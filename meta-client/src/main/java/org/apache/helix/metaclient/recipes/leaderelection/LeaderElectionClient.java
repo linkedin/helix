@@ -97,7 +97,13 @@ public class LeaderElectionClient implements AutoCloseable {
     LOG.info("Creating MetaClient for LeaderElectionClient");
     if (MetaClientConfig.StoreType.ZOOKEEPER.equals(metaClientConfig.getStoreType())) {
       ZkMetaClientConfig zkMetaClientConfig = new ZkMetaClientConfig.ZkMetaClientConfigBuilder().setConnectionAddress(
-          metaClientConfig.getConnectionAddress()).setZkSerializer((new LeaderInfoSerializer())).build();
+              metaClientConfig.getConnectionAddress())
+          .setZkSerializer((new LeaderInfoSerializer()))
+          .setSessionTimeoutInMillis(metaClientConfig.getSessionTimeoutInMillis())
+          .setMetaClientReconnectPolicy(metaClientConfig.getMetaClientReconnectPolicy())
+          .setConnectionInitTimeoutInMillis(metaClientConfig.getConnectionInitTimeoutInMillis())
+          .setAuthEnabled(metaClientConfig.isAuthEnabled())
+          .build();
       _metaClient = new ZkMetaClientFactory().getMetaClient(zkMetaClientConfig);
       _metaClient.connect();
       _metaClient.subscribeStateChanges(_connectStateListener);
@@ -121,7 +127,8 @@ public class LeaderElectionClient implements AutoCloseable {
    * Returns true if current participant is the current leadership.
    */
   public boolean isLeader(String leaderPath) {
-    return getLeader(leaderPath).equalsIgnoreCase(_participant);
+    String leader = getLeader(leaderPath);
+    return leader != null && leader.equalsIgnoreCase(_participant);
   }
 
   /**

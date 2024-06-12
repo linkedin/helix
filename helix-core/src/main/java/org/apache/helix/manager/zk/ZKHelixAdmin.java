@@ -42,7 +42,6 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 import com.google.common.collect.ImmutableSet;
-import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
@@ -61,7 +60,6 @@ import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -70,7 +68,6 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterConstraints;
 import org.apache.helix.model.ClusterConstraints.ConstraintType;
 import org.apache.helix.model.ClusterStatus;
-import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
@@ -90,11 +87,11 @@ import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.PauseSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
-import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.HelixUtil;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.RebalanceUtil;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
@@ -119,13 +116,14 @@ public class ZKHelixAdmin implements HelixAdmin {
   public static final String CONNECTION_TIMEOUT = "helixAdmin.timeOutInSec";
   private static final String MAINTENANCE_ZNODE_ID = "maintenance";
   private static final int DEFAULT_SUPERCLUSTER_REPLICA = 3;
-  private static final ImmutableSet<String> ALLOWED_INSTANCE_OPERATIONS_FOR_ADD_INSTANCE =
-      ImmutableSet.of("", InstanceConstants.InstanceOperation.SWAP_IN.name());
-  private static final ImmutableSet<String> INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT =
-      ImmutableSet.of(InstanceConstants.InstanceOperation.EVACUATE.name());
+  private static final ImmutableSet<InstanceConstants.InstanceOperation>
+      INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT =
+      ImmutableSet.of(InstanceConstants.InstanceOperation.EVACUATE,
+          InstanceConstants.InstanceOperation.UNKNOWN);
 
   private final RealmAwareZkClient _zkClient;
   private final ConfigAccessor _configAccessor;
+  private final BaseDataAccessor<ZNRecord> _baseDataAccessor;
   // true if ZKHelixAdmin was instantiated with a RealmAwareZkClient, false otherwise
   // This is used for close() to determine how ZKHelixAdmin should close the underlying ZkClient
   private final boolean _usesExternalZkClient;
@@ -143,6 +141,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   public ZKHelixAdmin(RealmAwareZkClient zkClient) {
     _zkClient = zkClient;
     _configAccessor = new ConfigAccessor(zkClient);
+    _baseDataAccessor = new ZkBaseDataAccessor<>(zkClient);
     _usesExternalZkClient = true;
   }
 
@@ -183,12 +182,14 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     _zkClient = zkClient;
     _configAccessor = new ConfigAccessor(_zkClient);
+    _baseDataAccessor = new ZkBaseDataAccessor<>(zkClient);
     _usesExternalZkClient = false;
   }
 
   private ZKHelixAdmin(RealmAwareZkClient zkClient, boolean usesExternalZkClient) {
     _zkClient = zkClient;
     _configAccessor = new ConfigAccessor(_zkClient);
+    _baseDataAccessor = new ZkBaseDataAccessor<>(zkClient);
     _usesExternalZkClient = usesExternalZkClient;
   }
 
@@ -206,113 +207,29 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException("Node " + nodeId + " already exists in cluster " + clusterName);
     }
 
-    if (!ALLOWED_INSTANCE_OPERATIONS_FOR_ADD_INSTANCE.contains(
-        instanceConfig.getInstanceOperation())) {
+    List<InstanceConfig> matchingLogicalIdInstances =
+        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+            instanceConfig);
+    if (matchingLogicalIdInstances.size() > 1) {
       throw new HelixException(
-          "Instance can only be added if InstanceOperation is set to one of" + "the following: "
-              + ALLOWED_INSTANCE_OPERATIONS_FOR_ADD_INSTANCE + " This instance: " + nodeId
-              + " has InstanceOperation set to " + instanceConfig.getInstanceOperation());
+          "There are already more than one instance with the same logicalId in the cluster: "
+              + matchingLogicalIdInstances.stream().map(InstanceConfig::getInstanceName)
+              .collect(Collectors.joining(", "))
+              + " Please make sure there is at most 2 instance with the same logicalId in the cluster.");
     }
 
-    // Get the topology key used to determine the logicalId of a node.
-    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
-    ClusterTopologyConfig clusterTopologyConfig =
-        ClusterTopologyConfig.createFromClusterConfig(clusterConfig);
-    String logicalIdKey = clusterTopologyConfig.getEndNodeType();
-    String faultZoneKey = clusterTopologyConfig.getFaultZoneType();
-    String toAddInstanceLogicalId = instanceConfig.getLogicalId(logicalIdKey);
-
-    HelixConfigScope instanceConfigScope =
-        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.PARTICIPANT,
-            clusterName).build();
-    List<String> existingInstanceIds = getConfigKeys(instanceConfigScope);
-    List<InstanceConfig> foundInstanceConfigsWithMatchingLogicalId =
-        existingInstanceIds.parallelStream()
-            .map(existingInstanceId -> getInstanceConfig(clusterName, existingInstanceId)).filter(
-                existingInstanceConfig -> existingInstanceConfig.getLogicalId(logicalIdKey)
-                    .equals(toAddInstanceLogicalId)).collect(Collectors.toList());
-
-    if (foundInstanceConfigsWithMatchingLogicalId.size() >= 2) {
-      // If the length is 2, we cannot add an instance with the same logicalId as an existing instance
-      // regardless of InstanceOperation.
-      throw new HelixException(
-          "There can only be 2 instances with the same logicalId in a cluster. "
-              + "Existing instances: " + foundInstanceConfigsWithMatchingLogicalId.get(0)
-              .getInstanceName() + " and " + foundInstanceConfigsWithMatchingLogicalId.get(1)
-              .getInstanceName() + " already have the same logicalId: " + toAddInstanceLogicalId
-              + "; therefore, " + nodeId + " cannot be added to the cluster.");
-    } else if (foundInstanceConfigsWithMatchingLogicalId.size() == 1) {
-      // If there is only one instance with the same logicalId,
-      // we can infer that the intended behaviour is to SWAP_IN or EVACUATE + ADD.
-      if (foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceOperation()
-          .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())) {
-        // If the existing instance with the same logicalId has SWAP_OUT InstanceOperation
-
-        // If the InstanceOperation is unset, we will set it to SWAP_IN.
-        if (!instanceConfig.getInstanceOperation()
-            .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())) {
-          instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN);
-        }
-
-        // If the existing instance with the same logicalId is not in the same FAULT_ZONE as this instance, we cannot
-        // add this instance.
-        if (!foundInstanceConfigsWithMatchingLogicalId.get(0).getDomainAsMap()
-            .containsKey(faultZoneKey) || !instanceConfig.getDomainAsMap().containsKey(faultZoneKey)
-            || !foundInstanceConfigsWithMatchingLogicalId.get(0).getDomainAsMap().get(faultZoneKey)
-            .equals(instanceConfig.getDomainAsMap().get(faultZoneKey))) {
-          throw new HelixException(
-              "Instance can only be added if the SWAP_OUT instance sharing the same logicalId is in the same FAULT_ZONE"
-                  + " as this instance. " + "Existing instance: "
-                  + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                  + " has FAULT_ZONE_TYPE: " + foundInstanceConfigsWithMatchingLogicalId.get(0)
-                  .getDomainAsMap().get(faultZoneKey) + " and this instance: " + nodeId
-                  + " has FAULT_ZONE_TYPE: " + instanceConfig.getDomainAsMap().get(faultZoneKey));
-        }
-
-        Map<String, Integer> foundInstanceCapacityMap =
-            foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceCapacityMap().isEmpty()
-                ? clusterConfig.getDefaultInstanceCapacityMap()
-                : foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceCapacityMap();
-        Map<String, Integer> instanceCapacityMap = instanceConfig.getInstanceCapacityMap().isEmpty()
-            ? clusterConfig.getDefaultInstanceCapacityMap()
-            : instanceConfig.getInstanceCapacityMap();
-        // If the instance does not have the same capacity, we cannot add this instance.
-        if (!new EqualsBuilder().append(foundInstanceCapacityMap, instanceCapacityMap).isEquals()) {
-          throw new HelixException(
-              "Instance can only be added if the SWAP_OUT instance sharing the same logicalId has the same capacity"
-                  + " as this instance. " + "Existing instance: "
-                  + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                  + " has capacity: " + foundInstanceCapacityMap + " and this instance: " + nodeId
-                  + " has capacity: " + instanceCapacityMap);
-        }
-      } else if (foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceOperation()
-          .equals(InstanceConstants.InstanceOperation.EVACUATE.name())) {
-        // No need to check anything on the new node, the old node will be evacuated and the new node
-        // will be added.
-      } else {
-        // If the instanceConfig.getInstanceEnabled() is true and the existing instance with the same logicalId
-        // does not have InstanceOperation set to one of the above, we cannot add this instance.
-        throw new HelixException(
-            "Instance can only be added if the exising instance sharing the same logicalId"
-                + " has InstanceOperation set to "
-                + InstanceConstants.InstanceOperation.SWAP_OUT.name()
-                + " and this instance has InstanceOperation set to "
-                + InstanceConstants.InstanceOperation.SWAP_IN.name()
-                + " or the existing instance sharing the same logicalId has Instance Operation set to "
-                + InstanceConstants.InstanceOperation.EVACUATE.name()
-                + " and this instance has InstanceOperation unset. Existing instance: "
-                + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                + " has InstanceOperation: " + foundInstanceConfigsWithMatchingLogicalId.get(0)
-                .getInstanceOperation());
-      }
-    } else if (!instanceConfig.getInstanceOperation().isEmpty()) {
-      // If there are no instances with the same logicalId, we can only add this instance if InstanceOperation
-      // is unset because it is a new instance.
-      throw new HelixException(
-          "There is no instance with logicalId: " + toAddInstanceLogicalId + " in cluster: "
-              + clusterName + "; therefore, " + nodeId
-              + " cannot join cluster with InstanceOperation set to "
-              + instanceConfig.getInstanceOperation() + ".");
+    InstanceConstants.InstanceOperation attemptedInstanceOperation =
+        instanceConfig.getInstanceOperation().getOperation();
+    try {
+      InstanceUtil.validateInstanceOperationTransition(_configAccessor, clusterName, instanceConfig,
+          InstanceConstants.InstanceOperation.UNKNOWN, attemptedInstanceOperation);
+    } catch (HelixException e) {
+      instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+      logger.error("Failed to add instance " + instanceConfig.getInstanceName() + " to cluster "
+          + clusterName + " with instance operation " + attemptedInstanceOperation
+          + ". Setting INSTANCE_OPERATION to " + instanceConfig.getInstanceOperation()
+          .getOperation()
+          + " instead.", e);
     }
 
     ZKUtil.createChildren(_zkClient, instanceConfigsPath, instanceConfig.getRecord());
@@ -325,8 +242,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     _zkClient.createPersistent(PropertyPathBuilder.instanceError(clusterName, nodeId), true);
     _zkClient.createPersistent(PropertyPathBuilder.instanceStatusUpdate(clusterName, nodeId), true);
     _zkClient.createPersistent(PropertyPathBuilder.instanceHistory(clusterName, nodeId), true);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.participantHistory(nodeId), new ParticipantHistory(nodeId));
   }
@@ -429,8 +345,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           "instance" + instanceName + " does not exist in cluster " + clusterName);
     }
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     return accessor.getProperty(keyBuilder.instanceConfig(instanceName));
@@ -449,8 +364,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           "instance" + instanceName + " does not exist in cluster " + clusterName);
     }
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey instanceConfigPropertyKey = accessor.keyBuilder().instanceConfig(instanceName);
     InstanceConfig currentInstanceConfig = accessor.getProperty(instanceConfigPropertyKey);
     if (!newInstanceConfig.getHostName().equals(currentInstanceConfig.getHostName())
@@ -464,12 +378,14 @@ public class ZKHelixAdmin implements HelixAdmin {
     return accessor.setProperty(instanceConfigPropertyKey, newInstanceConfig);
   }
 
+  @Deprecated
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
       final boolean enabled) {
     enableInstance(clusterName, instanceName, enabled, null, null);
   }
 
+  @Deprecated
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
       final boolean enabled, InstanceConstants.InstanceDisabledType disabledType, String reason) {
@@ -477,28 +393,12 @@ public class ZKHelixAdmin implements HelixAdmin {
         clusterName);
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
 
-    // If enabled is set to true and InstanceOperation is SWAP_IN, we should fail if there is not a
-    // matching SWAP_OUT instance.
-    InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
-    if (enabled && instanceConfig.getInstanceOperation()
-        .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())) {
-      InstanceConfig matchingSwapInstance = findMatchingSwapInstance(clusterName, instanceConfig);
-      if (matchingSwapInstance == null || !matchingSwapInstance.getInstanceOperation()
-          .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())) {
-        throw new HelixException("Instance cannot be enabled if InstanceOperation is set to "
-            + instanceConfig.getInstanceOperation() + " when there is no matching "
-            + InstanceConstants.InstanceOperation.SWAP_OUT.name() + " instance.");
-      }
-    }
-
     // Eventually we will have all instances' enable/disable information in clusterConfig. Now we
     // update both instanceConfig and clusterConfig in transition period.
     enableSingleInstance(clusterName, instanceName, enabled, baseAccessor, disabledType, reason);
-//    enableBatchInstances(clusterName, Collections.singletonList(instanceName), enabled,
-//        baseAccessor, disabledType, reason);
-
   }
 
+  @Deprecated
   @Override
   public void enableInstance(String clusterName, List<String> instances, boolean enabled) {
     // TODO: batch enable/disable is breaking backward compatibility on instance enable with older library
@@ -509,130 +409,65 @@ public class ZKHelixAdmin implements HelixAdmin {
     //enableInstance(clusterName, instances, enabled, null, null);
   }
 
+  /**
+   * Set the InstanceOperation of an instance in the cluster.
+   *
+   * @param clusterName       The cluster name
+   * @param instanceName      The instance name
+   * @param instanceOperation The instance operation
+   */
   @Override
-  // TODO: Name may change in future
   public void setInstanceOperation(String clusterName, String instanceName,
       @Nullable InstanceConstants.InstanceOperation instanceOperation) {
+    setInstanceOperation(clusterName, instanceName, instanceOperation, null, false);
+  }
 
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
-    String path = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+  /**
+   * Set the instanceOperation of and instance with {@link InstanceConstants.InstanceOperation}.
+   *
+   * @param clusterName       The cluster name
+   * @param instanceName      The instance name
+   * @param instanceOperation The instance operation type
+   * @param reason            The reason for the operation
+   */
+  @Override
+  public void setInstanceOperation(String clusterName, String instanceName,
+      @Nullable InstanceConstants.InstanceOperation instanceOperation, String reason) {
+    setInstanceOperation(clusterName, instanceName, instanceOperation, reason, false);
+  }
 
-    // InstanceOperation can only be set to SWAP_IN when the instance is added to the cluster
-    // or if it is disabled.
-    if (instanceOperation != null && instanceOperation.equals(
-        InstanceConstants.InstanceOperation.SWAP_IN) && getInstanceConfig(clusterName,
-        instanceName).getInstanceEnabled()) {
-      throw new HelixException("InstanceOperation should only be set to "
-          + InstanceConstants.InstanceOperation.SWAP_IN.name()
-          + " when an instance joins the cluster for the first time(when "
-          + "creating the InstanceConfig) or is disabled.");
-    }
-
-    // InstanceOperation cannot be set to null if there is an instance with the same logicalId in
-    // the cluster which does not have InstanceOperation set to SWAP_IN or SWAP_OUT.
-    if (instanceOperation == null) {
-      InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
-      String logicalIdKey = ClusterTopologyConfig.createFromClusterConfig(
-          _configAccessor.getClusterConfig(clusterName)).getEndNodeType();
-
-      HelixConfigScope instanceConfigScope =
-          new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.PARTICIPANT,
-              clusterName).build();
-      List<String> existingInstanceIds = getConfigKeys(instanceConfigScope);
-      List<InstanceConfig> matchingInstancesWithNonSwappingInstanceOperation =
-          existingInstanceIds.parallelStream()
-              .map(existingInstanceId -> getInstanceConfig(clusterName, existingInstanceId)).filter(
-                  existingInstanceConfig ->
-                      !existingInstanceConfig.getInstanceName().equals(instanceName)
-                          && existingInstanceConfig.getLogicalId(logicalIdKey)
-                          .equals(instanceConfig.getLogicalId(logicalIdKey))
-                          && !existingInstanceConfig.getInstanceOperation()
-                          .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())
-                          && !existingInstanceConfig.getInstanceOperation()
-                          .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())
-                          && !existingInstanceConfig.getInstanceOperation()
-                          .equals(InstanceConstants.InstanceOperation.EVACUATE.name()))
-              .collect(Collectors.toList());
-
-      if (!matchingInstancesWithNonSwappingInstanceOperation.isEmpty()) {
-        throw new HelixException("InstanceOperation cannot be set to null for " + instanceName
-            + " if there are other instances with the same logicalId in the cluster that do not have"
-            + " InstanceOperation set to SWAP_IN, SWAP_OUT, or EVACUATE.");
-      }
-    }
-
-    if (!baseAccessor.exists(path, 0)) {
-      throw new HelixException(
-          "Cluster " + clusterName + ", instance: " + instanceName + ", instance config does not exist");
-    }
-
-   boolean succeeded = baseAccessor.update(path, new DataUpdater<ZNRecord>() {
-      @Override
-      public ZNRecord update(ZNRecord currentData) {
-        if (currentData == null) {
-          throw new HelixException(
-              "Cluster: " + clusterName + ", instance: " + instanceName + ", participant config is null");
-        }
-
-        InstanceConfig config = new InstanceConfig(currentData);
-        config.setInstanceOperation(instanceOperation);
-        return config.getRecord();
-      }
-    }, AccessOption.PERSISTENT);
-
-    if (!succeeded) {
-      throw new HelixException("Failed to update instance operation. Please check if instance is disabled.");
-    }
+  /**
+   * Set the instanceOperation of and instance with {@link InstanceConstants.InstanceOperation}.
+   *
+   * @param clusterName       The cluster name
+   * @param instanceName      The instance name
+   * @param instanceOperation The instance operation type
+   * @param reason            The reason for the operation
+   * @param overrideAll       Whether to override all existing instance operations from all other
+   *                          instance operations
+   */
+  @Override
+  public void setInstanceOperation(String clusterName, String instanceName,
+      @Nullable InstanceConstants.InstanceOperation instanceOperation, String reason,
+      boolean overrideAll) {
+    InstanceConfig.InstanceOperation instanceOperationObj =
+        new InstanceConfig.InstanceOperation.Builder().setOperation(
+            instanceOperation == null ? InstanceConstants.InstanceOperation.ENABLE
+                : instanceOperation).setReason(reason).setSource(
+            overrideAll ? InstanceConstants.InstanceOperationSource.ADMIN
+                : InstanceConstants.InstanceOperationSource.USER).build();
+    InstanceUtil.setInstanceOperation(_configAccessor, _baseDataAccessor, clusterName, instanceName,
+        instanceOperationObj);
   }
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
     if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
-      return config != null && config.getInstanceOperation().equals(InstanceConstants.InstanceOperation.EVACUATE.name());
+      return config != null && config.getInstanceOperation().getOperation()
+          .equals(InstanceConstants.InstanceOperation.EVACUATE);
     }
     return false;
-  }
-
-  /**
-   * Find the instance that the passed instance is swapping with. If the passed instance has
-   * SWAP_OUT instanceOperation, then find the corresponding instance that has SWAP_IN
-   * instanceOperation. If the passed instance has SWAP_IN instanceOperation, then find the
-   * corresponding instance that has SWAP_OUT instanceOperation.
-   *
-   * @param clusterName    The cluster name
-   * @param instanceConfig The instance to find the swap instance for
-   * @return The swap instance if found, null otherwise.
-   */
-  @Nullable
-  private InstanceConfig findMatchingSwapInstance(String clusterName,
-      InstanceConfig instanceConfig) {
-    String logicalIdKey =
-        ClusterTopologyConfig.createFromClusterConfig(_configAccessor.getClusterConfig(clusterName))
-            .getEndNodeType();
-
-    for (String potentialSwappingInstance : getConfigKeys(
-        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.PARTICIPANT,
-            clusterName).build())) {
-      InstanceConfig potentialSwappingInstanceConfig =
-          getInstanceConfig(clusterName, potentialSwappingInstance);
-
-      // Return if there is a matching Instance with the same logicalId and opposite InstanceOperation swap operation.
-      if (potentialSwappingInstanceConfig.getLogicalId(logicalIdKey)
-          .equals(instanceConfig.getLogicalId(logicalIdKey)) && (
-          instanceConfig.getInstanceOperation()
-              .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())
-              && potentialSwappingInstanceConfig.getInstanceOperation()
-              .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())) || (
-          instanceConfig.getInstanceOperation()
-              .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())
-              && potentialSwappingInstanceConfig.getInstanceOperation()
-              .equals(InstanceConstants.InstanceOperation.SWAP_IN.name()))) {
-        return potentialSwappingInstanceConfig;
-      }
-    }
-
-    return null;
   }
 
   /**
@@ -650,7 +485,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    */
   private boolean canCompleteSwap(String clusterName, String swapOutInstanceName,
       String swapInInstanceName) {
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, baseAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
@@ -661,14 +496,13 @@ public class ZKHelixAdmin implements HelixAdmin {
         accessor.getProperty(keyBuilder.liveInstance(swapInInstanceName));
     InstanceConfig swapOutInstanceConfig = getInstanceConfig(clusterName, swapOutInstanceName);
     InstanceConfig swapInInstanceConfig = getInstanceConfig(clusterName, swapInInstanceName);
-    if (swapInLiveInstance == null || !swapInInstanceConfig.getInstanceEnabled()) {
+    if (swapInLiveInstance == null) {
       logger.warn(
-          "SwapOutInstance {} is {} + {} and SwapInInstance {} is {} + {} for cluster {}. Swap will"
-              + " not complete unless SwapInInstance instance is ENABLED and ONLINE.",
+          "SwapOutInstance {} is {} + {} and SwapInInstance {} is OFFLINE + {} for cluster {}. Swap will"
+              + " not complete unless SwapInInstance instance is ONLINE.",
           swapOutInstanceName, swapOutLiveInstance != null ? "ONLINE" : "OFFLINE",
-          swapOutInstanceConfig.getInstanceEnabled() ? "ENABLED" : "DISABLED", swapInInstanceName,
-          swapInLiveInstance != null ? "ONLINE" : "OFFLINE",
-          swapInInstanceConfig.getInstanceEnabled() ? "ENABLED" : "DISABLED", clusterName);
+          swapOutInstanceConfig.getInstanceOperation().getOperation(), swapInInstanceName,
+          swapInInstanceConfig.getInstanceOperation().getOperation(), clusterName);
       return false;
     }
 
@@ -705,21 +539,15 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
 
-    // 4. Collect a list of all partitions that have a current state on swapOutInstance
-    String swapOutLastActiveSession;
-    if (swapOutLiveInstance == null) {
-      // SwapOutInstance is down, try to find the last active session
-      if (swapOutSessions.size() != 1) {
-        logger.warn(
-            "SwapOutInstance {} is offline and has {} sessions for cluster {}. Swap can't be "
-                + "verified if last active session can't be determined. There should only be one session.",
-            swapOutInstanceName, swapOutSessions.size(), clusterName);
-        return false;
-      }
-      swapOutLastActiveSession = swapOutSessions.get(0);
-    } else {
-      swapOutLastActiveSession = swapOutLiveInstance.getEphemeralOwner();
+    // 4. If the swap-out instance is not alive or is disabled, we return true without checking
+    // the current states on the swap-in instance.
+    if (swapOutLiveInstance == null || swapOutInstanceConfig.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.DISABLE)) {
+      return true;
     }
+
+    // 5. Collect a list of all partitions that have a current state on swapOutInstance
+    String swapOutLastActiveSession = swapOutLiveInstance.getEphemeralOwner();
     String swapInActiveSession = swapInLiveInstance.getEphemeralOwner();
 
     // Iterate over all resources with current states on the swapOutInstance
@@ -754,24 +582,22 @@ public class ZKHelixAdmin implements HelixAdmin {
         String swapOutPartitionState = swapOutResourceCurrentState.getState(partitionName);
         String swapInPartitionState = swapInResourceCurrentState.getState(partitionName);
 
-        // SwapInInstance should not have any partitions in ERROR state.
-        if (swapInPartitionState.equals(HelixDefinedState.ERROR.name())) {
-          logger.warn(
-              "SwapOutInstance {} has partition {} in state {} and SwapInInstance {} has partition {} in state {} for cluster {}."
-                  + " Swap will not complete unless both instances have no partitions in ERROR state.",
-              swapOutInstanceName, partitionName, swapOutPartitionState, swapInInstanceName,
-              partitionName, swapInPartitionState, clusterName);
-          return false;
-        }
-
-        // The state of the partition on the swapInInstance be in the topState or a secondTopState.
-        // It should be in a topState only if the state model allows multiple replicas in the topState.
-        // In all other cases it should be a secondTopState.
-        if (!(swapInPartitionState.equals(topState) || secondTopStates.contains(
+        // SwapInInstance should have the correct state for the partition.
+        // All states should match except for the case where the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES
+        // or the swap-out partition is ERROR state.
+        // When the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES, the swap-in partition should be in a secondTopStates.
+        if (!(swapOutPartitionState.equals(HelixDefinedState.ERROR.name()) || (
+            topState.equals(swapOutPartitionState) && (
+                swapOutPartitionState.equals(swapInPartitionState) ||
+                    !ImmutableSet.of(StateModelDefinition.STATE_REPLICA_COUNT_ALL_REPLICAS,
+                        StateModelDefinition.STATE_REPLICA_COUNT_ALL_CANDIDATE_NODES).contains(
+                        stateModelDefinition.getNumInstancesPerState(
+                            stateModelDefinition.getTopState())) && secondTopStates.contains(
+                        swapInPartitionState))) || swapOutPartitionState.equals(
             swapInPartitionState))) {
           logger.warn(
               "SwapOutInstance {} has partition {} in {} but SwapInInstance {} has partition {} in state {} for cluster {}."
-                  + " Swap will not complete unless SwapInInstance has partition in topState or secondState.",
+                  + " Swap will not complete unless SwapInInstance has partition in correct states.",
               swapOutInstanceName, partitionName, swapOutPartitionState, swapInInstanceName,
               partitionName, swapInPartitionState, clusterName);
           return false;
@@ -792,12 +618,22 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
 
-    InstanceConfig swapOutInstanceConfig = instanceConfig.getInstanceOperation()
-        .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name()) ? instanceConfig
-        : findMatchingSwapInstance(clusterName, instanceConfig);
-    InstanceConfig swapInInstanceConfig = instanceConfig.getInstanceOperation()
-        .equals(InstanceConstants.InstanceOperation.SWAP_IN.name()) ? instanceConfig
-        : findMatchingSwapInstance(clusterName, instanceConfig);
+    List<InstanceConfig> swappingInstances =
+        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+            instanceConfig);
+    if (swappingInstances.size() != 1) {
+      logger.warn(
+          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
+          instanceName, clusterName);
+      return false;
+    }
+
+    InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.SWAP_IN)
+            ? instanceConfig : swappingInstances.get(0);
+    InstanceConfig swapInInstanceConfig = instanceConfig.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
+        : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
       logger.warn(
           "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
@@ -821,12 +657,22 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
 
-    InstanceConfig swapOutInstanceConfig = instanceConfig.getInstanceOperation()
-        .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name()) ? instanceConfig
-        : findMatchingSwapInstance(clusterName, instanceConfig);
-    InstanceConfig swapInInstanceConfig = instanceConfig.getInstanceOperation()
-        .equals(InstanceConstants.InstanceOperation.SWAP_IN.name()) ? instanceConfig
-        : findMatchingSwapInstance(clusterName, instanceConfig);
+    List<InstanceConfig> swappingInstances =
+        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+            instanceConfig);
+    if (swappingInstances.size() != 1) {
+      logger.warn(
+          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
+          instanceName, clusterName);
+      return false;
+    }
+
+    InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.SWAP_IN)
+            ? instanceConfig : swappingInstances.get(0);
+    InstanceConfig swapInInstanceConfig = instanceConfig.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
+        : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
       logger.warn(
           "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
@@ -840,11 +686,39 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
 
-    // Complete the swap by removing the InstanceOperation for the SWAP_IN node and disabling the SWAP_OUT node.
-    setInstanceOperation(clusterName, swapInInstanceConfig.getInstanceName(), null);
-    enableInstance(clusterName, swapOutInstanceConfig.getInstanceName(), false);
+    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
+    String swapInInstanceConfigPath =
+        PropertyPathBuilder.instanceConfig(clusterName, swapInInstanceConfig.getInstanceName());
+    String swapOutInstanceConfigPath =
+        PropertyPathBuilder.instanceConfig(clusterName, swapOutInstanceConfig.getInstanceName());
 
-    return true;
+    Map<String, DataUpdater<ZNRecord>> updaterMap = new HashMap<>();
+    updaterMap.put(swapInInstanceConfigPath, currentData -> {
+      if (currentData == null) {
+        throw new HelixException("Cluster: " + clusterName + ", instance: " + instanceName
+            + ", SWAP_IN instance config is null");
+      }
+
+      InstanceConfig currentSwapOutInstanceConfig =
+          getInstanceConfig(clusterName, swapOutInstanceConfig.getInstanceName());
+      InstanceConfig config = new InstanceConfig(currentData);
+      config.overwriteInstanceConfig(currentSwapOutInstanceConfig);
+      // Special handling in case the swap-out instance does not have HELIX_ENABLED or InstanceOperation set.
+      return config.getRecord();
+    });
+
+    updaterMap.put(swapOutInstanceConfigPath, currentData -> {
+      if (currentData == null) {
+        throw new HelixException("Cluster: " + clusterName + ", instance: " + instanceName
+            + ", swap out instance config is null");
+      }
+
+      InstanceConfig config = new InstanceConfig(currentData);
+      config.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+      return config.getRecord();
+    });
+
+    return baseAccessor.multiSet(updaterMap);
   }
 
   @Override
@@ -852,7 +726,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
       return config != null && INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT.contains(
-          config.getInstanceOperation());
+          config.getInstanceOperation().getOperation());
     }
     return false;
   }
@@ -866,7 +740,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    */
   private boolean instanceHasFullAutoCurrentStateOrMessage(String clusterName,
       String instanceName) {
-    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     // check the instance is alive
@@ -877,7 +751,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
 
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     // count number of sessions under CurrentState folder. If it is carrying over from prv session,
     // then there are > 1 session ZNodes.
     List<String> sessions = baseAccessor.getChildNames(PropertyPathBuilder.instanceCurrentState(clusterName, instanceName), 0);
@@ -917,7 +791,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   public void enableResource(final String clusterName, final String resourceName, final boolean enabled) {
     logger.info("{} resource {} in cluster {}.", enabled ? "Enable" : "Disable", resourceName, clusterName);
     String path = PropertyPathBuilder.idealState(clusterName, resourceName);
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     if (!baseAccessor.exists(path, 0)) {
       throw new HelixException("Cluster " + clusterName + ", resource: " + resourceName
           + ", ideal-state does not exist");
@@ -944,7 +818,7 @@ public class ZKHelixAdmin implements HelixAdmin {
         instanceName, clusterName);
     String path = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
 
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
 
     // check instanceConfig exists
     if (!baseAccessor.exists(path, 0)) {
@@ -1023,8 +897,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   public void enableCluster(String clusterName, boolean enabled, String reason) {
     logger.info("{} cluster {} for reason {}.", enabled ? "Enable" : "Disable", clusterName,
         reason == null ? "NULL" : reason);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     if (enabled) {
@@ -1048,8 +921,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isInMaintenanceMode(String clusterName) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     return accessor.getBaseDataAccessor()
         .exists(keyBuilder.maintenance().getPath(), AccessOption.PERSISTENT);
@@ -1083,6 +955,136 @@ public class ZKHelixAdmin implements HelixAdmin {
     ClusterStatus status = accessor.getProperty(accessor.keyBuilder().clusterStatus());
     return status == null ? null
         : new ClusterManagementMode(status.getManagementMode(), status.getManagementModeStatus());
+  }
+
+  @Override
+  public void setPartitionsToError(String clusterName, String instanceName, String resourceName,
+      List<String> partitionNames) {
+    logger.info("Set partitions {} for resource {} on instance {} in cluster {} to ERROR state.",
+        partitionNames == null ? "NULL" : HelixUtil.serializeByComma(partitionNames), resourceName,
+        instanceName, clusterName);
+    sendStateTransitionMessage(clusterName, instanceName, resourceName, partitionNames,
+        StateTransitionType.SET_TO_ERROR);
+  }
+
+  private void sendStateTransitionMessage(String clusterName, String instanceName,
+      String resourceName, List<String> partitionNames, StateTransitionType stateTransitionType) {
+    HelixDataAccessor accessor =
+        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+
+    // check the instance is alive
+    LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
+    if (liveInstance == null) {
+      // check if the instance exists in the cluster
+      String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+      throw new HelixException(String.format(
+          (_zkClient.exists(instanceConfigPath) ? SetPartitionFailureReason.INSTANCE_NOT_ALIVE
+              : SetPartitionFailureReason.INSTANCE_NON_EXISTENT).getMessage(resourceName,
+                  partitionNames, instanceName, instanceName, clusterName, stateTransitionType)));
+    }
+
+    // check resource exists in ideal state
+    IdealState idealState = accessor.getProperty(keyBuilder.idealStates(resourceName));
+    if (idealState == null) {
+      throw new HelixException(
+          String.format(SetPartitionFailureReason.RESOURCE_NON_EXISTENT.getMessage(resourceName,
+              partitionNames, instanceName, resourceName, clusterName, stateTransitionType)));
+    }
+
+    // check partition exists in resource
+    Set<String> partitionsNames = new HashSet<String>(partitionNames);
+    Set<String> partitions = (idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
+        ? idealState.getRecord().getMapFields().keySet()
+        : idealState.getRecord().getListFields().keySet();
+    if (!partitions.containsAll(partitionsNames)) {
+      throw new HelixException(
+          String.format(SetPartitionFailureReason.PARTITION_NON_EXISTENT.getMessage(resourceName,
+              partitionNames, instanceName, partitionNames.toString(), clusterName, stateTransitionType)));
+    }
+
+    // check partition is in ERROR state if reset is set to True
+    String sessionId = liveInstance.getEphemeralOwner();
+    CurrentState curState =
+        accessor.getProperty(keyBuilder.currentState(instanceName, sessionId, resourceName));
+    if (stateTransitionType.equals(StateTransitionType.RESET)) {
+      for (String partitionName : partitionNames) {
+        if (!curState.getState(partitionName).equals(HelixDefinedState.ERROR.toString())) {
+          throw new HelixException(String.format(
+              SetPartitionFailureReason.PARTITION_NOT_ERROR.getMessage(resourceName, partitionNames,
+                  instanceName, partitionNames.toString(), clusterName, stateTransitionType)));
+        }
+      }
+    }
+
+    // check stateModelDef exists
+    String stateModelDef = idealState.getStateModelDefRef();
+    StateModelDefinition stateModel = accessor.getProperty(keyBuilder.stateModelDef(stateModelDef));
+    if (stateModel == null) {
+      throw new HelixException(
+          String.format(SetPartitionFailureReason.STATE_MODEL_NON_EXISTENT.getMessage(resourceName,
+              partitionNames, instanceName, stateModelDef, clusterName, stateTransitionType)));
+    }
+
+    // check there is no pending messages for the partitions exist
+    List<Message> messages = accessor.getChildValues(keyBuilder.messages(instanceName), true);
+    for (Message message : messages) {
+      if (!MessageType.STATE_TRANSITION.name().equalsIgnoreCase(message.getMsgType())
+          || !sessionId.equals(message.getTgtSessionId())
+          || !resourceName.equals(message.getResourceName())
+          || !partitionsNames.contains(message.getPartitionName())) {
+        continue;
+      }
+
+      throw new HelixException(String.format(
+          "Can't %s state for %s.%s on %s, because a pending message %s exists for resource %s",
+          stateTransitionType.name(), resourceName, partitionNames, instanceName, message,
+          message.getResourceName()));
+    }
+
+    String adminName = null;
+    try {
+      adminName = InetAddress.getLocalHost().getCanonicalHostName() + "-ADMIN";
+    } catch (UnknownHostException e) {
+      logger.info("Unable to get host name. Will set it to UNKNOWN, mostly ignorable", e);
+      adminName = "UNKNOWN";
+    }
+
+    List<Message> stateTransitionMessages = new ArrayList<Message>();
+    List<PropertyKey> messageKeys = new ArrayList<PropertyKey>();
+    for (String partitionName : partitionNames) {
+      String msgId = UUID.randomUUID().toString();
+      Message message = new Message(MessageType.STATE_TRANSITION, msgId);
+      message.setSrcName(adminName);
+      message.setTgtName(instanceName);
+      message.setMsgState(MessageState.NEW);
+      message.setPartitionName(partitionName);
+      message.setResourceName(resourceName);
+      message.setTgtSessionId(sessionId);
+      message.setStateModelDef(stateModelDef);
+      message.setStateModelFactoryName(idealState.getStateModelFactoryName());
+      // if reset == TRUE, send ERROR to initialState message
+      // else, send * to ERROR state message
+      if (stateTransitionType.equals(StateTransitionType.RESET)) {
+        message.setFromState(HelixDefinedState.ERROR.toString());
+        message.setToState(stateModel.getInitialState());
+      }
+      if (stateTransitionType.equals(StateTransitionType.SET_TO_ERROR)) {
+        message.setFromState("*");
+        message.setToState(HelixDefinedState.ERROR.toString());
+      }
+      if (idealState.getResourceGroupName() != null) {
+        message.setResourceGroupName(idealState.getResourceGroupName());
+      }
+      if (idealState.getInstanceGroupTag() != null) {
+        message.setResourceTag(idealState.getInstanceGroupTag());
+      }
+
+      stateTransitionMessages.add(message);
+      messageKeys.add(keyBuilder.message(instanceName, message.getId()));
+    }
+
+    accessor.setChildren(messageKeys, stateTransitionMessages);
   }
 
   private void enableClusterPauseMode(String clusterName, boolean cancelPendingST, String reason) {
@@ -1168,8 +1170,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       final String reason, final MaintenanceSignal.AutoTriggerReason internalReason,
       final Map<String, String> customFields,
       final MaintenanceSignal.TriggeringEntity triggeringEntity) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     logger.info("Cluster {} {} {} maintenance mode for reason {}.", clusterName,
         triggeringEntity == MaintenanceSignal.TriggeringEntity.CONTROLLER ? "automatically"
@@ -1230,7 +1231,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
   }
 
-  private enum ResetPartitionFailureReason {
+  private enum SetPartitionFailureReason {
     INSTANCE_NOT_ALIVE("%s is not alive in cluster %s"),
     INSTANCE_NON_EXISTENT("%s does not exist in cluster %s"),
     RESOURCE_NON_EXISTENT("resource %s is not added to cluster %s"),
@@ -1240,129 +1241,33 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     private String message;
 
-    ResetPartitionFailureReason(String message) {
+    SetPartitionFailureReason(String message) {
       this.message = message;
     }
 
     public String getMessage(String resourceName, List<String> partitionNames, String instanceName,
-        String errorStateEntity, String clusterName) {
-      return String.format("Can't reset state for %s.%s on %s, because " + message, resourceName,
-          partitionNames, instanceName, errorStateEntity, clusterName);
+        String errorStateEntity, String clusterName, StateTransitionType stateTransitionType) {
+      return String.format("Can't %s state for %s.%s on %s, because " + message,
+          stateTransitionType.name(), resourceName, partitionNames, instanceName, errorStateEntity,
+          clusterName);
     }
   }
 
+  private enum StateTransitionType {
+    // sets state from ERROR to INIT.
+    RESET,
+    // sets state from ANY to ERROR.
+    SET_TO_ERROR,
+    // Unknown StateTransitionType
+    UNDEFINED
+  }
   @Override
   public void resetPartition(String clusterName, String instanceName, String resourceName,
       List<String> partitionNames) {
     logger.info("Reset partitions {} for resource {} on instance {} in cluster {}.",
         partitionNames == null ? "NULL" : HelixUtil.serializeByComma(partitionNames), resourceName,
         instanceName, clusterName);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
-    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
-
-    // check the instance is alive
-    LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-    if (liveInstance == null) {
-      // check if the instance exists in the cluster
-      String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
-      throw new HelixException(String.format(
-          (_zkClient.exists(instanceConfigPath) ? ResetPartitionFailureReason.INSTANCE_NOT_ALIVE
-              : ResetPartitionFailureReason.INSTANCE_NON_EXISTENT)
-              .getMessage(resourceName, partitionNames, instanceName, instanceName, clusterName)));
-    }
-
-    // check resource group exists
-    IdealState idealState = accessor.getProperty(keyBuilder.idealStates(resourceName));
-    if (idealState == null) {
-      throw new HelixException(String.format(ResetPartitionFailureReason.RESOURCE_NON_EXISTENT
-          .getMessage(resourceName, partitionNames, instanceName, resourceName, clusterName)));
-    }
-
-    // check partition exists in resource group
-    Set<String> resetPartitionNames = new HashSet<String>(partitionNames);
-    Set<String> partitions =
-        (idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED) ? idealState.getRecord()
-            .getMapFields().keySet() : idealState.getRecord().getListFields().keySet();
-    if (!partitions.containsAll(resetPartitionNames)) {
-      throw new HelixException(String.format(ResetPartitionFailureReason.PARTITION_NON_EXISTENT
-          .getMessage(resourceName, partitionNames, instanceName, partitionNames.toString(),
-              clusterName)));
-    }
-
-    // check partition is in ERROR state
-    String sessionId = liveInstance.getEphemeralOwner();
-    CurrentState curState =
-        accessor.getProperty(keyBuilder.currentState(instanceName, sessionId, resourceName));
-    for (String partitionName : resetPartitionNames) {
-      if (!curState.getState(partitionName).equals(HelixDefinedState.ERROR.toString())) {
-        throw new HelixException(String.format(ResetPartitionFailureReason.PARTITION_NOT_ERROR
-            .getMessage(resourceName, partitionNames, instanceName, partitionNames.toString(),
-                clusterName)));
-      }
-    }
-
-    // check stateModelDef exists and get initial state
-    String stateModelDef = idealState.getStateModelDefRef();
-    StateModelDefinition stateModel = accessor.getProperty(keyBuilder.stateModelDef(stateModelDef));
-    if (stateModel == null) {
-      throw new HelixException(String.format(ResetPartitionFailureReason.STATE_MODEL_NON_EXISTENT
-          .getMessage(resourceName, partitionNames, instanceName, stateModelDef, clusterName)));
-    }
-
-    // check there is no pending messages for the partitions exist
-    List<Message> messages = accessor.getChildValues(keyBuilder.messages(instanceName), true);
-    for (Message message : messages) {
-      if (!MessageType.STATE_TRANSITION.name().equalsIgnoreCase(message.getMsgType()) || !sessionId
-          .equals(message.getTgtSessionId()) || !resourceName.equals(message.getResourceName())
-          || !resetPartitionNames.contains(message.getPartitionName())) {
-        continue;
-      }
-
-      throw new HelixException(String.format(
-          "Can't reset state for %s.%s on %s, because a pending message %s exists for resource %s",
-          resourceName, partitionNames, instanceName, message.toString(),
-          message.getResourceName()));
-    }
-
-    String adminName = null;
-    try {
-      adminName = InetAddress.getLocalHost().getCanonicalHostName() + "-ADMIN";
-    } catch (UnknownHostException e) {
-      // can ignore it
-      logger.info("Unable to get host name. Will set it to UNKNOWN, mostly ignorable", e);
-      adminName = "UNKNOWN";
-    }
-
-    List<Message> resetMessages = new ArrayList<Message>();
-    List<PropertyKey> messageKeys = new ArrayList<PropertyKey>();
-    for (String partitionName : resetPartitionNames) {
-      // send ERROR to initialState message
-      String msgId = UUID.randomUUID().toString();
-      Message message = new Message(MessageType.STATE_TRANSITION, msgId);
-      message.setSrcName(adminName);
-      message.setTgtName(instanceName);
-      message.setMsgState(MessageState.NEW);
-      message.setPartitionName(partitionName);
-      message.setResourceName(resourceName);
-      message.setTgtSessionId(sessionId);
-      message.setStateModelDef(stateModelDef);
-      message.setFromState(HelixDefinedState.ERROR.toString());
-      message.setToState(stateModel.getInitialState());
-      message.setStateModelFactoryName(idealState.getStateModelFactoryName());
-
-      if (idealState.getResourceGroupName() != null) {
-        message.setResourceGroupName(idealState.getResourceGroupName());
-      }
-      if (idealState.getInstanceGroupTag() != null) {
-        message.setResourceTag(idealState.getInstanceGroupTag());
-      }
-
-      resetMessages.add(message);
-      messageKeys.add(keyBuilder.message(instanceName, message.getId()));
-    }
-
-    accessor.setChildren(messageKeys, resetMessages);
+    sendStateTransitionMessage(clusterName, instanceName, resourceName, partitionNames, StateTransitionType.RESET);
   }
 
   @Override
@@ -1528,8 +1433,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     List<String> instances = _zkClient.getChildren(memberInstancesPath);
     List<String> result = new ArrayList<String>();
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     for (String instanceName : instances) {
@@ -1675,8 +1579,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   public List<String> getResourcesInClusterWithTag(String clusterName, String tag) {
     List<String> resourcesWithTag = new ArrayList<String>();
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     for (String resourceName : getResourcesInCluster(clusterName)) {
@@ -1691,8 +1594,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public IdealState getResourceIdealState(String clusterName, String resourceName) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     return accessor.getProperty(keyBuilder.idealStates(resourceName));
@@ -1704,8 +1606,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger
         .info("Set IdealState for resource {} in cluster {} with new IdealState {}.", resourceName,
             clusterName, idealState == null ? "NULL" : idealState.toString());
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     accessor.setProperty(keyBuilder.idealStates(resourceName), idealState);
@@ -1747,8 +1648,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public ExternalView getResourceExternalView(String clusterName, String resourceName) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     return accessor.getProperty(keyBuilder.externalView(resourceName));
   }
@@ -1756,8 +1656,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public CustomizedView getResourceCustomizedView(String clusterName, String resourceName,
       String customizedStateType) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     return accessor.getProperty(keyBuilder.customizedView(customizedStateType, resourceName));
   }
@@ -1790,8 +1689,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
     }
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.stateModelDef(stateModelDef), stateModel);
   }
@@ -1802,8 +1700,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
       throw new HelixException("Cluster " + clusterName + " is not setup yet");
     }
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     accessor.removeProperty(keyBuilder.idealStates(resourceName));
@@ -1822,8 +1719,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     CloudConfig.Builder builder = new CloudConfig.Builder(cloudConfig);
     CloudConfig cloudConfigBuilder = builder.build();
 
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.cloudConfig(), cloudConfigBuilder);
   }
@@ -1831,8 +1727,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void removeCloudConfig(String clusterName) {
     logger.info("Remove Cloud Config for cluster {}.", clusterName);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.removeProperty(keyBuilder.cloudConfig());
   }
@@ -1863,8 +1758,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public StateModelDefinition getStateModelDef(String clusterName, String stateModelName) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     return accessor.getProperty(keyBuilder.stateModelDef(stateModelName));
@@ -1873,8 +1767,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void dropCluster(String clusterName) {
     logger.info("Deleting cluster {}.", clusterName);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     String root = "/" + clusterName;
@@ -1951,8 +1844,7 @@ public class ZKHelixAdmin implements HelixAdmin {
         new CustomizedStateConfig.Builder(customizedStateConfig);
     CustomizedStateConfig customizedStateConfigFromBuilder = builder.build();
 
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.customizedStateConfig(),
         customizedStateConfigFromBuilder);
@@ -1963,8 +1855,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger.info(
         "Remove CustomizedStateConfig from cluster {}.", clusterName);
 
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.removeProperty(keyBuilder.customizedStateConfig());
 
@@ -1983,8 +1874,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     builder.addAggregationEnabledType(type);
     CustomizedStateConfig customizedStateConfigFromBuilder = builder.build();
 
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     if(!accessor.updateProperty(keyBuilder.customizedStateConfig(),
         customizedStateConfigFromBuilder)) {
@@ -2013,8 +1903,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     builder.removeAggregationEnabledType(type);
     CustomizedStateConfig customizedStateConfigFromBuilder = builder.build();
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.customizedStateConfig(),
         customizedStateConfigFromBuilder);
@@ -2037,7 +1926,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public void onDemandRebalance(String clusterName) {
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     String path = PropertyPathBuilder.clusterConfig(clusterName);
 
     if (!baseAccessor.exists(path, 0)) {
@@ -2220,7 +2109,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       final String constraintId, final ConstraintItem constraintItem) {
     logger.info("Set constraint type {} with constraint id {} for cluster {}.", constraintType,
         constraintId, clusterName);
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
 
     PropertyKey.Builder keyBuilder = new PropertyKey.Builder(clusterName);
     String path = keyBuilder.constraint(constraintType.toString()).getPath();
@@ -2243,7 +2132,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       final String constraintId) {
     logger.info("Remove constraint type {} with constraint id {} for cluster {}.", constraintType,
         constraintId, clusterName);
-    BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<ZNRecord>(_zkClient);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
 
     PropertyKey.Builder keyBuilder = new PropertyKey.Builder(clusterName);
     String path = keyBuilder.constraint(constraintType.toString()).getPath();
@@ -2264,8 +2153,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public ClusterConstraints getConstraints(String clusterName, ConstraintType constraintType) {
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
 
     PropertyKey.Builder keyBuilder = new PropertyKey.Builder(clusterName);
     return accessor.getProperty(keyBuilder.constraint(constraintType.toString()));
@@ -2347,8 +2235,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException(
           "cluster " + clusterName + " instance " + instanceName + " is not setup yet");
     }
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
@@ -2368,8 +2255,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException(
           "cluster " + clusterName + " instance " + instanceName + " is not setup yet");
     }
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
@@ -2389,8 +2275,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException(
           "cluster " + clusterName + " instance " + instanceName + " is not setup yet");
     }
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
@@ -2427,6 +2312,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     setResourceIdealState(clusterName, resourceName, idealState);
   }
 
+  @Deprecated
   private void enableSingleInstance(final String clusterName, final String instanceName,
       final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
       InstanceConstants.InstanceDisabledType disabledType, String reason) {
@@ -2446,23 +2332,19 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
 
         InstanceConfig config = new InstanceConfig(currentData);
-        config.setInstanceEnabled(enabled);
-        if (!enabled) {
-          // new disabled type and reason will over write existing ones.
-          config.resetInstanceDisabledTypeAndReason();
-          if (reason != null) {
-            config.setInstanceDisabledReason(reason);
-          }
-          if (disabledType != null) {
-            config.setInstanceDisabledType(disabledType);
-          }
-        }
+        config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
+            enabled ? InstanceConstants.InstanceOperation.ENABLE
+                : InstanceConstants.InstanceOperation.DISABLE).setReason(reason).setSource(
+            disabledType != null
+                ? InstanceConstants.InstanceOperationSource.instanceDisabledTypeToInstanceOperationSource(
+                disabledType) : null).build());
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
   }
 
   // TODO: Add history ZNode for all batched enabling/disabling histories with metadata.
+  @Deprecated
   private void enableBatchInstances(final String clusterName, final List<String> instances,
       final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
       InstanceConstants.InstanceDisabledType disabledType, String reason) {
@@ -2798,8 +2680,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
     }
 
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<ZNRecord>(_zkClient));
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     List<String> instanceConfigNames = accessor.getChildNames(keyBuilder.instanceConfigs());
     List<String> instancePathNames = accessor.getChildNames(keyBuilder.instances());

@@ -24,6 +24,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import javax.annotation.Nullable;
+
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
@@ -266,11 +268,13 @@ public class MockHelixAdmin implements HelixAdmin {
 
   }
 
+  @Deprecated
   @Override
   public void enableInstance(String clusterName, String instanceName, boolean enabled) {
     enableInstance(clusterName, instanceName, enabled, null, null);
   }
 
+  @Deprecated
   @Override
   public void enableInstance(String clusterName, String instanceName, boolean enabled,
       InstanceConstants.InstanceDisabledType disabledType, String reason) {
@@ -283,19 +287,17 @@ public class MockHelixAdmin implements HelixAdmin {
 
     ZNRecord record = (ZNRecord) _baseDataAccessor.get(instanceConfigPath, null, 0);
     InstanceConfig instanceConfig = new InstanceConfig(record);
-    instanceConfig.setInstanceEnabled(enabled);
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
+            enabled ? InstanceConstants.InstanceOperation.ENABLE
+                : InstanceConstants.InstanceOperation.DISABLE).setReason(reason).build());
     if (!enabled) {
+      // TODO: Replace this when the HELIX_ENABLED and HELIX_DISABLED fields are removed.
       instanceConfig.resetInstanceDisabledTypeAndReason();
-      if (reason != null) {
-        instanceConfig.setInstanceDisabledReason(reason);
-      }
-      if (disabledType != null) {
-        instanceConfig.setInstanceDisabledType(disabledType);
-      }
     }
     _baseDataAccessor.set(instanceConfigPath, instanceConfig.getRecord(), 0);
   }
 
+  @Deprecated
   @Override
   public void enableInstance(String clusterName, List<String> instances, boolean enabled) {
 
@@ -303,7 +305,20 @@ public class MockHelixAdmin implements HelixAdmin {
 
   @Override
   public void setInstanceOperation(String clusterName, String instanceName,
-      InstanceConstants.InstanceOperation instanceOperation) {
+      @Nullable InstanceConstants.InstanceOperation instanceOperation) {
+    setInstanceOperation(clusterName, instanceName, instanceOperation, null, false);
+  }
+
+  @Override
+  public void setInstanceOperation(String clusterName, String instanceName,
+      @Nullable InstanceConstants.InstanceOperation instanceOperation, String reason) {
+    setInstanceOperation(clusterName, instanceName, instanceOperation, reason, false);
+  }
+
+  @Override
+  public void setInstanceOperation(String clusterName, String instanceName,
+      @Nullable InstanceConstants.InstanceOperation instanceOperation, String reason,
+      boolean overrideAll) {
   }
 
   @Override
@@ -358,6 +373,12 @@ public class MockHelixAdmin implements HelixAdmin {
   @Override
   public ClusterManagementMode getClusterManagementMode(String clusterName) {
     return null;
+  }
+
+  @Override
+  public void setPartitionsToError(String clusterName, String instanceName, String resourceName,
+      List<String> partitionNames) {
+
   }
 
   @Override public void resetPartition(String clusterName, String instanceName, String resourceName,

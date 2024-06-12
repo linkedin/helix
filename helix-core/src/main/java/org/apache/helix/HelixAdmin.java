@@ -281,9 +281,11 @@ public interface HelixAdmin {
    * @param instanceName
    * @param enabled
    */
+  @Deprecated
   void enableInstance(String clusterName, String instanceName, boolean enabled);
 
   /**
+   * @deprecated use {@link #setInstanceOperation(String, String, InstanceConstants.InstanceOperation)}
    * @param clusterName
    * @param instanceName
    * @param enabled
@@ -292,27 +294,54 @@ public interface HelixAdmin {
    * @param reason set additional string description on why the instance is disabled when
    *          <code>enabled</code> is false. Existing disabled reason will be over write if instance is in disabled state.
    */
+  @Deprecated
   void enableInstance(String clusterName, String instanceName, boolean enabled,
       InstanceConstants.InstanceDisabledType disabledType, String reason);
 
   /**
    * Batch enable/disable instances in a cluster
    * By default, all the instances are enabled
+   * @deprecated use {@link #setInstanceOperation(String, String, InstanceConstants.InstanceOperation)}
    * @param clusterName
    * @param instances
    * @param enabled
    */
+  @Deprecated
   void enableInstance(String clusterName, List<String> instances, boolean enabled);
 
   /**
-   * Set the instanceOperation field.
+   * Set the instanceOperation of and instance with {@link InstanceConstants.InstanceOperation}.
    *
    * @param clusterName       The cluster name
    * @param instanceName      The instance name
-   * @param instanceOperation The instance operation
+   * @param instanceOperation The instance operation type
    */
   void setInstanceOperation(String clusterName, String instanceName,
-      @Nullable InstanceConstants.InstanceOperation instanceOperation);
+      InstanceConstants.InstanceOperation instanceOperation);
+
+  /**
+   * Set the instanceOperation of and instance with {@link InstanceConstants.InstanceOperation}.
+   *
+   * @param clusterName       The cluster name
+   * @param instanceName      The instance name
+   * @param instanceOperation The instance operation type
+   * @param reason            The reason for the operation
+   */
+  void setInstanceOperation(String clusterName, String instanceName,
+      InstanceConstants.InstanceOperation instanceOperation, String reason);
+
+  /**
+   * Set the instanceOperation of and instance with {@link InstanceConstants.InstanceOperation}.
+   *
+   * @param clusterName       The cluster name
+   * @param instanceName      The instance name
+   * @param instanceOperation The instance operation type
+   * @param reason            The reason for the operation
+   * @param overrideAll       Whether to override all existing instance operations from all other
+   *                          instance operations
+   */
+  void setInstanceOperation(String clusterName, String instanceName,
+      InstanceConstants.InstanceOperation instanceOperation, String reason, boolean overrideAll);
 
   /**
    * Disable or enable a resource
@@ -414,6 +443,18 @@ public interface HelixAdmin {
    * @return {@link ClusterManagementMode}
    */
   ClusterManagementMode getClusterManagementMode(String clusterName);
+
+  /**
+   * Set a list of partitions for an instance to ERROR state from any state.
+   * The partitions could be in any state and setPartitionsToError will bring them to ERROR
+   * state. ANY to ERROR state transition is required for this.
+   * @param clusterName
+   * @param instanceName
+   * @param resourceName
+   * @param partitionNames
+   */
+  void setPartitionsToError(String clusterName, String instanceName, String resourceName,
+      List<String> partitionNames);
 
   /**
    * Reset a list of partitions in error state for an instance

@@ -182,8 +182,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     String disableReason = "Reason";
     tool.enableInstance(clusterName, instanceName, false,
         InstanceConstants.InstanceDisabledType.CLOUD_EVENT, disableReason);
-    Assert.assertTrue(tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason()
-        .equals(disableReason));
+    Assert.assertEquals(disableReason, tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason());
     tool.enableInstance(clusterName, instanceName, true,
         InstanceConstants.InstanceDisabledType.CLOUD_EVENT, disableReason);
     Assert.assertTrue(
@@ -346,6 +345,65 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     deleteCluster(clusterName);
     System.out.println("END testZkHelixAdmin at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  private void testSetInstanceOperation() {
+    System.out.println("START testSetInstanceOperation at " + new Date(System.currentTimeMillis()));
+
+    final String clusterName = getShortClassName();
+    String rootPath = "/" + clusterName;
+    if (_gZkClient.exists(rootPath)) {
+      _gZkClient.deleteRecursively(rootPath);
+    }
+
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+    tool.addCluster(clusterName, true);
+    Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+    Assert.assertTrue(_gZkClient.exists(PropertyPathBuilder.customizedStateConfig(clusterName)));
+
+    // Add instance to cluster
+    String hostname = "host1";
+    String port = "9999";
+    String instanceName = hostname + "_" + port;
+    InstanceConfig config =
+        new InstanceConfig.Builder().setHostName(hostname).setPort(port).build(instanceName);
+
+    tool.addInstance(clusterName, config);
+
+    // Set instance operation to DISABLE
+    tool.setInstanceOperation(clusterName, instanceName,
+        InstanceConstants.InstanceOperation.DISABLE, "disableReason");
+    Assert.assertEquals(tool.getInstanceConfig(clusterName, instanceName).getInstanceOperation()
+            .getOperation(),
+        InstanceConstants.InstanceOperation.DISABLE);
+    Assert.assertEquals(
+        tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason(),
+        "disableReason");
+
+    // Set instance operation to ENABLE
+    tool.setInstanceOperation(clusterName, instanceName, InstanceConstants.InstanceOperation.ENABLE,
+        "enableReason");
+    Assert.assertEquals(tool.getInstanceConfig(clusterName, instanceName).getInstanceOperation()
+            .getOperation(),
+        InstanceConstants.InstanceOperation.ENABLE);
+    // InstanceNonServingReason should be empty after setting operation to ENABLE
+    Assert.assertEquals(
+        tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason(), "");
+
+    // Set instance operation to UNKNOWN
+    tool.setInstanceOperation(clusterName, instanceName,
+        InstanceConstants.InstanceOperation.UNKNOWN, "unknownReason");
+    Assert.assertEquals(tool.getInstanceConfig(clusterName, instanceName).getInstanceOperation()
+            .getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertEquals(
+        tool.getInstanceConfig(clusterName, instanceName).getInstanceOperation().getReason(),
+        "unknownReason");
+
+    deleteCluster(clusterName);
+
+    System.out.println("END testSetInstanceOperation at " + new Date(System.currentTimeMillis()));
   }
 
   private HelixManager initializeHelixManager(String clusterName, String instanceName) {
@@ -589,6 +647,117 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         2);
   }
 
+  @Test(description = "Unit test for sanity check in setPartitionsToError()")
+  public void testSetPartitionsToError() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+    String instanceName = "TestInstance";
+    String testResource = "TestResource";
+    String wrongTestInstance = "WrongTestInstance";
+    String wrongTestResource = "WrongTestResource";
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+    admin.enableInstance(clusterName, instanceName, true);
+    InstanceConfig instanceConfig = admin.getInstanceConfig(clusterName, instanceName);
+
+    IdealState idealState = new IdealState(testResource);
+    idealState.setNumPartitions(3);
+    admin.addStateModelDef(clusterName, "MasterSlave", new MasterSlaveSMD());
+    idealState.setStateModelDefRef("MasterSlave");
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    admin.addResource(clusterName, testResource, idealState);
+    admin.enableResource(clusterName, testResource, true);
+
+    /*
+     * This is a unit test for sanity check in setPartitionsToError().
+     * There is no running controller in this test. We have end-to-end tests for
+     * setPartitionsToError()
+     * under integration/TestSetPartitionsToError.
+     */
+    // setPartitionsToError is expected to throw an exception when provided with a nonexistent
+    // instance.
+    try {
+      admin.setPartitionsToError(clusterName, wrongTestInstance, testResource,
+          Arrays.asList("1", "2"));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      // This exception is expected because the instance name is made up.
+      Assert.assertEquals(expected.getMessage(), String.format(
+          "Can't SET_TO_ERROR state for %s.[1, 2] on WrongTestInstance, because %s does not exist in cluster %s",
+          testResource, wrongTestInstance, clusterName));
+    }
+
+    // setPartitionsToError is expected to throw an exception when provided with a non-live
+    // instance.
+    try {
+      admin.setPartitionsToError(clusterName, instanceName, testResource, Arrays.asList("1", "2"));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      // This exception is expected because the instance is not alive.
+      Assert.assertEquals(expected.getMessage(),
+          String.format(
+              "Can't SET_TO_ERROR state for %s.[1, 2] on %s, because %s is not alive in cluster %s",
+              testResource, instanceName, instanceName, clusterName));
+    }
+
+    HelixManager manager = initializeHelixManager(clusterName, instanceConfig.getInstanceName());
+    manager.connect();
+
+    // setPartitionsToError is expected to throw an exception when provided with a nonexistent
+    // resource.
+    try {
+      admin.setPartitionsToError(clusterName, instanceName, wrongTestResource,
+          Arrays.asList("1", "2"));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      // This exception is expected because the resource is not added.
+      Assert.assertEquals(expected.getMessage(), String.format(
+          "Can't SET_TO_ERROR state for %s.[1, 2] on %s, because resource %s is not added to cluster %s",
+          wrongTestResource, instanceName, wrongTestResource, clusterName));
+    }
+
+    // setPartitionsToError is expected to throw an exception when partition does not exist.
+    try {
+      admin.setPartitionsToError(clusterName, instanceName, testResource, Arrays.asList("1", "2"));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      // This exception is expected because partitions do not exist.
+      Assert.assertEquals(expected.getMessage(), String.format(
+          "Can't SET_TO_ERROR state for %s.[1, 2] on %s, because not all [1, 2] exist in cluster %s",
+          testResource, instanceName, clusterName));
+    }
+
+    // clean up
+    manager.disconnect();
+    admin.dropCluster(clusterName);
+
+    // verify the cluster has been removed successfully
+    HelixDataAccessor dataAccessor =
+        new ZKHelixDataAccessor(className, new ZkBaseDataAccessor<>(_gZkClient));
+    try {
+      Assert.assertTrue(TestHelper.verify(
+          () -> dataAccessor.getChildNames(dataAccessor.keyBuilder().liveInstances()).isEmpty(),
+          1000));
+    } catch (Exception e) {
+      e.printStackTrace();
+      System.out.println("There're live instances not cleaned up yet");
+      assert false;
+    }
+
+    try {
+      Assert.assertTrue(TestHelper.verify(
+          () -> dataAccessor.getChildNames(dataAccessor.keyBuilder().clusterConfig()).isEmpty(),
+          1000));
+    } catch (Exception e) {
+      e.printStackTrace();
+      System.out.println("The cluster is not cleaned up yet");
+      assert false;
+    }
+  }
+
   @Test
   public void testResetPartition() throws Exception {
     String className = TestHelper.getTestClassName();
@@ -625,7 +794,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } catch (HelixException expected) {
       // This exception is expected because the instance name is made up.
       Assert.assertEquals(expected.getMessage(), String.format(
-          "Can't reset state for %s.[1, 2] on WrongTestInstance, because %s does not exist in cluster %s",
+          "Can't RESET state for %s.[1, 2] on WrongTestInstance, because %s does not exist in cluster %s",
           testResource, wrongTestInstance, clusterName));
     }
 
@@ -636,7 +805,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } catch (HelixException expected) {
       // This exception is expected because the instance is not alive.
       Assert.assertEquals(expected.getMessage(), String
-          .format("Can't reset state for %s.[1, 2] on %s, because %s is not alive in cluster %s",
+          .format("Can't RESET state for %s.[1, 2] on %s, because %s is not alive in cluster %s",
               testResource, instanceName, instanceName, clusterName));
     }
 
@@ -650,7 +819,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } catch (HelixException expected) {
       // This exception is expected because the resource is not added.
       Assert.assertEquals(expected.getMessage(), String.format(
-          "Can't reset state for %s.[1, 2] on %s, because resource %s is not added to cluster %s",
+          "Can't RESET state for %s.[1, 2] on %s, because resource %s is not added to cluster %s",
           wrongTestResource, instanceName, wrongTestResource, clusterName));
     }
 
@@ -660,7 +829,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } catch (HelixException expected) {
       // This exception is expected because partitions do not exist.
       Assert.assertEquals(expected.getMessage(), String.format(
-          "Can't reset state for %s.[1, 2] on %s, because not all [1, 2] exist in cluster %s",
+          "Can't RESET state for %s.[1, 2] on %s, because not all [1, 2] exist in cluster %s",
           testResource, instanceName, clusterName));
     }
 
