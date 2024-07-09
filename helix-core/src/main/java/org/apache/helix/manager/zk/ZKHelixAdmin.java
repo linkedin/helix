@@ -610,7 +610,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
       // Return if there is a matching Instance with the same logicalId and opposite InstanceOperation swap operation.
       if (potentialSwappingInstanceConfig.getLogicalId(logicalIdKey)
-          .equals(instanceConfig.getLogicalId(logicalIdKey)) && (
+          .equals(instanceConfig.getLogicalId(logicalIdKey)) && ((
           instanceConfig.getInstanceOperation()
               .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())
               && potentialSwappingInstanceConfig.getInstanceOperation()
@@ -618,7 +618,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           instanceConfig.getInstanceOperation()
               .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())
               && potentialSwappingInstanceConfig.getInstanceOperation()
-              .equals(InstanceConstants.InstanceOperation.SWAP_IN.name()))) {
+              .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())))) {
         return potentialSwappingInstanceConfig;
       }
     }
