@@ -835,7 +835,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     // Check if the swap is ready to be completed. If not, return false.
-    if (forceComplete || !canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
+    if (!forceComplete && !canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
         swapInInstanceConfig.getInstanceName())) {
       return false;
     }
