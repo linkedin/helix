@@ -38,6 +38,7 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
+import org.apache.helix.controller.rebalancer.strategy.AutoRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.integration.manager.ClusterControllerManager;
@@ -102,8 +103,6 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
         .setResources(new HashSet<>(_resources))
         .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
 
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
-
     // Add and start instances to cluster
     for (int i = 0; i < DEFAULT_INSTANCE_COUNT; i++) {
       String instanceName = INSTANCE_NAME_PREFIX + (INSTANCE_START_PORT + i);
@@ -118,6 +117,7 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
       _participants.add(participant);
     }
 
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
     System.out.println("End setup:" + TestHelper.getTestMethodName());
   }
 
@@ -125,11 +125,8 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
   public void afterTest() throws Exception {
     System.out.println("Start teardown:" + TestHelper.getTestMethodName());
 
-    // Drop all resources
-    for (String resource : _resources) {
-      _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, resource);
-    }
-    _resources.clear();
+    // Stop controller
+    _controller.syncStop();
 
     // Stop and remove all instances
     for (MockParticipantManager participant : _participants) {
@@ -142,8 +139,11 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
     }
     _participants.clear();
 
-    // Stop controller
-    _controller.syncStop();
+    // Drop all resources
+    for (String resource : _resources) {
+      _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, resource);
+    }
+    _resources.clear();
 
     // Drop cluster
     _gSetupTool.deleteCluster(CLUSTER_NAME);
@@ -379,6 +379,26 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
   }
 
+  private void createAutoRebalanceResource(String db) {
+    _gSetupTool.addResourceToCluster(CLUSTER_NAME, db, 1, "LeaderStandby",
+        IdealState.RebalanceMode.FULL_AUTO + "", null);
+    _resources.add(db);
+
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, db);
+
+    idealState.setRebalancerClassName(DelayedAutoRebalancer.class.getName());
+    idealState.setRebalanceStrategy(AutoRebalanceStrategy.class.getName());
+    idealState.setReplicas("ANY_LIVEINSTANCE");
+    idealState.enable(true);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, db, idealState);
+
+    ResourceConfig resourceConfig = new ResourceConfig(db);
+    _configAccessor.setResourceConfig(CLUSTER_NAME, db, resourceConfig);
+
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+  }
+
   @Test
   private void testComputePartitionAssignmentMaintenanceMode() throws Exception {
 
@@ -398,6 +418,8 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
           DEFAULT_INSTANCE_CAPACITY * DEFAULT_INSTANCE_COUNT / REPLICAS / crushedResourceCount,
           MIN_ACTIVE_REPLICA, 100000L);
     }
+
+    createAutoRebalanceResource("TEST_AUTOREBALANCE_DB_0");
 
     // Wait for cluster to converge after adding resources
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
@@ -419,6 +441,7 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
     MockParticipantManager toAddParticipant = createParticipant(toAddInstanceName);
     toAddParticipant.syncStart();
 
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
     // Choose participant to simulate killing in API call
     MockParticipantManager participantToKill = _participants.get(0);
 

@@ -29,7 +29,7 @@
 
   <groupId>org.apache.helix</groupId>
   <artifactId>helix</artifactId>
-  <version>1.3.2-SNAPSHOT</version>
+  <version>1.4.1-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>Apache Helix</name>
 
@@ -312,11 +312,9 @@
     <module>zookeeper-api</module>
     <module>helix-common</module>
     <module>helix-core</module>
-    <module>helix-admin-webapp</module>
     <module>helix-rest</module>
     <module>helix-lock</module>
     <module>helix-agent</module>
-    <!--<module>helix-front</module> disable build for helix-front-->
     <module>recipes</module>
     <module>helix-view-aggregator</module>
     <module>meta-client</module>
@@ -431,7 +429,7 @@
   <properties>
     <revision>1.1.1-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <project.build.outputTimestamp>1695574257</project.build.outputTimestamp>
+    <project.build.outputTimestamp>1718759977</project.build.outputTimestamp>
 
     <sonar.host.url>https://analysis.apache.org/</sonar.host.url>
 

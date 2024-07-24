@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -41,23 +42,42 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.integration.manager.MockParticipantManager;
+import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
-import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
+import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
 import org.apache.helix.rest.server.resources.helix.PerInstanceAccessor;
 import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
+import org.apache.helix.task.TaskFactory;
+import org.apache.helix.task.TaskStateModelFactory;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 public class TestPerInstanceAccessor extends AbstractTestClass {
-  private final static String CLUSTER_NAME = "TestCluster_0";
+  private final static String CLUSTER_NAME = "TestCluster_4";
   private final static String INSTANCE_NAME = CLUSTER_NAME + "localhost_12918";
+
+  private MockParticipantManager _instanceToDisable;
+
+  @BeforeClass
+  public void beforeClass() {
+    int indexToDisable = -1;
+    for (int i = 0; i < _mockParticipantManagers.size(); i++) {
+      if (_mockParticipantManagers.get(i).getInstanceName().equals(INSTANCE_NAME)) {
+        indexToDisable = i;
+        break;
+      }
+    }
+    _instanceToDisable = _mockParticipantManagers.remove(indexToDisable);
+  }
 
   @Test
   public void testIsInstanceStoppable() throws IOException {
@@ -254,9 +274,11 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   @Test(dependsOnMethods = "testTakeInstanceCheckOnly")
-  public void testGetAllMessages() throws IOException {
+  public void testGetAllMessages() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    String testInstance = CLUSTER_NAME + "localhost_12926"; //Non-live instance
+    _instanceToDisable.disconnect();
+
+    String testInstance = INSTANCE_NAME; //Non-live instance
 
     String messageId = "msg1";
     Message message = new Message(Message.MessageType.STATE_TRANSITION, messageId);
@@ -276,14 +298,14 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         node.get(PerInstanceAccessor.PerInstanceProperties.total_message_count.name()).intValue();
 
     Assert.assertEquals(newMessageCount, 1);
+    helixDataAccessor.removeProperty(helixDataAccessor.keyBuilder().message(testInstance, messageId));
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test(dependsOnMethods = "testGetAllMessages")
-  public void testGetMessagesByStateModelDef() throws IOException {
+  public void testGetMessagesByStateModelDef() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-
-    String testInstance = CLUSTER_NAME + "localhost_12926"; //Non-live instance
+    String testInstance = INSTANCE_NAME; //Non-live instance
     String messageId = "msg1";
     Message message = new Message(Message.MessageType.STATE_TRANSITION, messageId);
     message.setStateModelDef("MasterSlave");
@@ -314,6 +336,15 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         node.get(PerInstanceAccessor.PerInstanceProperties.total_message_count.name()).intValue();
 
     Assert.assertEquals(newMessageCount, 0);
+    MockParticipantManager participant =
+        new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, INSTANCE_NAME);
+    Map<String, TaskFactory> taskFactoryReg = new HashMap<>();
+    taskFactoryReg.put(MockTask.TASK_COMMAND, MockTask::new);
+    StateMachineEngine stateMachineEngine = participant.getStateMachineEngine();
+    stateMachineEngine.registerStateModelFactory("Task",
+        new TaskStateModelFactory(participant, taskFactoryReg));
+    participant.syncStart();
+    _mockParticipantManagers.add(participant);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -525,21 +556,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertFalse((boolean) responseMap.get("successful"));
 
     // test isEvacuateFinished on instance with EVACUATE but has currentState
-    // Put the cluster in MM so no assignment is calculated
-    _gSetupTool.getClusterManagementTool()
-        .enableMaintenanceMode(CLUSTER_NAME, true, "Change resource to full-auto");
-
-    // Make the DBs FULL_AUTO and wait because EVACUATE is only supported for FULL_AUTO resources
-    Set<String> resources = _resourcesMap.get(CLUSTER_NAME);
-    for (String resource : resources) {
-      IdealState idealState =
-          _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resource);
-      idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-      idealState.setDelayRebalanceEnabled(true);
-      idealState.setRebalanceDelay(360000);
-      _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, resource, idealState);
-    }
-
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME);
@@ -550,22 +566,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Map<String, Boolean> evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    // Returns false because the node still contains full-auto resources
-    Assert.assertFalse(evacuateFinishedResult.get("successful"));
-
-    // Make all resources SEMI_AUTO again
-    for (String resource : resources) {
-      IdealState idealState =
-          _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resource);
-      idealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
-      idealState.setDelayRebalanceEnabled(false);
-      idealState.setRebalanceDelay(0);
-      _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, resource, idealState);
-    }
-
-    // Exit MM
-    _gSetupTool.getClusterManagementTool()
-        .enableMaintenanceMode(CLUSTER_NAME, false, "Change resource to full-auto");
+    // Returns true because the node only contains semi-auto resources
+    Assert.assertTrue(evacuateFinishedResult.get("successful"));
 
     // Because the resources are now all semi-auto, is EvacuateFinished should return true
     response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
