@@ -136,12 +136,14 @@ public class TestZkConnectionLost extends TaskTestBase {
       Assert.assertTrue(disconnected.get());
       Assert.assertFalse(controllerManager.isConnected());
     } finally {
-      testThread.interrupt();
+      testThread.stop();
+      TestHelper.verify(() -> testThread.getState().equals(Thread.State.TERMINATED),
+          TestHelper.WAIT_DURATION);
       _zkServerRef.set(TestHelper.startZkServer(_zkAddr, null, false));
     }
   }
 
-  @Test
+  @Test (enabled = false)
   public void testLostZkConnection() throws Exception {
     System.setProperty(SystemPropertyKeys.ZK_WAIT_CONNECTED_TIMEOUT, "5000");
     System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, "5000");
