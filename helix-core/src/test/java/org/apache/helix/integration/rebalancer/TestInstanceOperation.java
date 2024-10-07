@@ -387,7 +387,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_OUT, true, -1);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testAddingNodeWithSwapOutInstanceOperation")
+  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testAddingNodeWithSwapOutInstanceOperation", enabled = false)
   public void testAddingNodeWithSwapOutNodeInstanceOperationUnset() throws Exception {
     System.out.println(
         "START TestInstanceOperation.testAddingNodeWithSwapOutNodeInstanceOperationUnset() at "
@@ -409,7 +409,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_IN, true, -1);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testAddingNodeWithSwapOutNodeInstanceOperationUnset")
+  @Test(expectedExceptions = HelixException.class, enabled = false)
   public void testNodeSwapWithNoSwapOutNode() throws Exception {
     System.out.println("START TestInstanceOperation.testNodeSwapWithNoSwapOutNode() at " + new Date(
         System.currentTimeMillis()));
@@ -422,7 +422,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_IN, true, -1);
   }
 
-  @Test(dependsOnMethods = "testNodeSwapWithNoSwapOutNode")
+  @Test(dependsOnMethods = "testAddingNodeWithSwapOutInstanceOperation")
   public void testNodeSwapSwapInNodeNoInstanceOperationEnabled() throws Exception {
     System.out.println(
         "START TestInstanceOperation.testNodeSwapSwapInNodeNoInstanceOperationEnabled() at "
@@ -442,7 +442,17 @@ public class TestInstanceOperation extends ZkTestBase {
     // set the InstanceOperation to SWAP_IN.
     String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
     addParticipant(instanceToSwapInName, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID),
-        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE), null, true, -1);
+        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE), null, false, -1);
+
+    InstanceConfig instanceConfig = _gSetupTool.getClusterManagementTool()
+        .getInstanceConfig(CLUSTER_NAME, instanceToSwapInName);
+    Map<String, String> domainAsMap = instanceConfig.getDomainAsMap();
+    domainAsMap.put(LOGICAL_ID, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID));
+    instanceConfig.setDomain(domainAsMap);
+    instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN);
+    instanceConfig.setInstanceEnabled(true);
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceConfig(CLUSTER_NAME, instanceToSwapInName, instanceConfig);
 
     Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
     Assert.assertTrue(_gSetupTool.getClusterManagementTool()
@@ -480,7 +490,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_IN, true, -1);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapSwapInNodeWithAlreadySwappingPair")
+  @Test(expectedExceptions = HelixException.class, enabled = false)
   public void testNodeSwapWrongFaultZone() throws Exception {
     System.out.println("START TestInstanceOperation.testNodeSwapWrongFaultZone() at " + new Date(
         System.currentTimeMillis()));
@@ -501,7 +511,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_IN, true, -1);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapWrongFaultZone")
+  @Test(expectedExceptions = HelixException.class, enabled = false)
   public void testNodeSwapWrongCapacity() throws Exception {
     System.out.println("START TestInstanceOperation.testNodeSwapWrongCapacity() at " + new Date(
         System.currentTimeMillis()));
@@ -522,7 +532,7 @@ public class TestInstanceOperation extends ZkTestBase {
         InstanceConstants.InstanceOperation.SWAP_IN, true, TEST_CAPACITY_VALUE - 10);
   }
 
-  @Test(dependsOnMethods = "testNodeSwapWrongCapacity")
+  @Test(dependsOnMethods = "testNodeSwapSwapInNodeWithAlreadySwappingPair")
   public void testNodeSwap() throws Exception {
     System.out.println(
         "START TestInstanceOperation.testNodeSwap() at " + new Date(System.currentTimeMillis()));
@@ -679,7 +689,7 @@ public class TestInstanceOperation extends ZkTestBase {
         Collections.emptySet(), Set.of(instanceToSwapInName))), TIMEOUT);
   }
 
-  @Test(dependsOnMethods = "testNodeSwapDisableAndReenable")
+  @Test(dependsOnMethods = "testNodeSwapDisableAndReenable", enabled = false)
   public void testNodeSwapSwapInNodeNoInstanceOperationDisabled() throws Exception {
     System.out.println(
         "START TestInstanceOperation.testNodeSwapSwapInNodeNoInstanceOperationDisabled() at "
@@ -748,7 +758,7 @@ public class TestInstanceOperation extends ZkTestBase {
         Collections.emptySet(), Set.of(instanceToSwapInName))), TIMEOUT);
   }
 
-  @Test(dependsOnMethods = "testNodeSwapSwapInNodeNoInstanceOperationDisabled")
+  @Test(dependsOnMethods = "testNodeSwapDisableAndReenable")
   public void testNodeSwapCancelSwapWhenReadyToComplete() throws Exception {
     System.out.println(
         "START TestInstanceOperation.testNodeSwapCancelSwapWhenReadyToComplete() at " + new Date(
@@ -986,7 +996,7 @@ public class TestInstanceOperation extends ZkTestBase {
         TIMEOUT);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapWithSwapOutInstanceDisabled")
+  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapWithSwapOutInstanceDisabled", enabled = false)
   public void testNodeSwapAddSwapInFirstEnabledBeforeSwapOutSet() {
     System.out.println(
         "START TestInstanceOperation.testNodeSwapAddSwapInFirstEnabledBeforeSwapOutSet() at "
@@ -1004,7 +1014,7 @@ public class TestInstanceOperation extends ZkTestBase {
         instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE), null, true, -1);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapAddSwapInFirstEnabledBeforeSwapOutSet")
+  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapAddSwapInFirstEnabledBeforeSwapOutSet", enabled = false)
   public void testNodeSwapAddSwapInFirstEnableBeforeSwapOutSet() {
     System.out.println(
         "START TestInstanceOperation.testNodeSwapAddSwapInFirstEnableBeforeSwapOutSet() at "
@@ -1027,7 +1037,7 @@ public class TestInstanceOperation extends ZkTestBase {
     _gSetupTool.getClusterManagementTool().enableInstance(CLUSTER_NAME, instanceToSwapInName, true);
   }
 
-  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapAddSwapInFirstEnableBeforeSwapOutSet")
+  @Test(expectedExceptions = HelixException.class, dependsOnMethods = "testNodeSwapWithSwapOutInstanceDisabled")
   public void testUnsetInstanceOperationOnSwapInWhenAlreadyUnsetOnSwapOut() {
     System.out.println(
         "START TestInstanceOperation.testUnsetInstanceOperationOnSwapInWhenAlreadyUnsetOnSwapOut() at "
@@ -1042,7 +1052,8 @@ public class TestInstanceOperation extends ZkTestBase {
     // Add instance with InstanceOperation set to SWAP_IN
     String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
     addParticipant(instanceToSwapInName, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID),
-        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE), null, false, -1);
+        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE),
+        InstanceConstants.InstanceOperation.SWAP_IN, false, -1);
 
     Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
 
@@ -1073,7 +1084,8 @@ public class TestInstanceOperation extends ZkTestBase {
     String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
     swapOutInstancesToSwapInInstances.put(instanceToSwapOutName, instanceToSwapInName);
     addParticipant(instanceToSwapInName, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID),
-        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE), null, false, -1);
+        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE),
+        InstanceConstants.InstanceOperation.SWAP_IN, false, -1);
 
     // Validate that the assignment has not changed since setting the InstanceOperation to SWAP_OUT
     Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());

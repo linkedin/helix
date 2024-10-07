@@ -219,7 +219,6 @@ public class ZKHelixAdmin implements HelixAdmin {
     ClusterTopologyConfig clusterTopologyConfig =
         ClusterTopologyConfig.createFromClusterConfig(clusterConfig);
     String logicalIdKey = clusterTopologyConfig.getEndNodeType();
-    String faultZoneKey = clusterTopologyConfig.getFaultZoneType();
     String toAddInstanceLogicalId = instanceConfig.getLogicalId(logicalIdKey);
 
     HelixConfigScope instanceConfigScope =
@@ -242,61 +241,13 @@ public class ZKHelixAdmin implements HelixAdmin {
               .getInstanceName() + " already have the same logicalId: " + toAddInstanceLogicalId
               + "; therefore, " + nodeId + " cannot be added to the cluster.");
     } else if (foundInstanceConfigsWithMatchingLogicalId.size() == 1) {
-      // If there is only one instance with the same logicalId, we can infer that the intended behaviour
-      // is to SWAP_IN.
-
-      // If the InstanceOperation is unset, we will set it to SWAP_IN.
       if (!instanceConfig.getInstanceOperation()
           .equals(InstanceConstants.InstanceOperation.SWAP_IN.name())) {
-        instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN);
-      }
-
-      // If the existing instance with the same logicalId does not have InstanceOperation set to SWAP_OUT and this instance
-      // is attempting to join as enabled, we cannot add this instance.
-      if (instanceConfig.getInstanceEnabled() && !foundInstanceConfigsWithMatchingLogicalId.get(0)
-          .getInstanceOperation()
-          .equals(InstanceConstants.InstanceOperation.SWAP_OUT.name())) {
-        throw new HelixException(
-            "Instance can only be added if the exising instance sharing the same logicalId has InstanceOperation"
-                + " set to " + InstanceConstants.InstanceOperation.SWAP_OUT.name()
-                + " and this instance has InstanceOperation set to "
-                + InstanceConstants.InstanceOperation.SWAP_IN.name() + ". " + "Existing instance: "
-                + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                + " has InstanceOperation: "
-                + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceOperation()
-                + " and this instance: " + nodeId + " has InstanceOperation: "
-                + instanceConfig.getInstanceOperation());
-      }
-
-      // If the existing instance with the same logicalId is not in the same FAULT_ZONE as this instance, we cannot
-      // add this instance.
-      if (!foundInstanceConfigsWithMatchingLogicalId.get(0).getDomainAsMap()
-          .containsKey(faultZoneKey) || !instanceConfig.getDomainAsMap().containsKey(faultZoneKey)
-          || !foundInstanceConfigsWithMatchingLogicalId.get(0).getDomainAsMap().get(faultZoneKey)
-          .equals(instanceConfig.getDomainAsMap().get(faultZoneKey))) {
-        throw new HelixException(
-            "Instance can only be added if the SWAP_OUT instance sharing the same logicalId is in the same FAULT_ZONE"
-                + " as this instance. " + "Existing instance: "
-                + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                + " has FAULT_ZONE_TYPE: " + foundInstanceConfigsWithMatchingLogicalId.get(0)
-                .getDomainAsMap().get(faultZoneKey) + " and this instance: " + nodeId
-                + " has FAULT_ZONE_TYPE: " + instanceConfig.getDomainAsMap().get(faultZoneKey));
-      }
-
-      Map<String, Integer> foundInstanceCapacityMap =
-          foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceCapacityMap().isEmpty()
-              ? clusterConfig.getDefaultInstanceCapacityMap()
-              : foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceCapacityMap();
-      Map<String, Integer> instanceCapacityMap = instanceConfig.getInstanceCapacityMap().isEmpty()
-          ? clusterConfig.getDefaultInstanceCapacityMap() : instanceConfig.getInstanceCapacityMap();
-      // If the instance does not have the same capacity, we cannot add this instance.
-      if (!new EqualsBuilder().append(foundInstanceCapacityMap, instanceCapacityMap).isEquals()) {
-        throw new HelixException(
-            "Instance can only be added if the SWAP_OUT instance sharing the same logicalId has the same capacity"
-                + " as this instance. " + "Existing instance: "
-                + foundInstanceConfigsWithMatchingLogicalId.get(0).getInstanceName()
-                + " has capacity: " + foundInstanceCapacityMap + " and this instance: " + nodeId
-                + " has capacity: " + instanceCapacityMap);
+        // We will leave it to an external system to set the InstanceOperation to SWAP_IN and add this instance
+        // with a unique logicalId instead
+        Map<String, String> domainMap = instanceConfig.getDomainAsMap();
+        domainMap.put(logicalIdKey, UUID.randomUUID().toString());
+        instanceConfig.setDomain(domainMap);
       }
     } else if (!instanceConfig.getInstanceOperation().isEmpty()) {
       // If there are no instances with the same logicalId, we can only add this instance if InstanceOperation
