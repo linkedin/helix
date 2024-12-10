@@ -21,7 +21,7 @@
   <parent>
     <groupId>org.apache.helix</groupId>
     <artifactId>helix</artifactId>
-    <version>1.4.1-SNAPSHOT</version>
+    <version>1.4.3-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -43,7 +43,7 @@
   </organization>
 
   <properties>
-    <revision>1.4.1-SNAPSHOT</revision>
+    <revision>1.4.3-SNAPSHOT</revision>
     <osgi.import>
       org.apache.helix*,
       org.apache.commons.cli*,
@@ -91,7 +91,7 @@
     <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-server</artifactId>
-      <version>9.4.51.v20230217</version>
+      <version>9.4.55.v20240627</version>
     </dependency>
     <dependency>
       <groupId>org.glassfish.jersey.core</groupId>

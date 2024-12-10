@@ -84,7 +84,8 @@ public class MaintenanceManagementService {
 
   public static final Set<StoppableCheck.Category> SKIPPABLE_HEALTH_CHECK_CATEGORIES =
       ImmutableSet.of(StoppableCheck.Category.CUSTOM_INSTANCE_CHECK,
-          StoppableCheck.Category.CUSTOM_PARTITION_CHECK);
+          StoppableCheck.Category.CUSTOM_PARTITION_CHECK,
+          StoppableCheck.Category.CUSTOM_AGGREGATED_CHECK);
 
   private final ConfigAccessor _configAccessor;
   private final CustomRestClient _customRestClient;
@@ -381,7 +382,7 @@ public class MaintenanceManagementService {
             toBeStoppedInstances);
     // custom check, includes partition check.
     batchCustomInstanceStoppableCheck(clusterId, instancesForCustomInstanceLevelChecks,
-        finalStoppableChecks, getMapFromJsonPayload(jsonContent));
+        toBeStoppedInstances, finalStoppableChecks, getMapFromJsonPayload(jsonContent));
     return finalStoppableChecks;
   }
 
@@ -472,32 +473,60 @@ public class MaintenanceManagementService {
   private List<String> batchHelixInstanceStoppableCheck(String clusterId,
       Collection<String> instances, Map<String, StoppableCheck> finalStoppableChecks,
       Set<String> toBeStoppedInstances) {
+
+    // Perform all but min_active replicas check in parallel
     Map<String, Future<StoppableCheck>> helixInstanceChecks = instances.stream().collect(
         Collectors.toMap(Function.identity(), instance -> POOL.submit(
             () -> performHelixOwnInstanceCheck(clusterId, instance, toBeStoppedInstances))));
+
+    // Perform min_active replicas check sequentially
+    addMinActiveReplicaChecks(clusterId, helixInstanceChecks, toBeStoppedInstances);
+
     // finalStoppableChecks contains instances that does not pass this health check
     return filterInstancesForNextCheck(helixInstanceChecks, finalStoppableChecks);
   }
 
   private List<String> batchCustomInstanceStoppableCheck(String clusterId, List<String> instances,
-      Map<String, StoppableCheck> finalStoppableChecks, Map<String, String> customPayLoads) {
+      Set<String> toBeStoppedInstances, Map<String, StoppableCheck> finalStoppableChecks,
+      Map<String, String> customPayLoads) {
     if (instances.isEmpty()) {
       // if all instances failed at previous checks, then all following checks are not required.
       return instances;
     }
     RESTConfig restConfig = _configAccessor.getRESTConfig(clusterId);
-    if (restConfig == null && (
-        !_skipHealthCheckCategories.contains(StoppableCheck.Category.CUSTOM_INSTANCE_CHECK)
-            || !_skipHealthCheckCategories.contains(
-            StoppableCheck.Category.CUSTOM_PARTITION_CHECK))) {
-      String errorMessage = String.format(
-          "The cluster %s hasn't enabled client side health checks yet, "
-              + "thus the stoppable check result is inaccurate", clusterId);
-      LOG.error(errorMessage);
-      throw new HelixException(errorMessage);
+    if (restConfig == null) {
+      // If the user didn't set up the rest config, we can't perform the custom check.
+      // Therefore, skip the custom check.
+      LOG.info(String.format("The cluster %s hasn't enabled client side health checks yet, "
+          + "thus the stoppable check result is inaccurate", clusterId));
+      return instances;
     }
 
-    List<String> instancesForCustomPartitionLevelChecks;
+    // If the config has exactUrl and the CLUSTER level customer check is not skipped, we will
+    // perform the custom check at cluster level.
+    if (restConfig.getCompleteConfiguredHealthUrl().isPresent()) {
+      if (_skipHealthCheckCategories.contains(StoppableCheck.Category.CUSTOM_AGGREGATED_CHECK)) {
+        return instances;
+      }
+
+      Map<String, StoppableCheck> clusterLevelCustomCheckResult =
+          performAggregatedCustomCheck(clusterId, instances,
+              restConfig.getCompleteConfiguredHealthUrl().get(), customPayLoads,
+              toBeStoppedInstances);
+      List<String> instancesForNextCheck = new ArrayList<>();
+      clusterLevelCustomCheckResult.forEach((instance, stoppableCheck) -> {
+        addStoppableCheck(finalStoppableChecks, instance, stoppableCheck);
+        if (stoppableCheck.isStoppable() || isNonBlockingCheck(stoppableCheck)) {
+          instancesForNextCheck.add(instance);
+        }
+      });
+
+      return instancesForNextCheck;
+    }
+
+    // Reaching here means the rest config requires instances/partition level checks. We will
+    // perform the custom check at instance/partition level if they are not skipped.
+    List<String> instancesForCustomPartitionLevelChecks = instances;
     if (!_skipHealthCheckCategories.contains(StoppableCheck.Category.CUSTOM_INSTANCE_CHECK)) {
       Map<String, Future<StoppableCheck>> customInstanceLevelChecks = instances.stream().collect(
           Collectors.toMap(Function.identity(), instance -> POOL.submit(
@@ -505,8 +534,6 @@ public class MaintenanceManagementService {
                   customPayLoads))));
       instancesForCustomPartitionLevelChecks =
           filterInstancesForNextCheck(customInstanceLevelChecks, finalStoppableChecks);
-    } else {
-      instancesForCustomPartitionLevelChecks = instances;
     }
 
     if (!instancesForCustomPartitionLevelChecks.isEmpty() && !_skipHealthCheckCategories.contains(
@@ -550,8 +577,8 @@ public class MaintenanceManagementService {
       } else if (healthCheck.equals(HELIX_CUSTOM_STOPPABLE_CHECK)) {
         // custom check, includes custom Instance check and partition check.
         instancesForNext =
-            batchCustomInstanceStoppableCheck(clusterId, instancesForNext, finalStoppableChecks,
-                healthCheckConfig);
+            batchCustomInstanceStoppableCheck(clusterId, instancesForNext, Collections.emptySet(),
+                finalStoppableChecks, healthCheckConfig);
       } else {
         throw new UnsupportedOperationException(healthCheck + " is not supported yet!");
       }
@@ -640,6 +667,8 @@ public class MaintenanceManagementService {
     LOG.info("Perform helix own custom health checks for {}/{}", clusterId, instanceName);
     List<HealthCheck> healthChecksToExecute = new ArrayList<>(HealthCheck.STOPPABLE_CHECK_LIST);
     healthChecksToExecute.removeAll(_skipStoppableHealthCheckList);
+    // Min active check is performed sequentially later
+    healthChecksToExecute.remove(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED);
     Map<String, Boolean> helixStoppableCheck =
         getInstanceHealthStatus(clusterId, instanceName, healthChecksToExecute,
             toBeStoppedInstances);
@@ -692,6 +721,29 @@ public class MaintenanceManagementService {
     }
 
     return instanceStoppableChecks;
+  }
+
+  private Map<String, StoppableCheck> performAggregatedCustomCheck(String clusterId,
+      List<String> instances, String url, Map<String, String> customPayLoads,
+      Set<String> toBeStoppedInstances) {
+    Map<String, StoppableCheck> aggregatedStoppableChecks = new HashMap<>();
+    try {
+      Map<String, List<String>> customCheckResult =
+          _customRestClient.getAggregatedStoppableCheck(url, instances, toBeStoppedInstances,
+              clusterId, customPayLoads);
+      for (Map.Entry<String, List<String>> entry : customCheckResult.entrySet()) {
+        // If the list is empty, it means the instance is stoppable.
+        aggregatedStoppableChecks.put(entry.getKey(),
+            new StoppableCheck(entry.getValue().isEmpty(), entry.getValue(),
+                StoppableCheck.Category.CUSTOM_AGGREGATED_CHECK));
+      }
+    } catch (IOException ex) {
+      LOG.error("Custom client side aggregated health check for {} failed.", clusterId, ex);
+      return instances.stream().collect(Collectors.toMap(Function.identity(),
+          instance -> new StoppableCheck(false, Collections.singletonList(instance),
+              StoppableCheck.Category.CUSTOM_AGGREGATED_CHECK)));
+    }
+    return aggregatedStoppableChecks;
   }
 
   public static Map<String, String> getMapFromJsonPayload(String jsonContent) throws IOException {
@@ -798,6 +850,41 @@ public class MaintenanceManagementService {
     }
 
     return healthStatus;
+  }
+
+  // Adds the result of the min_active replica check for each stoppable check passed in futureStoppableCheckByInstance
+  private void addMinActiveReplicaChecks(String clusterId, Map<String, Future<StoppableCheck>> futureStoppableCheckByInstance,
+      Set<String> toBeStoppedInstances) {
+    // Do not perform check if in the skip list
+    if (_skipStoppableHealthCheckList.contains(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED)) {
+      return;
+    }
+
+    Set<String> possibleToStopInstances = new HashSet<>(toBeStoppedInstances);
+    for (Map.Entry<String, Future<StoppableCheck>> entry : futureStoppableCheckByInstance.entrySet()) {
+      try {
+        String instanceName = entry.getKey();
+        StoppableCheck stoppableCheck = entry.getValue().get();
+
+        // Check if min active will be violated and add to stoppableCheck. If instance still stoppable,
+        // add to possibleToStopInstances
+        Map<String, Boolean> helixStoppableCheck =
+            getInstanceHealthStatus(clusterId, instanceName,
+                Collections.singletonList(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED),
+                possibleToStopInstances);
+        stoppableCheck.add(new StoppableCheck(helixStoppableCheck, StoppableCheck.Category.HELIX_OWN_CHECK));
+
+        if (stoppableCheck.isStoppable()) {
+          possibleToStopInstances.add(instanceName);
+        }
+
+      } catch (Exception e) {
+        String errorMessage = String.format("Failed to get StoppableChecks in parallel. Instances: %s",
+            futureStoppableCheckByInstance.values());
+        LOG.error(errorMessage, e);
+        throw new HelixException(errorMessage);
+      }
+    }
   }
 
   public static class MaintenanceManagementServiceBuilder {
