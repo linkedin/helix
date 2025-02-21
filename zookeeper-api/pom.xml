@@ -21,7 +21,7 @@
   <parent>
     <groupId>org.apache.helix</groupId>
     <artifactId>helix</artifactId>
-    <version>1.4.3-SNAPSHOT</version>
+    <version>1.4.4-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -169,7 +169,7 @@
         <version>3.3.0</version>
         <executions>
           <execution>
-            <id>default-package-jdk11</id>
+            <id>default-package-jdk8</id>
             <phase>package</phase>
             <goals>
               <goal>jar</goal>

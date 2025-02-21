@@ -19,7 +19,6 @@ package org.apache.helix.manager.zk;
  * under the License.
  */
 
-import com.google.common.collect.ImmutableMap;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -274,18 +273,16 @@ public class ZKHelixAdmin implements HelixAdmin {
           "Node " + instanceName + " is still alive for cluster " + clusterName + ", can't drop.");
     }
 
-    // delete config path
-    String instanceConfigsPath = PropertyPathBuilder.instanceConfig(clusterName);
-    ZKUtil.dropChildren(_zkClient, instanceConfigsPath, instanceConfig.getRecord());
-    // delete instance path
-    dropInstancePathRecursively(instancePath, instanceConfig.getInstanceName());
+    dropInstancePathsRecursively(clusterName, instanceName);
   }
 
-  private void dropInstancePathRecursively(String instancePath, String instanceName) {
+  private void dropInstancePathsRecursively(String clusterName, String instanceName) {
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     int retryCnt = 0;
     while (true) {
       try {
-        _zkClient.deleteRecursively(instancePath);
+        _zkClient.deleteRecursivelyAtomic(Arrays.asList(instancePath, instanceConfigPath));
         return;
       } catch (ZkClientException e) {
         if (retryCnt < 3 && e.getCause() instanceof ZkException && e.getCause()
@@ -333,11 +330,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   private void purgeInstance(String clusterName, String instanceName) {
     logger.info("Purge instance {} from cluster {}.", instanceName, clusterName);
-
-    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
-    _zkClient.delete(instanceConfigPath);
-    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
-    dropInstancePathRecursively(instancePath, instanceName);
+    dropInstancePathsRecursively(clusterName, instanceName);
   }
 
   @Override
@@ -747,7 +740,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     InstanceConfig.InstanceOperation instanceOperationObj = new InstanceConfig.InstanceOperation.Builder()
         .setOperation(InstanceConstants.InstanceOperation.UNKNOWN).setReason(reason)
-        .setSource(operationSource != null ? operationSource : InstanceConstants.InstanceOperationSource.USER).build();
+        .setSource(operationSource).build();
     InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
     instanceConfig.setInstanceOperation(instanceOperationObj);
 
@@ -2363,12 +2356,17 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
 
         InstanceConfig config = new InstanceConfig(currentData);
-        config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
-            enabled ? InstanceConstants.InstanceOperation.ENABLE
-                : InstanceConstants.InstanceOperation.DISABLE).setReason(reason).setSource(
-            disabledType != null
-                ? InstanceConstants.InstanceOperationSource.instanceDisabledTypeToInstanceOperationSource(
-                disabledType) : null).build());
+        config.setInstanceEnabled(enabled);
+        if (!enabled) {
+          // new disabled type and reason will overwrite existing ones.
+          config.resetInstanceDisabledTypeAndReason();
+          if (reason != null) {
+            config.setInstanceDisabledReason(reason);
+          }
+          if (disabledType != null) {
+            config.setInstanceDisabledType(disabledType);
+          }
+        }
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);

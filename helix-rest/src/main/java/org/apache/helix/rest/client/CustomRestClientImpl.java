@@ -132,8 +132,15 @@ class CustomRestClientImpl implements CustomRestClient {
     if (instances != null && !instances.isEmpty()) {
       payLoads.put("instances", instances);
     }
-    if (toBeStoppedInstances != null && !toBeStoppedInstances.isEmpty()) {
-      payLoads.put("to_be_stopped_instances", toBeStoppedInstances);
+    // Before sending the request, make sure the toBeStoppedInstances has no overlap with instances
+    Set<String> remainingToBeStoppedInstances = toBeStoppedInstances;
+    if (instances != null && toBeStoppedInstances != null) {
+      remainingToBeStoppedInstances =
+          toBeStoppedInstances.stream().filter(ins -> !instances.contains(ins))
+              .collect(Collectors.toSet());
+    }
+    if (remainingToBeStoppedInstances != null && !remainingToBeStoppedInstances.isEmpty()) {
+      payLoads.put("to_be_stopped_instances", remainingToBeStoppedInstances);
     }
     if (clusterId != null) {
       payLoads.put("cluster_id", clusterId);
@@ -148,7 +155,7 @@ class CustomRestClientImpl implements CustomRestClient {
   protected JsonNode getJsonObject(HttpResponse httpResponse) throws IOException {
     HttpEntity httpEntity = httpResponse.getEntity();
     String str = EntityUtils.toString(httpEntity);
-    LOG.info("Converting Response Content {} to JsonNode", str);
+    LOG.debug("Converting Response Content {} to JsonNode", str);
     return OBJECT_MAPPER.readTree(str);
   }
 
