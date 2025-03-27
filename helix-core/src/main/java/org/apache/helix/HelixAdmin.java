@@ -800,11 +800,11 @@ public interface HelixAdmin {
   /**
    * Return if instance operation 'Evacuate' is finished.
    * @param clusterName
-   * @param instancesName
+   * @param instancesNames
    * @return Return true if there is no FULL_AUTO or CUSTOMIZED resources in the current state nor
    * any pending message on the instance.
    */
-  default boolean isEvacuateFinished(String clusterName, String instancesName) {
+  default boolean isEvacuateFinished(String clusterName, String instancesNames) {
     throw new UnsupportedOperationException("isEvacuateFinished is not implemented.");
   }
 
