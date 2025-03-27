@@ -807,6 +807,8 @@ public interface HelixAdmin {
     throw new UnsupportedOperationException("isEvacuateFinished is not implemented.");
   }
 
+  boolean isInstanceDrained(String clusterName, String instanceName);
+
   /**
    * Check to see if swapping between two instances can be completed. Either the swapOut or
    * swapIn instance can be passed in.

@@ -460,12 +460,17 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
-    if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
-      InstanceConfig config = getInstanceConfig(clusterName, instanceName);
-      return config != null && config.getInstanceOperation().getOperation()
-          .equals(InstanceConstants.InstanceOperation.EVACUATE);
+    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+    if (config == null || !config.getInstanceOperation().getOperation()
+        .equals(InstanceConstants.InstanceOperation.EVACUATE)) {
+      return false;
     }
-    return false;
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+  }
+
+  @Override
+  public boolean isInstanceDrained(String clusterName, String instanceName) {
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
   }
 
   /**
@@ -721,7 +726,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isReadyForPreparingJoiningCluster(String clusterName, String instanceName) {
-    if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
+    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName)) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
       return config != null && INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT.contains(
           config.getInstanceOperation().getOperation());
@@ -763,7 +768,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    * @param instanceName
    * @return
    */
-  private boolean instanceHasFullAutoCurrentStateOrMessage(String clusterName,
+  private boolean instanceHasCurrentStateOrMessage(String clusterName,
       String instanceName) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
@@ -803,13 +808,14 @@ public class ZKHelixAdmin implements HelixAdmin {
       return true;
     }
 
-    // Get set of FULL_AUTO resources
+    // Get set of FULL_AUTO and CUSTOMIZED resources
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
-    Set<String> fullAutoResources = idealStates != null ? idealStates.stream()
-        .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO)
+    Set<String> resources = idealStates != null ? idealStates.stream()
+        .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO ||
+            idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
         .map(IdealState::getResourceName).collect(Collectors.toSet()) : Collections.emptySet();
 
-    return currentStates.stream().anyMatch(fullAutoResources::contains);
+    return currentStates.stream().anyMatch(resources::contains);
   }
 
   @Override
