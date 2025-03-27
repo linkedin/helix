@@ -459,13 +459,13 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   @Override
-  public boolean isEvacuateFinished(String clusterName, String instanceName) {
-    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+  public boolean isEvacuateFinished(String clusterName, String instanceNames) {
+    InstanceConfig config = getInstanceConfig(clusterName, instanceNames);
     if (config == null || config.getInstanceOperation().getOperation() !=
         InstanceConstants.InstanceOperation.EVACUATE ) {
       return false;
     }
-    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceNames);
   }
 
   @Override
