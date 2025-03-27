@@ -461,8 +461,8 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
-    if (config == null || !config.getInstanceOperation().getOperation()
-        .equals(InstanceConstants.InstanceOperation.EVACUATE)) {
+    if (config == null || config.getInstanceOperation().getOperation() !=
+        InstanceConstants.InstanceOperation.EVACUATE ) {
       return false;
     }
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
@@ -762,7 +762,8 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   /**
-   * Return true if Instance has any current state or pending message. Otherwise, return false if instance is offline,
+   * Return true if instance has any resource with FULL_AUTO or CUSTOMIZED rebalance mode in current state or
+   * if instance has any pending message. Otherwise, return false if instance is offline,
    * instance has no active session, or if instance is online but has no current state or pending message.
    * @param clusterName
    * @param instanceName
