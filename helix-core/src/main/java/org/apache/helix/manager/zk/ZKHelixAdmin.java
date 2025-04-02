@@ -211,7 +211,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     List<InstanceConfig> matchingLogicalIdInstances =
-        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+        InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (matchingLogicalIdInstances.size() > 1) {
       throw new HelixException(
@@ -224,7 +224,8 @@ public class ZKHelixAdmin implements HelixAdmin {
     InstanceConstants.InstanceOperation attemptedInstanceOperation =
         instanceConfig.getInstanceOperation().getOperation();
     try {
-      InstanceUtil.validateInstanceOperationTransition(_configAccessor, clusterName, instanceConfig,
+      InstanceUtil.validateInstanceOperationTransition(_baseDataAccessor, clusterName,
+          instanceConfig,
           InstanceConstants.InstanceOperation.UNKNOWN, attemptedInstanceOperation);
     } catch (HelixException e) {
       instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
@@ -621,7 +622,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     List<InstanceConfig> swappingInstances =
-        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+        InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
       logger.warn(
@@ -660,7 +661,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     List<InstanceConfig> swappingInstances =
-        InstanceUtil.findInstancesWithMatchingLogicalId(_configAccessor, clusterName,
+        InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
       logger.warn(
