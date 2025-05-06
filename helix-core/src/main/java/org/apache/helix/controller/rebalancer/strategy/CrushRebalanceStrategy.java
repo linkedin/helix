@@ -53,6 +53,21 @@ public class CrushRebalanceStrategy implements RebalanceStrategy<ResourceControl
   private Topology _clusterTopo;
   private int _replicas;
 
+  /**
+   * Number of retries for finding an appropriate instance for a replica.
+   */
+  private static final int MAX_RETRY = 10;
+  private final JenkinsHash hashFun = new JenkinsHash();
+  private CRUSHPlacementAlgorithm placementAlgorithm;
+
+  public CrushRebalanceStrategy() {
+    this(false);
+  }
+
+  public CrushRebalanceStrategy(boolean useStraw2) {
+    placementAlgorithm = new CRUSHPlacementAlgorithm(false, useStraw2);
+  }
+
   @Override
   public void init(String resourceName, final List<String> partitions,
       final LinkedHashMap<String, Integer> states, int maximumPerNode) {
@@ -124,13 +139,6 @@ public class CrushRebalanceStrategy implements RebalanceStrategy<ResourceControl
 
     return result;
   }
-
-  /**
-   * Number of retries for finding an appropriate instance for a replica.
-   */
-  private static final int MAX_RETRY = 10;
-  private final JenkinsHash hashFun = new JenkinsHash();
-  private CRUSHPlacementAlgorithm placementAlgorithm = new CRUSHPlacementAlgorithm();
 
   /**
    * Enforce isolation on the specified fault zone.
