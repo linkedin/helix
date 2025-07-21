@@ -35,6 +35,8 @@ import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
 import org.apache.helix.manager.zk.HelixManagerShutdownHook;
 import org.apache.helix.model.Message.MessageType;
+import org.apache.helix.participant.DistClusterControllerStateModel;
+import org.apache.helix.participant.DistClusterControllerStateModelFactory;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
@@ -83,6 +85,16 @@ public class ExampleProcess {
       stateModelFactory = new OnlineOfflineStateModelFactory(this.instanceName, delay);
     } else if ("LeaderStandby".equalsIgnoreCase(stateModelType)) {
       stateModelFactory = new LeaderStandbyStateModelFactory(this.instanceName, delay);
+    }
+    else if("DistCluster".equalsIgnoreCase(stateModelType)) {
+      StateModelFactory<DistClusterControllerStateModel> distClusterStateModelFactory =
+          new DistClusterControllerStateModelFactory(zkConnectString);
+      StateMachineEngine stateMach = manager.getStateMachineEngine();
+      stateMach.registerStateModelFactory(stateModelType, distClusterStateModelFactory);
+      manager.connect();
+      manager.getMessagingService().registerMessageHandlerFactory(MessageType.STATE_TRANSITION.name(), stateMach);
+    } else {
+      throw new IllegalArgumentException("Unknown state model type: " + stateModelType);
     }
     // genericStateMachineHandler = new StateMachineEngine();
     // genericStateMachineHandler.registerStateModelFactory(stateModelType,

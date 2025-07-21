@@ -59,7 +59,6 @@ public class PropertyPathBuilder {
     typeToClassMapping.put(PropertyType.IDEALSTATES, IdealState.class);
     typeToClassMapping.put(PropertyType.CONFIGS, InstanceConfig.class);
     typeToClassMapping.put(PropertyType.EXTERNALVIEW, ExternalView.class);
-    typeToClassMapping.put(PropertyType.CUSTOMIZEDVIEW, CustomizedView.class);
     typeToClassMapping.put(PropertyType.STATEMODELDEFS, StateModelDefinition.class);
     typeToClassMapping.put(PropertyType.MESSAGES, Message.class);
     typeToClassMapping.put(PropertyType.CURRENTSTATES, CurrentState.class);
