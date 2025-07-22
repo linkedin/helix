@@ -62,25 +62,6 @@ public class TestDistControllerStateModel extends ZkUnitTestBase {
     }
   }
 
-  @Test
-  public void testOnBecomeLeaderFromStandby_whenMultipleInstancesTrigger() throws Exception {
-    Message message = new Message(MessageType.STATE_TRANSITION, "0");
-    message.setPartitionName(clusterName);
-    message.setTgtName("controller_0");
-    stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
-
-    message = new Message(MessageType.STATE_TRANSITION, "1");
-    message.setPartitionName(clusterName);
-    message.setTgtName("controller_1");
-    DistClusterControllerStateModel stateModel2 = new DistClusterControllerStateModel(ZK_ADDR);
-    stateModel2.onBecomeLeaderFromStandby(message, new NotificationContext(null));
-
-    // controller_0 is the leader of clusterName.
-    Assert.assertTrue(stateModel._controllerOpt.get().isLeader());
-    // controller_1 was not able to become leader because controller_0 was already the leader.
-    Assert.assertFalse(stateModel2._controllerOpt.get().isLeader());
-  }
-
   @Test()
   public void testOnBecomeStandbyFromOffline() {
     stateModel.onBecomeStandbyFromOffline(new Message(new ZNRecord("test")), null);
@@ -283,5 +264,24 @@ public class TestDistControllerStateModel extends ZkUnitTestBase {
         "Instance2 should complete immediately, proving locks are not shared");
     Assert.assertTrue(instance1Interrupted.get(),
         "Instance1 should have been interrupted while holding its lock");
+  }
+
+  @Test()
+  public void testOnBecomeLeaderFromStandby_whenMultipleInstancesTrigger() throws Exception {
+    Message message = new Message(MessageType.STATE_TRANSITION, "0");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_0");
+    stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+
+    message = new Message(MessageType.STATE_TRANSITION, "1");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_1");
+    DistClusterControllerStateModel stateModel2 = new DistClusterControllerStateModel(ZK_ADDR);
+    stateModel2.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+
+    // controller_0 is the leader of clusterName.
+    Assert.assertTrue(stateModel._controllerOpt.get().isLeader());
+    // controller_1 was not able to become leader because controller_0 was already the leader.
+    Assert.assertFalse(stateModel2._controllerOpt.get().isLeader());
   }
 }

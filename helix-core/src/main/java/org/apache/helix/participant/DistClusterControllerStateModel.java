@@ -86,8 +86,8 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
         if (!newController.isLeader()) {
           logger.warn("Controller Leader session is not the same as the current session for "
               + clusterName + ". This should not happen. Controller: " + controllerName);
-          // Publish metrics through Senseo when not a leader
-          //publishLeadershipFailureMetric(clusterName, controllerName);
+          // Publish metrics through Sensor when not a leader
+          publishLeadershipFailureMetric(clusterName, controllerName);
         }
         logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
       } else {
@@ -141,8 +141,8 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               + " for " + _controllerOpt.get().getClusterName());
 
           // Publish metrics when controller is still leader during reset
-//          publishStillLeaderDuringResetMetric(_controllerOpt.get().getClusterName(),
-//              _controllerOpt.get().getInstanceName());
+          publishStillLeaderDuringResetMetric(_controllerOpt.get().getClusterName(),
+              _controllerOpt.get().getInstanceName());
         }
         _controllerOpt = Optional.empty();
       }
@@ -151,7 +151,6 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
       if (_metricsMonitor != null) {
         try {
           _metricsMonitor.unregister();
-          logger.info("Unregistered DistController metrics monitor");
         } catch (Exception e) {
           logger.warn("Failed to unregister DistController metrics monitor", e);
         }
