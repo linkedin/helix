@@ -662,7 +662,7 @@ public class TestClusterStatusMonitor {
     // Initial state - still leader during reset counter should be 0
     Object initialCount = _server.getAttribute(clusterMonitorObjName, "ResetLeaderFailureCounter");
     Assert.assertTrue(initialCount instanceof Long);
-    Assert.assertEquals((Long) initialCount, Long.valueOf(0));
+    Assert.assertEquals(initialCount, 0L);
 
     // Report still leader during reset multiple times
     monitor.reportResetLeaderFailure();
