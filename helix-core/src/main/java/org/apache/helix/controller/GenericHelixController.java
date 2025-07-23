@@ -1290,8 +1290,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     String uid = UUID.randomUUID().toString().substring(0, 8);
     ClusterEvent event = new ClusterEvent(_clusterName, eventType,
         String.format("%s_%s", uid, Pipeline.Type.DEFAULT.name()));
-//    event.addAttribute(AttributeName.EVENT_SESSION.name(),
-//        changeContext.getManager().getSessionIdIfLead());
+    event.addAttribute(AttributeName.EVENT_SESSION.name(),
+        changeContext.getManager().getSessionIdIfLead());
     event.addAttribute(AttributeName.helixmanager.name(), changeContext.getManager());
     event.addAttribute(AttributeName.changeContext.name(), changeContext);
     event.addAttribute(AttributeName.AsyncFIFOWorkerPool.name(), _asyncFIFOWorkerPool);
