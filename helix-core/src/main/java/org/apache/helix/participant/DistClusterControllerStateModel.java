@@ -45,6 +45,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
 
   protected volatile Optional<HelixManager> _controllerOpt = Optional.empty();
   private final Set<Pipeline.Type> _enabledPipelineTypes;
+  private ClusterStatusMonitor _clusterStatusMonitor;
 
   // dedicated lock object to avoid cross-instance contention from Optional.empty() singleton
   private final Object _controllerLock = new Object();
@@ -130,6 +131,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
   public void reset() {
     synchronized (_controllerLock) {
       if (_controllerOpt.isPresent()) {
+        String clusterName = _controllerOpt.get().getClusterName();
         logger.info("Disconnecting controller: " + _controllerOpt.get().getInstanceName() + " for "
             + _controllerOpt.get().getClusterName());
         _controllerOpt.get().disconnect();
@@ -138,27 +140,38 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               _controllerOpt.get().getInstanceName(), _controllerOpt.get().getClusterName());
 
           // Publish metrics when controller is still leader during reset
-          publishControllerMetric(_controllerOpt.get().getClusterName(), METRIC_STILL_LEADER_DURING_RESET);
+          publishControllerMetric(clusterName, METRIC_STILL_LEADER_DURING_RESET);
         }
         _controllerOpt = Optional.empty();
+      }
+
+      // Clean up cluster status monitor
+      if (_clusterStatusMonitor != null) {
+        _clusterStatusMonitor.reset();
+        _clusterStatusMonitor = null;
       }
     }
   }
 
   /**
-   * Publishes controller metrics through ClusterStatusMonitor
+   * Publishes controller metrics through the managed ClusterStatusMonitor
    * @param clusterName the cluster name
    * @param metricType the type of metric to publish
    */
   private void publishControllerMetric(String clusterName, String metricType) {
     try {
-      ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+      // Ensure we have a monitor for this cluster
+      if (_clusterStatusMonitor == null) {
+          _clusterStatusMonitor = new ClusterStatusMonitor(clusterName);
+          _clusterStatusMonitor.active();
+      }
+
       switch (metricType) {
         case METRIC_LEADERSHIP_FAILURE:
-          monitor.reportLeadershipFailure();
+          _clusterStatusMonitor.reportLeadershipFailure();
           break;
         case METRIC_STILL_LEADER_DURING_RESET:
-          monitor.reportStillLeaderDuringReset();
+          _clusterStatusMonitor.reportStillLeaderDuringReset();
           break;
         default:
           logger.warn("Unknown metric type: {} for cluster {}", metricType, clusterName);
