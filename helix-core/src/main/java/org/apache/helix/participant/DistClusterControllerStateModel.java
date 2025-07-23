@@ -82,6 +82,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
         if (!newController.isLeader()) {
           logger.warn("Controller Leader session is not the same as the current session for {}. "
               + "This should not happen. Controller: {}", clusterName ,controllerName);
+
           // Publish metrics through ClusterStatusMonitor when not a leader
           publishControllerMetric(clusterName, METRIC_LEADERSHIP_FAILURE);
         }

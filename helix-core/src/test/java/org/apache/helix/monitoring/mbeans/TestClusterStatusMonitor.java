@@ -610,4 +610,75 @@ public class TestClusterStatusMonitor {
       }
     }
   }
+
+  @Test
+  public void testLeadershipFailureMetrics() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    // Initial state - leadership failure counter should be 0
+    Object initialCount = _server.getAttribute(clusterMonitorObjName, "LeadershipFailureCounter");
+    Assert.assertTrue(initialCount instanceof Long);
+    Assert.assertEquals(initialCount, 0L);
+
+    // Report leadership failure multiple times
+    monitor.reportLeadershipFailure();
+    monitor.reportLeadershipFailure();
+    monitor.reportLeadershipFailure();
+
+    // Verify counter increased
+    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "LeadershipFailureCounter");
+    Assert.assertTrue(updatedCount instanceof Long);
+    Assert.assertEquals(updatedCount, 3L);
+
+    // Verify getter method returns same value
+    Assert.assertEquals(monitor.getLeadershipFailureCounter(), 3L);
+
+    // Clean up
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName),
+        "Failed to unregister ClusterStatusMonitor.");
+  }
+
+  @Test
+  public void testStillLeaderDuringResetMetrics() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    // Initial state - still leader during reset counter should be 0
+    Object initialCount = _server.getAttribute(clusterMonitorObjName, "StillLeaderDuringResetCounter");
+    Assert.assertTrue(initialCount instanceof Long);
+    Assert.assertEquals((Long) initialCount, Long.valueOf(0));
+
+    // Report still leader during reset multiple times
+    monitor.reportStillLeaderDuringReset();
+    monitor.reportStillLeaderDuringReset();
+
+    // Verify counter increased
+    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "StillLeaderDuringResetCounter");
+    Assert.assertTrue(updatedCount instanceof Long);
+    Assert.assertEquals((Long) updatedCount, Long.valueOf(2));
+
+    // Verify getter method returns same value
+    Assert.assertEquals(monitor.getStillLeaderDuringResetCounter(), 2L);
+
+    // Clean up
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName),
+        "Failed to unregister ClusterStatusMonitor.");
+  }
 }
