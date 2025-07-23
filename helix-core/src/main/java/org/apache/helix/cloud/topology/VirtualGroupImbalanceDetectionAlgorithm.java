@@ -1,4 +1,4 @@
-package org.apache.helix.controller.rebalancer.strategy;
+package org.apache.helix.cloud.topology;
 
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -19,17 +19,16 @@ package org.apache.helix.controller.rebalancer.strategy;
  * under the License.
  */
 
-import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import java.util.Map;
+import java.util.Set;
 
-/**
- * CRUSH-ed, CRUSH with even distribution. This is an Auto rebalance strategy based on CRUSH algorithm.
- * This gives even partition distribution, but number of partitions to be reshuffled during node outage could be high.
- */
-public class CrushEdRebalanceStrategy extends AbstractEvenDistributionRebalanceStrategy {
-  protected RebalanceStrategy<ResourceControllerDataProvider> _baseStrategy =
-      new CrushRebalanceStrategy();
-
-  protected RebalanceStrategy<ResourceControllerDataProvider> getBaseRebalanceStrategy() {
-    return _baseStrategy;
-  }
+public interface VirtualGroupImbalanceDetectionAlgorithm {
+  /**
+   * Get the imbalance score for the given assignment.
+   * @param virtualGroupToInstancesAssignment a mapping from virtual group ID to a set of
+   *                                          instance IDs
+   * @return the imbalance score, which is a non-negative integer. A lower score indicates a more
+   * balanced assignment.
+   */
+  int getImbalanceScore(Map<String, Set<String>> virtualGroupToInstancesAssignment);
 }

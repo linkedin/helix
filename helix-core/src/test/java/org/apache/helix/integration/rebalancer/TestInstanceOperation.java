@@ -282,6 +282,79 @@ public class TestInstanceOperation extends ZkTestBase {
     Assert.assertEquals(getEVs(), assignment);
 }
 
+  @Test
+  public void testEvacuateWithCustomizedResource() throws Exception {
+    System.out.println("START TestInstanceOperation.testEvacuateWithCustomizedResource() at " + new Date(System.currentTimeMillis()));
+    for( String resource : _allDBs) {
+      _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, resource);
+    }
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    String instanceToEvacuate = _participants.get(0).getInstanceName();
+    String customizedDB = "CustomizedTestDB";
+    Map<Integer, String> partitionInstanceMap = new HashMap<>();
+    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(0).getInstanceName());
+    createResourceInCustomizedMode(_gSetupTool, CLUSTER_NAME, customizedDB, partitionInstanceMap);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    _gSetupTool.getClusterManagementTool()
+        .manuallyEnableMaintenanceMode(CLUSTER_NAME, true, null, null);
+    // evacuated instance
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.EVACUATE);
+    _gSetupTool.getClusterManagementTool()
+        .manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null, null);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
+    // Drop customized DBs in clusterx
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, customizedDB);
+    createTestDBs(DEFAULT_RESOURCE_DELAY_TIME);
+  }
+
+  @Test
+  public void testEvacuateWithCustomizedResourceOfflineInstance() throws Exception {
+    /*
+      Test the following scenario
+       * Customized resource partitions P0, P1 assigned to an instance A.
+       * Instance A becomes unhealthy.
+       * Cluster enters maintenance mode.
+       * Evacuate operation is set of instance A
+       * Cluster exists maintenance mode
+       * isEvacuateFinished operation on instanceA returns False
+       * new ideal state is computed, which doesn't have instance A
+       * isEvacuateFinished operation on instanceA returns true
+     */
+    System.out.println("START TestInstanceOperation.testEvacuateWithCustomizedResourceOfflineInstance() at " + new Date(System.currentTimeMillis()));
+    for( String resource : _allDBs) {
+      _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, resource);
+    }
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    String instanceToEvacuate = _participants.get(0).getInstanceName();
+    String customizedDB = "CustomizedTestDB";
+    Map<Integer, String> partitionInstanceMap = new HashMap<>();
+    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(0).getInstanceName());
+    partitionInstanceMap.put(Integer.valueOf(1), _participants.get(0).getInstanceName());
+    createResourceInCustomizedMode(_gSetupTool, CLUSTER_NAME, customizedDB, partitionInstanceMap);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    _participants.get(0).syncStop();
+    _gSetupTool.getClusterManagementTool()
+        .manuallyEnableMaintenanceMode(CLUSTER_NAME, true, null, null);
+    // evacuated instance
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.EVACUATE);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    _gSetupTool.getClusterManagementTool()
+        .manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null, null);
+    Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
+    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(1).getInstanceName());
+    partitionInstanceMap.put(Integer.valueOf(1), _participants.get(1).getInstanceName());
+    IdealState newIdealState = createCustomizedResourceIdealState(customizedDB, partitionInstanceMap);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, customizedDB, newIdealState);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    Assert.assertTrue(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
+    // Drop customized DBs in clusterx
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, customizedDB);
+    createTestDBs(DEFAULT_RESOURCE_DELAY_TIME);
+  }
+
   @Test(dependsOnMethods = "testEvacuate")
   public void testRevertEvacuation() throws Exception {
     System.out.println("START TestInstanceOperation.testRevertEvacuation() at " + new Date(System.currentTimeMillis()));

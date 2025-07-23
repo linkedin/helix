@@ -38,13 +38,9 @@ import org.slf4j.LoggerFactory;
 @StateModelInfo(initialState = "OFFLINE", states = {"LEADER", "STANDBY"})
 public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyStateModel {
   private static Logger logger = LoggerFactory.getLogger(DistClusterControllerStateModel.class);
-
-  protected volatile Optional<HelixManager> _controllerOpt = Optional.empty();
+  protected Optional<HelixManager> _controllerOpt = Optional.empty();
   private final Set<Pipeline.Type> _enabledPipelineTypes;
   private ClusterStatusMonitor _clusterStatusMonitor;
-
-  // dedicated lock object to avoid cross-instance contention from Optional.empty() singleton
-  private final Object _controllerLock = new Object();
 
   public DistClusterControllerStateModel(String zkAddr) {
     this(zkAddr, Sets.newHashSet(Pipeline.Type.DEFAULT, Pipeline.Type.TASK));
@@ -68,7 +64,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
 
     logger.info(controllerName + " becoming leader from standby for " + clusterName);
 
-    synchronized (_controllerLock) {
+    synchronized (_controllerOpt) {
       if (!_controllerOpt.isPresent()) {
         HelixManager newController = HelixManagerFactory
             .getZKHelixManager(clusterName, controllerName, InstanceType.CONTROLLER, _zkAddr);
@@ -77,7 +73,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
         newController.startTimerTasks();
         _controllerOpt = Optional.of(newController);
         if (!newController.isLeader()) {
-          logger.warn("Controller Leader session is not the same as the current session for {}. "
+          logger.error("Controller Leader session is not the same as the current session for {}. "
               + "This should not happen. Controller: {}", clusterName ,controllerName);
 
           // Publish metrics through ClusterStatusMonitor when not a leader
@@ -101,7 +97,6 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
 
     if (_controllerOpt.isPresent()) {
       reset();
-      //TODO: log this message only if reset is successful
       logStateTransition("LEADER", "STANDBY", clusterName, controllerName);
     } else {
       logger.error("No controller exists for " + clusterName);
@@ -116,7 +111,6 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
   @Override
   public void onBecomeDroppedFromOffline(Message message, NotificationContext context) {
     reset();
-    //TODO: log this message only if reset is successful
     logStateTransition("OFFLINE", "DROPPED", message == null ? "" : message.getPartitionName(),
         message == null ? "" : message.getTgtName());
   }
@@ -128,14 +122,14 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
 
   @Override
   public void reset() {
-    synchronized (_controllerLock) {
+    synchronized (_controllerOpt) {
       if (_controllerOpt.isPresent()) {
         String clusterName = _controllerOpt.get().getClusterName();
         logger.info("Disconnecting controller: " + _controllerOpt.get().getInstanceName() + " for "
             + _controllerOpt.get().getClusterName());
         _controllerOpt.get().disconnect();
         if(_controllerOpt.get().isLeader()) {
-          logger.warn("Controller is still leader after disconnecting: {} for {}",
+          logger.error("Controller is still leader after disconnecting: {} for {}",
               _controllerOpt.get().getInstanceName(), _controllerOpt.get().getClusterName());
 
           // Publish metrics when controller is still leader during reset
