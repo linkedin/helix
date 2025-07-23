@@ -39,10 +39,6 @@ import org.slf4j.LoggerFactory;
 public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyStateModel {
   private static Logger logger = LoggerFactory.getLogger(DistClusterControllerStateModel.class);
 
-  // Constants for metric types
-  private static final String METRIC_LEADERSHIP_FAILURE = "leadership_failure";
-  private static final String METRIC_STILL_LEADER_DURING_RESET = "still_leader_during_reset";
-
   protected volatile Optional<HelixManager> _controllerOpt = Optional.empty();
   private final Set<Pipeline.Type> _enabledPipelineTypes;
   private ClusterStatusMonitor _clusterStatusMonitor;
@@ -85,9 +81,10 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               + "This should not happen. Controller: {}", clusterName ,controllerName);
 
           // Publish metrics through ClusterStatusMonitor when not a leader
-          publishControllerMetric(clusterName, METRIC_LEADERSHIP_FAILURE);
+          getClusterStatusMonitor(clusterName).reportLeadershipFailure();
+        } else {
+          logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
         }
-        logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
       } else {
         logger.error("controller already exists:" + _controllerOpt.get().getInstanceName() + " for "
             + clusterName);
@@ -104,6 +101,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
 
     if (_controllerOpt.isPresent()) {
       reset();
+      //TODO: log this message only if reset is successful
       logStateTransition("LEADER", "STANDBY", clusterName, controllerName);
     } else {
       logger.error("No controller exists for " + clusterName);
@@ -118,6 +116,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
   @Override
   public void onBecomeDroppedFromOffline(Message message, NotificationContext context) {
     reset();
+    //TODO: log this message only if reset is successful
     logStateTransition("OFFLINE", "DROPPED", message == null ? "" : message.getPartitionName(),
         message == null ? "" : message.getTgtName());
   }
@@ -140,7 +139,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               _controllerOpt.get().getInstanceName(), _controllerOpt.get().getClusterName());
 
           // Publish metrics when controller is still leader during reset
-          publishControllerMetric(clusterName, METRIC_STILL_LEADER_DURING_RESET);
+          getClusterStatusMonitor(clusterName).reportStillLeaderDuringReset();
         }
         _controllerOpt = Optional.empty();
       }
@@ -153,31 +152,11 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
     }
   }
 
-  /**
-   * Publishes controller metrics through the managed ClusterStatusMonitor
-   * @param clusterName the cluster name
-   * @param metricType the type of metric to publish
-   */
-  private void publishControllerMetric(String clusterName, String metricType) {
-    try {
-      // Ensure we have a monitor for this cluster
-      if (_clusterStatusMonitor == null) {
-          _clusterStatusMonitor = new ClusterStatusMonitor(clusterName);
-          _clusterStatusMonitor.active();
-      }
-
-      switch (metricType) {
-        case METRIC_LEADERSHIP_FAILURE:
-          _clusterStatusMonitor.reportLeadershipFailure();
-          break;
-        case METRIC_STILL_LEADER_DURING_RESET:
-          _clusterStatusMonitor.reportStillLeaderDuringReset();
-          break;
-        default:
-          logger.warn("Unknown metric type: {} for cluster {}", metricType, clusterName);
-      }
-    } catch (Exception e) {
-      logger.error("Failed to publish {} metric for cluster {}", metricType, clusterName, e);
+  private ClusterStatusMonitor getClusterStatusMonitor(String clusterName) {
+    if (_clusterStatusMonitor == null) {
+      _clusterStatusMonitor = new ClusterStatusMonitor(clusterName);
+      _clusterStatusMonitor.active();
     }
+    return _clusterStatusMonitor;
   }
 }
