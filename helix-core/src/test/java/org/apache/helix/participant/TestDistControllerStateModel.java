@@ -295,7 +295,7 @@ public class TestDistControllerStateModel extends ZkUnitTestBase {
     ClusterStatusMonitor internalMonitor = (ClusterStatusMonitor) monitorField.get(stateModel2);
 
     // The monitor should have been created and the metric should be incremented
-    Assert.assertEquals(internalMonitor.getLeadershipFailureCounter(), 1,
+    Assert.assertEquals(internalMonitor.getLeaderFailureCounter(), 1,
         "Leadership failure metric should be incremented when second controller fails to become leader");
   }
 }

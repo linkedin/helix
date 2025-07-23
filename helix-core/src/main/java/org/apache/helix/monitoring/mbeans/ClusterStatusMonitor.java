@@ -87,8 +87,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _rebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
-  private AtomicLong _leadershipFailureCount = new AtomicLong(0L);
-  private AtomicLong _stillLeaderDuringResetCount = new AtomicLong(0L);
+  private AtomicLong _leaderFailureCount = new AtomicLong(0L);
+  private AtomicLong _resetLeaderFailureCount = new AtomicLong(0L);
 
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
@@ -662,8 +662,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _rebalanceFailureCount.set(0L);
       _continuousResourceRebalanceFailureCount.set(0L);
       _continuousTaskRebalanceFailureCount.set(0L);
-      _leadershipFailureCount.set(0L);
-      _stillLeaderDuringResetCount.set(0L);
+      _leaderFailureCount.set(0L);
+      _resetLeaderFailureCount.set(0L);
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1143,26 +1143,26 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   @Override
-  public long getLeadershipFailureCounter() {
-    return _leadershipFailureCount.get();
+  public long getLeaderFailureCounter() {
+    return _leaderFailureCount.get();
   }
 
   @Override
-  public long getStillLeaderDuringResetCounter() {
-    return _stillLeaderDuringResetCount.get();
+  public long getResetLeaderFailureCounter() {
+    return _resetLeaderFailureCount.get();
   }
 
   /**
    * Report a leadership failure for distributed controller
    */
-  public void reportLeadershipFailure() {
-    _leadershipFailureCount.incrementAndGet();
+  public void reportLeaderFailure() {
+    _leaderFailureCount.incrementAndGet();
   }
 
   /**
    * Report when controller is still leader during reset
    */
-  public void reportStillLeaderDuringReset() {
-    _stillLeaderDuringResetCount.incrementAndGet();
+  public void reportResetLeaderFailure() {
+    _resetLeaderFailureCount.incrementAndGet();
   }
 }

@@ -151,10 +151,10 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   /**
    * @return The number of leadership failures for distributed controllers
    */
-  long getLeadershipFailureCounter();
+  long getLeaderFailureCounter();
 
   /**
    * @return The number of times controller was still leader during reset
    */
-  long getStillLeaderDuringResetCounter();
+  long getResetLeaderFailureCounter();
 }

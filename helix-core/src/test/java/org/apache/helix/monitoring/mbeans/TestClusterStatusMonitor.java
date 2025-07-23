@@ -612,7 +612,7 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
-  public void testLeadershipFailureMetrics() throws Exception {
+  public void testLeaderFailureMetrics() throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
     String clusterName = className + "_" + methodName;
@@ -624,22 +624,22 @@ public class TestClusterStatusMonitor {
     Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
 
     // Initial state - leadership failure counter should be 0
-    Object initialCount = _server.getAttribute(clusterMonitorObjName, "LeadershipFailureCounter");
+    Object initialCount = _server.getAttribute(clusterMonitorObjName, "LeaderFailureCounter");
     Assert.assertTrue(initialCount instanceof Long);
     Assert.assertEquals(initialCount, 0L);
 
     // Report leadership failure multiple times
-    monitor.reportLeadershipFailure();
-    monitor.reportLeadershipFailure();
-    monitor.reportLeadershipFailure();
+    monitor.reportLeaderFailure();
+    monitor.reportLeaderFailure();
+    monitor.reportLeaderFailure();
 
     // Verify counter increased
-    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "LeadershipFailureCounter");
+    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "LeaderFailureCounter");
     Assert.assertTrue(updatedCount instanceof Long);
     Assert.assertEquals(updatedCount, 3L);
 
     // Verify getter method returns same value
-    Assert.assertEquals(monitor.getLeadershipFailureCounter(), 3L);
+    Assert.assertEquals(monitor.getLeaderFailureCounter(), 3L);
 
     // Clean up
     monitor.reset();
@@ -648,7 +648,7 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
-  public void testStillLeaderDuringResetMetrics() throws Exception {
+  public void testResetLeaderFailureMetrics() throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
     String clusterName = className + "_" + methodName;
@@ -660,21 +660,21 @@ public class TestClusterStatusMonitor {
     Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
 
     // Initial state - still leader during reset counter should be 0
-    Object initialCount = _server.getAttribute(clusterMonitorObjName, "StillLeaderDuringResetCounter");
+    Object initialCount = _server.getAttribute(clusterMonitorObjName, "ResetLeaderFailureCounter");
     Assert.assertTrue(initialCount instanceof Long);
     Assert.assertEquals((Long) initialCount, Long.valueOf(0));
 
     // Report still leader during reset multiple times
-    monitor.reportStillLeaderDuringReset();
-    monitor.reportStillLeaderDuringReset();
+    monitor.reportResetLeaderFailure();
+    monitor.reportResetLeaderFailure();
 
     // Verify counter increased
-    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "StillLeaderDuringResetCounter");
+    Object updatedCount = _server.getAttribute(clusterMonitorObjName, "ResetLeaderFailureCounter");
     Assert.assertTrue(updatedCount instanceof Long);
     Assert.assertEquals((Long) updatedCount, Long.valueOf(2));
 
     // Verify getter method returns same value
-    Assert.assertEquals(monitor.getStillLeaderDuringResetCounter(), 2L);
+    Assert.assertEquals(monitor.getResetLeaderFailureCounter(), 2L);
 
     // Clean up
     monitor.reset();

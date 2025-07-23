@@ -81,7 +81,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               + "This should not happen. Controller: {}", clusterName ,controllerName);
 
           // Publish metrics through ClusterStatusMonitor when not a leader
-          getClusterStatusMonitor(clusterName).reportLeadershipFailure();
+          getClusterStatusMonitor(clusterName).reportLeaderFailure();
         } else {
           logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
         }
@@ -139,7 +139,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
               _controllerOpt.get().getInstanceName(), _controllerOpt.get().getClusterName());
 
           // Publish metrics when controller is still leader during reset
-          getClusterStatusMonitor(clusterName).reportStillLeaderDuringReset();
+          getClusterStatusMonitor(clusterName).reportResetLeaderFailure();
         }
         _controllerOpt = Optional.empty();
       }
