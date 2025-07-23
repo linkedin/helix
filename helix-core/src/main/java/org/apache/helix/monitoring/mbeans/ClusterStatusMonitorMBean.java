@@ -147,4 +147,14 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    * state partition is larger than configured threshold (default is 1).
    */
   long getNumOfResourcesRebalanceThrottledGauge();
+
+  /**
+   * @return The number of leadership failures for distributed controllers
+   */
+  long getLeaderFailureCounter();
+
+  /**
+   * @return The number of times controller was still leader during reset
+   */
+  long getResetLeaderFailureCounter();
 }
