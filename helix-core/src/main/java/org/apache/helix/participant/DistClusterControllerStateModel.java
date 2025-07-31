@@ -29,6 +29,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.model.Message;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.participant.statemachine.StateModelInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +40,7 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
   private static Logger logger = LoggerFactory.getLogger(DistClusterControllerStateModel.class);
   protected Optional<HelixManager> _controllerOpt = Optional.empty();
   private final Set<Pipeline.Type> _enabledPipelineTypes;
+  private ClusterStatusMonitor _clusterStatusMonitor;
 
   public DistClusterControllerStateModel(String zkAddr) {
     this(zkAddr, Sets.newHashSet(Pipeline.Type.DEFAULT, Pipeline.Type.TASK));
@@ -70,7 +72,15 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
         newController.connect();
         newController.startTimerTasks();
         _controllerOpt = Optional.of(newController);
-        logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
+        if (!newController.isLeader()) {
+          logger.error("Controller Leader session is not the same as the current session for {}. "
+              + "This should not happen. Controller: {}", clusterName ,controllerName);
+
+          // Publish metrics through ClusterStatusMonitor when not a leader
+          getClusterStatusMonitor(clusterName).reportLeaderFailure();
+        } else {
+          logStateTransition("STANDBY", "LEADER", clusterName, controllerName);
+        }
       } else {
         logger.error("controller already exists:" + _controllerOpt.get().getInstanceName() + " for "
             + clusterName);
@@ -114,11 +124,33 @@ public class DistClusterControllerStateModel extends AbstractHelixLeaderStandbyS
   public void reset() {
     synchronized (_controllerOpt) {
       if (_controllerOpt.isPresent()) {
+        String clusterName = _controllerOpt.get().getClusterName();
         logger.info("Disconnecting controller: " + _controllerOpt.get().getInstanceName() + " for "
             + _controllerOpt.get().getClusterName());
         _controllerOpt.get().disconnect();
+        if(_controllerOpt.get().isLeader()) {
+          logger.error("Controller is still leader after disconnecting: {} for {}",
+              _controllerOpt.get().getInstanceName(), _controllerOpt.get().getClusterName());
+
+          // Publish metrics when controller is still leader during reset
+          getClusterStatusMonitor(clusterName).reportResetLeaderFailure();
+        }
         _controllerOpt = Optional.empty();
       }
+
+      // Clean up cluster status monitor
+      if (_clusterStatusMonitor != null) {
+        _clusterStatusMonitor.reset();
+        _clusterStatusMonitor = null;
+      }
     }
+  }
+
+  private ClusterStatusMonitor getClusterStatusMonitor(String clusterName) {
+    if (_clusterStatusMonitor == null) {
+      _clusterStatusMonitor = new ClusterStatusMonitor(clusterName);
+      _clusterStatusMonitor.active();
+    }
+    return _clusterStatusMonitor;
   }
 }

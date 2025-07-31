@@ -21,15 +21,19 @@ package org.apache.helix.participant;
 
 import org.apache.helix.NotificationContext;
 import org.apache.helix.TestHelper;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+
+import java.lang.reflect.Field;
 
 public class TestDistControllerStateModel extends ZkUnitTestBase {
   private static Logger LOG = LoggerFactory.getLogger(TestDistControllerStateModel.class);
@@ -124,4 +128,35 @@ public class TestDistControllerStateModel extends ZkUnitTestBase {
     stateModel.reset();
   }
 
+  @Test()
+  public void testOnBecomeLeaderFromStandby_whenMultipleInstancesTrigger() throws Exception {
+    // First controller becomes leader
+    Message message = new Message(MessageType.STATE_TRANSITION, "0");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_0");
+    stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+
+    // Second controller attempts to become leader
+    message = new Message(MessageType.STATE_TRANSITION, "1");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_1");
+    DistClusterControllerStateModel stateModel2 = new DistClusterControllerStateModel(ZK_ADDR);
+    stateModel2.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+
+    // Verify leadership states
+    // controller_0 is the leader of clusterName.
+    Assert.assertTrue(stateModel._controllerOpt.get().isLeader());
+    // controller_1 was not able to become leader because controller_0 was already the leader.
+    Assert.assertFalse(stateModel2._controllerOpt.get().isLeader());
+
+    // Verify that leadership failure metric was reported by accessing the internal monitor
+    // Use reflection to get the internal ClusterStatusMonitor from stateModel2
+    Field monitorField = DistClusterControllerStateModel.class.getDeclaredField("_clusterStatusMonitor");
+    monitorField.setAccessible(true);
+    ClusterStatusMonitor internalMonitor = (ClusterStatusMonitor) monitorField.get(stateModel2);
+
+    // The monitor should have been created and the metric should be incremented
+    Assert.assertEquals(internalMonitor.getLeaderFailureCounter(), 1,
+        "Leadership failure metric should be incremented when second controller fails to become leader");
+  }
 }
