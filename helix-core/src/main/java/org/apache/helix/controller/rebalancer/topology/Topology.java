@@ -19,6 +19,7 @@ package org.apache.helix.controller.rebalancer.topology;
  * under the License.
  */
 
+import io.netty.util.internal.StringUtil;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -203,6 +204,16 @@ public class Topology {
           // the topology tree. The topology tree only requires FaultZoneType and EndNodeType.
           unnecessaryTopoKeys.forEach(instanceTopologyMap::remove);
         }
+        // Check if fault zone is missing from original domain configuration - exclude instance to prevent singleton fault zones
+        String faultZoneType = _clusterTopologyConfig.getFaultZoneType();
+        Map<String, String> originalDomain = insConfig.getDomainAsMap();
+
+        if (!originalDomain.containsKey(faultZoneType) || StringUtil.isNullOrEmpty(originalDomain.get(faultZoneType))) {
+          logger.warn("Instance '{}' excluded from topology: fault zone '{}' is missing from original domain configuration. " +
+              "Domain: '{}'. This prevents singleton fault zones.",
+              instanceName, faultZoneType, insConfig.getDomainAsString());
+          continue; // Skip this instance
+        }
         addEndNode(root, instanceName, instanceTopologyMap, weight, _liveInstances);
       } catch (IllegalArgumentException e) {
         if (insConfig.getInstanceEnabled()) {
@@ -257,9 +268,8 @@ public class Topology {
         }
         int numOfMatchedKeys = 0;
         for (String key : clusterTopologyConfig.getTopologyKeyDefaultValue().keySet()) {
-          // if a key does not exist in the instance domain config, using the default domain value.
           String value = domainAsMap.get(key);
-          if (value == null || value.length() == 0) {
+          if (value == null || value.isEmpty()) {
             value = clusterTopologyConfig.getTopologyKeyDefaultValue().get(key);
           } else {
             numOfMatchedKeys++;
