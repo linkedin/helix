@@ -19,13 +19,11 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
-import java.util.HashMap;
 import java.util.Map;
 
 import java.util.Objects;
 import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
-import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.testng.Assert;
@@ -102,7 +100,6 @@ public class TestExternalViewComputeOnIdealStateChange extends BaseStageTest {
 
     setSingleIdealState(updatedIdealState);
 
-    // 6. Create new cache instance and re-run all stages to pick up updated IdealState and current state
     cache = new ResourceControllerDataProvider(_clusterName);
     event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
 
