@@ -436,15 +436,13 @@ public class ZkClient implements Watcher {
     }
   }
 
-  
+
 
   public void unsubscribeStateChanges(IZkStateListener stateListener) {
     synchronized (_stateListener) {
       _stateListener.remove(stateListener);
     }
   }
-
-  
 
   public void unsubscribeAll() {
     if (_usePersistWatcher) {
@@ -3008,7 +3006,7 @@ public class ZkClient implements Watcher {
     }
   }
 
-  
+
 
   private void validateCurrentThread() {
     if (_zookeeperEventThread != null && Thread.currentThread() == _zookeeperEventThread) {
