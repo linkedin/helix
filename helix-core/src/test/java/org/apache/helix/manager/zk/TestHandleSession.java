@@ -51,6 +51,7 @@ import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
 import org.apache.helix.zookeeper.zkclient.ZkEventThread;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 import org.apache.helix.msdcommon.mock.MockMetadataStoreDirectoryServer;
@@ -66,6 +67,13 @@ public class TestHandleSession extends ZkTestBase {
   private static final String MSDS_HOSTNAME = "localhost";
   private static final int MSDS_PORT = 19910;
   private static final String MSDS_NAMESPACE = "testSessionBug";
+
+  @AfterMethod
+  public void cleanupSystemProperties() {
+    // Ensure MULTI_ZK_ENABLED is always cleaned up to prevent test isolation issues
+    System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
+    System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
+  }
 
   @Test
   public void testHandleNewSession() throws Exception {
@@ -697,6 +705,7 @@ public class TestHandleSession extends ZkTestBase {
     final long sessionTimeout = 10000L; // 5 seconds for faster testing
 
     // mock MSDS with routing data that maps cluster to our ZK server
+    // Only need cluster-specific sharding key since setupCluster() now runs in regular ZK mode
     Map<String, Collection<String>> routingData = new HashMap<>();
     routingData.put(ZK_ADDR, Collections.singletonList("/" + clusterName));
 
@@ -707,15 +716,15 @@ public class TestHandleSession extends ZkTestBase {
     String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE;
     System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, msdsEndpoint);
 
-    // enable Multi-ZK mode to force usage of I0ItecIZkStateListenerImpl wrapper
-    // This wrapper receives sessionId but calls handleNewSession(null), causing the bug
+    // Setup minimal cluster FIRST with regular ZK mode
+    TestHelper.setupCluster(clusterName, ZK_ADDR, 12346,
+        "localhost", "TestDB", 1, 2, 2, 1, "MasterSlave", true);
+
+    // ONLY AFTER cluster setup is complete, enable Multi-ZK mode
+    // This prevents setupCluster from failing due to missing sharding keys
     String originalMultiZkEnabled = System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, "true");
     System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, Long.toString(sessionTimeout)); // 5 seconds for faster testing
-
-    // Setup minimal cluster
-    TestHelper.setupCluster(clusterName, ZK_ADDR, 12346,
-        "localhost", "TestDB", 1, 2, 2, 1, "MasterSlave", true);
 
     final ZKHelixDataAccessor accessor =
         new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
