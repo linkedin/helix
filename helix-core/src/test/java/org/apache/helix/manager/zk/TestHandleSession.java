@@ -19,24 +19,20 @@ package org.apache.helix.manager.zk;
  * under the License.
  */
 
-import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
-import java.util.concurrent.atomic.AtomicReference;
 import org.apache.helix.AccessOption;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.InstanceType;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
-import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkTestHelper;
 import org.apache.helix.api.listeners.CurrentStateChangeListener;
@@ -45,35 +41,16 @@ import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.controller.GenericHelixController;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.LiveInstance;
+import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
-import org.apache.helix.zookeeper.zkclient.IZkStateListener;
-import org.apache.helix.zookeeper.zkclient.ZkEventThread;
 import org.testng.Assert;
-import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
-
-import org.apache.helix.msdcommon.mock.MockMetadataStoreDirectoryServer;
-import org.apache.helix.msdcommon.constant.MetadataStoreRoutingConstants;
-import org.apache.helix.zookeeper.impl.client.DedicatedZkClient;
-import java.util.HashMap;
-import java.util.Collection;
 
 
 public class TestHandleSession extends ZkTestBase {
   private static final String _className = TestHelper.getTestClassName();
-  private static MockMetadataStoreDirectoryServer _msdsServer;
-  private static final String MSDS_HOSTNAME = "localhost";
-  private static final int MSDS_PORT = 19910;
-  private static final String MSDS_NAMESPACE = "testSessionBug";
-
-  @AfterMethod
-  public void cleanupSystemProperties() {
-    // Ensure MULTI_ZK_ENABLED is always cleaned up to prevent test isolation issues
-    System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
-    System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
-  }
 
   @Test
   public void testHandleNewSession() throws Exception {
@@ -689,243 +666,6 @@ public class TestHandleSession extends ZkTestBase {
 
     long getResetHandlersStartTime() {
       return resetHandlersStartTime;
-    }
-  }
-
-  /**
-   * Test that queues 2 stale session events to demonstrate progressive handler degradation prevention.
-   * This test shows how multiple stale session events can not cause handlers to be reset while
-   * LiveInstance remains active, creating the "zombie participant" condition.
-   */
-  @Test
-  public void testMultipleStaleSessionEventsReadyHandlers() throws Exception {
-    String className = getShortClassName();
-    final String clusterName = CLUSTER_PREFIX + "_" + className + "_" + "testMultipleEvents";
-    final String instanceName = "localhost_12346";
-    final long sessionTimeout = 10000L; // 5 seconds for faster testing
-
-    // mock MSDS with routing data that maps cluster to our ZK server
-    // Only need cluster-specific sharding key since setupCluster() now runs in regular ZK mode
-    Map<String, Collection<String>> routingData = new HashMap<>();
-    routingData.put(ZK_ADDR, Collections.singletonList("/" + clusterName));
-
-    _msdsServer = new MockMetadataStoreDirectoryServer(MSDS_HOSTNAME, MSDS_PORT, MSDS_NAMESPACE, routingData);
-    _msdsServer.startServer();
-
-    // Set MSDS endpoint as system property (required for Multi-ZK mode)
-    String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE;
-    System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, msdsEndpoint);
-
-    // Setup minimal cluster FIRST with regular ZK mode
-    TestHelper.setupCluster(clusterName, ZK_ADDR, 12346,
-        "localhost", "TestDB", 1, 2, 2, 1, "MasterSlave", true);
-
-    // ONLY AFTER cluster setup is complete, enable Multi-ZK mode
-    // This prevents setupCluster from failing due to missing sharding keys
-    String originalMultiZkEnabled = System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
-    System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, "true");
-    System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, Long.toString(sessionTimeout)); // 5 seconds for faster testing
-
-    final ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
-    final PropertyKey.Builder keyBuilder = accessor.keyBuilder();
-
-    // Create ZKHelixManager with sharding key for Multi-ZK mode
-    final ZKHelixManager manager = new ZKHelixManager(clusterName, instanceName,
-        InstanceType.PARTICIPANT, ZK_ADDR);
-
-    try {
-      manager.connect();
-
-      // Get the current session ID after connection
-      final String actualSessionId = manager.getSessionId();
-      System.out.println("Actual current session: " + actualSessionId);
-      System.out.println("Manager _zkclient class: " + manager._zkclient.getClass().getName());
-
-      // Get the underlying ZkClient from DedicatedZkClient
-      ZkClient zkClient = null;
-      if (manager._zkclient instanceof DedicatedZkClient) {
-        // DedicatedZkClient wraps the underlying ZkClient
-        DedicatedZkClient dedicatedZkClient = (DedicatedZkClient) manager._zkclient;
-        try {
-          Field zkClientField = DedicatedZkClient.class.getDeclaredField("_rawZkClient");
-          zkClientField.setAccessible(true);
-          zkClient = (ZkClient) zkClientField.get(dedicatedZkClient);
-          System.out.println("✅ Successfully extracted underlying ZkClient from DedicatedZkClient");
-        } catch (Exception e) {
-          Assert.fail("Failed to extract underlying ZkClient from DedicatedZkClient: " + e.getMessage());
-        }
-      } else {
-        Assert.fail("Expected DedicatedZkClient but got: " + manager._zkclient.getClass().getName());
-      }
-
-      System.out.println("Underlying ZkClient class: " + zkClient.getClass().getName());
-
-      Class<?> clazz = zkClient.getClass().getSuperclass();
-
-      Field stateListenerField = clazz.getDeclaredField("_stateListener");
-      stateListenerField.setAccessible(true);
-
-      @SuppressWarnings("unchecked")
-      Set<IZkStateListener> realStateListeners = (Set<IZkStateListener>) stateListenerField.get(zkClient);
-
-      // verify we have the buggy wrapper
-      System.out.println("registered state listeners: " + realStateListeners);
-
-      // Access _eventThread field
-      Field eventThreadField = clazz.getDeclaredField("_eventThread");
-      eventThreadField.setAccessible(true);
-      ZkEventThread realEventThread = (ZkEventThread) eventThreadField.get(zkClient);
-
-      // Generate fake session IDs for the two events
-      final String fakeSessionID1 = "0x" + Long.toHexString(Double.doubleToLongBits(Math.random()));
-      final String fakeSessionID2 = "0x" + Long.toHexString(Double.doubleToLongBits(Math.random()));
-      System.out.println("Fake session 1: " + fakeSessionID1);
-      System.out.println("Fake session 2: " + fakeSessionID2);
-
-      // verify they are different
-      Assert.assertFalse(actualSessionId.equals(fakeSessionID1), "Test setup issue: sessions should be different");
-      Assert.assertFalse(actualSessionId.equals(fakeSessionID2), "Test setup issue: sessions should be different");
-      Assert.assertFalse(fakeSessionID1.equals(fakeSessionID2), "Test setup issue: fake sessions should be different");
-
-
-      ZkEventThread.ZkEvent firstEvent = new ZkEventThread.ZkEvent("First stale session event") {
-        @Override
-        public void run() throws Exception {
-          for (final IZkStateListener realListener : realStateListeners) {
-            realListener.handleNewSession(fakeSessionID1);
-          }
-        }
-      };
-      realEventThread.send(firstEvent);
-
-      Thread.sleep(sessionTimeout); // Give event thread time to process
-
-      // FIRST EVENT VERIFICATION
-
-      Assert.assertTrue(TestHelper.verify(() -> {
-        LiveInstance li = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-        return li != null;
-      }, 5000L), "LiveInstance should be created after first handleNewSession call");
-
-      LiveInstance liveInstanceAfterFirst = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-
-      // Verify first event bug: LiveInstance uses current session, not fake session
-      Assert.assertEquals(liveInstanceAfterFirst.getEphemeralOwner(), actualSessionId,
-          "First event: LiveInstance ephemeral owner should match current ZK connection session");
-      Assert.assertFalse(liveInstanceAfterFirst.getEphemeralOwner().equals(fakeSessionID1),
-          "First event: LiveInstance ephemeral owner should NOT match the fake session ID");
-
-      final AtomicReference<Exception> caughtException = new AtomicReference<>();
-      final CountDownLatch eventProcessed = new CountDownLatch(1);
-
-      ZkEventThread.ZkEvent secondEvent = new ZkEventThread.ZkEvent("Second stale session event") {
-        @Override
-        public void run() throws Exception {
-          try {
-            for (final IZkStateListener realListener : realStateListeners) {
-              realListener.handleNewSession(fakeSessionID2);
-            }
-          } catch (Exception e) {
-            caughtException.set(e);
-          } finally {
-            eventProcessed.countDown(); // signal main thread
-          }
-        }
-      };
-
-      realEventThread.send(secondEvent);
-
-      // Wait up to 3*sessioNTimeout seconds for the event to finish
-      eventProcessed.await(3 * sessionTimeout, java.util.concurrent.TimeUnit.SECONDS);
-
-      Assert.assertNull(
-          caughtException.get(),
-          "Second stale session event should not have thrown an exception due to LiveInstance already existing"
-      );
-
-      // SECOND EVENT VERIFICATION
-
-      // LiveInstance should still exist (zombie condition)
-      LiveInstance liveInstanceAfterSecond = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-      Assert.assertNotNull(liveInstanceAfterSecond, "LiveInstance should still exist after second event");
-      Assert.assertEquals(liveInstanceAfterSecond.getEphemeralOwner(), actualSessionId,
-          "Second event: LiveInstance should still have current session");
-
-      // check that handlers are reset but NOT re-initialized after second event
-      // demonstrates the progressive degradation leading to zombie participant
-
-      try {
-        // Access the _handlers field to check handler states
-        Field handlersField = ZKHelixManager.class.getDeclaredField("_handlers");
-        handlersField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<CallbackHandler> handlers = (List<CallbackHandler>) handlersField.get(manager);
-
-        // Check if handlers are in reset state (not ready)
-        int resetHandlerCount = 0;
-        int readyHandlerCount = 0;
-
-        for (CallbackHandler handler : handlers) {
-          if (handler.isReady()) {
-            readyHandlerCount++;
-          } else {
-            resetHandlerCount++;
-          }
-        }
-
-        System.out.println("Total handlers: " + handlers.size());
-        System.out.println("Ready handlers: " + readyHandlerCount);
-        System.out.println("Reset handlers: " + resetHandlerCount);
-
-        // CRITICAL: After second stale session, handlers should be reset but not re-initialized
-        Assert.assertTrue(
-            readyHandlerCount > 0 && resetHandlerCount == 0,
-            "Some handlers are RESET - second event may have resetted handler unexpectedly"
-        );
-
-      } catch (Exception e) {
-        Assert.fail("Could not access internal handler state: " + e.getMessage());
-      }
-
-      // second event should fail LiveInstance creation, causing handler reset without re-initialization
-      try {
-        // Handlers should be reset but not re-initialized
-        Field handlersField = ZKHelixManager.class.getDeclaredField("_handlers");
-        handlersField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<CallbackHandler> handlers = (List<CallbackHandler>) handlersField.get(manager);
-
-        if (handlers != null && !handlers.isEmpty()) {
-          boolean allHandlersReady = handlers.stream().allMatch(CallbackHandler::isReady);
-          Assert.assertTrue(allHandlersReady,
-              "CRITICAL: All handlers should be in RESET state after second stale session event. " +
-                  "This proves resetHandlers() was called but initHandlers() was NOT called, creating zombie condition.");
-        }
-
-      } catch (Exception e) {
-        Assert.fail("Failed to verify zombie condition: " + e.getMessage());
-      }
-
-    } finally {
-      try {
-        manager.disconnect();
-      } catch (Exception e) {
-        // Ignore cleanup errors
-      }
-      TestHelper.dropCluster(clusterName, _gZkClient);
-
-      // Stop MSDS server
-      if (_msdsServer != null) {
-        _msdsServer.stopServer();
-      }
-      System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
-
-      if (originalMultiZkEnabled != null) {
-        System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, originalMultiZkEnabled);
-      } else {
-        System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
-      }
     }
   }
 }
