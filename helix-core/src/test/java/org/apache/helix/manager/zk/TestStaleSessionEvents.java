@@ -76,6 +76,10 @@ public class TestStaleSessionEvents extends ZkTestBase {
     try {
       setupMultiZkEnvironment(clusterName, participantPort, sessionTimeout);
 
+      // Ensure MSDS server is ready to serve requests (CI timing issue)
+      waitForMsdsServerReady();
+
+      Thread.sleep(5000);
       ZKHelixManager manager = new ZKHelixManager(clusterName, instanceName, InstanceType.PARTICIPANT, ZK_ADDR);
       ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
@@ -115,9 +119,6 @@ public class TestStaleSessionEvents extends ZkTestBase {
 
     _msdsServer = new MockMetadataStoreDirectoryServer(MSDS_HOSTNAME, MSDS_PORT, MSDS_NAMESPACE, routingData);
     _msdsServer.startServer();
-
-    // add wait for CI failure
-    Thread.sleep(2000);
 
     String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE;
     System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, msdsEndpoint);
@@ -212,5 +213,28 @@ public class TestStaleSessionEvents extends ZkTestBase {
     } else {
       System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     }
+  }
+
+  private void waitForMsdsServerReady() throws Exception {
+    String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE + "/routing-data";
+
+    for (int i = 0; i < 10; i++) {
+      try {
+        java.net.URL url = new java.net.URL(msdsEndpoint);
+        java.net.HttpURLConnection connection = (java.net.HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setConnectTimeout(1000);
+        connection.setReadTimeout(1000);
+
+        int responseCode = connection.getResponseCode();
+        if (responseCode == 200) {
+          return;
+        }
+      } catch (Exception e) {
+        // Server not ready yet, continue trying
+      }
+      Thread.sleep(1000);
+    }
+    throw new Exception("MSDS server did not become ready within timeout");
   }
 }
