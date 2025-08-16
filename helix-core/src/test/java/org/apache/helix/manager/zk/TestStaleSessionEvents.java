@@ -116,6 +116,9 @@ public class TestStaleSessionEvents extends ZkTestBase {
     _msdsServer = new MockMetadataStoreDirectoryServer(MSDS_HOSTNAME, MSDS_PORT, MSDS_NAMESPACE, routingData);
     _msdsServer.startServer();
 
+    // add wait for CI failure
+    Thread.sleep(2000);
+
     String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE;
     System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, msdsEndpoint);
 
