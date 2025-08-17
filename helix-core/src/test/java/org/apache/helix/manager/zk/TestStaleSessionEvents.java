@@ -52,11 +52,10 @@ import org.testng.annotations.Test;
 public class TestStaleSessionEvents extends ZkTestBase {
   private static final String CLUSTER_PREFIX = "CLUSTER";
   private static final String MSDS_HOSTNAME = "localhost";
-  private static final int MSDS_PORT = 19922; // Changed to avoid conflict with other multi-ZK tests
+  private static final int MSDS_PORT = 19922;
   private static final String MSDS_NAMESPACE = "testStaleSessionEvents";
 
   private static MockMetadataStoreDirectoryServer _msdsServer;
-
 
 
   @Test
@@ -66,7 +65,7 @@ public class TestStaleSessionEvents extends ZkTestBase {
     long sessionTimeout = 10000L;
 
     String clusterName = CLUSTER_PREFIX + "_" + getShortClassName() + "_staleSessionTest";
-    
+
     // Save original system properties for restoration
     String originalMultiZkEnabled = System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     String originalMsdsEndpoint = System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
@@ -76,25 +75,13 @@ public class TestStaleSessionEvents extends ZkTestBase {
     System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
     System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
-    
-    // Reset RoutingDataManager to clear any cached routing data from previous tests
-    RoutingDataManager.getInstance().reset(true);
 
     try {
       setupMultiZkEnvironment(clusterName, participantPort, sessionTimeout);
 
-      // Ensure MSDS server is ready to serve requests (CI timing issue)
-      waitForMsdsServerReady();
-
-      Thread.sleep(5000);
-      
-      // Debug: Verify system properties are correctly set
-      System.out.println("DEBUG: MULTI_ZK_ENABLED = " + System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED));
-      System.out.println("DEBUG: MSDS_SERVER_ENDPOINT_KEY = " + System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY));
-      
       // Additional reset right before ZKHelixManager creation to ensure clean state
       RoutingDataManager.getInstance().reset(true);
-      
+
       ZKHelixManager manager = new ZKHelixManager(clusterName, instanceName, InstanceType.PARTICIPANT, ZK_ADDR);
       ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
@@ -124,20 +111,20 @@ public class TestStaleSessionEvents extends ZkTestBase {
       }
     } finally {
       cleanupMultiZkEnvironment(clusterName);
-      
+
       // Restore original system property values to avoid affecting other tests
       if (originalMultiZkEnabled != null) {
         System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, originalMultiZkEnabled);
       } else {
         System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
       }
-      
+
       if (originalMsdsEndpoint != null) {
         System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, originalMsdsEndpoint);
       } else {
         System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
       }
-      
+
       if (originalZkSessionTimeout != null) {
         System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, originalZkSessionTimeout);
       } else {
@@ -238,33 +225,8 @@ public class TestStaleSessionEvents extends ZkTestBase {
       _msdsServer.stopServer();
       _msdsServer = null;
     }
-    
+
     // Reset RoutingDataManager to ensure clean state for next test
     RoutingDataManager.getInstance().reset(true);
-    
-    // Note: System properties are restored in the test method's finally block for proper isolation
-  }
-
-  private void waitForMsdsServerReady() throws Exception {
-    String msdsEndpoint = "http://" + MSDS_HOSTNAME + ":" + MSDS_PORT + "/admin/v2/namespaces/" + MSDS_NAMESPACE + "/routing-data";
-
-    for (int i = 0; i < 10; i++) {
-      try {
-        java.net.URL url = new java.net.URL(msdsEndpoint);
-        java.net.HttpURLConnection connection = (java.net.HttpURLConnection) url.openConnection();
-        connection.setRequestMethod("GET");
-        connection.setConnectTimeout(1000);
-        connection.setReadTimeout(1000);
-
-        int responseCode = connection.getResponseCode();
-        if (responseCode == 200) {
-          return;
-        }
-      } catch (Exception e) {
-        // Server not ready yet, continue trying
-      }
-      Thread.sleep(1000);
-    }
-    throw new Exception("MSDS server did not become ready within timeout");
   }
 }
