@@ -43,7 +43,6 @@ import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
 import org.apache.helix.zookeeper.zkclient.ZkEventThread;
 import org.testng.Assert;
-import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 /**
@@ -57,13 +56,6 @@ public class TestStaleSessionEvents extends ZkTestBase {
 
   private static MockMetadataStoreDirectoryServer _msdsServer;
 
-  @AfterMethod
-  public void cleanupSystemProperties() {
-    System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
-    System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
-    System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
-  }
-
   @Test
   public void testStaleSessionEventDoesNotCauseZombieParticipant() throws Exception {
     String instanceName = "localhost_12346";
@@ -71,7 +63,16 @@ public class TestStaleSessionEvents extends ZkTestBase {
     long sessionTimeout = 10000L;
 
     String clusterName = CLUSTER_PREFIX + "_" + getShortClassName() + "_staleSessionTest";
+    
+    // Save original system properties for restoration
     String originalMultiZkEnabled = System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
+    String originalMsdsEndpoint = System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
+    String originalZkSessionTimeout = System.getProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
+
+    // Clear any pollution from previous tests - start with clean slate
+    System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
+    System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
+    System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
 
     try {
       setupMultiZkEnvironment(clusterName, participantPort, sessionTimeout);
@@ -108,7 +109,26 @@ public class TestStaleSessionEvents extends ZkTestBase {
         }
       }
     } finally {
-      cleanupMultiZkEnvironment(clusterName, originalMultiZkEnabled);
+      cleanupMultiZkEnvironment(clusterName);
+      
+      // Restore original system property values to avoid affecting other tests
+      if (originalMultiZkEnabled != null) {
+        System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, originalMultiZkEnabled);
+      } else {
+        System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
+      }
+      
+      if (originalMsdsEndpoint != null) {
+        System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, originalMsdsEndpoint);
+      } else {
+        System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
+      }
+      
+      if (originalZkSessionTimeout != null) {
+        System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, originalZkSessionTimeout);
+      } else {
+        System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
+      }
     }
   }
 
@@ -197,22 +217,15 @@ public class TestStaleSessionEvents extends ZkTestBase {
     }
   }
 
-  private void cleanupMultiZkEnvironment(String clusterName, String originalMultiZkEnabled) {
+  private void cleanupMultiZkEnvironment(String clusterName) {
     TestHelper.dropCluster(clusterName, _gZkClient);
 
     if (_msdsServer != null) {
       _msdsServer.stopServer();
       _msdsServer = null;
     }
-
-    System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
-    System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
-
-    if (originalMultiZkEnabled != null) {
-      System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, originalMultiZkEnabled);
-    } else {
-      System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
-    }
+    
+    // Note: System properties are restored in the test method's finally block for proper isolation
   }
 
   private void waitForMsdsServerReady() throws Exception {
