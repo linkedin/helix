@@ -65,13 +65,11 @@ public class TestStaleSessionEvents extends ZkTestBase {
     long sessionTimeout = 10000L;
 
     String clusterName = CLUSTER_PREFIX + "_" + getShortClassName() + "_staleSessionTest";
-
-    // Save original system properties for restoration
     String originalMultiZkEnabled = System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     String originalMsdsEndpoint = System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
     String originalZkSessionTimeout = System.getProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
 
-    // Clear any pollution from previous tests - start with clean slate
+    // start with clean slate
     System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
     System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
@@ -79,7 +77,7 @@ public class TestStaleSessionEvents extends ZkTestBase {
     try {
       setupMultiZkEnvironment(clusterName, participantPort, sessionTimeout);
 
-      // Additional reset right before ZKHelixManager creation to ensure clean state
+      // reset before ZKHelixManager creation to ensure clean state
       RoutingDataManager.getInstance().reset(true);
 
       ZKHelixManager manager = new ZKHelixManager(clusterName, instanceName, InstanceType.PARTICIPANT, ZK_ADDR);
