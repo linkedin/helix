@@ -40,6 +40,7 @@ import org.apache.helix.msdcommon.constant.MetadataStoreRoutingConstants;
 import org.apache.helix.msdcommon.mock.MockMetadataStoreDirectoryServer;
 import org.apache.helix.zookeeper.impl.client.DedicatedZkClient;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
+import org.apache.helix.zookeeper.routing.RoutingDataManager;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
 import org.apache.helix.zookeeper.zkclient.ZkEventThread;
 import org.testng.Assert;
@@ -75,6 +76,9 @@ public class TestStaleSessionEvents extends ZkTestBase {
     System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
     System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
     System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
+    
+    // Reset RoutingDataManager to clear any cached routing data from previous tests
+    RoutingDataManager.getInstance().reset(true);
 
     try {
       setupMultiZkEnvironment(clusterName, participantPort, sessionTimeout);
@@ -226,6 +230,9 @@ public class TestStaleSessionEvents extends ZkTestBase {
       _msdsServer.stopServer();
       _msdsServer = null;
     }
+    
+    // Reset RoutingDataManager to ensure clean state for next test
+    RoutingDataManager.getInstance().reset(true);
     
     // Note: System properties are restored in the test method's finally block for proper isolation
   }
