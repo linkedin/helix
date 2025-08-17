@@ -64,7 +64,7 @@ public class TestStaleSessionEvents extends ZkTestBase {
     System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
   }
 
-  @Test
+  @Test(priority = -1000) // Run this test first to avoid system property pollution from multi-ZK tests
   public void testStaleSessionEventDoesNotCauseZombieParticipant() throws Exception {
     String instanceName = "localhost_12346";
     int participantPort = 12346;
