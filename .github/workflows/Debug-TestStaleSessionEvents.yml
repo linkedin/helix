@@ -21,7 +21,7 @@ jobs:
     - name: Build with Maven
       run: mvn clean install -Dmaven.test.skip.exec=true -DretryFailedDeploymentCount=5
     - name: Run TestStaleSessionEvents Only
-      run: mvn -q -fae test -Dtest=TestStaleSessionEvents
+      run: mvn -q -fae test -Dtest=TestStaleSessionEvents -pl helix-core
     - name: Print Test Results
       run: .github/scripts/printTestResult.sh
       if: ${{ success() || failure() }}
