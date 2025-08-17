@@ -1,4 +1,4 @@
-name: Debug TestStaleSessionEvents
+name: Debug Session Tests
 on:
   push:
     branches: [ test-stale-session-debug ]
@@ -6,7 +6,7 @@ on:
     branches: [ test-stale-session-debug ]
 
 jobs:
-  Debug_Single_Test:
+  Debug_Session_Tests:
 
     runs-on: ubuntu-latest
 
@@ -20,8 +20,8 @@ jobs:
       run: rm -rf .m2\repository\com\github\eirslett
     - name: Build with Maven
       run: mvn clean install -Dmaven.test.skip.exec=true -DretryFailedDeploymentCount=5
-    - name: Run TestStaleSessionEvents Only
-      run: mvn -q -fae test -Dtest=TestStaleSessionEvents -pl helix-core
+    - name: Run Session-Related Tests (StaleSessionEvents runs last)
+      run: mvn -q -fae test -Dtest=TestHandleSession,TestStaleSessionEvents -pl helix-core
     - name: Print Test Results
       run: .github/scripts/printTestResult.sh
       if: ${{ success() || failure() }}
@@ -29,6 +29,6 @@ jobs:
       if: ${{ success() || failure() }}
       uses: actions/upload-artifact@v4
       with:
-        name: test-results-stale-session
+        name: test-results-session-tests
         path: ./**/target/surefire-reports/
         if-no-files-found: ignore
