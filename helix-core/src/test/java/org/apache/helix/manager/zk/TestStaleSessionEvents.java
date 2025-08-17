@@ -52,7 +52,7 @@ import org.testng.annotations.Test;
 public class TestStaleSessionEvents extends ZkTestBase {
   private static final String CLUSTER_PREFIX = "CLUSTER";
   private static final String MSDS_HOSTNAME = "localhost";
-  private static final int MSDS_PORT = 19911;
+  private static final int MSDS_PORT = 19922; // Changed to avoid conflict with other multi-ZK tests
   private static final String MSDS_NAMESPACE = "testStaleSessionEvents";
 
   private static MockMetadataStoreDirectoryServer _msdsServer;
@@ -87,6 +87,14 @@ public class TestStaleSessionEvents extends ZkTestBase {
       waitForMsdsServerReady();
 
       Thread.sleep(5000);
+      
+      // Debug: Verify system properties are correctly set
+      System.out.println("DEBUG: MULTI_ZK_ENABLED = " + System.getProperty(SystemPropertyKeys.MULTI_ZK_ENABLED));
+      System.out.println("DEBUG: MSDS_SERVER_ENDPOINT_KEY = " + System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY));
+      
+      // Additional reset right before ZKHelixManager creation to ensure clean state
+      RoutingDataManager.getInstance().reset(true);
+      
       ZKHelixManager manager = new ZKHelixManager(clusterName, instanceName, InstanceType.PARTICIPANT, ZK_ADDR);
       ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
