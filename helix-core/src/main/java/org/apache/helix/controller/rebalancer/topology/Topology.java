@@ -261,6 +261,7 @@ public class Topology {
         int numOfMatchedKeys = 0;
         boolean shouldThrowExceptionDueToMissingConfigs = false;
         for (String key : clusterTopologyConfig.getTopologyKeyDefaultValue().keySet()) {
+          // if a key does not exist in the instance domain config, using the default domain value.
           String value = domainAsMap.get(key);
           if (value == null || value.isEmpty()) {
             value = clusterTopologyConfig.getTopologyKeyDefaultValue().get(key);
