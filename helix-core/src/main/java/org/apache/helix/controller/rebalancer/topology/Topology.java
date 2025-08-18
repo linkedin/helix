@@ -19,7 +19,6 @@ package org.apache.helix.controller.rebalancer.topology;
  * under the License.
  */
 
-import io.netty.util.internal.StringUtil;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -203,16 +202,6 @@ public class Topology {
           // Remove unnecessary keys from the topology map. We do not need to use these to build more layers in
           // the topology tree. The topology tree only requires FaultZoneType and EndNodeType.
           unnecessaryTopoKeys.forEach(instanceTopologyMap::remove);
-        }
-        // Check if fault zone is missing from original domain configuration - exclude instance to prevent singleton fault zones
-        String faultZoneType = _clusterTopologyConfig.getFaultZoneType();
-        Map<String, String> originalDomain = insConfig.getDomainAsMap();
-
-        if (!originalDomain.containsKey(faultZoneType) || StringUtil.isNullOrEmpty(originalDomain.get(faultZoneType))) {
-          logger.warn("Instance '{}' excluded from topology: fault zone '{}' is missing from original domain configuration. " +
-              "Domain: '{}'. This prevents singleton fault zones.",
-              instanceName, faultZoneType, insConfig.getDomainAsString());
-          continue; // Skip this instance
         }
         addEndNode(root, instanceName, instanceTopologyMap, weight, _liveInstances);
       } catch (InstanceConfigMismatchException e) {

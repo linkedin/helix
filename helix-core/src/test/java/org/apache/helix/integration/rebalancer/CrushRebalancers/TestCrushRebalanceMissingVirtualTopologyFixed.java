@@ -41,7 +41,6 @@ public class TestCrushRebalanceMissingVirtualTopologyFixed extends ZkTestBase {
   private final String className = getShortClassName();
   private final String clusterName = CLUSTER_PREFIX + "_" + className;
 
-  // Venice-like configuration
   private static final String TOPOLOGY = "/mz_virtualZone/host/applicationInstanceId";
   private static final String FAULT_ZONE_TYPE = "mz_virtualZone";
   private static final int PARTITIONS = 500;  // Reduced for more dramatic effect
@@ -67,6 +66,7 @@ public class TestCrushRebalanceMissingVirtualTopologyFixed extends ZkTestBase {
     clusterConfig.setTopology(TOPOLOGY);
     clusterConfig.setFaultZoneType(FAULT_ZONE_TYPE);
     clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setRequiredInstanceTopologyKeys(List.of(FAULT_ZONE_TYPE));
     configAccessor.setClusterConfig(clusterName, clusterConfig);
 
     // Add "good" instances with proper virtual topology configuration
@@ -199,10 +199,10 @@ public class TestCrushRebalanceMissingVirtualTopologyFixed extends ZkTestBase {
         totalPartitionsAssigned += goodInstancePartitions;
         double goodRatio = (double) goodInstancePartitions / expectedPartitionsPerInstance;
         System.out.println("Instance " + instance + ": " + goodInstancePartitions + " partitions (ratio: " + goodRatio + "x)");
-        
+
         Assert.assertTrue(goodRatio > 0.5 && goodRatio < 1.5,
             "Good instances should have balanced allocation. Instance " + instance +
-                " has ratio " + goodRatio + "x, partitions: " + goodInstancePartitions + 
+                " has ratio " + goodRatio + "x, partitions: " + goodInstancePartitions +
                 ", expected: " + expectedPartitionsPerInstance);
       }
     }
@@ -210,7 +210,7 @@ public class TestCrushRebalanceMissingVirtualTopologyFixed extends ZkTestBase {
     // Verify all partitions are still assigned (just distributed among valid instances)
     int expectedTotalPartitions = PARTITIONS * REPLICAS;
     Assert.assertEquals(totalPartitionsAssigned, expectedTotalPartitions,
-        "All partitions should be assigned to valid instances. Expected: " + expectedTotalPartitions + 
+        "All partitions should be assigned to valid instances. Expected: " + expectedTotalPartitions +
         ", Actual: " + totalPartitionsAssigned);
 
     // Demonstrate the root cause: verify topology mapping shows default values
