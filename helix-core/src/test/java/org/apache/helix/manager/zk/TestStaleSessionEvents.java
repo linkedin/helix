@@ -87,18 +87,25 @@ public class TestStaleSessionEvents extends ZkTestBase {
       try {
         manager.connect(); // <- this will create the LiveInstance node
         String actualSessionId = manager.getSessionId();
-        String fakeSessionId = "0x" + Long.toHexString(Double.doubleToLongBits(Math.random()));
-        Assert.assertFalse(actualSessionId.equals(fakeSessionId),
-            "Actual and fake session should be different");
 
-        CountDownLatch eventProcessed = new CountDownLatch(1);
-        AtomicReference<Exception> caughtException = new AtomicReference<>();
+        // active sessionID processing working as expected
+        verifySessionBehaviorCore(accessor, keyBuilder, instanceName, actualSessionId, manager);
 
-        // send a handleNewSession event with a fake session id
-        sendStaleSessionEvent(manager, fakeSessionId, eventProcessed, caughtException);
-        eventProcessed.await(3 * sessionTimeout, TimeUnit.MILLISECONDS); // wait for event to be processed
+        // stale session behavior with two different fake sessions
+        for (int i = 0; i < 2; i++) {
+          String fakeSessionId = "0x" + Long.toHexString(Double.doubleToLongBits(Math.random() + i * 1000));
+          Assert.assertFalse(actualSessionId.equals(fakeSessionId),
+              String.format("Actual and fake session %d should be different", i + 1));
 
-        verifyStaleSessionEventBehavior(accessor, keyBuilder, instanceName, actualSessionId, caughtException, manager);
+          CountDownLatch eventProcessed = new CountDownLatch(1);
+          AtomicReference<Exception> caughtException = new AtomicReference<>();
+
+          sendStaleSessionEvent(manager, fakeSessionId, eventProcessed, caughtException);
+          eventProcessed.await(3 * sessionTimeout, TimeUnit.MILLISECONDS); // wait for event to be processed
+
+          verifyStaleSessionEventBehavior(accessor, keyBuilder, instanceName, actualSessionId,
+              caughtException, manager);
+        }
 
       } finally {
         try {
@@ -110,23 +117,19 @@ public class TestStaleSessionEvents extends ZkTestBase {
     } finally {
       cleanupMultiZkEnvironment(clusterName);
 
-      // Restore original system property values to avoid affecting other tests
+      System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
+      System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
+      System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
+
+      // Set original values if they were not null
       if (originalMultiZkEnabled != null) {
         System.setProperty(SystemPropertyKeys.MULTI_ZK_ENABLED, originalMultiZkEnabled);
-      } else {
-        System.clearProperty(SystemPropertyKeys.MULTI_ZK_ENABLED);
       }
-
       if (originalMsdsEndpoint != null) {
         System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY, originalMsdsEndpoint);
-      } else {
-        System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_ENDPOINT_KEY);
       }
-
       if (originalZkSessionTimeout != null) {
         System.setProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT, originalZkSessionTimeout);
-      } else {
-        System.clearProperty(SystemPropertyKeys.ZK_SESSION_TIMEOUT);
       }
     }
   }
@@ -186,21 +189,34 @@ public class TestStaleSessionEvents extends ZkTestBase {
     eventThread.send(event);
   }
 
-  private void verifyStaleSessionEventBehavior(ZKHelixDataAccessor accessor, PropertyKey.Builder keyBuilder,
-      String instanceName, String actualSessionId,
-      AtomicReference<Exception> caughtException, ZKHelixManager manager) throws Exception {
-
-    Assert.assertNull(caughtException.get(), "Stale session event should not throw exceptions");
-    Assert.assertTrue(TestHelper.verify(() -> {
-      LiveInstance li = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-      return li != null;
-    }, 5000L), "LiveInstance should be created after handleNewSession call");
-
+  private void verifyPreConditions(ZKHelixDataAccessor accessor, PropertyKey.Builder keyBuilder,
+      String instanceName, String expectedSessionId, ZKHelixManager manager) throws Exception {
+    // Verify LiveInstance exists and has correct session ID
     LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-    Assert.assertNotNull(liveInstance, "LiveInstance should exist after stale session event");
+    Assert.assertNotNull(liveInstance, "LiveInstance should exist before testing session behavior");
+    Assert.assertEquals(liveInstance.getEphemeralOwner(), expectedSessionId,
+        "LiveInstance should have current active session ID");
 
-    Assert.assertEquals(liveInstance.getEphemeralOwner(), actualSessionId,
-        "LiveInstance ephemeral owner should match current ZK session, not the stale session");
+    // Verify callBackHandlers exist and are healthy
+    Field handlersField = ZKHelixManager.class.getDeclaredField("_handlers");
+    handlersField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    List<CallbackHandler> handlers = (List<CallbackHandler>) handlersField.get(manager);
+
+    Assert.assertNotNull(handlers, "CallbackHandlers should exist");
+    Assert.assertFalse(handlers.isEmpty(), "CallbackHandlers should not be empty");
+
+    long readyCount = handlers.stream().filter(CallbackHandler::isReady).count();
+    Assert.assertTrue(readyCount > 0, "At least one callback handler should be ready");
+  }
+
+  private void verifySessionBehaviorCore(ZKHelixDataAccessor accessor, PropertyKey.Builder keyBuilder,
+      String instanceName, String expectedSessionId, ZKHelixManager manager) throws Exception {
+    LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
+    Assert.assertNotNull(liveInstance, "LiveInstance should exist after session event");
+
+    Assert.assertEquals(liveInstance.getEphemeralOwner(), expectedSessionId,
+        "LiveInstance ephemeral owner should match expected session ID");
 
     // verify handlers remain healthy
     Field handlersField = ZKHelixManager.class.getDeclaredField("_handlers");
@@ -214,6 +230,14 @@ public class TestStaleSessionEvents extends ZkTestBase {
       Assert.assertTrue(readyCount > 0 && resetCount == 0,
           String.format("Expected all handlers to be ready. Ready: %d, Reset: %d", readyCount, resetCount));
     }
+  }
+
+  private void verifyStaleSessionEventBehavior(ZKHelixDataAccessor accessor, PropertyKey.Builder keyBuilder,
+      String instanceName, String actualSessionId,
+      AtomicReference<Exception> caughtException, ZKHelixManager manager) throws Exception {
+
+    Assert.assertNull(caughtException.get(), "Stale session event should not throw exceptions");
+    verifySessionBehaviorCore(accessor, keyBuilder, instanceName, actualSessionId, manager);
   }
 
   private void cleanupMultiZkEnvironment(String clusterName) {

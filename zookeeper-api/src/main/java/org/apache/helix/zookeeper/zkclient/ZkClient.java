@@ -436,8 +436,6 @@ public class ZkClient implements Watcher {
     }
   }
 
-
-
   public void unsubscribeStateChanges(IZkStateListener stateListener) {
     synchronized (_stateListener) {
       _stateListener.remove(stateListener);
