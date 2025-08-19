@@ -382,11 +382,11 @@ public class TestCrushRebalanceMissingVirtualTopology extends ZkTestBase {
 
       if (instance.contains("bad_host")) {
         // The bad instance should be missing mz_virtualZone in its domain
-        Assert.assertFalse(domain.contains("mz_virtualZone"),
+        Assert.assertFalse(domain.contains(FAULT_ZONE_TYPE),
             "Bad instance should not have mz_virtualZone configured");
       } else {
         // Good instances should have proper mz_virtualZone
-        Assert.assertTrue(domain.contains("mz_virtualZone"),
+        Assert.assertTrue(domain.contains(FAULT_ZONE_TYPE),
             "Good instances should have mz_virtualZone configured");
       }
     }
