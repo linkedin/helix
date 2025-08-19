@@ -1318,11 +1318,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
    */
   @Override
   public void handleNewSession(String sessionId) throws Exception {
-    // Store the queued sessionID here. This will be used by handleStateChange() for logging.
-    // Note: since this is updated during the SyncConnected event, we won’t use this ID for logging SyncConnected
-    // itself. A typical reconnection flow is: SyncConnected → Disconnected → Expired → Closed.
-    // Therefore, we can identify which session the SyncConnected event belongs to by checking the logs for
-    // Disconnected, Expired, or Closed events, as they follow the SyncConnected logs.
+    /* Store the queued sessionID here. This will be used by handleStateChange() for logging.
+     * Note: since this is updated during the SyncConnected event, we won't use this ID for logging SyncConnected
+     * itself. A typical reconnection flow is: SyncConnected → Disconnected → Expired → Closed.
+     * For identifying the SyncConnected event's sessionID, we can use the logs from issueSync() which gets queued for
+     * SyncConnected event in fireNewSessionEvents(). We will see either :
+     * - Success: "syncOnNewSession with sessionID {} async return code: {} and proceeds"
+     * - Failure: "Failed to call sync() on new session {}"
+     */
     _lastQueuedSessionID = sessionId;
 
     // Wait until we get a non-zero session id. Otherwise, getSessionId() might be null.
