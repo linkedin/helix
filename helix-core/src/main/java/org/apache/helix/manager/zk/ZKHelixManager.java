@@ -1276,7 +1276,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
           + _instanceName + ", type: " + _instanceType);
       break;
     default:
-      LOG.info("KeeperState:" + state + ", currentSessionId: " + _lastQueuedSessionID + ", instance: "
+      LOG.info("KeeperState:" + state + ", SessionId: " + _lastQueuedSessionID + ", instance: "
           + _instanceName + ", type: " + _instanceType);
       break;
     }

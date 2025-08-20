@@ -27,6 +27,7 @@ import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+import org.testng.annotations.DataProvider;
 
 import static org.mockito.Mockito.*;
 import org.mockito.ArgumentCaptor;
@@ -58,8 +59,17 @@ public class TestZKHelixManagerSessionLogging extends ZkTestBase {
     _gSetupTool.deleteCluster(CLUSTER_NAME);
   }
 
-  @Test
-  public void testHandleStateChangedUsesLastQueuedSessionIdForLogging() throws Exception {
+  @DataProvider(name = "keeperStates")
+  public Object[][] keeperStatesProvider() {
+    return new Object[][] {
+        {KeeperState.Expired, "warn"},
+        {KeeperState.Disconnected, "warn"},
+        {KeeperState.Closed, "info"}
+    };
+  }
+
+  @Test(dataProvider = "keeperStates")
+  public void testHandleStateChangedUsesLastQueuedSessionIdForLogging(KeeperState state, String logLevel) throws Exception {
     String lastQueuedSessionId = "1234567";
     String staleSessionId = "7654321";
 
@@ -85,24 +95,28 @@ public class TestZKHelixManagerSessionLogging extends ZkTestBase {
     loggerField.set(null, mockLogger);
 
     try {
-      // simulate an expired event.
-      manager.handleStateChanged(KeeperState.Expired);
+      // simulate the state change event
+      manager.handleStateChanged(state);
 
-      // Verify warn was called and capture the log message
+      // Verify the appropriate log level was called and capture the log message
       ArgumentCaptor<String> logMessageCaptor = ArgumentCaptor.forClass(String.class);
-      verify(mockLogger).warn(logMessageCaptor.capture());
+      if ("warn".equals(logLevel)) {
+        verify(mockLogger).warn(logMessageCaptor.capture());
+      } else if ("info".equals(logLevel)) {
+        verify(mockLogger).info(logMessageCaptor.capture());
+      }
 
       String actualLogMessage = logMessageCaptor.getValue();
 
       // log message should contain _lastQueuedSessionID value
       Assert.assertTrue(actualLogMessage.contains(lastQueuedSessionId),
-          "Log message for Expired state should contain _lastQueuedSessionID value (" +
+          "Log message for " + state + " state should contain _lastQueuedSessionID value (" +
               lastQueuedSessionId + ") " +
               "but actual log was: " + actualLogMessage);
 
       // log message should not contain _sessionId value
       Assert.assertFalse(actualLogMessage.contains(staleSessionId),
-          "Log message for Expired state should NOT contain _sessionId value (" + staleSessionId + ") " +
+          "Log message for " + state + " state should NOT contain _sessionId value (" + staleSessionId + ") " +
               "but actual log was: " + actualLogMessage);
 
     } finally {
