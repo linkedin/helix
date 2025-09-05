@@ -36,10 +36,9 @@ class Straw2Selector implements Selector {
       }
     }
     if (selected == null) {
-      LOG.error("Straw2Selector failed: no node selected. Input={}, round={}, nodeCount={}",
-          input, round, _nodes == null ? 0 : _nodes.size());
       throw new IllegalStateException(
-          String.format("No node selected for input %d and round %d", input, round));
+          String.format("No node selected for input %d and round %d. NodeCount=%d",
+              input, round, _nodes == null ? 0 : _nodes.size()));
     }
     return selected;
   }

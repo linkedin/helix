@@ -134,11 +134,12 @@ public class CRUSHPlacementAlgorithm {
           try {
             out = selector.select(input, rPrime);
           } catch (IllegalStateException e) {
-            logger.error("CRUSH selector failed for node: name={}, type={}, childrenCount={}, input={}, rPrime={}",
-                in.getName(), in.getType(),
-                in.getChildren() == null ? 0 : in.getChildren().size(),
-                input, rPrime);
-            throw e;
+            // Enhance exception with node context for logging at higher level
+            throw new IllegalStateException(
+                String.format("Selector failed for node [name=%s, type=%s, childrenCount=%d]. %s",
+                    in.getName(), in.getType(),
+                    in.getChildren() == null ? 0 : in.getChildren().size(),
+                    e.getMessage()), e);
           }
           if (!out.getType().equalsIgnoreCase(type)) {
             logger.trace("selected output {} for data {} didn't match the type {}: walking down " +
