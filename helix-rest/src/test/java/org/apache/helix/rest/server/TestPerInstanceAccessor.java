@@ -601,6 +601,23 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.EVACUATE);
 
+    // Verify canCompleteSwap and completeSwapIfPossible do not throw and return successful=false
+    Response canCompleteSwapOnNew = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=canCompleteSwap")
+        .format(CLUSTER_NAME, test_instance_name).post(this, entity);
+    Assert.assertEquals(canCompleteSwapOnNew.getStatus(), Response.Status.OK.getStatusCode());
+    Map<String, Object> canCompleteSwapMap =
+        OBJECT_MAPPER.readValue(canCompleteSwapOnNew.readEntity(String.class), Map.class);
+    Assert.assertFalse((boolean) canCompleteSwapMap.get("successful"));
+
+    Response completeSwapIfPossibleOnNew = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=completeSwapIfPossible")
+        .format(CLUSTER_NAME, test_instance_name).post(this, entity);
+    Assert.assertEquals(completeSwapIfPossibleOnNew.getStatus(), Response.Status.OK.getStatusCode());
+    Map<String, Object> completeSwapIfPossibleMap =
+        OBJECT_MAPPER.readValue(completeSwapIfPossibleOnNew.readEntity(String.class), Map.class);
+    Assert.assertFalse((boolean) completeSwapIfPossibleMap.get("successful"));
+
     response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
         .format(CLUSTER_NAME, test_instance_name).post(this, entity);
     evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
