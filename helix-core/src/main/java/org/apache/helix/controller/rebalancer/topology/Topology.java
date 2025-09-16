@@ -338,9 +338,7 @@ public class Topology {
         buildNewNode(pathValue, path, current, instanceName, instanceWeight,
             liveInstances.contains(instanceName), pathNodes);
       } else if (path.equals(_clusterTopologyConfig.getEndNodeType())) {
-        throw new HelixException(
-            "Failed to add topology node because duplicate leaf nodes are not allowed. Duplicate node name: "
-                + pathValue);
+        throw new DuplicateTopologyNodeException(pathValue, instanceName);
       }
       current = current.getChild(pathValue);
     }

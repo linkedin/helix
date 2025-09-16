@@ -48,6 +48,7 @@ import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.controller.rebalancer.topology.DuplicateTopologyNodeException;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
@@ -240,6 +241,64 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         });
       });
     }
+  }
+
+  /**
+   * Preserves the current state assignments in the BestPossibleStateOutput when topology
+   * construction fails. This prevents all partitions from being dropped due to configuration issues.
+   *
+   * @param resourceName The name of the resource
+   * @param resource The resource object
+   * @param currentStateOutput The current state output
+   * @param output The best possible state output to populate
+   * @param cache The resource controller data provider
+   */
+  private void preserveCurrentStateInOutput(String resourceName, Resource resource,
+      CurrentStateOutput currentStateOutput, BestPossibleStateOutput output,
+      ResourceControllerDataProvider cache) {
+
+    // Copy current state to best possible state to prevent drops
+    for (Partition partition : resource.getPartitions()) {
+      Map<String, String> currentStateMap =
+          currentStateOutput.getCurrentStateMap(resourceName, partition);
+
+      if (currentStateMap != null && !currentStateMap.isEmpty()) {
+        for (Map.Entry<String, String> entry : currentStateMap.entrySet()) {
+          String instance = entry.getKey();
+          String state = entry.getValue();
+
+          // Only preserve non-error states
+          if (!HelixDefinedState.ERROR.toString().equals(state)) {
+            output.setState(resourceName, partition, instance, state);
+          }
+        }
+      }
+    }
+
+    // Try to preserve preference lists from ideal state if available
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState != null && idealState.getPreferenceLists() != null
+        && !idealState.getPreferenceLists().isEmpty()) {
+      output.setPreferenceLists(resourceName, idealState.getPreferenceLists());
+    } else {
+      // If no ideal state preference lists, create them from current state
+      Map<String, List<String>> preferenceLists = new HashMap<>();
+      for (Partition partition : resource.getPartitions()) {
+        Map<String, String> currentStateMap =
+            currentStateOutput.getCurrentStateMap(resourceName, partition);
+        if (currentStateMap != null && !currentStateMap.isEmpty()) {
+          preferenceLists.put(partition.getPartitionName(),
+              new ArrayList<>(currentStateMap.keySet()));
+        }
+      }
+      if (!preferenceLists.isEmpty()) {
+        output.setPreferenceLists(resourceName, preferenceLists);
+      }
+    }
+
+    LogUtil.logInfo(logger, _eventId, String.format(
+        "Preserved current state for resource %s with %d partitions to avoid drops due to topology error",
+        resourceName, resource.getPartitions().size()));
   }
 
   private void reportResourceState(ClusterStatusMonitor clusterStatusMonitor,
@@ -553,6 +612,16 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         }
 
         return true;
+      } catch (DuplicateTopologyNodeException e) {
+        // Handle duplicate topology nodes by preserving current state to avoid dropping partitions
+        LogUtil.logError(logger, _eventId, String.format(
+            "Topology construction failed for resource %s due to duplicate node '%s' for instance '%s'. " +
+            "Preserving current state to avoid partition drops.",
+            resourceName, e.getDuplicateNodeName(), e.getInstanceName()));
+
+        // Preserve current state instead of dropping all partitions
+        preserveCurrentStateInOutput(resourceName, resource, currentStateOutput, output, cache);
+        return true; // Return true to indicate we handled it gracefully
       } catch (HelixException e) {
         // No eligible instance is found.
         LogUtil.logError(logger, _eventId, e.getMessage());
