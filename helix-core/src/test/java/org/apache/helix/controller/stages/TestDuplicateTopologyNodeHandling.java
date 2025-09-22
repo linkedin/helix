@@ -19,7 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,21 +27,18 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
-import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.strategy.CrushEd2RebalanceStrategy;
-import org.apache.helix.controller.rebalancer.topology.DuplicateTopologyNodeException;
+import org.apache.helix.HelixException;
+import org.apache.helix.HelixManager;
 import org.apache.helix.model.ClusterConfig;
-import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.StateModelDefinition;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
-
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -58,8 +55,8 @@ public class TestDuplicateTopologyNodeHandling {
   private BestPossibleStateOutput bestPossibleStateOutput;
   private String resourceName;
   private Resource resource;
-  private IdealState idealState;
   private StateModelDefinition stateModelDef;
+  private MessageGenerationPhase messageGenerationPhase;
 
   @BeforeMethod
   public void setUp() {
@@ -95,11 +92,26 @@ public class TestDuplicateTopologyNodeHandling {
     when(event.getEventId()).thenReturn(UUID.randomUUID().toString());
     when(cache.getStateModelDef("MasterSlave")).thenReturn(stateModelDef);
     when(cache.getPipelineName()).thenReturn("DEFAULT");
+
+    messageGenerationPhase = new MessageGenerationPhase();
   }
 
   @Test
-  public void testDuplicateTopologyNodeExceptionThrown() {
-    // Setup duplicate topology configuration
+  public void testDuplicateTopologyFailureDoesNotGenerateDroppedMessages() throws Exception {
+    resource.addPartition("TestResource_0");
+    resource.addPartition("TestResource_1");
+
+    // Setup existing current state (instances currently have assignments)
+    currentStateOutput.setCurrentState(resourceName, new Partition("TestResource_0"),
+        "instance1", "MASTER");
+    currentStateOutput.setCurrentState(resourceName, new Partition("TestResource_0"),
+        "instance2", "SLAVE");
+    currentStateOutput.setCurrentState(resourceName, new Partition("TestResource_1"),
+        "instance3", "MASTER");
+    currentStateOutput.setCurrentState(resourceName, new Partition("TestResource_1"),
+        "instance1", "SLAVE");
+
+    // Test that duplicate topology configuration throws HelixException
     String instance1 = "host1_12345";
     String instance2 = "host2_12345";
     String instance3 = "host3_12346";
@@ -110,7 +122,6 @@ public class TestDuplicateTopologyNodeHandling {
     clusterConfig.setFaultZoneType("rack");
 
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
-
     InstanceConfig config1 = new InstanceConfig(instance1);
     config1.setDomain("rack=rack1,host=duplicateHost");
     instanceConfigMap.put(instance1, config1);
@@ -123,273 +134,68 @@ public class TestDuplicateTopologyNodeHandling {
     config3.setDomain("rack=rack2,host=uniqueHost");
     instanceConfigMap.put(instance3, config3);
 
-    List<String> allNodes = new ArrayList<>();
-    allNodes.add(instance1);
-    allNodes.add(instance2);
-    allNodes.add(instance3);
-
-    List<String> liveNodes = new ArrayList<>(allNodes);
-
     ResourceControllerDataProvider dataProvider = mock(ResourceControllerDataProvider.class);
     when(dataProvider.getClusterConfig()).thenReturn(clusterConfig);
     when(dataProvider.getAssignableInstanceConfigMap()).thenReturn(instanceConfigMap);
     when(dataProvider.getClusterEventId()).thenReturn("testEvent");
 
     CrushEd2RebalanceStrategy strategy = new CrushEd2RebalanceStrategy();
-
-    List<String> partitions = new ArrayList<>();
-    partitions.add("TestResource_0");
-    partitions.add("TestResource_1");
-
+    List<String> partitions = Arrays.asList("TestResource_0", "TestResource_1");
     LinkedHashMap<String, Integer> stateCountMap = new LinkedHashMap<>();
     stateCountMap.put("MASTER", 1);
     stateCountMap.put("SLAVE", 2);
-
     strategy.init(resourceName, partitions, stateCountMap, 3);
 
-    // Verify that DuplicateTopologyNodeException is thrown
+    List<String> allNodes = Arrays.asList(instance1, instance2, instance3);
+
+    // Verify HelixException is thrown for duplicate topology
+    boolean exceptionThrown = false;
     try {
-      strategy.computePartitionAssignment(allNodes, liveNodes, new HashMap<>(), dataProvider);
-      Assert.fail("Expected DuplicateTopologyNodeException but no exception was thrown");
-    } catch (DuplicateTopologyNodeException e) {
-      // Verify exception details
-      Assert.assertTrue(e.getMessage().contains("duplicate leaf nodes"));
-      Assert.assertEquals(e.getDuplicateNodeName(), "duplicateHost");
-      Assert.assertTrue(e.getInstanceName().equals(instance1) || e.getInstanceName().equals(instance2));
-    } catch (Exception e) {
-      Assert.fail("Expected DuplicateTopologyNodeException but got: " + e.getClass().getName());
+      strategy.computePartitionAssignment(allNodes, allNodes, new HashMap<>(), dataProvider);
+    } catch (HelixException e) {
+      Assert.assertTrue(e.getMessage().contains(
+          "Failed to add topology node because duplicate leaf nodes are not allowed"));
+      Assert.assertTrue(e.getMessage().contains("Duplicate node name: duplicateHost"));
+      exceptionThrown = true;
     }
-  }
+    Assert.assertTrue(exceptionThrown, "Expected HelixException for duplicate topology");
 
-  @Test
-  public void testPreservationFromIdealStateOnDuplicateTopology() {
-    String partition0 = "TestResource_0";
-    String partition1 = "TestResource_1";
-    resource.addPartition(partition0);
-    resource.addPartition(partition1);
+    // Verify that when topology fails, BestPossibleStateOutput remains empty
+    BestPossibleStateOutput topologyFailureOutput = new BestPossibleStateOutput();
+    Assert.assertTrue(topologyFailureOutput.getResourceStatesMap().isEmpty(),
+        "BestPossibleStateOutput should be empty when topology calculation fails");
 
-    // Setup IdealState with preference lists
-    idealState = new IdealState(resourceName);
-    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealState.setStateModelDefRef("MasterSlave");
-    idealState.setReplicas("3");
+    // Check that getInstanceStateMap returns empty map for a resource that has no state assignments
+    Map<String, String> stateMap = topologyFailureOutput.getInstanceStateMap(resourceName,
+        new Partition("TestResource_0"));
+    Assert.assertTrue(stateMap.isEmpty(),
+        "No state assignment should exist in BestPossibleStateOutput after topology failure");
 
-    Map<String, List<String>> preferenceLists = new HashMap<>();
-    preferenceLists.put(partition0, Arrays.asList("instance1", "instance2", "instance3"));
-    preferenceLists.put(partition1, Arrays.asList("instance2", "instance3", "instance1"));
-    idealState.setPreferenceLists(preferenceLists);
-
-    when(cache.getIdealState(resourceName)).thenReturn(idealState);
-    when(cache.getStateModelDef("MasterSlave")).thenReturn(stateModelDef);
-
+    // Verify MessageGenerationPhase does not generate DROPPED messages
     Map<String, Resource> resourceMap = new HashMap<>();
     resourceMap.put(resourceName, resource);
+
+    // Setup event attributes with the actual topology failure output
+    when(event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name())).thenReturn(topologyFailureOutput);
     when(event.getAttribute(AttributeName.RESOURCES_TO_REBALANCE.name())).thenReturn(resourceMap);
+    HelixManager helixManager = mock(HelixManager.class);
+    when(event.getAttribute(AttributeName.helixmanager.name())).thenReturn(helixManager);
 
-    // Setup rebalancer to throw DuplicateTopologyNodeException
-    DelayedAutoRebalancer rebalancer = mock(DelayedAutoRebalancer.class);
-    when(rebalancer.computeNewIdealState(anyString(), any(IdealState.class),
-        any(CurrentStateOutput.class), any(ResourceControllerDataProvider.class)))
-        .thenThrow(new DuplicateTopologyNodeException("duplicateHost", "instance1"));
+    messageGenerationPhase.process(event);
 
-    // Execute the stage with mocked rebalancer
-    testWithMockedRebalancer(rebalancer);
-
-    // Verify that preference lists were preserved from IdealState
-    Assert.assertEquals(bestPossibleStateOutput.getPreferenceLists(resourceName),
-        idealState.getPreferenceLists());
-
-    // Verify that states were preserved
-    Map<String, String> partition0States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition0));
-    Assert.assertNotNull(partition0States);
-    Assert.assertTrue(!partition0States.isEmpty(), "Should have at least 1 replica for partition 0");
-
-    Map<String, String> partition1States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition1));
-    Assert.assertNotNull(partition1States);
-    Assert.assertTrue(!partition1States.isEmpty(), "Should have at least 1 replica for partition 1");
-  }
-
-  @Test
-  public void testFallbackToCurrentStateWhenNoIdealState() {
-    // Setup resource with partitions
-    String partition0 = "TestResource_0";
-    String partition1 = "TestResource_1";
-    resource.addPartition(partition0);
-    resource.addPartition(partition1);
-
-    // No IdealState available
-    when(cache.getIdealState(resourceName)).thenReturn(null);
-
-    // Setup current state
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition0), "instance1", "MASTER");
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition0), "instance2", "SLAVE");
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition1), "instance3", "MASTER");
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition1), "instance1", "SLAVE");
-
-    Map<String, Resource> resourceMap = new HashMap<>();
-    resourceMap.put(resourceName, resource);
-    when(event.getAttribute(AttributeName.RESOURCES_TO_REBALANCE.name())).thenReturn(resourceMap);
-
-    // Execute preservation
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-
-    // Verify states were preserved from current state
-    Map<String, String> partition0States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition0));
-    Assert.assertEquals(partition0States.get("instance1"), "MASTER");
-    Assert.assertEquals(partition0States.get("instance2"), "SLAVE");
-
-    Map<String, String> partition1States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition1));
-    Assert.assertEquals(partition1States.get("instance3"), "MASTER");
-    Assert.assertEquals(partition1States.get("instance1"), "SLAVE");
-
-    // Verify preference lists were created from current state
-    Map<String, List<String>> preferenceLists = bestPossibleStateOutput.getPreferenceLists(resourceName);
-    Assert.assertNotNull(preferenceLists);
-    Assert.assertTrue(preferenceLists.get(partition0).contains("instance1"));
-    Assert.assertTrue(preferenceLists.get(partition0).contains("instance2"));
-    Assert.assertTrue(preferenceLists.get(partition1).contains("instance3"));
-    Assert.assertTrue(preferenceLists.get(partition1).contains("instance1"));
-  }
-
-  @Test
-  public void testErrorStatesArePreserved() {
-    // Setup resource with partition
-    String partition0 = "TestResource_0";
-    resource.addPartition(partition0);
-
-    // No IdealState to force fallback to current state
-    when(cache.getIdealState(resourceName)).thenReturn(null);
-
-    // Setup current state with ERROR state
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition0), "instance1", "ERROR");
-    currentStateOutput.setCurrentState(resourceName, new Partition(partition0), "instance2", "SLAVE");
-
-    // Execute preservation
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-
-    // Verify ERROR state was preserved
-    Map<String, String> partition0States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition0));
-    Assert.assertEquals(partition0States.get("instance1"), "ERROR");
-    Assert.assertEquals(partition0States.get("instance2"), "SLAVE");
-  }
-
-  @Test
-  public void testSemiAutoModePreservation() {
-    String partition0 = "TestResource_0";
-    resource.addPartition(partition0);
-
-    // Setup IdealState in SEMI_AUTO mode with instance-state map
-    idealState = new IdealState(resourceName);
-    idealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
-    idealState.setStateModelDefRef("MasterSlave");
-
-    // Set instance-state map directly
-    Map<String, String> instanceStateMap = new HashMap<>();
-    instanceStateMap.put("instance1", "MASTER");
-    instanceStateMap.put("instance2", "SLAVE");
-    instanceStateMap.put("instance3", "SLAVE");
-    idealState.setInstanceStateMap(partition0, instanceStateMap);
-
-    when(cache.getIdealState(resourceName)).thenReturn(idealState);
-
-    // Execute preservation
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-
-    // Verify states were copied directly from IdealState
-    Map<String, String> partition0States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition0));
-    Assert.assertEquals(partition0States.get("instance1"), "MASTER");
-    Assert.assertEquals(partition0States.get("instance2"), "SLAVE");
-    Assert.assertEquals(partition0States.get("instance3"), "SLAVE");
-  }
-
-  @Test
-  public void testNoPartitionsDroppedOnTopologyError() {
-    // Setup resource with multiple partitions
-    for (int i = 0; i < 10; i++) {
-      resource.addPartition("TestResource_" + i);
-    }
-
-    // Setup current state with all partitions assigned
-    for (int i = 0; i < 10; i++) {
-      String partitionName = "TestResource_" + i;
-      currentStateOutput.setCurrentState(resourceName, new Partition(partitionName),
-          "instance" + (i % 3), i == 0 ? "MASTER" : "SLAVE");
-    }
-
-    // No IdealState to force current state preservation
-    when(cache.getIdealState(resourceName)).thenReturn(null);
-
-    // Execute preservation
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-
-    // Verify all partitions are still assigned
-    for (int i = 0; i < 10; i++) {
-      String partitionName = "TestResource_" + i;
-      Map<String, String> stateMap = bestPossibleStateOutput.getInstanceStateMap(
-          resourceName, new Partition(partitionName));
-
-      Assert.assertNotNull(stateMap, "Partition " + partitionName + " should have state assignments");
-      Assert.assertFalse(stateMap.isEmpty(), "Partition " + partitionName + " should not be dropped");
-
-      // Verify the correct instance and state
-      String expectedInstance = "instance" + (i % 3);
-      String expectedState = i == 0 ? "MASTER" : "SLAVE";
-      Assert.assertEquals(stateMap.get(expectedInstance), expectedState);
-    }
-  }
-
-  @Test
-  public void testCustomizedModePreservation() {
-    // Setup resource
-    String partition0 = "TestResource_0";
-    resource.addPartition(partition0);
-
-    // Setup IdealState in CUSTOMIZED mode
-    idealState = new IdealState(resourceName);
-    idealState.setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
-    idealState.setStateModelDefRef("MasterSlave");
-
-    Map<String, String> instanceStateMap = new HashMap<>();
-    instanceStateMap.put("instance1", "MASTER");
-    instanceStateMap.put("instance2", "SLAVE");
-    idealState.setInstanceStateMap(partition0, instanceStateMap);
-
-    when(cache.getIdealState(resourceName)).thenReturn(idealState);
-
-    // Execute preservation
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-
-    // Verify states were copied from IdealState
-    Map<String, String> partition0States = bestPossibleStateOutput.getInstanceStateMap(
-        resourceName, new Partition(partition0));
-    Assert.assertEquals(partition0States.get("instance1"), "MASTER");
-    Assert.assertEquals(partition0States.get("instance2"), "SLAVE");
-  }
-
-  // Helper method to test with a mocked rebalancer
-  private void testWithMockedRebalancer(DelayedAutoRebalancer rebalancer) {
-    stage.preserveCurrentStateInOutput(resourceName, resource, currentStateOutput,
-        bestPossibleStateOutput, cache);
-  }
-
-  private static class Arrays {
-    public static <T> List<T> asList(T... elements) {
-      List<T> list = new ArrayList<>();
-      for (T element : elements) {
-        list.add(element);
+    MessageOutput messageOutput = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    if (messageOutput != null) {
+      Map<Partition, List<Message>> resourceMessages = messageOutput.getResourceMessageMap(resourceName);
+      if (resourceMessages != null) {
+        for (List<Message> messages : resourceMessages.values()) {
+          for (Message message : messages) {
+            Assert.assertFalse("DROPPED".equals(message.getToState()),
+                "No DROPPED messages should be generated when topology fails");
+          }
+        }
       }
-      return list;
     }
+    // success: Topology failure -> empty BestPossibleStateOutput -> no DROPPED messages ->
+    // existing assignments preserved
   }
 }

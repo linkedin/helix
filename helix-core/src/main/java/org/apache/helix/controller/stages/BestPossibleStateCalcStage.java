@@ -48,7 +48,6 @@ import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
-import org.apache.helix.controller.rebalancer.topology.DuplicateTopologyNodeException;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
@@ -241,118 +240,6 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         });
       });
     }
-  }
-
-  /**
-   * Preserves the state assignments in the BestPossibleStateOutput when topology
-   * construction fails. This prevents all partitions from being dropped due to configuration issues.
-   * Prioritizes IdealState if available, falls back to CurrentState otherwise.
-   *
-   * @param resourceName The name of the resource
-   * @param resource The resource object
-   * @param currentStateOutput The current state output
-   * @param output The best possible state output to populate
-   * @param cache The resource controller data provider
-   */
-  void preserveCurrentStateInOutput(String resourceName, Resource resource,
-      CurrentStateOutput currentStateOutput, BestPossibleStateOutput output,
-      ResourceControllerDataProvider cache) {
-
-    IdealState idealState = cache.getIdealState(resourceName);
-    boolean preservedFromIdealState = false;
-
-    // First, try to preserve from IdealState if it exists
-    if (idealState != null) {
-      // Copy preference lists if they exist
-      if (idealState.getPreferenceLists() != null && !idealState.getPreferenceLists().isEmpty()) {
-        output.setPreferenceLists(resourceName, idealState.getPreferenceLists());
-      }
-
-      // For FULL_AUTO mode with preference lists
-      if (idealState.getRebalanceMode() == IdealState.RebalanceMode.FULL_AUTO
-          && idealState.getPreferenceLists() != null
-          && !idealState.getPreferenceLists().isEmpty()) {
-
-        StateModelDefinition stateModelDef = cache.getStateModelDef(idealState.getStateModelDefRef());
-        if (stateModelDef != null) {
-          for (Partition partition : resource.getPartitions()) {
-            List<String> preferenceList = idealState.getPreferenceList(partition.getPartitionName());
-            if (preferenceList != null && !preferenceList.isEmpty()) {
-              Map<String, Integer> stateCountMap = stateModelDef.getStateCountMap(
-                  preferenceList.size(), idealState.getReplicaCount(preferenceList.size()));
-
-              int index = 0;
-              for (Map.Entry<String, Integer> stateEntry : stateCountMap.entrySet()) {
-                String state = stateEntry.getKey();
-                int count = stateEntry.getValue();
-
-                for (int i = 0; i < count && index < preferenceList.size(); i++, index++) {
-                  String instance = preferenceList.get(index);
-                  output.setState(resourceName, partition, instance, state);
-                }
-              }
-            }
-          }
-          preservedFromIdealState = true;
-        }
-      }
-      // For SEMI_AUTO or CUSTOMIZED modes - just copy the instance-state maps directly
-      else if ((idealState.getRebalanceMode() == IdealState.RebalanceMode.SEMI_AUTO
-          || idealState.getRebalanceMode() == IdealState.RebalanceMode.CUSTOMIZED)
-          && idealState.getRecord().getMapFields() != null
-          && !idealState.getRecord().getMapFields().isEmpty()) {
-
-        for (Partition partition : resource.getPartitions()) {
-          Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition.getPartitionName());
-          if (instanceStateMap != null && !instanceStateMap.isEmpty()) {
-            for (Map.Entry<String, String> entry : instanceStateMap.entrySet()) {
-              output.setState(resourceName, partition, entry.getKey(), entry.getValue());
-            }
-          }
-        }
-        preservedFromIdealState = true;
-      }
-    }
-
-    // Fall back to current state if ideal state preservation didn't work
-    if (!preservedFromIdealState) {
-      LogUtil.logInfo(logger, _eventId, String.format(
-          "Could not preserve from IdealState for resource %s, falling back to CurrentState",
-          resourceName));
-
-      for (Partition partition : resource.getPartitions()) {
-        Map<String, String> currentStateMap =
-            currentStateOutput.getCurrentStateMap(resourceName, partition);
-
-        if (currentStateMap != null && !currentStateMap.isEmpty()) {
-          for (Map.Entry<String, String> entry : currentStateMap.entrySet()) {
-            String instance = entry.getKey();
-            String state = entry.getValue();
-            // Copy all states including ERROR to preserve exact current state
-            output.setState(resourceName, partition, instance, state);
-          }
-        }
-      }
-
-      // Create preference lists from current state
-      Map<String, List<String>> preferenceLists = new HashMap<>();
-      for (Partition partition : resource.getPartitions()) {
-        Map<String, String> currentStateMap =
-            currentStateOutput.getCurrentStateMap(resourceName, partition);
-        if (currentStateMap != null && !currentStateMap.isEmpty()) {
-          preferenceLists.put(partition.getPartitionName(),
-              new ArrayList<>(currentStateMap.keySet()));
-        }
-      }
-      if (!preferenceLists.isEmpty()) {
-        output.setPreferenceLists(resourceName, preferenceLists);
-      }
-    }
-
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "Preserved state for resource %s with %d partitions to avoid drops due to topology error (from %s)",
-        resourceName, resource.getPartitions().size(),
-        preservedFromIdealState ? "IdealState" : "CurrentState"));
   }
 
   private void reportResourceState(ClusterStatusMonitor clusterStatusMonitor,
@@ -666,16 +553,6 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         }
 
         return true;
-      } catch (DuplicateTopologyNodeException e) {
-        // Handle duplicate topology nodes by preserving current state to avoid dropping partitions
-        LogUtil.logError(logger, _eventId, String.format(
-            "Topology construction failed for resource %s due to duplicate node '%s' for instance '%s'. " +
-            "Preserving current state to avoid partition drops.",
-            resourceName, e.getDuplicateNodeName(), e.getInstanceName()));
-
-        // Preserve current state instead of dropping all partitions
-        preserveCurrentStateInOutput(resourceName, resource, currentStateOutput, output, cache);
-        return true; // indicate we handled it gracefully
       } catch (HelixException e) {
         // No eligible instance is found.
         LogUtil.logError(logger, _eventId, e.getMessage());
