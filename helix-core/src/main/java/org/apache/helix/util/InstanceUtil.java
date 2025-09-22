@@ -108,7 +108,8 @@ public class InstanceUtil {
           ImmutableMap.of(InstanceConstants.InstanceOperation.UNKNOWN, ALWAYS_ALLOWED,
           InstanceConstants.InstanceOperation.ENABLE, ALL_MATCHES_ARE_UNKNOWN_OR_EVACUATE,
           InstanceConstants.InstanceOperation.DISABLE, ALL_MATCHES_ARE_UNKNOWN_OR_EVACUATE,
-          InstanceConstants.InstanceOperation.SWAP_IN, ANY_MATCH_ENABLE_OR_DISABLE));
+          InstanceConstants.InstanceOperation.SWAP_IN, ANY_MATCH_ENABLE_OR_DISABLE,
+              InstanceConstants.InstanceOperation.EVACUATE, ALWAYS_ALLOWED));
 
   /**
    * Validates if the transition from the current operation to the target operation is valid.
