@@ -85,10 +85,10 @@ public class WorkflowDispatcher extends AbstractTaskDispatcher {
       }
 
       if (freshConfig.getTargetState() != TargetState.DELETE) {
-        // This indicates the workflow was recreated or modified between cache refresh cycles
+        // This likely indicates a race condition where the workflow was recreated or modified
+        // between cache refresh cycles
         LOG.warn("Stale DELETE state detected in cache for workflow {}. " +
-                 "Fresh state from ZooKeeper: {}. Skipping deletion to prevent data loss. " +
-                 "This likely indicates a race condition where the workflow was recreated after cache refresh.",
+                 "Fresh state from ZooKeeper: {}. Skipping deletion to prevent data loss.",
                  workflow, freshConfig.getTargetState());
         // force cache refresh for next pipeline run to get the latest state
         _clusterDataCache.requireFullRefresh();
@@ -96,8 +96,8 @@ public class WorkflowDispatcher extends AbstractTaskDispatcher {
       }
 
       // DELETE state confirmed from fresh read - safe to proceed
-      LOG.debug("DELETE state confirmed for workflow {} from fresh ZooKeeper read. Proceeding with cleanup.",
-                workflow);
+      LOG.info("DELETE state confirmed for workflow {} from fresh ZooKeeper read. Proceeding with cleanup.",
+               workflow);
       updateInflightJobs(workflow, workflowCtx, currentStateOutput, bestPossibleOutput);
       cleanupWorkflow(workflow);
       return;
