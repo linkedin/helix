@@ -157,7 +157,7 @@ public class TestTopologyDuplicateNodePreservesAssignments extends ZkTestBase {
     // 6. Verify assignments are PRESERVED
     ExternalView currentEV = _accessor.getProperty(_accessor.keyBuilder().externalView(resourceName));
     Assert.assertNotNull(currentEV, "ExternalView should exist after topology failure");
-
+    Assert.assertFalse(verifier.verifyByPolling(10000, 10), "Cluster should not converge");
     int currentReplicaCount = countTotalReplicas(currentEV);
 
     // KEY ASSERTION: Replica count must remain EXACTLY the same
