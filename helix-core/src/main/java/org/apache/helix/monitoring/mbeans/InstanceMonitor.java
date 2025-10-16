@@ -52,7 +52,12 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     ALL_PARTITIONS_DISABLED_GAUGE("AllPartitionsDisabled"),
     MAX_CAPACITY_USAGE_GAUGE("MaxCapacityUsageGauge"),
     MESSAGE_QUEUE_SIZE_GAUGE("MessageQueueSizeGauge"),
-    PASTDUE_MESSAGE_GAUGE("PastDueMessageGauge");
+    PASTDUE_MESSAGE_GAUGE("PastDueMessageGauge"),
+    INSTANCE_OPERATION_DURATION_ENABLE_GAUGE("InstanceOperationDuration_ENABLE"),
+    INSTANCE_OPERATION_DURATION_DISABLE_GAUGE("InstanceOperationDuration_DISABLE"),
+    INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE("InstanceOperationDuration_EVACUATE"),
+    INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
+    INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN");
 
     private final String metricName;
 
@@ -83,6 +88,17 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _messageQueueSizeGauge;
   private SimpleDynamicMetric<Long> _pastDueMessageGauge;
 
+  // Instance Operation Duration Gauges (in milliseconds)
+  private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationDisableGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationEvacuateGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationSwapInGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationUnknownGauge;
+
+  // Track current operation and start time for duration calculation
+  private InstanceConstants.InstanceOperation _currentOperation;
+  private long _currentOperationStartTime;
+
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
 
@@ -97,6 +113,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
+    _currentOperation = InstanceConstants.InstanceOperation.ENABLE;
+    _currentOperationStartTime = System.currentTimeMillis();
 
     createMetrics();
   }
@@ -123,6 +141,18 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _pastDueMessageGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.PASTDUE_MESSAGE_GAUGE.metricName(),
             0L);
+
+    // Initialize instance operation duration gauges
+    _instanceOperationDurationEnableGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_ENABLE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationDisableGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_DISABLE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationEvacuateGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationSwapInGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE.metricName(), 0L);
+    _instanceOperationDurationUnknownGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE.metricName(), 0L);
   }
 
   private List<DynamicMetric<?, ?>> buildAttributeList() {
@@ -134,7 +164,12 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _onlineStatusGauge,
         _maxCapacityUsageGauge,
         _messageQueueSizeGauge,
-        _pastDueMessageGauge
+        _pastDueMessageGauge,
+        _instanceOperationDurationEnableGauge,
+        _instanceOperationDurationDisableGauge,
+        _instanceOperationDurationEvacuateGauge,
+        _instanceOperationDurationSwapInGauge,
+        _instanceOperationDurationUnknownGauge
     );
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
@@ -168,6 +203,46 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   protected long getMessageQueueSizeGauge() { return _messageQueueSizeGauge.getValue(); }
 
   protected long getPastDueMessageGauge() { return _pastDueMessageGauge.getValue(); }
+
+  /**
+   * Get the current duration in ENABLE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in ENABLE state
+   */
+  protected long getInstanceOperationDurationEnable() {
+    return _instanceOperationDurationEnableGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in DISABLE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in DISABLE state
+   */
+  protected long getInstanceOperationDurationDisable() {
+    return _instanceOperationDurationDisableGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in EVACUATE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in EVACUATE state
+   */
+  protected long getInstanceOperationDurationEvacuate() {
+    return _instanceOperationDurationEvacuateGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in SWAP_IN operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in SWAP_IN state
+   */
+  protected long getInstanceOperationDurationSwapIn() {
+    return _instanceOperationDurationSwapInGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in UNKNOWN operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in UNKNOWN state
+   */
+  protected long getInstanceOperationDurationUnknown() {
+    return _instanceOperationDurationUnknownGauge.getValue();
+  }
 
   /**
    * Get the name of the monitored instance
@@ -219,6 +294,57 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _enabledStatusGauge.updateValue(isEnabled ? 1L : 0L);
     _disabledPartitionsGauge.updateValue(numDisabledPartitions);
     _allPartitionsDisabledGauge.updateValue(allPartitionsDisabled ? 1L : 0L);
+  }
+
+  /**
+   * Update the instance operation and recalculate duration metrics.
+   * This method should be called whenever the instance operation changes or periodically
+   * to update the duration of the current operation.
+   *
+   * @param newOperation the current instance operation
+   */
+  public synchronized void updateInstanceOperation(InstanceConstants.InstanceOperation newOperation) {
+    if (newOperation == null) {
+      newOperation = InstanceConstants.InstanceOperation.ENABLE;
+    }
+
+    // Check if operation changed
+    if (_currentOperation != newOperation) {
+      // Operation changed - reset start time and set all duration gauges to 0
+      _currentOperation = newOperation;
+      _currentOperationStartTime = System.currentTimeMillis();
+
+      // Reset all duration gauges to 0
+      _instanceOperationDurationEnableGauge.updateValue(0L);
+      _instanceOperationDurationDisableGauge.updateValue(0L);
+      _instanceOperationDurationEvacuateGauge.updateValue(0L);
+      _instanceOperationDurationSwapInGauge.updateValue(0L);
+      _instanceOperationDurationUnknownGauge.updateValue(0L);
+    }
+
+    // Update the duration gauge for the current operation
+    long currentDuration = System.currentTimeMillis() - _currentOperationStartTime;
+    switch (_currentOperation) {
+      case ENABLE:
+        _instanceOperationDurationEnableGauge.updateValue(currentDuration);
+        break;
+      case DISABLE:
+        _instanceOperationDurationDisableGauge.updateValue(currentDuration);
+        break;
+      case EVACUATE:
+        _instanceOperationDurationEvacuateGauge.updateValue(currentDuration);
+        break;
+      case SWAP_IN:
+        _instanceOperationDurationSwapInGauge.updateValue(currentDuration);
+        break;
+      case UNKNOWN:
+        _instanceOperationDurationUnknownGauge.updateValue(currentDuration);
+        break;
+      default:
+        // Should not happen, but handle gracefully
+        _instanceOperationDurationUnknownGauge.updateValue(currentDuration);
+        break;
+    }
   }
 
   /**

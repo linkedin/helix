@@ -225,7 +225,8 @@ public class TestClusterStatusMonitor {
     }
 
     monitor.setClusterInstanceStatus(liveInstanceSet, liveInstanceSet, Collections.emptySet(),
-        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceMessageMap);
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceMessageMap,
+        null);
 
     Assert.assertEquals(monitor.getInstanceMessageQueueBacklog(), 25 * n);
     Assert.assertEquals(monitor.getTotalPastDueMessageGauge(), 15 * n);
@@ -445,7 +446,7 @@ public class TestClusterStatusMonitor {
     // Call setClusterInstanceStatus to register instance monitors.
     monitor.setClusterInstanceStatus(maxUsageMap.keySet(), maxUsageMap.keySet(),
         Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(),
-        Collections.emptyMap(), Collections.emptyMap());
+        Collections.emptyMap(), Collections.emptyMap(), null);
 
     // Update instance capacity status.
     for (Map.Entry<String, Double> usageEntry : maxUsageMap.entrySet()) {
