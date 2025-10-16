@@ -88,6 +88,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
 
+  // Cluster-level instance operation counts
+  private AtomicLong _instancesInOperationEnableCount = new AtomicLong(0L);
+  private AtomicLong _instancesInOperationDisableCount = new AtomicLong(0L);
+  private AtomicLong _instancesInOperationEvacuateCount = new AtomicLong(0L);
+  private AtomicLong _instancesInOperationSwapInCount = new AtomicLong(0L);
+  private AtomicLong _instancesInOperationUnknownCount = new AtomicLong(0L);
+
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, InstanceMonitor> _instanceMonitorMap =
@@ -192,6 +199,31 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     return _totalPastDueMsgSize.get();
   }
 
+  @Override
+  public long getInstancesInOperationEnableGauge() {
+    return _instancesInOperationEnableCount.get();
+  }
+
+  @Override
+  public long getInstancesInOperationDisableGauge() {
+    return _instancesInOperationDisableCount.get();
+  }
+
+  @Override
+  public long getInstancesInOperationEvacuateGauge() {
+    return _instancesInOperationEvacuateCount.get();
+  }
+
+  @Override
+  public long getInstancesInOperationSwapInGauge() {
+    return _instancesInOperationSwapInCount.get();
+  }
+
+  @Override
+  public long getInstancesInOperationUnknownGauge() {
+    return _instancesInOperationUnknownCount.get();
+  }
+
   private void register(Object bean, ObjectName name) {
     try {
       if (_beanServer.isRegistered(name)) {
@@ -228,11 +260,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param disabledPartitions a map of instance name to the set of partitions disabled on it
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
+   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation tracking)
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
       Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
-      Map<String, Set<Message>> instanceMessageMap) {
+      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -320,6 +353,52 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _maxInstanceMsgQueueSize.set(maxInstanceMsgQueueSize);
       _totalMsgQueueSize.set(totalMsgQueueSize);
       _totalPastDueMsgSize.set(totalPastDueMsgSize);
+
+      // Count instances by operation type (cluster-level metrics)
+      long enableCount = 0;
+      long disableCount = 0;
+      long evacuateCount = 0;
+      long swapInCount = 0;
+      long unknownCount = 0;
+
+      if (instanceConfigMap != null) {
+        for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
+          InstanceConfig config = entry.getValue();
+          if (config != null && config.getInstanceOperation() != null) {
+            switch (config.getInstanceOperation().getOperation()) {
+              case ENABLE:
+                enableCount++;
+                break;
+              case DISABLE:
+                disableCount++;
+                break;
+              case EVACUATE:
+                evacuateCount++;
+                break;
+              case SWAP_IN:
+                swapInCount++;
+                break;
+              case UNKNOWN:
+                unknownCount++;
+                break;
+              default:
+                // Default to ENABLE if operation is not recognized
+                enableCount++;
+                break;
+            }
+          } else {
+            // If no operation is set, default to ENABLE
+            enableCount++;
+          }
+        }
+      }
+
+      // Update cluster-level instance operation count gauges
+      _instancesInOperationEnableCount.set(enableCount);
+      _instancesInOperationDisableCount.set(disableCount);
+      _instancesInOperationEvacuateCount.set(evacuateCount);
+      _instancesInOperationSwapInCount.set(swapInCount);
+      _instancesInOperationUnknownCount.set(unknownCount);
     }
   }
 
