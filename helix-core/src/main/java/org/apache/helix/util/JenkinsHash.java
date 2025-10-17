@@ -104,7 +104,7 @@ public class JenkinsHash {
     long hash = xor(CRUSH_HASH_SEED, a);
     long b = a;
     long x = 1073741827L;
-    long y = 2147483659;
+    long y = 2147483659L;
     Triple val = hashMix(new Triple(b, x, hash));
     b = val.a; x = val.b; hash = val.c;
     val = hashMix(new Triple(y, a, hash));
