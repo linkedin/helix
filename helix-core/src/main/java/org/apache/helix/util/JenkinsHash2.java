@@ -22,7 +22,7 @@ package org.apache.helix.util;
 public class JenkinsHash2 {
   // max value to limit it to 4 bytes
   private static final long MAX_VALUE = 0xFFFFFFFFL;
-  private static final long CRUSH_HASH_SEED = 2147483659L;
+  private static final long CRUSH_HASH_SEED = 0L;
 
   /**
    * Convert a byte into a long value without making it negative.
@@ -103,8 +103,8 @@ public class JenkinsHash2 {
   public long hash(long a) {
     long hash = xor(CRUSH_HASH_SEED, a);
     long b = a;
-    long x = 1073741827L;
-    long y = 2147483659L;
+    long x = 0L;
+    long y = 0L;
     Triple val = hashMix(new Triple(b, x, hash));
     b = val.a; x = val.b; hash = val.c;
     val = hashMix(new Triple(y, a, hash));
@@ -114,8 +114,8 @@ public class JenkinsHash2 {
 
   public long hash(long a, long b) {
     long hash = xor(xor(CRUSH_HASH_SEED, a), b);
-    long x = 1073741833L;
-    long y = 2147483713L;
+    long x = 0L;
+    long y = 0L;
     Triple val = hashMix(new Triple(a, b, hash));
     a = val.a; b = val.b; hash = val.c;
     val = hashMix(new Triple(x, a, hash));
@@ -127,8 +127,8 @@ public class JenkinsHash2 {
 
   public long hash(long a, long b, long c) {
     long hash = xor(xor(xor(CRUSH_HASH_SEED, a), b), c);
-    long x = 231232L;
-    long y = 1232L;
+    long x = 0L;
+    long y = 0L;
     Triple val = hashMix(new Triple(a, b, hash));
     a = val.a; b = val.b; hash = val.c;
     val = hashMix(new Triple(c, x, hash));

@@ -1,6 +1,9 @@
 package org.apache.helix.util;
 
 import org.testng.annotations.Test;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Tests focused on finding JenkinsHash outputs where the lower 16 bits are 0.
@@ -9,9 +12,10 @@ import org.testng.annotations.Test;
 public class JenkinsHashLower16BitsTest {
     private static final JenkinsHash JENKINS_HASH = new JenkinsHash();
     private static final JenkinsHash2 JENKINS_HASH2 = new JenkinsHash2();
-    private static final long MAX_ATTEMPTS = 1_000_000_000;
+    private static final long MAX_ATTEMPTS = 10_000_000_000L;
     private static final int MAX_EXAMPLES = 500000;
     private static final long PROGRESS_REPORT_INTERVAL = 50_000_000;
+    private static final int NUM_THREADS = 8;
 
     @Test
     public void testFindHashesWithLower16BitsZero() {
@@ -19,8 +23,8 @@ public class JenkinsHashLower16BitsTest {
 
         // Test with different numbers of parameters
         for (int paramCount = 3; paramCount <= 3; paramCount++) { // for 1 param test for now
-            System.out.printf("\n=== Testing %d-parameter hashes ===%n", paramCount);
-            int found = findRandomHashesWithLower16BitsZero(paramCount);
+            System.out.printf("\n=== Testing %d-parameter hashes with %d threads ===%n", paramCount, NUM_THREADS);
+            int found = findRandomHashesWithLower16BitsZeroParallel(paramCount);
 
             // Instead of failing, just log if we didn't find any matches
             if (found == 0) {
@@ -36,50 +40,96 @@ public class JenkinsHashLower16BitsTest {
         }
     }
 
-    private int findRandomHashesWithLower16BitsZero(int paramCount) {
-        java.util.Random random = new java.util.Random();
-        int found = 0;
-        int found2 = 0;
+    private int findRandomHashesWithLower16BitsZeroParallel(int paramCount) {
+        ExecutorService executor = Executors.newFixedThreadPool(NUM_THREADS);
+        AtomicInteger foundOld = new AtomicInteger(0);
+        AtomicInteger foundNew = new AtomicInteger(0);
+        AtomicLong totalAttempts = new AtomicLong(0);
         long startTime = System.currentTimeMillis();
 
-        for (int attempt = 1; attempt <= MAX_ATTEMPTS && found < MAX_EXAMPLES; attempt++) {
-            long[] params = random.longs(paramCount).toArray();
-            long hash = computeHash(params);
-            long hash2 = computeHash2(params);
+        // Divide work among threads
+        long attemptsPerThread = MAX_ATTEMPTS / NUM_THREADS;
+        CountDownLatch latch = new CountDownLatch(NUM_THREADS);
 
-            if ((hash & 0xFFFF) == 0) {
-                found++;
-//                System.out.printf("Found1 %d: %s -> 0x%x%n",
-//                                found,
-//                                java.util.Arrays.toString(params),
-//                                hash);
+        // Progress reporting thread
+        ScheduledExecutorService progressReporter = Executors.newSingleThreadScheduledExecutor();
+        progressReporter.scheduleAtFixedRate(() -> {
+            long attempts = totalAttempts.get();
+            if (attempts > 0) {
+                System.out.printf("Progress: %,d attempts, old: %d, new: %d matches%n",
+                    attempts, foundOld.get(), foundNew.get());
             }
+        }, 10, 10, TimeUnit.SECONDS);
 
-            if ((hash2 & 0xFFFF) == 0) {
-                found2++;
-//                System.out.printf("Found2 %d: %s -> 0x%x%n",
-//                    found2,
-//                    java.util.Arrays.toString(params),
-//                    hash2);
-            }
+        for (int threadId = 0; threadId < NUM_THREADS; threadId++) {
+            final int tid = threadId;
+            executor.submit(() -> {
+                try {
+                    java.util.Random random = new java.util.Random(System.currentTimeMillis() + tid*1000);
+                    int localFoundOld = 0;
+                    int localFoundNew = 0;
 
+                    for (long attempt = 1; attempt <= attemptsPerThread &&
+                         foundOld.get() < MAX_EXAMPLES && foundNew.get() < MAX_EXAMPLES; attempt++) {
 
-            // Print progress every PROGRESS_REPORT_INTERVAL attempts
-            if (attempt % PROGRESS_REPORT_INTERVAL == 0) {
-                System.out.printf("Attempt %,d: old: %d, new: %d  matches %n",
-                                attempt, found, found2 , MAX_EXAMPLES);
-            }
+                        long[] params = random.longs(paramCount).toArray();
+                        long hash = computeHash(params);
+                        long hash2 = computeHash2(params);
+
+                        if ((hash & 0xFFFF) == 0) {
+                            localFoundOld++;
+                            foundOld.incrementAndGet();
+                        }
+
+                        if ((hash2 & 0xFFFF) == 0) {
+                            localFoundNew++;
+                            foundNew.incrementAndGet();
+                        }
+
+                        // Update total attempts periodically
+                        if (attempt % 1000000 == 0) {
+                            totalAttempts.addAndGet(1000000);
+                        }
+                    }
+
+                    // Add remaining attempts
+                    totalAttempts.addAndGet(attemptsPerThread % 1000000);
+
+                    System.out.printf("Thread %d completed: old=%d, new=%d%n",
+                        tid, localFoundOld, localFoundNew);
+
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            // Wait for all threads to complete
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("Test interrupted");
+        } finally {
+            executor.shutdown();
+            progressReporter.shutdown();
         }
 
         long duration = System.currentTimeMillis() - startTime;
-        System.out.printf("Completed %,d attempts in %d ms%n",
-                         Math.min(MAX_ATTEMPTS, (found < MAX_EXAMPLES) ? MAX_ATTEMPTS : (found * MAX_ATTEMPTS / MAX_EXAMPLES)),
-                         duration);
+        long actualAttempts = totalAttempts.get();
 
-        System.out.printf("a total of %d collisions found for older JenkinsHash \n"
-            + " and %d collision found for the prime based hash", found, found2);
+        System.out.printf("Completed %,d attempts in %d ms (%.2f attempts/sec)%n",
+                         actualAttempts, duration,
+                         actualAttempts * 1000.0 / duration);
 
-        return found;
+        System.out.printf("Total: %d collisions found for older JenkinsHash%n" +
+            "and %d collisions found for the modified hash%n",
+            foundOld.get(), foundNew.get());
+
+        System.out.printf("old vs new ratio: %.4f%n",
+            foundOld.get() == 0 ? 0.0 :
+                (double) foundNew.get() / (double) foundOld.get());
+        return foundOld.get();
     }
 
     private long computeHash(long... params) {
