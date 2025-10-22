@@ -54,7 +54,3 @@ class Straw2Selector implements Selector {
     return 0.0;
   }
 }
-
-// create a Node, such that it has a child whose id will provide a 0 hash also child with weight > 1
-//
-
