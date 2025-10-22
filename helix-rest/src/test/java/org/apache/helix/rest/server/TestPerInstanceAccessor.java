@@ -885,60 +885,70 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
   @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
   public void testValidateClusterTopologyOnUpdate() throws IOException {
-    System.out.println("Start test :" + TestHelper.getTestMethodName());
-    // Enable Topology aware for the cluster
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+
+    // Enable topology-aware for the cluster
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
     clusterConfig.setTopologyAwareEnabled(true);
     clusterConfig.setTopology("/zone/instance");
     clusterConfig.setFaultZoneType("zone");
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
 
-    // Set the swap out instance operation as EVACUATE and swapIn instance ENABLED
-    // Set domain for both instances having same applicationInstanceID
-    String swapOutInstance  = CLUSTER_NAME + "localhost_12918";
+    // Prepare swap-out and swap-in instances
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
     String swapInInstance = CLUSTER_NAME + "localhost_12919";
-    InstanceConfig swapOutInstanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
-    InstanceConfig swapInInstanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
-    String domainSwapOutInstance = String.format(
+
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+
+    String domain = String.format(
         "zone=%s,instance=%s,applicationInstanceId=%s,host=%s",
-        "zone_0", "Participant_O_1", "Participant_O_1", swapOutInstance
-    );;
-    swapInInstanceConfig.setDomain(domainSwapOutInstance);
-    swapOutInstanceConfig.setDomain(domainSwapOutInstance);
-    swapOutInstanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE);
-    swapInInstanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutInstanceConfig);
-    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInInstanceConfig);
-    // update one instance as swapIn and one as swap out
-    // enable the swap in instance
+        "zone_0", "Participant_O_1", "Participant_O_1", "%s"
+    );
+    swapOutConfig.setDomain(String.format(domain, swapOutInstance));
+    swapInConfig.setDomain(String.format(domain, swapInInstance));
+
+    swapOutConfig.setInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE);
+    swapInConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
 
     Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
 
-    // create the request for enabling ths swap out instance
+// Create the request for enabling the swap-out instance
     ZNRecord record = new ZNRecord(swapOutInstance);
-    record.getSimpleFields().put(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "true");
+    record.getSimpleFields().put(
+        InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "true"
+    );
 
-    Entity entity =
-        Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE);
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(record),
+        MediaType.APPLICATION_JSON_TYPE
+    );
+
     boolean updateRequestFails = false;
-    try{
-      new JerseyUriRequestBuilder(
-          "clusters/{}/instances/{}/configs?command=update")
-          .format(CLUSTER_NAME, swapOutInstance).post(this, entity);
+    try {
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+          .format(CLUSTER_NAME, swapOutInstance)
+          .post(this, entity);
     } catch (AssertionError e) {
       updateRequestFails = true;
       System.out.println("Caught expected AssertionError: " + e.getMessage());
     }
     Assert.assertTrue(updateRequestFails);
-    // disable the swapInInstance and check if the above request succeeds.
-    swapInInstanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
-    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInInstanceConfig);
-    new JerseyUriRequestBuilder(
-        "clusters/{}/instances/{}/configs?command=update")
-        .format(CLUSTER_NAME, swapOutInstance).post(this, entity);
+
+    // Mark the swap-in instance unknown and retry the update
+    swapInConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(CLUSTER_NAME, swapOutInstance)
+        .post(this, entity);
+
   }
 
-  @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
+  @Test(dependsOnMethods = "testValidateClusterTopologyOnUpdate")
   public void testGetResourcesOnInstance() throws JsonProcessingException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
