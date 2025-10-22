@@ -605,8 +605,12 @@ public class PerInstanceAccessor extends AbstractHelixResource {
            * Even if the instance is disabled, non-valid instance topology config will cause rebalance
            * failure. We are doing the check whenever user updates InstanceConfig.
            */
-          validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
+          boolean isvalid = validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
               instanceConfig, command);
+          if (!isvalid) {
+            return badRequest(String.format("Invalid topology setting for Instance : {}. Fail the config update",
+                instanceName));
+          }
           configAccessor.updateInstanceConfig(clusterId, instanceName, instanceConfig);
           break;
         case delete:
@@ -886,9 +890,19 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     } else {
       originalInstanceConfigCopy.getRecord().update(newInstanceConfig.getRecord());
     }
-
-    return originalInstanceConfigCopy
+    return validateCLusterTopology(configAccessor, clusterName, originalInstanceConfigCopy) &&
+        originalInstanceConfigCopy
         .validateTopologySettingInInstanceConfig(configAccessor.getClusterConfig(clusterName),
             instanceName);
+  }
+
+  private boolean validateCLusterTopology(ConfigAccessor configAccessor, String clusterName, InstanceConfig instanceConfig) {
+    List<InstanceConfig> matchingInstances = InstanceUtil.findInstancesWithMatchingLogicalId(configAccessor,
+        clusterName, instanceConfig);
+    return matchingInstances.isEmpty() || matchingInstances.stream().allMatch(instance ->
+        instance.getInstanceOperation().getOperation()
+            .equals(InstanceConstants.InstanceOperation.UNKNOWN)
+            || instance.getInstanceOperation().getOperation()
+            .equals(InstanceConstants.InstanceOperation.EVACUATE));
   }
 }
