@@ -24,6 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -102,6 +105,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
 
+  // Background executor for resetting gauges
+  private final ScheduledExecutorService _resetExecutor;
+
   /**
    * Initialize the bean
    * @param clusterName the cluster to monitor
@@ -115,6 +121,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
     _currentOperation = InstanceConstants.InstanceOperation.ENABLE;
     _currentOperationStartTime = System.currentTimeMillis();
+    _resetExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread thread = new Thread(r, "InstanceMonitor-ResetGauges-" + participantName);
+      thread.setDaemon(true);
+      return thread;
+    });
 
     createMetrics();
   }
@@ -326,14 +337,17 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Resets all operation duration gauges to 0.
+   * Resets all operation duration gauges except the current operation to 0.
+   * This method is typically called after a delay to ensure only the current
+   * operation shows a non-zero duration.
    */
-  private void resetAllOperationDurationGauges() {
-    _instanceOperationDurationEnableGauge.updateValue(0L);
-    _instanceOperationDurationDisableGauge.updateValue(0L);
-    _instanceOperationDurationEvacuateGauge.updateValue(0L);
-    _instanceOperationDurationSwapInGauge.updateValue(0L);
-    _instanceOperationDurationUnknownGauge.updateValue(0L);
+  private void resetAllExceptCurrentOperation() {
+    // Reset all gauges except the one for the current operation
+    for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
+      if (operation != _currentOperation) {
+        updateOperationDurationGauge(operation, 0L);
+      }
+    }
   }
 
   /**
@@ -357,17 +371,18 @@ public class InstanceMonitor extends DynamicMBeanProvider {
       // Now switch to the new operation
       _currentOperation = newOperation;
       _currentOperationStartTime = System.currentTimeMillis();
-
-      // Reset all duration gauges to 0 (only the new operation will be non-zero)
-      resetAllOperationDurationGauges();
-
-      // Early return since we've changed operation - the new operation starts at 0
-      return;
     }
 
     // Update the duration gauge for the current operation
     long currentDuration = System.currentTimeMillis() - _currentOperationStartTime;
     updateOperationDurationGauge(_currentOperation, currentDuration);
+
+    // Schedule a background task to reset all gauges except the current one after 2 minutes
+    _resetExecutor.schedule(() -> {
+      synchronized (InstanceMonitor.this) {
+        resetAllExceptCurrentOperation();
+      }
+    }, 2, TimeUnit.MINUTES);
   }
 
   /**

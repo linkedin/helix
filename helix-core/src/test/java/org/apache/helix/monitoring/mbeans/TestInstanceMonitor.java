@@ -110,8 +110,13 @@ public class TestInstanceMonitor {
     Assert.assertTrue(evacuateDuration >= 100L,
         "EVACUATE duration should be >= 100ms, but was " + evacuateDuration);
 
+    // The previous operation (ENABLE) should still show its final duration
+    // until the background thread resets it after 2 minutes
+    // So we just verify it's >= 0 (it will have some duration from before the switch)
+    Assert.assertTrue(monitor.getInstanceOperationDurationEnable() >= 0L,
+        "ENABLE duration should retain its final value until background reset");
+
     // All other operations should be 0
-    Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L);
     Assert.assertEquals(monitor.getInstanceOperationDurationDisable(), 0L);
     Assert.assertEquals(monitor.getInstanceOperationDurationSwapIn(), 0L);
     Assert.assertEquals(monitor.getInstanceOperationDurationUnknown(), 0L);
@@ -130,9 +135,11 @@ public class TestInstanceMonitor {
     // Change to DISABLE operation
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.DISABLE);
 
-    // EVACUATE should now be 0, DISABLE should start counting
-    Assert.assertEquals(monitor.getInstanceOperationDurationEvacuate(), 0L,
-        "EVACUATE duration should be 0 after switching to DISABLE");
+    // EVACUATE should retain its final duration (until background reset after 2 mins)
+    // DISABLE should start counting from 0
+    long finalEvacuateDuration = monitor.getInstanceOperationDurationEvacuate();
+    Assert.assertTrue(finalEvacuateDuration > 0L,
+        "EVACUATE duration should retain its final value after switching to DISABLE");
     Assert.assertEquals(monitor.getInstanceOperationDurationDisable(), 0L,
         "DISABLE duration should start at 0");
 
@@ -142,7 +149,9 @@ public class TestInstanceMonitor {
     long disableDuration = monitor.getInstanceOperationDurationDisable();
     Assert.assertTrue(disableDuration >= 100L,
         "DISABLE duration should be >= 100ms, but was " + disableDuration);
-    Assert.assertEquals(monitor.getInstanceOperationDurationEvacuate(), 0L);
+    // EVACUATE retains its final duration
+    Assert.assertTrue(monitor.getInstanceOperationDurationEvacuate() > 0L,
+        "EVACUATE should still show its final duration");
 
     // Test SWAP_IN operation
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN);
@@ -152,8 +161,11 @@ public class TestInstanceMonitor {
     long swapInDuration = monitor.getInstanceOperationDurationSwapIn();
     Assert.assertTrue(swapInDuration >= 50L,
         "SWAP_IN duration should be >= 50ms, but was " + swapInDuration);
-    Assert.assertEquals(monitor.getInstanceOperationDurationDisable(), 0L);
-    Assert.assertEquals(monitor.getInstanceOperationDurationEvacuate(), 0L);
+    // Previous operations retain their final durations
+    Assert.assertTrue(monitor.getInstanceOperationDurationDisable() > 0L,
+        "DISABLE should still show its final duration");
+    Assert.assertTrue(monitor.getInstanceOperationDurationEvacuate() > 0L,
+        "EVACUATE should still show its final duration");
 
     // Test UNKNOWN operation
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
@@ -163,17 +175,24 @@ public class TestInstanceMonitor {
     long unknownDuration = monitor.getInstanceOperationDurationUnknown();
     Assert.assertTrue(unknownDuration >= 50L,
         "UNKNOWN duration should be >= 50ms, but was " + unknownDuration);
-    Assert.assertEquals(monitor.getInstanceOperationDurationSwapIn(), 0L);
+    // SWAP_IN retains its final duration
+    Assert.assertTrue(monitor.getInstanceOperationDurationSwapIn() > 0L,
+        "SWAP_IN should still show its final duration");
 
-    // Test going back to ENABLE - all should be 0
+    // Test going back to ENABLE - previous operations retain their final values
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
     Thread.sleep(50);
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
 
-    Assert.assertEquals(monitor.getInstanceOperationDurationDisable(), 0L);
-    Assert.assertEquals(monitor.getInstanceOperationDurationEvacuate(), 0L);
-    Assert.assertEquals(monitor.getInstanceOperationDurationSwapIn(), 0L);
-    Assert.assertEquals(monitor.getInstanceOperationDurationUnknown(), 0L);
+    // Previous operations retain their final durations until background reset
+    Assert.assertTrue(monitor.getInstanceOperationDurationDisable() > 0L,
+        "DISABLE should retain its final duration");
+    Assert.assertTrue(monitor.getInstanceOperationDurationEvacuate() > 0L,
+        "EVACUATE should retain its final duration");
+    Assert.assertTrue(monitor.getInstanceOperationDurationSwapIn() > 0L,
+        "SWAP_IN should retain its final duration");
+    Assert.assertTrue(monitor.getInstanceOperationDurationUnknown() > 0L,
+        "UNKNOWN should retain its final duration");
 
     // ENABLE duration should be > 0
     long enableDuration = monitor.getInstanceOperationDurationEnable();
@@ -244,8 +263,9 @@ public class TestInstanceMonitor {
     long evacuateDuration = monitor.getInstanceOperationDurationEvacuate();
     Assert.assertTrue(evacuateDuration >= 150L,
         "EVACUATE duration should be >= 150ms, but was " + evacuateDuration);
-    Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L,
-        "ENABLE should be 0 when in EVACUATE");
+    // ENABLE retains its final duration from before the switch
+    Assert.assertTrue(monitor.getInstanceOperationDurationEnable() >= 0L,
+        "ENABLE should retain its final duration when switching to EVACUATE");
 
     // ===== Test 2: Create new InstanceConfig for DISABLE operation =====
     // Creating a fresh instance to avoid backwards compatibility issues
