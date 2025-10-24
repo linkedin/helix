@@ -297,6 +297,46 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
+   * Updates the duration gauge for a specific operation.
+   * @param operation the operation to update
+   * @param duration the duration value to set
+   */
+  private void updateOperationDurationGauge(InstanceConstants.InstanceOperation operation, long duration) {
+    switch (operation) {
+      case ENABLE:
+        _instanceOperationDurationEnableGauge.updateValue(duration);
+        break;
+      case DISABLE:
+        _instanceOperationDurationDisableGauge.updateValue(duration);
+        break;
+      case EVACUATE:
+        _instanceOperationDurationEvacuateGauge.updateValue(duration);
+        break;
+      case SWAP_IN:
+        _instanceOperationDurationSwapInGauge.updateValue(duration);
+        break;
+      case UNKNOWN:
+        _instanceOperationDurationUnknownGauge.updateValue(duration);
+        break;
+      default:
+        // Should not happen, but handle gracefully
+        _instanceOperationDurationUnknownGauge.updateValue(duration);
+        break;
+    }
+  }
+
+  /**
+   * Resets all operation duration gauges to 0.
+   */
+  private void resetAllOperationDurationGauges() {
+    _instanceOperationDurationEnableGauge.updateValue(0L);
+    _instanceOperationDurationDisableGauge.updateValue(0L);
+    _instanceOperationDurationEvacuateGauge.updateValue(0L);
+    _instanceOperationDurationSwapInGauge.updateValue(0L);
+    _instanceOperationDurationUnknownGauge.updateValue(0L);
+  }
+
+  /**
    * Update the instance operation and recalculate duration metrics.
    * This method should be called whenever the instance operation changes or periodically
    * to update the duration of the current operation.
@@ -310,41 +350,24 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
     // Check if operation changed
     if (_currentOperation != newOperation) {
-      // Operation changed - reset start time and set all duration gauges to 0
+      // Capture the final duration of the previous operation before switching
+      long finalDuration = System.currentTimeMillis() - _currentOperationStartTime;
+      updateOperationDurationGauge(_currentOperation, finalDuration);
+
+      // Now switch to the new operation
       _currentOperation = newOperation;
       _currentOperationStartTime = System.currentTimeMillis();
 
-      // Reset all duration gauges to 0
-      _instanceOperationDurationEnableGauge.updateValue(0L);
-      _instanceOperationDurationDisableGauge.updateValue(0L);
-      _instanceOperationDurationEvacuateGauge.updateValue(0L);
-      _instanceOperationDurationSwapInGauge.updateValue(0L);
-      _instanceOperationDurationUnknownGauge.updateValue(0L);
+      // Reset all duration gauges to 0 (only the new operation will be non-zero)
+      resetAllOperationDurationGauges();
+
+      // Early return since we've changed operation - the new operation starts at 0
+      return;
     }
 
     // Update the duration gauge for the current operation
     long currentDuration = System.currentTimeMillis() - _currentOperationStartTime;
-    switch (_currentOperation) {
-      case ENABLE:
-        _instanceOperationDurationEnableGauge.updateValue(currentDuration);
-        break;
-      case DISABLE:
-        _instanceOperationDurationDisableGauge.updateValue(currentDuration);
-        break;
-      case EVACUATE:
-        _instanceOperationDurationEvacuateGauge.updateValue(currentDuration);
-        break;
-      case SWAP_IN:
-        _instanceOperationDurationSwapInGauge.updateValue(currentDuration);
-        break;
-      case UNKNOWN:
-        _instanceOperationDurationUnknownGauge.updateValue(currentDuration);
-        break;
-      default:
-        // Should not happen, but handle gracefully
-        _instanceOperationDurationUnknownGauge.updateValue(currentDuration);
-        break;
-    }
+    updateOperationDurationGauge(_currentOperation, currentDuration);
   }
 
   /**

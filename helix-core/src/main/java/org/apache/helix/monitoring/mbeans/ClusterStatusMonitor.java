@@ -228,13 +228,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param disabledPartitions a map of instance name to the set of partitions disabled on it
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
-   * @param instanceOperations a map of instance name to current instance operation
+   * @param instanceConfigMap a map of instance name to InstanceConfig
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
       Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
       Map<String, Set<Message>> instanceMessageMap,
-      Map<String, InstanceConfig> instanceOperations) {
+      Map<String, InstanceConfig> instanceConfigMap) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -288,8 +288,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
               !disabledInstanceSet.contains(instanceName));
 
           // Update instance operation duration metrics
-          if (instanceOperations != null && instanceOperations.containsKey(instanceName)) {
-            bean.updateInstanceOperation(instanceOperations.get(instanceName).getInstanceOperation().getOperation());
+          if (instanceConfigMap != null && instanceConfigMap.containsKey(instanceName)) {
+            bean.updateInstanceOperation(instanceConfigMap.get(instanceName).getInstanceOperation().getOperation());
           }
 
           // calculate and update instance level message related gauges
