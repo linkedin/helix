@@ -38,6 +38,7 @@ import javax.management.ObjectName;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.model.ExternalView;
@@ -89,11 +90,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
 
   // Cluster-level instance operation counts
-  private AtomicLong _instancesInOperationEnableCount = new AtomicLong(0L);
-  private AtomicLong _instancesInOperationDisableCount = new AtomicLong(0L);
-  private AtomicLong _instancesInOperationEvacuateCount = new AtomicLong(0L);
-  private AtomicLong _instancesInOperationSwapInCount = new AtomicLong(0L);
-  private AtomicLong _instancesInOperationUnknownCount = new AtomicLong(0L);
+  private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
+      new ConcurrentHashMap<>();
 
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
@@ -119,6 +117,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   public ClusterStatusMonitor(String clusterName) {
     _clusterName = clusterName;
     _beanServer = ManagementFactory.getPlatformMBeanServer();
+
+    // Initialize the map with all operation types
+    for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
+      _perOperationInstanceCount.put(operation, new AtomicLong(0L));
+    }
   }
 
   public ObjectName getObjectName(String name) throws MalformedObjectNameException {
@@ -201,27 +204,32 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
   @Override
   public long getInstancesInOperationEnableGauge() {
-    return _instancesInOperationEnableCount.get();
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.ENABLE, new AtomicLong(0L)).get();
   }
 
   @Override
   public long getInstancesInOperationDisableGauge() {
-    return _instancesInOperationDisableCount.get();
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.DISABLE, new AtomicLong(0L)).get();
   }
 
   @Override
   public long getInstancesInOperationEvacuateGauge() {
-    return _instancesInOperationEvacuateCount.get();
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.EVACUATE, new AtomicLong(0L)).get();
   }
 
   @Override
   public long getInstancesInOperationSwapInGauge() {
-    return _instancesInOperationSwapInCount.get();
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.SWAP_IN, new AtomicLong(0L)).get();
   }
 
   @Override
   public long getInstancesInOperationUnknownGauge() {
-    return _instancesInOperationUnknownCount.get();
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.UNKNOWN, new AtomicLong(0L)).get();
   }
 
   private void register(Object bean, ObjectName name) {
@@ -354,51 +362,34 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _totalMsgQueueSize.set(totalMsgQueueSize);
       _totalPastDueMsgSize.set(totalPastDueMsgSize);
 
-      // Count instances by operation type (cluster-level metrics)
-      long enableCount = 0;
-      long disableCount = 0;
-      long evacuateCount = 0;
-      long swapInCount = 0;
-      long unknownCount = 0;
+      // Count instances by operation type (cluster-level metrics) using map
+      // First reset all counts to 0
+      for (AtomicLong count : _perOperationInstanceCount.values()) {
+        count.set(0L);
+      }
 
       if (instanceConfigMap != null) {
         for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
           InstanceConfig config = entry.getValue();
+          InstanceConstants.InstanceOperation operation;
+
           if (config != null && config.getInstanceOperation() != null) {
-            switch (config.getInstanceOperation().getOperation()) {
-              case ENABLE:
-                enableCount++;
-                break;
-              case DISABLE:
-                disableCount++;
-                break;
-              case EVACUATE:
-                evacuateCount++;
-                break;
-              case SWAP_IN:
-                swapInCount++;
-                break;
-              case UNKNOWN:
-                unknownCount++;
-                break;
-              default:
-                // Default to ENABLE if operation is not recognized
-                enableCount++;
-                break;
-            }
+            operation = config.getInstanceOperation().getOperation();
           } else {
             // If no operation is set, default to ENABLE
-            enableCount++;
+            operation = InstanceConstants.InstanceOperation.ENABLE;
+          }
+
+          // Increment the count for this operation
+          AtomicLong count = _perOperationInstanceCount.get(operation);
+          if (count != null) {
+            count.incrementAndGet();
+          } else {
+            // If operation is not in the map (shouldn't happen), default to ENABLE
+            _perOperationInstanceCount.get(InstanceConstants.InstanceOperation.ENABLE).incrementAndGet();
           }
         }
       }
-
-      // Update cluster-level instance operation count gauges
-      _instancesInOperationEnableCount.set(enableCount);
-      _instancesInOperationDisableCount.set(disableCount);
-      _instancesInOperationEvacuateCount.set(evacuateCount);
-      _instancesInOperationSwapInCount.set(swapInCount);
-      _instancesInOperationUnknownCount.set(unknownCount);
     }
   }
 
