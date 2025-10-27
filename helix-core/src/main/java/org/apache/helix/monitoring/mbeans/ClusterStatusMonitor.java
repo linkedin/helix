@@ -371,13 +371,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       if (instanceConfigMap != null) {
         for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
           InstanceConfig config = entry.getValue();
-          InstanceConstants.InstanceOperation operation;
+          InstanceConstants.InstanceOperation operation = InstanceConstants.InstanceOperation.ENABLE;
 
           if (config != null && config.getInstanceOperation() != null) {
             operation = config.getInstanceOperation().getOperation();
-          } else {
-            // If no operation is set, default to ENABLE
-            operation = InstanceConstants.InstanceOperation.ENABLE;
           }
 
           // Increment the count for this operation
