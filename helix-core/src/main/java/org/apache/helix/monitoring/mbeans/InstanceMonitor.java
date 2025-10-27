@@ -120,7 +120,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
     _currentOperation = InstanceConstants.InstanceOperation.ENABLE;
-    _currentOperationStartTime = System.currentTimeMillis();
+    // Initialize to 0 so that if we haven't received operation info yet, duration will be large
+    // and will be corrected when we receive the actual operation start time from InstanceConfig
+    _currentOperationStartTime = 0L;
     _resetExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
       Thread thread = new Thread(r, "InstanceMonitor-ResetGauges-" + participantName);
       thread.setDaemon(true);
@@ -358,25 +360,41 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * to update the duration of the current operation.
    *
    * @param newOperation the current instance operation
+   * @param operationStartTime the timestamp (in milliseconds since epoch) when the operation started.
+   *                          This should come from InstanceConfig.InstanceOperation.getTimestamp()
+   *                          to survive controller restarts. Use -1 if timestamp is unknown
+   *                          (for backward compatibility with legacy HELIX_ENABLED field).
    */
-  public synchronized void updateInstanceOperation(InstanceConstants.InstanceOperation newOperation) {
+  public synchronized void updateInstanceOperation(InstanceConstants.InstanceOperation newOperation,
+      long operationStartTime) {
     if (newOperation == null) {
       newOperation = InstanceConstants.InstanceOperation.ENABLE;
     }
 
+    // Handle backward compatibility: if timestamp is -1 (unknown), use current time
+    // This happens when InstanceOperation is not set and we're using legacy HELIX_ENABLED field
+    // We capture current time ONCE to ensure consistency across calculations
+    long currentTime = System.currentTimeMillis();
+    if (operationStartTime == -1L) {
+      operationStartTime = currentTime;
+    }
+
     // Check if operation changed
     if (_currentOperation != newOperation) {
-      // Capture the final duration of the previous operation before switching
-      long finalDuration = System.currentTimeMillis() - _currentOperationStartTime;
-      updateOperationDurationGauge(_currentOperation, finalDuration);
+      // Only update final duration if we had a valid start time
+      // On first call after controller restart, _currentOperationStartTime may be 0
+      if (_currentOperationStartTime > 0L) {
+        long finalDuration = currentTime - _currentOperationStartTime;
+        updateOperationDurationGauge(_currentOperation, finalDuration);
+      }
 
       // Now switch to the new operation
       _currentOperation = newOperation;
-      _currentOperationStartTime = System.currentTimeMillis();
+      _currentOperationStartTime = operationStartTime;
     }
 
     // Update the duration gauge for the current operation
-    long currentDuration = System.currentTimeMillis() - _currentOperationStartTime;
+    long currentDuration = currentTime - _currentOperationStartTime;
     updateOperationDurationGauge(_currentOperation, currentDuration);
 
     // Capture the current operation at scheduling time to avoid race conditions

@@ -289,7 +289,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
           // Update instance operation duration metrics
           if (instanceConfigMap != null && instanceConfigMap.containsKey(instanceName)) {
-            bean.updateInstanceOperation(instanceConfigMap.get(instanceName).getInstanceOperation().getOperation());
+            InstanceConfig.InstanceOperation instanceOperation =
+                instanceConfigMap.get(instanceName).getInstanceOperation();
+            bean.updateInstanceOperation(instanceOperation.getOperation(),
+                instanceOperation.getTimestamp());
           }
 
           // calculate and update instance level message related gauges
