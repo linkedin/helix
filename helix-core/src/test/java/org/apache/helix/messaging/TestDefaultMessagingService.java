@@ -60,6 +60,15 @@ public class TestDefaultMessagingService {
         PropertyType type = key.getType();
         if (type == PropertyType.EXTERNALVIEW || type == PropertyType.IDEALSTATES) {
           return (T) new ExternalView(_externalView);
+        } else if (type == PropertyType.LIVEINSTANCES) {
+          // Support querying for a specific live instance
+          String path = key.getPath();
+          String instanceName = path.substring(path.lastIndexOf('/') + 1);
+          for (ZNRecord record : _liveInstances) {
+            if (record.getId().equals(instanceName)) {
+              return (T) HelixProperty.convertToTypedInstance(key.getTypeClass(), record);
+            }
+          }
         }
         return null;
       }
