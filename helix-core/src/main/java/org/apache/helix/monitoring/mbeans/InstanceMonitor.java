@@ -337,14 +337,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Resets all operation duration gauges except the current operation to 0.
-   * This method is typically called after a delay to ensure only the current
-   * operation shows a non-zero duration.
+   * Resets all operation duration gauges except the specified operations to 0.
+   * This method is typically called after a delay to ensure only the specified
+   * operations show a non-zero duration.
+   *
+   * @param operationsToExclude the set of operations to exclude from reset
    */
-  private void resetAllExceptCurrentOperation() {
-    // Reset all gauges except the one for the current operation
+  private void resetAllExceptOperations(Set<InstanceConstants.InstanceOperation> operationsToExclude) {
+    // Reset all gauges except the ones for the excluded operations
     for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
-      if (operation != _currentOperation) {
+      if (!operationsToExclude.contains(operation)) {
         updateOperationDurationGauge(operation, 0L);
       }
     }
@@ -377,10 +379,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     long currentDuration = System.currentTimeMillis() - _currentOperationStartTime;
     updateOperationDurationGauge(_currentOperation, currentDuration);
 
-    // Schedule a background task to reset all gauges except the current one after 2 minutes
+    // Capture the current operation at scheduling time to avoid race conditions
+    // If we transition from ENABLE -> EVACUATE -> ENABLE within 2 minutes,
+    // we want to reset based on what the operation was when we scheduled the task,
+    // not what it becomes later.
+    final InstanceConstants.InstanceOperation operationToExclude = _currentOperation;
+
+    // Schedule a background task to reset all gauges except the captured operation after 2 minutes
     _resetExecutor.schedule(() -> {
       synchronized (InstanceMonitor.this) {
-        resetAllExceptCurrentOperation();
+        resetAllExceptOperations(Collections.singleton(operationToExclude));
       }
     }, 2, TimeUnit.MINUTES);
   }
