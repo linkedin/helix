@@ -55,6 +55,56 @@ public class InstanceValidationUtil {
   public static Set<String> UNHEALTHY_STATES =
       ImmutableSet.of(HelixDefinedState.DROPPED.name(), HelixDefinedState.ERROR.name());
 
+  /**
+   * Result class for min active replica check with details about the first failure
+   */
+  public static class MinActiveReplicaCheckResult {
+    private final boolean passed;
+    private final String resourceName;
+    private final String partitionName;
+    private final int currentActiveReplicas;
+    private final int requiredMinActiveReplicas;
+
+    private MinActiveReplicaCheckResult(boolean passed, String resourceName, String partitionName,
+        int currentActiveReplicas, int requiredMinActiveReplicas) {
+      this.passed = passed;
+      this.resourceName = resourceName;
+      this.partitionName = partitionName;
+      this.currentActiveReplicas = currentActiveReplicas;
+      this.requiredMinActiveReplicas = requiredMinActiveReplicas;
+    }
+
+    public static MinActiveReplicaCheckResult passed() {
+      return new MinActiveReplicaCheckResult(true, null, null, -1, -1);
+    }
+
+    public static MinActiveReplicaCheckResult failed(String resourceName, String partitionName,
+        int currentActiveReplicas, int requiredMinActiveReplicas) {
+      return new MinActiveReplicaCheckResult(false, resourceName, partitionName,
+          currentActiveReplicas, requiredMinActiveReplicas);
+    }
+
+    public boolean isPassed() {
+      return passed;
+    }
+
+    public String getResourceName() {
+      return resourceName;
+    }
+
+    public String getPartitionName() {
+      return partitionName;
+    }
+
+    public int getCurrentActiveReplicas() {
+      return currentActiveReplicas;
+    }
+
+    public int getRequiredMinActiveReplicas() {
+      return requiredMinActiveReplicas;
+    }
+  }
+
   static final String UNHEALTHY_PARTITION = "UNHEALTHY_PARTITION";
   static final String HOST_NO_STATE_ERROR = "HOST_NO_STATE_ERROR:";
   // The message that will be shown if partition is in initial state of the state model and
@@ -396,7 +446,7 @@ public class InstanceValidationUtil {
    */
   public static boolean siblingNodesActiveReplicaCheck(HelixDataAccessor dataAccessor,
       String instanceName) {
-    return siblingNodesActiveReplicaCheck(dataAccessor, instanceName, Collections.emptySet());
+    return siblingNodesActiveReplicaCheckWithDetails(dataAccessor, instanceName, Collections.emptySet()).isPassed();
   }
 
   /**
@@ -416,6 +466,29 @@ public class InstanceValidationUtil {
    */
   public static boolean siblingNodesActiveReplicaCheck(HelixDataAccessor dataAccessor,
       String instanceName, Set<String> toBeStoppedInstances) {
+    return siblingNodesActiveReplicaCheckWithDetails(dataAccessor, instanceName, toBeStoppedInstances).isPassed();
+  }
+
+  /**
+   * Check if sibling nodes of the instance meet min active replicas constraint with details
+   * Two instances are sibling of each other if they host the same partition. And sibling nodes
+   * that are in toBeStoppableInstances will be presumed to be stopped.
+   * WARNING: The check uses ExternalView to reduce network traffic but suffer from accuracy
+   * due to external view propagation latency
+   *
+   * This method returns detailed information about the first partition that fails the check,
+   * including resource name, partition name, current active replicas, and required minimum.
+   *
+   * TODO: Use in memory cache and query instance's currentStates
+   *
+   * @param dataAccessor A helper class to access the Helix data.
+   * @param instanceName An instance to be evaluated against this check.
+   * @param toBeStoppedInstances A set of instances presumed to be are already stopped. And it
+   *                             shouldn't contain the `instanceName`
+   * @return MinActiveReplicaCheckResult with pass/fail status and details of first failure
+   */
+  public static MinActiveReplicaCheckResult siblingNodesActiveReplicaCheckWithDetails(
+      HelixDataAccessor dataAccessor, String instanceName, Set<String> toBeStoppedInstances) {
     PropertyKey.Builder propertyKeyBuilder = dataAccessor.keyBuilder();
     List<String> resources = dataAccessor.getChildNames(propertyKeyBuilder.idealStates());
 
@@ -464,15 +537,15 @@ public class InstanceValidationUtil {
             }
           }
           if (numHealthySiblings < minActiveReplicas) {
-            _logger.info(
-                "Partition {} doesn't have enough active replicas in sibling nodes. NumHealthySiblings: {}, minActiveReplicas: {}",
-                partition, numHealthySiblings, minActiveReplicas);
-            return false;
+            _logger.warn(
+                "Instance {} min active replica check failed: Resource {} partition {} has {}/{} active replicas",
+                instanceName, resourceName, partition, numHealthySiblings, minActiveReplicas);
+            return MinActiveReplicaCheckResult.failed(resourceName, partition, numHealthySiblings, minActiveReplicas);
           }
         }
       }
     }
 
-    return true;
+    return MinActiveReplicaCheckResult.passed();
   }
 }
