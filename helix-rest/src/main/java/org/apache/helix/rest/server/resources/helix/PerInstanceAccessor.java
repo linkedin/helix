@@ -605,12 +605,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
            * Even if the instance is disabled, non-valid instance topology config will cause rebalance
            * failure. We are doing the check whenever user updates InstanceConfig.
            */
-          boolean isvalid = validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
+          validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
               instanceConfig, command);
-          if (!isvalid) {
-            return badRequest(String.format("Invalid topology setting for Instance : {}. Fail the config update",
-                instanceName));
-          }
           configAccessor.updateInstanceConfig(clusterId, instanceName, instanceConfig);
           break;
         case delete:
@@ -625,8 +621,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           return badRequest(String.format("Unsupported command: %s", command));
       }
     } catch (IllegalArgumentException ex) {
-      LOG.error(String.format("Invalid topology setting for Instance : {}. Fail the config update",
-          instanceName), ex);
+      LOG.error("Invalid topology setting for Instance : {}. Fail the config update", instanceName, ex);
       return serverError(ex);
     } catch (HelixException ex) {
       return notFound(ex.getMessage());
@@ -882,6 +877,15 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       Command command) {
     InstanceConfig originalInstanceConfigCopy =
         configAccessor.getInstanceConfig(clusterName, instanceName);
+    InstanceConstants.InstanceOperation currentOperation = originalInstanceConfigCopy.getInstanceOperation().getOperation();
+    InstanceConstants.InstanceOperation targetOperation = newInstanceConfig.getInstanceOperation().getOperation();
+    try {
+      InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName, originalInstanceConfigCopy,
+          currentOperation, targetOperation);
+    } catch (HelixException e) {
+      throw new IllegalArgumentException(String.format(
+          "Failed topology setting update in instance %s, got exception %s", instanceName, e));
+    }
     if (command == Command.delete) {
       for (Map.Entry<String, String> entry : newInstanceConfig.getRecord().getSimpleFields()
           .entrySet()) {
@@ -890,19 +894,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     } else {
       originalInstanceConfigCopy.getRecord().update(newInstanceConfig.getRecord());
     }
-    return validateCLusterTopology(configAccessor, clusterName, originalInstanceConfigCopy) &&
-        originalInstanceConfigCopy
+    return originalInstanceConfigCopy
         .validateTopologySettingInInstanceConfig(configAccessor.getClusterConfig(clusterName),
             instanceName);
   }
 
-  private boolean validateCLusterTopology(ConfigAccessor configAccessor, String clusterName, InstanceConfig instanceConfig) {
-    List<InstanceConfig> matchingInstances = InstanceUtil.findInstancesWithMatchingLogicalId(configAccessor,
-        clusterName, instanceConfig);
-    return matchingInstances.isEmpty() || matchingInstances.stream().allMatch(instance ->
-        instance.getInstanceOperation().getOperation()
-            .equals(InstanceConstants.InstanceOperation.UNKNOWN)
-            || instance.getInstanceOperation().getOperation()
-            .equals(InstanceConstants.InstanceOperation.EVACUATE));
-  }
 }

@@ -883,7 +883,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
+  @Test()
   public void testValidateClusterTopologyOnUpdate() throws IOException {
     System.out.println("Start test: " + TestHelper.getTestMethodName());
 
@@ -948,7 +948,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
   }
 
-  @Test(dependsOnMethods = "testValidateClusterTopologyOnUpdate")
+  @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
   public void testGetResourcesOnInstance() throws JsonProcessingException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
