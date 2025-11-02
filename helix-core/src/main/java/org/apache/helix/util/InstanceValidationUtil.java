@@ -55,56 +55,6 @@ public class InstanceValidationUtil {
   public static Set<String> UNHEALTHY_STATES =
       ImmutableSet.of(HelixDefinedState.DROPPED.name(), HelixDefinedState.ERROR.name());
 
-  /**
-   * Result class for min active replica check with details about the first failure
-   */
-  public static class MinActiveReplicaCheckResult {
-    private final boolean passed;
-    private final String resourceName;
-    private final String partitionName;
-    private final int currentActiveReplicas;
-    private final int requiredMinActiveReplicas;
-
-    private MinActiveReplicaCheckResult(boolean passed, String resourceName, String partitionName,
-        int currentActiveReplicas, int requiredMinActiveReplicas) {
-      this.passed = passed;
-      this.resourceName = resourceName;
-      this.partitionName = partitionName;
-      this.currentActiveReplicas = currentActiveReplicas;
-      this.requiredMinActiveReplicas = requiredMinActiveReplicas;
-    }
-
-    public static MinActiveReplicaCheckResult passed() {
-      return new MinActiveReplicaCheckResult(true, null, null, -1, -1);
-    }
-
-    public static MinActiveReplicaCheckResult failed(String resourceName, String partitionName,
-        int currentActiveReplicas, int requiredMinActiveReplicas) {
-      return new MinActiveReplicaCheckResult(false, resourceName, partitionName,
-          currentActiveReplicas, requiredMinActiveReplicas);
-    }
-
-    public boolean isPassed() {
-      return passed;
-    }
-
-    public String getResourceName() {
-      return resourceName;
-    }
-
-    public String getPartitionName() {
-      return partitionName;
-    }
-
-    public int getCurrentActiveReplicas() {
-      return currentActiveReplicas;
-    }
-
-    public int getRequiredMinActiveReplicas() {
-      return requiredMinActiveReplicas;
-    }
-  }
-
   static final String UNHEALTHY_PARTITION = "UNHEALTHY_PARTITION";
   static final String HOST_NO_STATE_ERROR = "HOST_NO_STATE_ERROR:";
   // The message that will be shown if partition is in initial state of the state model and

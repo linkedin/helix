@@ -63,6 +63,7 @@ import org.apache.helix.rest.server.resources.helix.PerInstanceAccessor;
 import org.apache.helix.rest.server.service.InstanceService;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.helix.util.MinActiveReplicaCheckResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -914,16 +915,12 @@ public class MaintenanceManagementService {
           break;
         case MIN_ACTIVE_REPLICA_CHECK_FAILED:
           if (includeDetails) {
-            InstanceValidationUtil.MinActiveReplicaCheckResult result = InstanceValidationUtil
+            MinActiveReplicaCheckResult result = InstanceValidationUtil
                 .siblingNodesActiveReplicaCheckWithDetails(_dataAccessor, instanceName, toBeStoppedInstances);
             if (result.isPassed()) {
               healthStatus.put(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED.name(), true);
             } else {
-              String detailedMessage = String.format("%s: Resource %s partition %s has %d/%d active replicas",
-                  HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED.name(),
-                  result.getResourceName(), result.getPartitionName(),
-                  result.getCurrentActiveReplicas(), result.getRequiredMinActiveReplicas());
-              healthStatus.put(detailedMessage, false);
+              healthStatus.put(result.toString(), false);
             }
           } else {
             healthStatus.put(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED.name(),

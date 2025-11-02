@@ -625,7 +625,7 @@ public class TestInstanceValidationUtil {
     when(externalView.getStateMap("testResource_0")).thenReturn(
         ImmutableMap.of(TEST_INSTANCE, "Master", "instance1", "Slave", "instance2", "Slave"));
     
-    InstanceValidationUtil.MinActiveReplicaCheckResult result = 
+    MinActiveReplicaCheckResult result = 
         InstanceValidationUtil.siblingNodesActiveReplicaCheckWithDetails(mock.dataAccessor, TEST_INSTANCE, Collections.emptySet());
     
     Assert.assertTrue(result.isPassed());
@@ -682,7 +682,7 @@ public class TestInstanceValidationUtil {
     when(mock.dataAccessor.getProperty(BUILDER.instanceConfig(TEST_INSTANCE))).thenReturn(instanceConfig);
     when(mock.dataAccessor.getProperty(BUILDER.clusterConfig())).thenReturn(clusterConfig);
     
-    InstanceValidationUtil.MinActiveReplicaCheckResult result = 
+    MinActiveReplicaCheckResult result = 
         InstanceValidationUtil.siblingNodesActiveReplicaCheckWithDetails(mock.dataAccessor, TEST_INSTANCE, Collections.emptySet());
     
     // Should fail on the resource
