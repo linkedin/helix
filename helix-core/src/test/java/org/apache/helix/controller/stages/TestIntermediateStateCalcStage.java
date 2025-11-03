@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -648,6 +649,102 @@ public class TestIntermediateStateCalcStage extends BaseStageTest {
           .getStateMap()
           .equals(expectedResult.getPartitionStateMap(resource).getStateMap()));
     }
+  }
+  @Test
+  public void testEnableRecoveryRebalanceForTopStateDownwardStateTransition() {
+    String[] resources = {"TestResource"};
+    String resource = resources[0];
+    int nReplica = 3;
+    int nPartition = 1;
+
+    // ---- Basic setup ----
+    setupIdealState(4, resources, nPartition, nReplica, IdealState.RebalanceMode.FULL_AUTO,
+        "MasterSlave", null, null, 2);
+    setupStateModel();
+    setupInstances(4);
+    setupLiveInstances(4);
+    event.addAttribute(AttributeName.RESOURCES.name(), getResourceMap(resources, nPartition, "MasterSlave"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "MasterSlave"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+    IntermediateStateOutput expectedResult = new IntermediateStateOutput();
+
+    // To simulate that master->slave downward transition is recovery rebalance
+    // we set load balance throttling to allow 0 load balance messages per instance
+    _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    _clusterConfig.setStateTransitionThrottleConfigs(ImmutableList.of(
+        new StateTransitionThrottleConfig(StateTransitionThrottleConfig.RebalanceType.LOAD_BALANCE,
+            StateTransitionThrottleConfig.ThrottleScope.INSTANCE, 0)));
+    setClusterConfig(_clusterConfig);
+
+    // ---- Partition and states ----
+    Partition partition = new Partition(resource + "_0");
+    Map<String, List<String>> partitionMap = new HashMap<>();
+    partitionMap.put(partition.getPartitionName(), Arrays.asList("localhost_1", "localhost_2", "localhost_3"));
+    bestPossibleStateOutput.setPreferenceLists(resource, partitionMap);
+
+    // Best possible: new assignment
+    bestPossibleStateOutput.setState(resource, partition, "localhost_1", "MASTER");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_2", "SLAVE");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_3", "SLAVE");
+
+    // Current: old assignment
+    currentStateOutput.setCurrentState(resource, partition, "localhost_0", "MASTER");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_1", "SLAVE");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_2", "SLAVE");
+
+    // Message to demote localhost_0 from MASTER → SLAVE
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("MASTER", "SLAVE", "localhost_0"));
+
+    // ---- Attach attributes and run ----
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    // Validate message got throttled because it was load balance type
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 0);
+    // intermediate output matches current state output because ST message got throttled
+    Assert.assertTrue(
+        output.getPartitionStateMap(resource).getPartitionMap(partition).
+            equals(currentStateOutput.getCurrentStateMap(resource, partition)));
+
+    //-------- Test Success scenario--------------
+
+    // Set config to treat topState downward transition as recovery rebalance
+    _clusterConfig.setRecoveryBalanceForTopStateDownwardTransitionEnabled(true);
+    setClusterConfig(_clusterConfig);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), new ResourceControllerDataProvider());
+    // Reset selected message to demote localhost_0
+    // Message to demote localhost_0 from MASTER → SLAVE
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("MASTER", "SLAVE", "localhost_0"));
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    // Validate message didn't get throttled because it was load balance type
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 1);
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).get(0).getSTRebalanceType(),
+        Message.STRebalanceType.RECOVERY_REBALANCE);
+    // intermediate output state processed the ST message
+    Map<String, String> stateMap =
+        output.getPartitionStateMap(resource).getPartitionMap(partition);
+    Assert.assertTrue(
+        stateMap.values().stream().allMatch(state -> state.equals("SLAVE")),
+        "All hosts should be in SLAVE state");
   }
 
   private void preSetup(String[] resources, int numOfLiveInstances, int numOfReplicas) {
