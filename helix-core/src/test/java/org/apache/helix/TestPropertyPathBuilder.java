@@ -23,7 +23,6 @@ import org.testng.Assert;
 import org.testng.AssertJUnit;
 import org.testng.annotations.Test;
 
-
 public class TestPropertyPathBuilder {
   @Test
   public void testGetPath() {
