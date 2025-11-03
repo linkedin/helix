@@ -171,6 +171,10 @@ public class ClusterConfig extends HelixProperty {
 
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
+
+    // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
+    // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
+    ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -1308,5 +1312,13 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  public boolean isRecoveryBalanceForTopStateDownwardTransitionEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(), false);
+  }
+
+  public void setRecoveryBalanceForTopStateDownwardTransitionEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),enabled);
   }
 }

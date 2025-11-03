@@ -353,6 +353,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     chargePendingTransition(resource, currentStateOutput, throttleController, cache,
         preferenceLists, stateModelDef);
 
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        clusterConfig.isRecoveryBalanceForTopStateDownwardTransitionEnabled();
+
     // Sort partitions in case of urgent partition need to take the quota first.
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
     partitions.sort(new PartitionPriorityComparator(bestPossiblePartitionStateMap.getStateMap(),
@@ -375,7 +378,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : messagesToThrottle) {
         RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredState, message, derivedCurrentStateMap);
-
+        if(recoveryRebalanceForTopStateDownwardTransition) {
+          rebalanceType = validateTopStateDownwardTransition(stateModelDef, message) ? RebalanceType.RECOVERY_BALANCE :
+              rebalanceType;
+        }
         // Number of states required by StateModelDefinition are not satisfied, need recovery
         if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
           message.setSTRebalanceType(Message.STRebalanceType.RECOVERY_REBALANCE);
@@ -433,6 +439,18 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
 
     LogUtil.logDebug(logger, _eventId, String.format("End processing resource: %s", resourceName));
     return intermediatePartitionStateMap;
+  }
+
+  private boolean validateTopStateDownwardTransition(StateModelDefinition stateModelDef, Message msg) {
+    String topState = stateModelDef.getTopState();
+    if (topState == null) {
+      return false;
+    }
+    String secondTopState = stateModelDef.getNextStateForTransition(topState, stateModelDef.getInitialState());
+    if (secondTopState == null) {
+      return false;
+    }
+    return msg.getFromState() == topState && msg.getToState() == secondTopState;
   }
 
   /**
