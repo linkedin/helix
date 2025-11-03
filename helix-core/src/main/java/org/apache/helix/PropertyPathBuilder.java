@@ -19,12 +19,11 @@ package org.apache.helix;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
 import org.apache.helix.model.ClusterStatus;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
@@ -47,148 +46,19 @@ import org.slf4j.LoggerFactory;
  * Utility mapping properties to their Zookeeper locations
  */
 public class PropertyPathBuilder {
-  private static Logger logger = LoggerFactory.getLogger(PropertyPathBuilder.class);
-
-  static final Map<PropertyType, Map<Integer, String>> templateMap =
-      new HashMap<PropertyType, Map<Integer, String>>();
+  static final Map<PropertyType, Map<Integer, PathTemplate>> templateMap =
+      new HashMap<PropertyType, Map<Integer, PathTemplate>>();
   @Deprecated // typeToClassMapping is not being used anywhere
   static final Map<PropertyType, Class<? extends HelixProperty>> typeToClassMapping =
       new HashMap<PropertyType, Class<? extends HelixProperty>>();
-  static {
-    typeToClassMapping.put(PropertyType.LIVEINSTANCES, LiveInstance.class);
-    typeToClassMapping.put(PropertyType.IDEALSTATES, IdealState.class);
-    typeToClassMapping.put(PropertyType.CONFIGS, InstanceConfig.class);
-    typeToClassMapping.put(PropertyType.EXTERNALVIEW, ExternalView.class);
-    typeToClassMapping.put(PropertyType.CUSTOMIZEDVIEW, CustomizedView.class);
-    typeToClassMapping.put(PropertyType.STATEMODELDEFS, StateModelDefinition.class);
-    typeToClassMapping.put(PropertyType.MESSAGES, Message.class);
-    typeToClassMapping.put(PropertyType.CURRENTSTATES, CurrentState.class);
-    typeToClassMapping.put(PropertyType.STATUSUPDATES, StatusUpdate.class);
-    typeToClassMapping.put(PropertyType.HISTORY, ControllerHistory.class);
-    typeToClassMapping.put(PropertyType.PAUSE, PauseSignal.class);
-    typeToClassMapping.put(PropertyType.MAINTENANCE, MaintenanceSignal.class);
-    typeToClassMapping.put(PropertyType.STATUS, ClusterStatus.class);
-    // TODO: Below must handle the case for future versions of Task Framework with a different path
-    // structure
-    typeToClassMapping.put(PropertyType.WORKFLOWCONTEXT, WorkflowContext.class);
-
-    // @formatter:off
-    addEntry(PropertyType.CONFIGS, 1, "/{clusterName}/CONFIGS");
-    addEntry(PropertyType.CONFIGS, 2, "/{clusterName}/CONFIGS/{scope}");
-    addEntry(PropertyType.CONFIGS, 3, "/{clusterName}/CONFIGS/{scope}/{scopeKey}");
-    // addEntry(PropertyType.CONFIGS,2,"/{clusterName}/CONFIGS/{instanceName}");
-    addEntry(PropertyType.LIVEINSTANCES, 1, "/{clusterName}/LIVEINSTANCES");
-    addEntry(PropertyType.LIVEINSTANCES, 2, "/{clusterName}/LIVEINSTANCES/{instanceName}");
-    addEntry(PropertyType.INSTANCES, 1, "/{clusterName}/INSTANCES");
-    addEntry(PropertyType.INSTANCES, 2, "/{clusterName}/INSTANCES/{instanceName}");
-    addEntry(PropertyType.IDEALSTATES, 1, "/{clusterName}/IDEALSTATES");
-    addEntry(PropertyType.IDEALSTATES, 2, "/{clusterName}/IDEALSTATES/{resourceName}");
-    addEntry(PropertyType.EXTERNALVIEW, 1, "/{clusterName}/EXTERNALVIEW");
-    addEntry(PropertyType.EXTERNALVIEW, 2, "/{clusterName}/EXTERNALVIEW/{resourceName}");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 1, "/{clusterName}/CUSTOMIZEDVIEW");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 2, "/{clusterName}/CUSTOMIZEDVIEW/{customizedStateType}");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 3, "/{clusterName}/CUSTOMIZEDVIEW/{customizedStateType}/{resourceName}");
-    addEntry(PropertyType.STATUS, 1, "/{clusterName}/STATUS");
-    addEntry(PropertyType.STATUS, 2, "/{clusterName}/STATUS/{clusterName}");
-
-    addEntry(PropertyType.TARGETEXTERNALVIEW, 1, "/{clusterName}/TARGETEXTERNALVIEW");
-    addEntry(PropertyType.TARGETEXTERNALVIEW, 2,
-        "/{clusterName}/TARGETEXTERNALVIEW/{resourceName}");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 1, "/{clusterName}/CUSTOMIZEDVIEW");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 2, "/{clusterName}/CUSTOMIZEDVIEW/{resourceName}");
-    addEntry(PropertyType.CUSTOMIZEDVIEW, 3,
-        "/{clusterName}/CUSTOMIZEDVIEW/{resourceName}/{customizedStateName}");
-    addEntry(PropertyType.STATEMODELDEFS, 1, "/{clusterName}/STATEMODELDEFS");
-    addEntry(PropertyType.STATEMODELDEFS, 2, "/{clusterName}/STATEMODELDEFS/{stateModelName}");
-    addEntry(PropertyType.CONTROLLER, 1, "/{clusterName}/CONTROLLER");
-    addEntry(PropertyType.PROPERTYSTORE, 1, "/{clusterName}/PROPERTYSTORE");
-
-    // INSTANCE
-    addEntry(PropertyType.MESSAGES, 2, "/{clusterName}/INSTANCES/{instanceName}/MESSAGES");
-    addEntry(PropertyType.MESSAGES, 3, "/{clusterName}/INSTANCES/{instanceName}/MESSAGES/{msgId}");
-    addEntry(PropertyType.CURRENTSTATES, 2,
-        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES");
-    addEntry(PropertyType.CURRENTSTATES, 3,
-        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}");
-    addEntry(PropertyType.CURRENTSTATES, 4,
-        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}/{resourceName}");
-    addEntry(PropertyType.CURRENTSTATES, 5,
-        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}/{resourceName}/{bucketName}");
-    addEntry(PropertyType.TASKCURRENTSTATES, 2,
-        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES");
-    addEntry(PropertyType.TASKCURRENTSTATES, 3,
-        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}");
-    addEntry(PropertyType.TASKCURRENTSTATES, 4,
-        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}/{resourceName}");
-    addEntry(PropertyType.TASKCURRENTSTATES, 5,
-        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}/{resourceName}/{bucketName}");
-    addEntry(PropertyType.CUSTOMIZEDSTATES, 2,
-        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES");
-    addEntry(PropertyType.CUSTOMIZEDSTATES, 3,
-        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES/{customizedStateName}");
-    addEntry(PropertyType.CUSTOMIZEDSTATES, 4,
-        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES/{customizedStateName}/{resourceName}");
-    addEntry(PropertyType.STATUSUPDATES, 2,
-        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES");
-    addEntry(PropertyType.STATUSUPDATES, 3,
-        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}");
-    addEntry(PropertyType.STATUSUPDATES, 4,
-        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}/{subPath}");
-    addEntry(PropertyType.STATUSUPDATES, 5,
-        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}/{subPath}/{recordName}");
-    addEntry(PropertyType.ERRORS, 2, "/{clusterName}/INSTANCES/{instanceName}/ERRORS");
-    addEntry(PropertyType.ERRORS, 3, "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}");
-    addEntry(PropertyType.ERRORS, 4,
-        "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}/{subPath}");
-    addEntry(PropertyType.ERRORS, 5,
-        "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}/{subPath}/{recordName}");
-    addEntry(PropertyType.INSTANCE_HISTORY, 2, "/{clusterName}/INSTANCES/{instanceName}/HISTORY");
-    addEntry(PropertyType.HEALTHREPORT, 2, "/{clusterName}/INSTANCES/{instanceName}/HEALTHREPORT");
-    addEntry(PropertyType.HEALTHREPORT, 3,
-        "/{clusterName}/INSTANCES/{instanceName}/HEALTHREPORT/{reportName}");
-    // CONTROLLER
-    addEntry(PropertyType.MESSAGES_CONTROLLER, 1, "/{clusterName}/CONTROLLER/MESSAGES");
-    addEntry(PropertyType.MESSAGES_CONTROLLER, 2, "/{clusterName}/CONTROLLER/MESSAGES/{msgId}");
-    addEntry(PropertyType.ERRORS_CONTROLLER, 1, "/{clusterName}/CONTROLLER/ERRORS");
-    addEntry(PropertyType.ERRORS_CONTROLLER, 2, "/{clusterName}/CONTROLLER/ERRORS/{errorId}");
-    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 1, "/{clusterName}/CONTROLLER/STATUSUPDATES");
-    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 2,
-        "/{clusterName}/CONTROLLER/STATUSUPDATES/{subPath}");
-    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 3,
-        "/{clusterName}/CONTROLLER/STATUSUPDATES/{subPath}/{recordName}");
-    addEntry(PropertyType.LEADER, 1, "/{clusterName}/CONTROLLER/LEADER");
-    addEntry(PropertyType.HISTORY, 1, "/{clusterName}/CONTROLLER/HISTORY");
-    addEntry(PropertyType.PAUSE, 1, "/{clusterName}/CONTROLLER/PAUSE");
-    addEntry(PropertyType.MAINTENANCE, 1, "/{clusterName}/CONTROLLER/MAINTENANCE");
-    // @formatter:on
-
-    // RESOURCE
-    addEntry(PropertyType.WORKFLOWCONTEXT, 2,
-        "/{clusterName}/PROPERTYSTORE/TaskRebalancer/{workflowName}/Context"); // Old
-
-    // TODO: These are the current task framework related paths. In the future, if we decide to use
-    // a different structure such as a non-flatten ZNode structure, these paths need to be changed
-    // accordingly.
-    addEntry(PropertyType.TASK_CONFIG_ROOT, 1, "/{clusterName}/CONFIGS/RESOURCE");
-    addEntry(PropertyType.WORKFLOW_CONFIG, 2, "/{clusterName}/CONFIGS/RESOURCE/{workflowName}");
-    addEntry(PropertyType.JOB_CONFIG, 3,
-        "/{clusterName}/CONFIGS/RESOURCE/{workflowName}" + "_" + "{jobName}");
-    addEntry(PropertyType.TASK_CONTEXT_ROOT, 1,
-        "/{clusterName}/PROPERTYSTORE" + TaskConstants.REBALANCER_CONTEXT_ROOT);
-    addEntry(PropertyType.WORKFLOW_CONTEXT, 2, "/{clusterName}/PROPERTYSTORE"
-        + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}/Context");
-    addEntry(PropertyType.JOB_CONTEXT, 3, "/{clusterName}/PROPERTYSTORE"
-        + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}" + "_" + "{jobName}/Context");
-  }
-  static Pattern pattern = Pattern.compile("(\\{.+?\\})");
+  private static Logger logger = LoggerFactory.getLogger(PropertyPathBuilder.class);
 
   private static void addEntry(PropertyType type, int numKeys, String template) {
     if (!templateMap.containsKey(type)) {
-      templateMap.put(type, new HashMap<Integer, String>());
+      templateMap.put(type, new HashMap<Integer, PathTemplate>());
     }
-    logger.trace("Adding template for type:" + type.getType() + " arguments:" + numKeys
-        + " template:" + template);
-    templateMap.get(type).put(numKeys, template);
+    logger.trace("Adding template for type:" + type.getType() + " arguments:" + numKeys + " template:" + template);
+    templateMap.get(type).put(numKeys, new PathTemplate(template));
   }
 
   /**
@@ -204,33 +74,22 @@ public class PropertyPathBuilder {
       return null;
     }
     if (keys == null) {
-      keys = new String[] {};
+      keys = new String[]{};
     }
-    String template = null;
+
+    PathTemplate template = null;
     if (templateMap.containsKey(type)) {
-      // keys.length+1 since we add clusterName
       template = templateMap.get(type).get(keys.length + 1);
     }
 
     String result = null;
-
     if (template != null) {
-      result = template;
-      Matcher matcher = pattern.matcher(template);
-      int count = 0;
-      while (matcher.find()) {
-        count = count + 1;
-        String var = matcher.group();
-        if (count == 1) {
-          result = result.replace(var, clusterName);
-        } else {
-          result = result.replace(var, keys[count - 2]);
-        }
-      }
+      result = template.buildPath(clusterName, keys);
     }
+
     if (result == null || result.indexOf('{') > -1 || result.indexOf('}') > -1) {
-      logger.warn("Unable to instantiate template:" + template + " using clusterName:" + clusterName
-          + " and keys:" + Arrays.toString(keys));
+      logger.warn("Unable to instantiate template for type:" + type + " using clusterName:" + clusterName + " and keys:"
+          + Arrays.toString(keys));
     }
     return result;
   }
@@ -318,8 +177,7 @@ public class PropertyPathBuilder {
   }
 
   // Path = /<cluster>/CUSTOMIZEDVIEW/<customizedStateName>/<resourceName>
-  public static String customizedView(String clusterName, String customizedStateName,
-      String resourceName) {
+  public static String customizedView(String clusterName, String customizedStateName, String resourceName) {
     StringBuilder builder = new StringBuilder("/");
     builder.append(clusterName);
     builder.append("/CUSTOMIZEDVIEW/");
@@ -393,8 +251,7 @@ public class PropertyPathBuilder {
   }
 
   // Path = /<cluster>/INSTANCES/<instance>/CURRENTSTATES/<session>
-  public static String instanceCurrentState(String clusterName, String instanceName,
-      String sessionId) {
+  public static String instanceCurrentState(String clusterName, String instanceName, String sessionId) {
     StringBuilder builder = new StringBuilder("/");
     builder.append(clusterName);
     builder.append("/INSTANCES/");
@@ -626,5 +483,185 @@ public class PropertyPathBuilder {
   // PATH = "/<clusterName>/STATUS/CLUSTER/<clusterName>"
   public static String clusterStatus(String clusterName) {
     return "/" + clusterName + "/STATUS/CLUSTER/" + clusterName;
+  }
+
+  /**
+   * Pre-parsed path template for efficient path construction.
+   * Parses template strings once at initialization to avoid repeated regex operations.
+   */
+  static class PathTemplate {
+    private final String[] parts;
+
+    /**
+     * Parse a template string like "/{clusterName}/INSTANCES/{instanceName}"
+     * into reusable parts: ["/", "/INSTANCES/", ""]
+     */
+    PathTemplate(String template) {
+      List<String> partsList = new ArrayList<>();
+      int lastEnd = 0;
+
+      // Find all {placeholders} and split the template into static parts
+      int start = template.indexOf('{');
+      while (start != -1) {
+        partsList.add(template.substring(lastEnd, start));
+        int end = template.indexOf('}', start);
+        if (end == -1) {
+          logger.error("Malformed template: missing closing brace in " + template);
+          break;
+        }
+        lastEnd = end + 1;
+        start = template.indexOf('{', lastEnd);
+      }
+      partsList.add(template.substring(lastEnd));
+
+      this.parts = partsList.toArray(new String[0]);
+    }
+
+    /**
+     * Build path by concatenating static parts with parameters.
+     */
+    String buildPath(String clusterName, String... keys) {
+      StringBuilder sb = new StringBuilder(128);
+      sb.append(parts[0]).append(clusterName);
+
+      for (int i = 0; i < keys.length; i++) {
+        if (i + 1 < parts.length) {
+          sb.append(parts[i + 1]);
+        }
+        sb.append(keys[i]);
+      }
+
+      if (keys.length + 1 < parts.length) {
+        sb.append(parts[keys.length + 1]);
+      }
+
+      return sb.toString();
+    }
+  }
+
+  static {
+    typeToClassMapping.put(PropertyType.LIVEINSTANCES, LiveInstance.class);
+    typeToClassMapping.put(PropertyType.IDEALSTATES, IdealState.class);
+    typeToClassMapping.put(PropertyType.CONFIGS, InstanceConfig.class);
+    typeToClassMapping.put(PropertyType.EXTERNALVIEW, ExternalView.class);
+    typeToClassMapping.put(PropertyType.CUSTOMIZEDVIEW, CustomizedView.class);
+    typeToClassMapping.put(PropertyType.STATEMODELDEFS, StateModelDefinition.class);
+    typeToClassMapping.put(PropertyType.MESSAGES, Message.class);
+    typeToClassMapping.put(PropertyType.CURRENTSTATES, CurrentState.class);
+    typeToClassMapping.put(PropertyType.STATUSUPDATES, StatusUpdate.class);
+    typeToClassMapping.put(PropertyType.HISTORY, ControllerHistory.class);
+    typeToClassMapping.put(PropertyType.PAUSE, PauseSignal.class);
+    typeToClassMapping.put(PropertyType.MAINTENANCE, MaintenanceSignal.class);
+    typeToClassMapping.put(PropertyType.STATUS, ClusterStatus.class);
+    // TODO: Below must handle the case for future versions of Task Framework with a different path
+    // structure
+    typeToClassMapping.put(PropertyType.WORKFLOWCONTEXT, WorkflowContext.class);
+
+    // @formatter:off
+    addEntry(PropertyType.CONFIGS, 1, "/{clusterName}/CONFIGS");
+    addEntry(PropertyType.CONFIGS, 2, "/{clusterName}/CONFIGS/{scope}");
+    addEntry(PropertyType.CONFIGS, 3, "/{clusterName}/CONFIGS/{scope}/{scopeKey}");
+    // addEntry(PropertyType.CONFIGS,2,"/{clusterName}/CONFIGS/{instanceName}");
+    addEntry(PropertyType.LIVEINSTANCES, 1, "/{clusterName}/LIVEINSTANCES");
+    addEntry(PropertyType.LIVEINSTANCES, 2, "/{clusterName}/LIVEINSTANCES/{instanceName}");
+    addEntry(PropertyType.INSTANCES, 1, "/{clusterName}/INSTANCES");
+    addEntry(PropertyType.INSTANCES, 2, "/{clusterName}/INSTANCES/{instanceName}");
+    addEntry(PropertyType.IDEALSTATES, 1, "/{clusterName}/IDEALSTATES");
+    addEntry(PropertyType.IDEALSTATES, 2, "/{clusterName}/IDEALSTATES/{resourceName}");
+    addEntry(PropertyType.EXTERNALVIEW, 1, "/{clusterName}/EXTERNALVIEW");
+    addEntry(PropertyType.EXTERNALVIEW, 2, "/{clusterName}/EXTERNALVIEW/{resourceName}");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 1, "/{clusterName}/CUSTOMIZEDVIEW");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 2, "/{clusterName}/CUSTOMIZEDVIEW/{customizedStateType}");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 3, "/{clusterName}/CUSTOMIZEDVIEW/{customizedStateType}/{resourceName}");
+    addEntry(PropertyType.STATUS, 1, "/{clusterName}/STATUS");
+    addEntry(PropertyType.STATUS, 2, "/{clusterName}/STATUS/{clusterName}");
+
+    addEntry(PropertyType.TARGETEXTERNALVIEW, 1, "/{clusterName}/TARGETEXTERNALVIEW");
+    addEntry(PropertyType.TARGETEXTERNALVIEW, 2,
+        "/{clusterName}/TARGETEXTERNALVIEW/{resourceName}");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 1, "/{clusterName}/CUSTOMIZEDVIEW");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 2, "/{clusterName}/CUSTOMIZEDVIEW/{resourceName}");
+    addEntry(PropertyType.CUSTOMIZEDVIEW, 3,
+        "/{clusterName}/CUSTOMIZEDVIEW/{resourceName}/{customizedStateName}");
+    addEntry(PropertyType.STATEMODELDEFS, 1, "/{clusterName}/STATEMODELDEFS");
+    addEntry(PropertyType.STATEMODELDEFS, 2, "/{clusterName}/STATEMODELDEFS/{stateModelName}");
+    addEntry(PropertyType.CONTROLLER, 1, "/{clusterName}/CONTROLLER");
+    addEntry(PropertyType.PROPERTYSTORE, 1, "/{clusterName}/PROPERTYSTORE");
+
+    // INSTANCE
+    addEntry(PropertyType.MESSAGES, 2, "/{clusterName}/INSTANCES/{instanceName}/MESSAGES");
+    addEntry(PropertyType.MESSAGES, 3, "/{clusterName}/INSTANCES/{instanceName}/MESSAGES/{msgId}");
+    addEntry(PropertyType.CURRENTSTATES, 2,
+        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES");
+    addEntry(PropertyType.CURRENTSTATES, 3,
+        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}");
+    addEntry(PropertyType.CURRENTSTATES, 4,
+        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}/{resourceName}");
+    addEntry(PropertyType.CURRENTSTATES, 5,
+        "/{clusterName}/INSTANCES/{instanceName}/CURRENTSTATES/{sessionId}/{resourceName}/{bucketName}");
+    addEntry(PropertyType.TASKCURRENTSTATES, 2,
+        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES");
+    addEntry(PropertyType.TASKCURRENTSTATES, 3,
+        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}");
+    addEntry(PropertyType.TASKCURRENTSTATES, 4,
+        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}/{resourceName}");
+    addEntry(PropertyType.TASKCURRENTSTATES, 5,
+        "/{clusterName}/INSTANCES/{instanceName}/TASKCURRENTSTATES/{sessionId}/{resourceName}/{bucketName}");
+    addEntry(PropertyType.CUSTOMIZEDSTATES, 2,
+        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES");
+    addEntry(PropertyType.CUSTOMIZEDSTATES, 3,
+        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES/{customizedStateName}");
+    addEntry(PropertyType.CUSTOMIZEDSTATES, 4,
+        "/{clusterName}/INSTANCES/{instanceName}/CUSTOMIZEDSTATES/{customizedStateName}/{resourceName}");
+    addEntry(PropertyType.STATUSUPDATES, 2,
+        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES");
+    addEntry(PropertyType.STATUSUPDATES, 3,
+        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}");
+    addEntry(PropertyType.STATUSUPDATES, 4,
+        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}/{subPath}");
+    addEntry(PropertyType.STATUSUPDATES, 5,
+        "/{clusterName}/INSTANCES/{instanceName}/STATUSUPDATES/{sessionId}/{subPath}/{recordName}");
+    addEntry(PropertyType.ERRORS, 2, "/{clusterName}/INSTANCES/{instanceName}/ERRORS");
+    addEntry(PropertyType.ERRORS, 3, "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}");
+    addEntry(PropertyType.ERRORS, 4,
+        "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}/{subPath}");
+    addEntry(PropertyType.ERRORS, 5,
+        "/{clusterName}/INSTANCES/{instanceName}/ERRORS/{sessionId}/{subPath}/{recordName}");
+    addEntry(PropertyType.INSTANCE_HISTORY, 2, "/{clusterName}/INSTANCES/{instanceName}/HISTORY");
+    addEntry(PropertyType.HEALTHREPORT, 2, "/{clusterName}/INSTANCES/{instanceName}/HEALTHREPORT");
+    addEntry(PropertyType.HEALTHREPORT, 3,
+        "/{clusterName}/INSTANCES/{instanceName}/HEALTHREPORT/{reportName}");
+    // CONTROLLER
+    addEntry(PropertyType.MESSAGES_CONTROLLER, 1, "/{clusterName}/CONTROLLER/MESSAGES");
+    addEntry(PropertyType.MESSAGES_CONTROLLER, 2, "/{clusterName}/CONTROLLER/MESSAGES/{msgId}");
+    addEntry(PropertyType.ERRORS_CONTROLLER, 1, "/{clusterName}/CONTROLLER/ERRORS");
+    addEntry(PropertyType.ERRORS_CONTROLLER, 2, "/{clusterName}/CONTROLLER/ERRORS/{errorId}");
+    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 1, "/{clusterName}/CONTROLLER/STATUSUPDATES");
+    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 2,
+        "/{clusterName}/CONTROLLER/STATUSUPDATES/{subPath}");
+    addEntry(PropertyType.STATUSUPDATES_CONTROLLER, 3,
+        "/{clusterName}/CONTROLLER/STATUSUPDATES/{subPath}/{recordName}");
+    addEntry(PropertyType.LEADER, 1, "/{clusterName}/CONTROLLER/LEADER");
+    addEntry(PropertyType.HISTORY, 1, "/{clusterName}/CONTROLLER/HISTORY");
+    addEntry(PropertyType.PAUSE, 1, "/{clusterName}/CONTROLLER/PAUSE");
+    addEntry(PropertyType.MAINTENANCE, 1, "/{clusterName}/CONTROLLER/MAINTENANCE");
+    // @formatter:on
+
+    // RESOURCE
+    addEntry(PropertyType.WORKFLOWCONTEXT, 2,
+        "/{clusterName}/PROPERTYSTORE/TaskRebalancer/{workflowName}/Context"); // Old
+
+    // TODO: These are the current task framework related paths. In the future, if we decide to use
+    // a different structure such as a non-flatten ZNode structure, these paths need to be changed
+    // accordingly.
+    addEntry(PropertyType.TASK_CONFIG_ROOT, 1, "/{clusterName}/CONFIGS/RESOURCE");
+    addEntry(PropertyType.WORKFLOW_CONFIG, 2, "/{clusterName}/CONFIGS/RESOURCE/{workflowName}");
+    addEntry(PropertyType.JOB_CONFIG, 3, "/{clusterName}/CONFIGS/RESOURCE/{workflowName}" + "_" + "{jobName}");
+    addEntry(PropertyType.TASK_CONTEXT_ROOT, 1, "/{clusterName}/PROPERTYSTORE" + TaskConstants.REBALANCER_CONTEXT_ROOT);
+    addEntry(PropertyType.WORKFLOW_CONTEXT, 2,
+        "/{clusterName}/PROPERTYSTORE" + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}/Context");
+    addEntry(PropertyType.JOB_CONTEXT, 3,
+        "/{clusterName}/PROPERTYSTORE" + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}" + "_"
+            + "{jobName}/Context");
   }
 }
