@@ -64,6 +64,7 @@ public class ClusterConfig extends HelixProperty {
     STATE_TRANSITION_THROTTLE_CONFIGS,
     STATE_TRANSITION_CANCELLATION_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
+    TOP_STATE_HANDOFF_DURATION_THRESHOLD,
     RESOURCE_PRIORITY_FIELD,
     REBALANCE_TIMER_PERIOD,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
@@ -701,6 +702,24 @@ public class ClusterConfig extends HelixProperty {
   public long getMissTopStateDurationThreshold() {
     return _record.getLongField(ClusterConfigProperty.MISS_TOP_STATE_DURATION_THRESHOLD.name(),
         Long.MAX_VALUE);
+  }
+
+  /**
+   * Set the top state handoff duration threshold in milliseconds
+   * @param durationThreshold
+   */
+  public void setTopStateHandoffDurationThreshold(long durationThreshold) {
+    _record.setLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
+        durationThreshold);
+  }
+
+  /**
+   * Get the top state handoff duration threshold. If not configured, defaults to 10000ms.
+   * @return the threshold in milliseconds
+   */
+  public long getTopStateHandoffDurationThreshold() {
+    return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
+        10000L);
   }
 
   /**
