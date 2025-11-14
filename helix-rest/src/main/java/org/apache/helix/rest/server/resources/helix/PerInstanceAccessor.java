@@ -49,6 +49,7 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.constants.EvacuateExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -396,7 +397,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @QueryParam("reason") String reason,
       @Deprecated @QueryParam("instanceDisabledType") String disabledType,
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
-      @QueryParam("force") boolean force, String content) {
+      @QueryParam("force") boolean force,
+      @QueryParam("exclusions") String exclusions,
+      String content) {
     Command cmd;
     try {
       cmd = Command.valueOf(command);
@@ -502,7 +505,17 @@ public class PerInstanceAccessor extends AbstractHelixResource {
         case isEvacuateFinished:
           boolean evacuateFinished;
           try {
-            evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName);
+            if (exclusions != null && !exclusions.trim().isEmpty()) {
+              Set<EvacuateExclusionType> exclusionTypes =
+                  EvacuateExclusionType.parseExclusionTypes(exclusions);
+              evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
+            } else {
+              evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName);
+            }
+          } catch (IllegalArgumentException e) {
+            LOG.error(String.format("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
+                clusterId, instanceName, exclusions), e);
+            return badRequest("Invalid exclusion type: " + exclusions);
           } catch (HelixException e) {
             LOG.error(String.format("Encountered error when checking if evacuation finished for cluster: "
                 + "{}, instance: {}", clusterId, instanceName), e);

@@ -60,6 +60,7 @@ import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
+import org.apache.helix.constants.EvacuateExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
@@ -460,17 +461,23 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
+    return isEvacuateFinished(clusterName, instanceName, Collections.emptySet());
+  }
+
+  @Override
+  public boolean isEvacuateFinished(String clusterName, String instanceName,
+      Set<EvacuateExclusionType> exclusionTypes) {
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
     if (config == null || config.getInstanceOperation().getOperation() !=
         InstanceConstants.InstanceOperation.EVACUATE ) {
       return false;
     }
-    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes);
   }
 
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
-    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
   }
 
   /**
@@ -748,7 +755,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isReadyForPreparingJoiningCluster(String clusterName, String instanceName) {
-    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName)) {
+    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet())) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
       return config != null && INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT.contains(
           config.getInstanceOperation().getOperation());
@@ -790,10 +797,11 @@ public class ZKHelixAdmin implements HelixAdmin {
    * in ideal state, true otherwise.
    * @param clusterName
    * @param instanceName
+   * @param exclusionTypes Set of exclusion types to filter out resources/partitions
    * @return
    */
   private boolean instanceHasCurrentStateOrMessage(String clusterName,
-      String instanceName) {
+      String instanceName, Set<EvacuateExclusionType> exclusionTypes) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
@@ -824,9 +832,21 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
+
+    // Get InstanceConfig to check for disabled partitions (needed for both online and offline)
+    InstanceConfig instanceConfig = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
+    Map<String, List<String>> disabledPartitionsMap = instanceConfig != null ?
+        instanceConfig.getDisabledPartitionsMap() : Collections.emptyMap();
+
+    // Get set of FULL_AUTO and CUSTOMIZED resources, applying DISABLED_RESOURCE exclusion
+    Set<String> resources = filterResourcesByModeAndExclusions(idealStates, exclusionTypes);
+
     if (liveInstance == null) {
+      // For offline instances, check if all CUSTOMIZED resources are reassigned
+      // We still need to apply exclusions here
       boolean customizedResourcesReassigned =
-          areAllCustomizedResourcesReassigned(currentStates, idealStates, instanceName);
+          areAllCustomizedResourcesReassignedWithExclusions(currentStates, idealStates,
+              instanceName, exclusionTypes, disabledPartitionsMap, resources);
       logger.info("check for customizedResourcesReassigned for instance {} in cluster {} returned {}",
           instanceName, clusterName, customizedResourcesReassigned);
       return !customizedResourcesReassigned;
@@ -838,13 +858,137 @@ public class ZKHelixAdmin implements HelixAdmin {
       logger.info("Instance {} in cluster {} has pending messages.", instanceName, clusterName);
       return true;
     }
-    // Get set of FULL_AUTO and CUSTOMIZED resources
-    Set<String> resources = idealStates != null ? idealStates.stream()
+
+    // Filter current states based on exclusions for online instance
+    return currentStates.stream()
+        .anyMatch(cs -> {
+          String resourceName = cs.getResourceName();
+          // Only check resources that are in the FULL_AUTO/CUSTOMIZED set
+          if (!resources.contains(resourceName)) {
+            return false;
+          }
+
+          Map<String, String> partitionStateMap = cs.getPartitionStateMap();
+          if (partitionStateMap == null || partitionStateMap.isEmpty()) {
+            return false;
+          }
+
+          // Check if there are any non-excluded partitions
+          return partitionStateMap.entrySet().stream()
+              .anyMatch(entry -> !shouldExcludePartition(entry.getKey(), entry.getValue(),
+                  resourceName, exclusionTypes, disabledPartitionsMap));
+        });
+  }
+
+  /**
+   * Filters resources to only include FULL_AUTO and CUSTOMIZED mode resources,
+   * and applies DISABLED_RESOURCE exclusion if requested.
+   *
+   * @param idealStates List of ideal states to filter
+   * @param exclusionTypes Set of exclusion types to apply
+   * @return Set of resource names that match the criteria
+   */
+  private Set<String> filterResourcesByModeAndExclusions(List<IdealState> idealStates,
+      Set<EvacuateExclusionType> exclusionTypes) {
+    if (idealStates == null) {
+      return Collections.emptySet();
+    }
+
+    return idealStates.stream()
         .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO ||
             idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
-        .map(IdealState::getResourceName).collect(Collectors.toSet()) : Collections.emptySet();
+        .filter(idealState -> !exclusionTypes.contains(EvacuateExclusionType.DISABLED_RESOURCE) ||
+            idealState.isEnabled())
+        .map(IdealState::getResourceName)
+        .collect(Collectors.toSet());
+  }
 
-    return currentStates.stream().map(CurrentState::getResourceName).anyMatch(resources::contains);
+  /**
+   * Determines if a partition should be excluded from evacuation completion check.
+   *
+   * @param partition The partition name
+   * @param state The current state of the partition
+   * @param resourceName The resource name
+   * @param exclusionTypes Set of exclusion types to apply
+   * @param disabledPartitionsMap Map of resource to disabled partitions
+   * @return true if partition should be excluded (not block evacuation), false otherwise
+   */
+  private boolean shouldExcludePartition(String partition, String state, String resourceName,
+      Set<EvacuateExclusionType> exclusionTypes,
+      Map<String, List<String>> disabledPartitionsMap) {
+
+    // Exclude ERROR partitions if requested
+    if (exclusionTypes.contains(EvacuateExclusionType.ERROR_PARTITIONS) &&
+        HelixDefinedState.ERROR.name().equals(state)) {
+      return true;
+    }
+
+    // Exclude DISABLED partitions if requested
+    if (exclusionTypes.contains(EvacuateExclusionType.DISABLED_PARTITION)) {
+      List<String> disabledPartitions = disabledPartitionsMap.get(resourceName);
+      return disabledPartitions != null && disabledPartitions.contains(partition);
+    }
+
+    return false; // Partition is not excluded
+  }
+
+  /**
+   * Returns true if, for all customized resources present in the given current states every partition is now assigned
+   * to a different instance (i.e., not instanceName) in the IdealState, with exclusions applied.
+   *
+   * @param currentStates  list of CurrentState objects of instanceName representing the current assignment of
+   *                       resources on the instance
+   * @param idealStates    list of IdealState objects representing the desired assignment of resources
+   * @param instanceName   the instance from which resources are migrated
+   * @param exclusionTypes Set of exclusion types to filter out resources/partitions
+   * @param disabledPartitionsMap Map of resource to disabled partitions for the instance
+   * @param allowedResources Set of resources to check (already filtered by mode and enabled status)
+   * @return true if all customized resources are reassigned (excluding filtered ones), false otherwise
+   */
+  private boolean areAllCustomizedResourcesReassignedWithExclusions(List<CurrentState> currentStates,
+      List<IdealState> idealStates, String instanceName, Set<EvacuateExclusionType> exclusionTypes,
+      Map<String, List<String>> disabledPartitionsMap, Set<String> allowedResources) {
+
+    // Step 1: Create a map of resourceName -> CurrentState
+    Map<String, CurrentState> currentStateMap = currentStates.stream()
+        .collect(Collectors.toMap(CurrentState::getResourceName, cs -> cs));
+
+    // Step 2: Filter ideal states that are CUSTOMIZED and present in currentStates
+    List<IdealState> customizedIdealStates = idealStates.stream()
+        .filter(is -> is.getRebalanceMode() == RebalanceMode.CUSTOMIZED &&
+            currentStateMap.containsKey(is.getResourceName()) &&
+            allowedResources.contains(is.getResourceName()))
+        .collect(Collectors.toList());
+
+    // Step 3: Check if any partition of any customized resource is still assigned to the instance
+    for (IdealState idealState : customizedIdealStates) {
+      String resourceName = idealState.getResourceName();
+      CurrentState cs = currentStateMap.get(resourceName);
+
+      for (String partition : cs.getPartitionStateMap().keySet()) {
+        String state = cs.getPartitionStateMap().get(partition);
+
+        // Apply partition-level exclusions using shared helper method
+        if (shouldExcludePartition(partition, state, resourceName, exclusionTypes,
+            disabledPartitionsMap)) {
+          continue; // Skip this partition
+        }
+
+        // Check if this non-excluded partition is still assigned to the instance in IdealState
+        Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition);
+        if (instanceStateMap == null) {
+          continue;
+        }
+
+        for (String assignedInstance : instanceStateMap.keySet()) {
+          if (instanceName.equals(assignedInstance)) {
+            return false; // Partition still assigned to the given instance
+          }
+        }
+      }
+    }
+
+    return true; // All partitions have been reassigned (or excluded)
   }
 
   /**
