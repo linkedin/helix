@@ -535,10 +535,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           new HashMap<>(bestPossibleStates.getResourceMap(resource));
       StateModelDefinition stateModelDef = stateModelDefMap.get(
           resourceMap.get(resource).getStateModelDefRef());
-      String topState = null;
-      if (stateModelDef != null && !stateModelDef.getStatesPriorityList().isEmpty()) {
-        topState = stateModelDef.getStatesPriorityList().get(0);
-      }
+      String topState = stateModelDef.getTopState();
 
       for (Partition partition : partitionStateMap.keySet()) {
         Map<String, String> instanceStateMap = partitionStateMap.get(partition);
