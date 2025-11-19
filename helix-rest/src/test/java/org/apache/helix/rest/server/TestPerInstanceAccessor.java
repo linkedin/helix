@@ -699,6 +699,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.EVACUATE);
+    // Verify INSTANCE_OPERATION_STATE field is set correctly
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "EVACUATE");
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=INVALIDOP")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode()).format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=")
@@ -706,6 +708,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.ENABLE);
+    // Verify INSTANCE_OPERATION_STATE field is set correctly
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
 
     // test canCompleteSwap
     Response canCompleteSwapResponse =

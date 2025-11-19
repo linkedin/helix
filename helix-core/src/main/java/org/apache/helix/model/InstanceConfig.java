@@ -73,7 +73,8 @@ public class InstanceConfig extends HelixProperty {
     INSTANCE_INFO_MAP,
     INSTANCE_CAPACITY_MAP,
     TARGET_TASK_THREAD_POOL_SIZE,
-    HELIX_INSTANCE_OPERATIONS
+    HELIX_INSTANCE_OPERATIONS,
+    INSTANCE_OPERATION_STATE
   }
 
   public static class InstanceOperation {
@@ -249,6 +250,8 @@ public class InstanceConfig extends HelixProperty {
    */
   public InstanceConfig(String instanceId) {
     super(instanceId);
+    // Initialize the INSTANCE_OPERATION_STATE field
+    updateInstanceOperationState();
   }
 
   /**
@@ -257,6 +260,10 @@ public class InstanceConfig extends HelixProperty {
    */
   public InstanceConfig(ZNRecord record) {
     super(record);
+    // Ensure the INSTANCE_OPERATION_STATE field is set.
+    if (_record.getSimpleField(InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()) == null) {
+      updateInstanceOperationState();
+    }
   }
 
   /**
@@ -641,6 +648,9 @@ public class InstanceConfig extends HelixProperty {
         serializeInstanceOperations(operations));
 
     setLegacyFieldsForInstanceOperation(operation);
+
+    // Update the INSTANCE_OPERATION_STATE field for easy visibility
+    updateInstanceOperationState();
   }
 
   /**
@@ -681,6 +691,16 @@ public class InstanceConfig extends HelixProperty {
     // The last instance operation in the list is the most recent one.
     // ENABLE operation should not be included in the list.
     return instanceOperations.get(instanceOperations.size() - 1);
+  }
+
+  /**
+   * Update the INSTANCE_OPERATION_STATE field based on the current active instance operation.
+   * This field provides a simple, human-readable view of the current instance state.
+   */
+  private void updateInstanceOperationState() {
+    InstanceOperation activeOperation = getInstanceOperation();
+    _record.setSimpleField(InstanceConfigProperty.INSTANCE_OPERATION_STATE.name(),
+        activeOperation.getOperation().name());
   }
 
   /**
@@ -738,6 +758,23 @@ public class InstanceConfig extends HelixProperty {
     }
 
     return activeInstanceOperation;
+  }
+
+  /**
+   * Get the current instance operation state. This provides a simple, human-readable view of
+   * the current instance state (ENABLE, DISABLE, EVACUATE, SWAP_IN, UNKNOWN).
+   *
+   * @return the current instance operation state as a string
+   */
+  public String getInstanceOperationState() {
+    // If the field is not set, compute it from the current instance operation
+    String state = _record.getSimpleField(InstanceConfigProperty.INSTANCE_OPERATION_STATE.name());
+    if (state == null || state.isEmpty()) {
+      state = getInstanceOperation().getOperation().name();
+      // Update the field so it's persisted
+      _record.setSimpleField(InstanceConfigProperty.INSTANCE_OPERATION_STATE.name(), state);
+    }
+    return state;
   }
 
   /**
