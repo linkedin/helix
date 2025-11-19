@@ -466,6 +466,123 @@ public class TestInstancesAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testGetAllInstancesWithOperationStates() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Get all instances from the cluster
+    List<String> allInstances = _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Assert.assertTrue(allInstances.size() >= 4, "Need at least 4 instances for this test");
+
+    // Set different operation states on instances
+    String enabledInstance = allInstances.get(0);
+    String disabledInstance = allInstances.get(1);
+    String evacuatedInstance = allInstances.get(2);
+    String swapInInstance = allInstances.get(3);
+
+    // Set DISABLE operation
+    InstanceConfig disabledConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, disabledInstance);
+    disabledConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+            .setReason("Test disable")
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, disabledInstance, disabledConfig);
+
+    // Set EVACUATE operation
+    InstanceConfig evacuatedConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, evacuatedInstance);
+    evacuatedConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.EVACUATE)
+            .setReason("Test evacuate")
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, evacuatedInstance, evacuatedConfig);
+
+    // Set SWAP_IN operation
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setReason("Test swap in")
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    // Keep one instance with ENABLE (default) - enabledInstance already has ENABLE by default
+
+    // Make the API call
+    String body = new JerseyUriRequestBuilder("clusters/{}/instances").isBodyReturnExpected(true)
+        .format(CLUSTER_NAME).get(this);
+
+    JsonNode node = OBJECT_MAPPER.readTree(body);
+
+    // Verify all expected fields are present
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.instances.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.online.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.enabled.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.disabled.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.evacuated.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.swap_in.name()));
+    Assert.assertNotNull(node.get(InstancesAccessor.InstancesProperties.unknown.name()));
+
+    // Parse the response arrays
+    Set<String> enabledInstances = OBJECT_MAPPER.readValue(
+        node.get(InstancesAccessor.InstancesProperties.enabled.name()).toString(),
+        OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
+    Set<String> disabledInstances = OBJECT_MAPPER.readValue(
+        node.get(InstancesAccessor.InstancesProperties.disabled.name()).toString(),
+        OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
+    Set<String> evacuatedInstances = OBJECT_MAPPER.readValue(
+        node.get(InstancesAccessor.InstancesProperties.evacuated.name()).toString(),
+        OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
+    Set<String> swapInInstances = OBJECT_MAPPER.readValue(
+        node.get(InstancesAccessor.InstancesProperties.swap_in.name()).toString(),
+        OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
+    Set<String> unknownInstances = OBJECT_MAPPER.readValue(
+        node.get(InstancesAccessor.InstancesProperties.unknown.name()).toString(),
+        OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
+
+    // Verify the categorization is correct
+    Assert.assertTrue(enabledInstances.contains(enabledInstance),
+        "Enabled instance should be in enabled list");
+    Assert.assertTrue(disabledInstances.contains(disabledInstance),
+        "Disabled instance should be in disabled list");
+    Assert.assertTrue(evacuatedInstances.contains(evacuatedInstance),
+        "Evacuated instance should be in evacuated list");
+    Assert.assertTrue(swapInInstances.contains(swapInInstance),
+        "Swap-in instance should be in swap_in list");
+
+    // Verify instances are not in wrong categories
+    Assert.assertFalse(disabledInstances.contains(enabledInstance),
+        "Enabled instance should not be in disabled list");
+    Assert.assertFalse(evacuatedInstances.contains(disabledInstance),
+        "Disabled instance should not be in evacuated list");
+    Assert.assertFalse(enabledInstances.contains(evacuatedInstance),
+        "Evacuated instance should not be in enabled list");
+    Assert.assertFalse(enabledInstances.contains(swapInInstance),
+        "Swap-in instance should not be in enabled list");
+
+    // Clean up - reset all instances to ENABLE
+    disabledConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, disabledInstance, disabledConfig);
+
+    evacuatedConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, evacuatedInstance, evacuatedConfig);
+
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(enabled = false)
   public void testUpdateInstances() throws IOException {
     // TODO: Reenable the test after storage node fix the problem
@@ -814,7 +931,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
   public void testInstanceStoppableWithIncludeDetails() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
 
-    // Test the same scenario as testInstanceStoppableZoneBasedWithToBeStoppedInstances 
+    // Test the same scenario as testInstanceStoppableZoneBasedWithToBeStoppedInstances
     // but with includeDetails=true to get enhanced error messages
     String content = String.format(
         "{\"%s\":\"%s\",\"%s\":[\"%s\"], \"%s\":[\"%s\"]}",
@@ -830,24 +947,24 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode nonStoppableInstances = jsonNode.get(
         InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    
-    // Instance5 should not be stoppable due to MIN_ACTIVE_REPLICA_CHECK_FAILED 
+
+    // Instance5 should not be stoppable due to MIN_ACTIVE_REPLICA_CHECK_FAILED
     // and should now have detailed information about which partition failed
     Set<String> instance5Reasons = getStringSet(nonStoppableInstances, "instance5");
     Assert.assertEquals(instance5Reasons.size(), 1);
     String reason = instance5Reasons.iterator().next();
-    
+
     // With includeDetails=true, we should get a detailed message
-    Assert.assertTrue(reason.startsWith("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"), 
+    Assert.assertTrue(reason.startsWith("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"),
         "Expected detailed reason to start with HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED but got: " + reason);
-    
+
     // The detailed message should contain partition information
     // Expected format: "HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED: Resource StoppableTestCluster2_db_0 partition StoppableTestCluster2_db_0_3 has 1/2 active replicas"
-    Assert.assertTrue(reason.contains("partition"), 
+    Assert.assertTrue(reason.contains("partition"),
         "Expected detailed reason to contain partition information but got: " + reason);
-    Assert.assertTrue(reason.contains("has"), 
+    Assert.assertTrue(reason.contains("has"),
         "Expected detailed reason to contain 'has' but got: " + reason);
-    Assert.assertTrue(reason.contains("active replicas"), 
+    Assert.assertTrue(reason.contains("active replicas"),
         "Expected detailed reason to contain 'active replicas' but got: " + reason);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());

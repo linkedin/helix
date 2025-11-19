@@ -43,6 +43,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
@@ -72,6 +73,10 @@ public class InstancesAccessor extends AbstractHelixResource {
     instances,
     online,
     disabled,
+    enabled,
+    evacuated,
+    swap_in,
+    unknown,
     selection_base,
     skip_custom_check_if_instance_not_alive,
     zone_order,
@@ -112,25 +117,56 @@ public class InstancesAccessor extends AbstractHelixResource {
       ObjectNode root = JsonNodeFactory.instance.objectNode();
       root.put(Properties.id.name(), JsonNodeFactory.instance.textNode(clusterId));
 
+      // Initialize all arrays
       ArrayNode instancesNode =
           root.putArray(InstancesAccessor.InstancesProperties.instances.name());
       instancesNode.addAll((ArrayNode) OBJECT_MAPPER.valueToTree(instances));
+      
       ArrayNode onlineNode = root.putArray(InstancesAccessor.InstancesProperties.online.name());
+      ArrayNode enabledNode = root.putArray(InstancesAccessor.InstancesProperties.enabled.name());
       ArrayNode disabledNode = root.putArray(InstancesAccessor.InstancesProperties.disabled.name());
+      ArrayNode evacuatedNode = root.putArray(InstancesAccessor.InstancesProperties.evacuated.name());
+      ArrayNode swapInNode = root.putArray(InstancesAccessor.InstancesProperties.swap_in.name());
+      ArrayNode unknownNode = root.putArray(InstancesAccessor.InstancesProperties.unknown.name());
 
       List<String> liveInstances = accessor.getChildNames(accessor.keyBuilder().liveInstances());
-      ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
 
+      // Categorize each instance by its operation state
       for (String instanceName : instances) {
         InstanceConfig instanceConfig =
             accessor.getProperty(accessor.keyBuilder().instanceConfig(instanceName));
         if (instanceConfig != null) {
-          if (!InstanceValidationUtil.isInstanceEnabled(instanceConfig, clusterConfig)) {
-            disabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
-          }
+          // Get the instance operation
+          InstanceConfig.InstanceOperation instanceOperation = instanceConfig.getInstanceOperation();
+          InstanceConstants.InstanceOperation operation = instanceOperation.getOperation();
 
+          // Add to online list if live
           if (liveInstances.contains(instanceName)) {
             onlineNode.add(JsonNodeFactory.instance.textNode(instanceName));
+          }
+
+          // Categorize by operation state
+          switch (operation) {
+            case ENABLE:
+              enabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case DISABLE:
+              disabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case EVACUATE:
+              evacuatedNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case SWAP_IN:
+              swapInNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case UNKNOWN:
+              unknownNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            default:
+              _logger.warn("Unknown instance operation {} for instance {}. Adding to unknown list.",
+                  operation, instanceName);
+              unknownNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
           }
         }
       }
