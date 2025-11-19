@@ -27,6 +27,7 @@ import java.util.concurrent.Callable;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
@@ -35,6 +36,7 @@ import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractBaseStage;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -81,6 +83,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, LiveInstance> liveInstanceMap = dataProvider.getLiveInstances();
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
             Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+            Map<String, Long> errorPartitionCounts = Maps.newHashMap();
+            
             for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
               InstanceConfig config = e.getValue();
@@ -89,6 +93,10 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 liveInstanceSet.add(instanceName);
                 instanceMessageMap.put(instanceName,
                     Sets.newHashSet(dataProvider.getMessages(instanceName).values()));
+                
+                // Count ERROR partitions for this live instance
+                long errorCount = countErrorPartitions(dataProvider, instanceName);
+                errorPartitionCounts.put(instanceName, errorCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -104,7 +112,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
                     disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
-                    instanceConfigMap);
+                    instanceConfigMap, errorPartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
@@ -121,5 +129,46 @@ public class ReadClusterDataStage extends AbstractBaseStage {
         }
       });
     }
+  }
+
+  /**
+   * Count the number of partitions in ERROR state for a given instance
+   * @param dataProvider the data provider containing current state information
+   * @param instanceName the name of the instance to check
+   * @return the count of partitions in ERROR state
+   */
+  private long countErrorPartitions(BaseControllerDataProvider dataProvider, String instanceName) {
+    long errorCount = 0L;
+    
+    try {
+      Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
+      LiveInstance liveInstance = liveInstances.get(instanceName);
+      
+      if (liveInstance != null) {
+        String sessionId = liveInstance.getEphemeralOwner();
+        Map<String, CurrentState> currentStateMap = 
+            dataProvider.getCurrentState(instanceName, sessionId, false);
+        
+        if (currentStateMap != null) {
+          for (CurrentState currentState : currentStateMap.values()) {
+            if (currentState != null) {
+              Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
+              if (partitionStateMap != null) {
+                for (String state : partitionStateMap.values()) {
+                  if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
+                    errorCount++;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      LogUtil.logWarn(logger, _eventId, 
+          "Failed to count error partitions for instance: " + instanceName, e);
+    }
+    
+    return errorCount;
   }
 }

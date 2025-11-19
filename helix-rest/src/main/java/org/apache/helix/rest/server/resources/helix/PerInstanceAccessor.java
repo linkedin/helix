@@ -487,7 +487,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           admin.enablePartition(true, clusterId, instanceName,
               node.get(PerInstanceProperties.resource.name()).textValue(),
               (List<String>) OBJECT_MAPPER.readValue(
-                  node.get(PerInstanceProperties.partitions.name()).toString(),
+                  node.get(PerInstanceProperties.partitions.name()).toString()lemaintenace
                   OBJECT_MAPPER.getTypeFactory()
                       .constructCollectionType(List.class, String.class)));
           break;

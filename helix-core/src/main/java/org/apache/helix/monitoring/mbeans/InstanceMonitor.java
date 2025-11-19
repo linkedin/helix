@@ -56,6 +56,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     MAX_CAPACITY_USAGE_GAUGE("MaxCapacityUsageGauge"),
     MESSAGE_QUEUE_SIZE_GAUGE("MessageQueueSizeGauge"),
     PASTDUE_MESSAGE_GAUGE("PastDueMessageGauge"),
+    ERROR_PARTITIONS_GAUGE("ErrorPartitions"),
     INSTANCE_OPERATION_DURATION_ENABLE_GAUGE("InstanceOperationDuration_ENABLE"),
     INSTANCE_OPERATION_DURATION_DISABLE_GAUGE("InstanceOperationDuration_DISABLE"),
     INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE("InstanceOperationDuration_EVACUATE"),
@@ -90,6 +91,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Double> _maxCapacityUsageGauge;
   private SimpleDynamicMetric<Long> _messageQueueSizeGauge;
   private SimpleDynamicMetric<Long> _pastDueMessageGauge;
+  private SimpleDynamicMetric<Long> _errorPartitionsGauge;
 
   // Instance Operation Duration Gauges (in milliseconds)
   private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
@@ -154,6 +156,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _pastDueMessageGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.PASTDUE_MESSAGE_GAUGE.metricName(),
             0L);
+    _errorPartitionsGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.ERROR_PARTITIONS_GAUGE.metricName(),
+            0L);
 
     // Initialize instance operation duration gauges
     _instanceOperationDurationEnableGauge = new SimpleDynamicMetric<>(
@@ -178,6 +183,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _maxCapacityUsageGauge,
         _messageQueueSizeGauge,
         _pastDueMessageGauge,
+        _errorPartitionsGauge,
         _instanceOperationDurationEnableGauge,
         _instanceOperationDurationDisableGauge,
         _instanceOperationDurationEvacuateGauge,
@@ -216,6 +222,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   protected long getMessageQueueSizeGauge() { return _messageQueueSizeGauge.getValue(); }
 
   protected long getPastDueMessageGauge() { return _pastDueMessageGauge.getValue(); }
+
+  protected long getErrorPartitions() { return _errorPartitionsGauge.getValue(); }
 
   /**
    * Get the current duration in ENABLE operation (in milliseconds)
@@ -275,10 +283,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * @param disabledPartitions current disabled partitions
    * @param isLive true if running, false otherwise
    * @param isEnabled true if enabled, false if disabled
+   * @param errorPartitionCount number of partitions in ERROR state on this instance
    */
   public synchronized void updateInstance(Set<String> tags,
       Map<String, List<String>> disabledPartitions, List<String> oldDisabledPartitions,
-      boolean isLive, boolean isEnabled) {
+      boolean isLive, boolean isEnabled, long errorPartitionCount) {
     if (tags == null || tags.isEmpty()) {
       _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     } else {
@@ -307,6 +316,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _enabledStatusGauge.updateValue(isEnabled ? 1L : 0L);
     _disabledPartitionsGauge.updateValue(numDisabledPartitions);
     _allPartitionsDisabledGauge.updateValue(allPartitionsDisabled ? 1L : 0L);
+    _errorPartitionsGauge.updateValue(errorPartitionCount);
   }
 
   /**
