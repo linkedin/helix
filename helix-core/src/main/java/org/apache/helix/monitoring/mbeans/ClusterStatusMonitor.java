@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.management.JMException;
@@ -758,6 +759,17 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   public void reset() {
     LOG.info("Reset ClusterStatusMonitor");
     try {
+      // Shutdown the shared executor FIRST before unregistering instances
+      // This prevents instances from trying to schedule new tasks during unregister
+      if (_sharedResetExecutor != null && !_sharedResetExecutor.isShutdown()) {
+        List<Runnable> pendingTasks = _sharedResetExecutor.shutdownNow();
+        if (!pendingTasks.isEmpty()) {
+          LOG.info("Cancelled {} pending gauge reset tasks during cluster monitor reset for cluster: {}", 
+                   pendingTasks.size(), _clusterName);
+        }
+      }
+
+      // Now safe to unregister all monitors
       unregisterAllResources();
       unregisterAllInstances();
       unregisterAllPerInstanceResources();
@@ -765,11 +777,6 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       unregisterAllEventMonitors();
       unregisterAllWorkflowsMonitor();
       unregisterAllJobs();
-
-      // Shutdown the shared executor to clean up the thread
-      if (_sharedResetExecutor != null && !_sharedResetExecutor.isShutdown()) {
-        _sharedResetExecutor.shutdownNow();
-      }
 
       _liveInstances.clear();
       _instances.clear();
