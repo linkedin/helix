@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.management.JMException;
 import javax.management.MBeanServer;
@@ -114,6 +116,9 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
   private final Map<String, JobMonitor> _perTypeJobMonitorMap = new ConcurrentHashMap<>();
 
+  // Shared executor for all InstanceMonitor gauge reset tasks in this cluster
+  private final ScheduledExecutorService _sharedResetExecutor;
+
   public ClusterStatusMonitor(String clusterName) {
     _clusterName = clusterName;
     _beanServer = ManagementFactory.getPlatformMBeanServer();
@@ -122,6 +127,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
       _perOperationInstanceCount.put(operation, new AtomicLong(0L));
     }
+
+    // Create a single shared executor for all instance monitors in this cluster
+    _sharedResetExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread thread = new Thread(r, "ClusterMonitor-SharedResetExecutor-" + clusterName);
+      thread.setDaemon(true);
+      return thread;
+    });
   }
 
   public ObjectName getObjectName(String name) throws MalformedObjectNameException {
@@ -287,7 +299,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       for (String instanceName : toRegister) {
         try {
           ObjectName objectName = getObjectName(getInstanceBeanName(instanceName));
-          InstanceMonitor bean = new InstanceMonitor(_clusterName, instanceName, objectName);
+          InstanceMonitor bean = new InstanceMonitor(_clusterName, instanceName, objectName, _sharedResetExecutor);
           bean.updateInstance(tags.get(instanceName), disabledPartitions.get(instanceName),
               oldDisabledPartitions.get(instanceName), liveInstanceSet.contains(instanceName),
               !disabledInstanceSet.contains(instanceName));
@@ -753,6 +765,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       unregisterAllEventMonitors();
       unregisterAllWorkflowsMonitor();
       unregisterAllJobs();
+
+      // Shutdown the shared executor to clean up the thread
+      if (_sharedResetExecutor != null && !_sharedResetExecutor.isShutdown()) {
+        _sharedResetExecutor.shutdownNow();
+      }
 
       _liveInstances.clear();
       _instances.clear();

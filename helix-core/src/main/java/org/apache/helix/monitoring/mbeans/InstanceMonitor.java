@@ -116,8 +116,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * Initialize the bean
    * @param clusterName the cluster to monitor
    * @param participantName the instance whose statistics this holds
+   * @param objectName the MBean object name
+   * @param sharedResetExecutor shared executor service for all instances in this cluster
    */
-  public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
+  public InstanceMonitor(String clusterName, String participantName, ObjectName objectName,
+      ScheduledExecutorService sharedResetExecutor) {
     _clusterName = clusterName;
     _participantName = participantName;
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
@@ -127,11 +130,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     // Initialize to 0 so that if we haven't received operation info yet, duration will be large
     // and will be corrected when we receive the actual operation start time from InstanceConfig
     _currentOperationStartTime = 0L;
-    _resetExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-      Thread thread = new Thread(r, "InstanceMonitor-ResetGauges-" + participantName);
-      thread.setDaemon(true);
-      return thread;
-    });
+    // Use the shared executor instead of creating a per-instance executor
+    _resetExecutor = sharedResetExecutor;
 
     createMetrics();
   }

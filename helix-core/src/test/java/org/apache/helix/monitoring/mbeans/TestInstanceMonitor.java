@@ -23,6 +23,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -32,9 +34,24 @@ import com.google.common.collect.ImmutableSet;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.InstanceConfig;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class TestInstanceMonitor {
+  private ScheduledExecutorService _testExecutor;
+
+  @BeforeMethod
+  public void setUp() {
+    _testExecutor = Executors.newSingleThreadScheduledExecutor();
+  }
+
+  @AfterMethod
+  public void tearDown() {
+    if (_testExecutor != null) {
+      _testExecutor.shutdownNow();
+    }
+  }
   @Test
   public void testInstanceMonitor()
       throws JMException {
@@ -45,7 +62,7 @@ public class TestInstanceMonitor {
     Map<String, List<String>> disabledPartitions = ImmutableMap.of("instance1",
         ImmutableList.of("partition1", "partition2", InstanceConstants.ALL_RESOURCES_DISABLED_PARTITION_KEY));
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), _testExecutor);
 
     // Verify init status.
     Assert.assertEquals(monitor.getSensorName(),
@@ -87,7 +104,7 @@ public class TestInstanceMonitor {
     String testInstance = "testInstance";
     String testDomain = "testDomain:key=value";
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), _testExecutor);
 
     // Initially, all duration metrics should be 0 (instance starts in ENABLE state)
     Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L);
@@ -227,7 +244,7 @@ public class TestInstanceMonitor {
 
     // Create InstanceMonitor
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), _testExecutor);
 
     // Verify initial state - instance starts in ENABLE
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
@@ -278,7 +295,7 @@ public class TestInstanceMonitor {
     // Creating a fresh instance to avoid backwards compatibility issues
     InstanceConfig instanceConfig2 = new InstanceConfig(testInstance + "_2");
     InstanceMonitor monitor2 =
-        new InstanceMonitor(testCluster, testInstance + "_2", new ObjectName(testDomain + "2"));
+        new InstanceMonitor(testCluster, testInstance + "_2", new ObjectName(testDomain + "2"), _testExecutor);
 
     InstanceConfig.InstanceOperation disableOp =
         new InstanceConfig.InstanceOperation.Builder()
@@ -320,7 +337,7 @@ public class TestInstanceMonitor {
     String testInstance = "testInstance";
     String testDomain = "testDomain:key=value";
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), _testExecutor);
 
     // Verify initial state
     Assert.assertEquals(monitor.getPartitionCount(), 0L);
@@ -358,7 +375,7 @@ public class TestInstanceMonitor {
     String testInstance = "testInstance";
     String testDomain = "testDomain:key=value";
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), _testExecutor);
 
     // Test 1: Initial state should be 0
     Assert.assertEquals(monitor.getPartitionCount(), 0L);
