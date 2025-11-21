@@ -24,10 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -110,22 +106,13 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
 
-  // Background executor for resetting gauges
-  private final ScheduledExecutorService _resetExecutor;
-
-  // Track the pending reset task so we can cancel it if operation changes
-  // Volatile to ensure visibility across threads (accessed from update thread and executor thread)
-  private volatile ScheduledFuture<?> _pendingResetTask;
-
   /**
    * Initialize the bean
    * @param clusterName the cluster to monitor
    * @param participantName the instance whose statistics this holds
    * @param objectName the MBean object name
-   * @param sharedResetExecutor shared executor service for all instances in this cluster
    */
-  public InstanceMonitor(String clusterName, String participantName, ObjectName objectName,
-      ScheduledExecutorService sharedResetExecutor) {
+  public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
     _clusterName = clusterName;
     _participantName = participantName;
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
@@ -135,8 +122,6 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     // Initialize to 0 so that if we haven't received operation info yet, duration will be large
     // and will be corrected when we receive the actual operation start time from InstanceConfig
     _currentOperationStartTime = 0L;
-    // Use the shared executor instead of creating a per-instance executor
-    _resetExecutor = sharedResetExecutor;
 
     createMetrics();
   }
@@ -402,42 +387,12 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
     // Check if operation changed
     if (_currentOperation != newOperation) {
-      // Only update final duration if we had a valid start time
-      // On first call after controller restart, _currentOperationStartTime may be 0
-      if (_currentOperationStartTime > 0L) {
-        long finalDuration = currentTime - _currentOperationStartTime;
-        updateOperationDurationGauge(_currentOperation, finalDuration);
-      }
-
-      // Now switch to the new operation
+      // Switch to the new operation
       _currentOperation = newOperation;
       _currentOperationStartTime = operationStartTime;
 
-      // Cancel any pending reset task since the operation changed
-      if (_pendingResetTask != null && !_pendingResetTask.isDone()) {
-        _pendingResetTask.cancel(false);
-      }
-
-      // Capture the current operation at scheduling time to avoid race conditions
-      // If we transition from ENABLE -> EVACUATE -> ENABLE within 2 minutes,
-      // we want to reset based on what the operation was when we scheduled the task,
-      // not what it becomes later.
-      final InstanceConstants.InstanceOperation operationToExclude = _currentOperation;
-
-      // Schedule a background task to reset all gauges except the captured operation after 2 minutes
-      // Only schedule when operation changes to avoid accumulating redundant tasks
-      try {
-        _pendingResetTask = _resetExecutor.schedule(() -> {
-          synchronized (InstanceMonitor.this) {
-            resetAllExceptOperations(Collections.singleton(operationToExclude));
-          }
-        }, 2, TimeUnit.MINUTES);
-      } catch (RejectedExecutionException e) {
-        // Executor may be shut down during ClusterStatusMonitor.reset()
-        // This is safe to ignore - gauges just won't auto-reset
-        _logger.debug("Failed to schedule gauge reset task for instance {} - executor shut down",
-                      _participantName);
-      }
+      // Reset all gauges except the current (new) operation
+      resetAllExceptOperations(Collections.singleton(_currentOperation));
     }
 
     // Update the duration gauge for the current operation (called on every update)
@@ -541,16 +496,5 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     doRegister(buildAttributeList(), _initObjectName);
 
     return this;
-  }
-
-  @Override
-  public synchronized void unregister() {
-    // Cancel any pending reset task since this monitor is being unregistered
-    if (_pendingResetTask != null && !_pendingResetTask.isDone()) {
-      _pendingResetTask.cancel(false);
-    }
-    // Note: We do NOT shutdown _resetExecutor here because it's shared across all instances
-    // The executor is owned and managed by ClusterStatusMonitor
-    super.unregister();
   }
 }
