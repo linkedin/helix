@@ -103,8 +103,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             }
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
-                    disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
-                    instanceConfigMap);
+                    disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap, instanceConfigMap);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
