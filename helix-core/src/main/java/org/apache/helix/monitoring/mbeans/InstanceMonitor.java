@@ -24,9 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -61,7 +58,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     INSTANCE_OPERATION_DURATION_DISABLE_GAUGE("InstanceOperationDuration_DISABLE"),
     INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE("InstanceOperationDuration_EVACUATE"),
     INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
-    INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN");
+    INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
+    PARTITION_COUNT_GAUGE("PartitionCount"),
+    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionCount");
 
     private final String metricName;
 
@@ -92,6 +91,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _messageQueueSizeGauge;
   private SimpleDynamicMetric<Long> _pastDueMessageGauge;
   private SimpleDynamicMetric<Long> _errorPartitionsGauge;
+  private SimpleDynamicMetric<Long> _partitionCountGauge;
+  private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
 
   // Instance Operation Duration Gauges (in milliseconds)
   private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
@@ -107,13 +108,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
 
-  // Background executor for resetting gauges
-  private final ScheduledExecutorService _resetExecutor;
-
   /**
    * Initialize the bean
    * @param clusterName the cluster to monitor
    * @param participantName the instance whose statistics this holds
+   * @param objectName the MBean object name
    */
   public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
     _clusterName = clusterName;
@@ -125,11 +124,6 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     // Initialize to 0 so that if we haven't received operation info yet, duration will be large
     // and will be corrected when we receive the actual operation start time from InstanceConfig
     _currentOperationStartTime = 0L;
-    _resetExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-      Thread thread = new Thread(r, "InstanceMonitor-ResetGauges-" + participantName);
-      thread.setDaemon(true);
-      return thread;
-    });
 
     createMetrics();
   }
@@ -158,6 +152,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
             0L);
     _errorPartitionsGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.ERROR_PARTITIONS_GAUGE.metricName(),
+    _partitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.PARTITION_COUNT_GAUGE.metricName(),
+            0L);
+    _topStatePartitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.TOP_STATE_PARTITION_COUNT_GAUGE.metricName(),
             0L);
 
     // Initialize instance operation duration gauges
@@ -184,6 +183,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _messageQueueSizeGauge,
         _pastDueMessageGauge,
         _errorPartitionsGauge,
+        _partitionCountGauge,
+        _topStatePartitionCountGauge,
         _instanceOperationDurationEnableGauge,
         _instanceOperationDurationDisableGauge,
         _instanceOperationDurationEvacuateGauge,
@@ -224,6 +225,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   protected long getPastDueMessageGauge() { return _pastDueMessageGauge.getValue(); }
 
   protected long getErrorPartitions() { return _errorPartitionsGauge.getValue(); }
+  protected long getPartitionCount() { return _partitionCountGauge.getValue(); }
+
+  protected long getTopStatePartitionCount() { return _topStatePartitionCountGauge.getValue(); }
 
   /**
    * Get the current duration in ENABLE operation (in milliseconds)
@@ -391,34 +395,17 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
     // Check if operation changed
     if (_currentOperation != newOperation) {
-      // Only update final duration if we had a valid start time
-      // On first call after controller restart, _currentOperationStartTime may be 0
-      if (_currentOperationStartTime > 0L) {
-        long finalDuration = currentTime - _currentOperationStartTime;
-        updateOperationDurationGauge(_currentOperation, finalDuration);
-      }
-
-      // Now switch to the new operation
+      // Switch to the new operation
       _currentOperation = newOperation;
       _currentOperationStartTime = operationStartTime;
+
+      // Reset all gauges except the current (new) operation
+      resetAllExceptOperations(Collections.singleton(_currentOperation));
     }
 
-    // Update the duration gauge for the current operation
+    // Update the duration gauge for the current operation (called on every update)
     long currentDuration = currentTime - _currentOperationStartTime;
     updateOperationDurationGauge(_currentOperation, currentDuration);
-
-    // Capture the current operation at scheduling time to avoid race conditions
-    // If we transition from ENABLE -> EVACUATE -> ENABLE within 2 minutes,
-    // we want to reset based on what the operation was when we scheduled the task,
-    // not what it becomes later.
-    final InstanceConstants.InstanceOperation operationToExclude = _currentOperation;
-
-    // Schedule a background task to reset all gauges except the captured operation after 2 minutes
-    _resetExecutor.schedule(() -> {
-      synchronized (InstanceMonitor.this) {
-        resetAllExceptOperations(Collections.singleton(operationToExclude));
-      }
-    }, 2, TimeUnit.MINUTES);
   }
 
   /**
@@ -452,6 +439,22 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    */
   public synchronized void updatePastDueMessageGauge(long msgCount) {
     _pastDueMessageGauge.updateValue(msgCount);
+  }
+
+  /**
+   * Updates the total number of partitions assigned to this instance.
+   * @param partitionCount total number of partitions on this instance
+   */
+  public synchronized void updatePartitionCount(long partitionCount) {
+    _partitionCountGauge.updateValue(partitionCount);
+  }
+
+  /**
+   * Updates the number of partitions in top state assigned to this instance.
+   * @param topStatePartitionCount number of partitions in top state on this instance
+   */
+  public synchronized void updateTopStatePartitionCount(long topStatePartitionCount) {
+    _topStatePartitionCountGauge.updateValue(topStatePartitionCount);
   }
 
   /**
