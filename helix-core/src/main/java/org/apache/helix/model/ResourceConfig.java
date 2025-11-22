@@ -60,7 +60,8 @@ public class ResourceConfig extends HelixProperty {
     EXTERNAL_VIEW_DISABLED,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
-    RELAXED_DISABLED_PARTITION_CONSTRAINT // Resource-level override for relaxed disabled partition constraint
+    RELAXED_DISABLED_PARTITION_CONSTRAINT, // Resource-level override for relaxed disabled partition constraint
+    ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
 
   public enum ResourceConfigConstants {
@@ -277,6 +278,33 @@ public class ResourceConfig extends HelixProperty {
    */
   public int getMinActiveReplica() {
     return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
+  }
+
+  /**
+   * Get the list of states that should be considered as "active" for min active replica check.
+   * If not configured, the default behavior applies (all states except DROPPED, ERROR, and initial state).
+   *
+   * @return List of state names to be considered active, or null if not configured
+   */
+  public List<String> getActiveStatesForMinActiveReplicaCheck() {
+    return _record.getListField(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+  }
+
+  /**
+   * Set the list of states that should be considered as "active" for min active replica check.
+   * When configured, only replicas in these states will count toward the min active replica constraint.
+   * 
+   * Example: For a state model with states [LEADER, STANDBY, BOOTSTRAP, OFFLINE],
+   * setting this to ["LEADER", "STANDBY"] will only count replicas in LEADER or STANDBY states.
+   *
+   * @param activeStates List of state names to be considered active, or null to use default behavior
+   */
+  public void setActiveStatesForMinActiveReplicaCheck(List<String> activeStates) {
+    if (activeStates == null) {
+      _record.getListFields().remove(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    } else {
+      _record.setListField(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(), activeStates);
+    }
   }
 
   public int getMaxPartitionsPerInstance() {
