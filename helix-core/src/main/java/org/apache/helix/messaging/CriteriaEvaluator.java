@@ -70,6 +70,25 @@ public class CriteriaEvaluator {
     String resourceName = recipientCriteria.getResource();
     String instanceName = recipientCriteria.getInstanceName();
 
+    // If only instance name is specified (no resource/partition/state),
+    // use LIVEINSTANCES for efficient lookup. This is safe because we filter by
+    // liveParticipants anyway, so querying LIVEINSTANCES directly is more efficient.
+    if (Strings.isNullOrEmpty(resourceName)
+        && Strings.isNullOrEmpty(recipientCriteria.getPartition())
+        && Strings.isNullOrEmpty(recipientCriteria.getPartitionState())
+        && dataSource == DataSource.EXTERNALVIEW) {
+      dataSource = DataSource.LIVEINSTANCES;
+    }
+
+    // Since we always filter by liveParticipants anyway, if the dataSource
+    // is INSTANCES and we're querying for all instances, just use
+    // LIVEINSTANCES directly to avoid redundant ZK reads and filtering
+    if (dataSource == DataSource.INSTANCES 
+        && (Strings.isNullOrEmpty(instanceName) || instanceName.equals(MATCH_ALL_SYM) 
+            || instanceName.equals("*"))) {
+      dataSource = DataSource.LIVEINSTANCES;
+    }
+
     switch (dataSource) {
     case EXTERNALVIEW:
       properties = getProperty(accessor, resourceName, keyBuilder.externalViews(),
@@ -93,18 +112,32 @@ public class CriteriaEvaluator {
     // flatten the data
     List<ZNRecordRow> allRows = ZNRecordRow.flatten(HelixProperty.convertToList(properties));
 
-    // save the matches
-    // TODO: Apply strict check on the getChildValuesMap() call.
-    // TODO: For backward compatibility, allow partial read for now. This may reduce the
-    // TODO: match result eventually.
-    Set<String> liveParticipants =
-        accessor.getChildValuesMap(keyBuilder.liveInstances(), false).keySet();
+    // Only fetch liveParticipants if dataSource is not already LIVEINSTANCES
+    // When dataSource is LIVEINSTANCES, all rows are already live by definition
+    Set<String> liveParticipants = null;
+    if (dataSource != DataSource.LIVEINSTANCES) {
+      // TODO: Apply strict check on the getChildValuesMap() call.
+      // TODO: For backward compatibility, allow partial read for now. This may reduce the
+      // TODO: match result eventually.
+      Map<String, HelixProperty> liveInstanceMap = 
+          accessor.getChildValuesMap(keyBuilder.liveInstances(), false);
+      liveParticipants = liveInstanceMap != null ? liveInstanceMap.keySet() : Collections.emptySet();
+      
+      //if there are no live instances, no point in filtering
+      if (liveParticipants.isEmpty()) {
+        logger.info("No live participants found");
+        return Lists.newArrayList();
+      }
+    }
+
     List<ZNRecordRow> result = Lists.newArrayList();
     for (ZNRecordRow row : allRows) {
       // The participant instance name is stored in the return value of either getRecordId() or
       // getMapSubKey()
-      if (rowMatches(recipientCriteria, row) && (liveParticipants.contains(row.getRecordId())
-          || liveParticipants.contains(row.getMapSubKey()))) {
+      boolean isLive = (liveParticipants == null)
+          || liveParticipants.contains(row.getRecordId())
+          || liveParticipants.contains(row.getMapSubKey());
+      if (rowMatches(recipientCriteria, row) && isLive) {
         result.add(row);
       }
     }
@@ -125,7 +158,7 @@ public class CriteriaEvaluator {
           !recipientCriteria.getPartitionState().equals("") ? row.getMapValue() : "");
       selected.add(resultRow);
     }
-    logger.info("Query returned " + selected.size() + " rows");
+    logger.info("Query returned {} rows", selected.size());
     return Lists.newArrayList(selected);
   }
 
@@ -153,7 +186,7 @@ public class CriteriaEvaluator {
    * @return Java matches expression (i.e. contains ".*?"s and '.'s)
    */
   private String normalizePattern(String pattern) {
-    if (pattern == null || pattern.equals("") || pattern.equals("*")) {
+    if (Strings.isNullOrEmpty(pattern) || pattern.equals("*")) {
       pattern = "%";
     }
     StringBuilder builder = new StringBuilder();
