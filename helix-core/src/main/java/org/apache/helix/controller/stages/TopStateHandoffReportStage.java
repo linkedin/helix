@@ -141,9 +141,6 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
               partition, stateModelDef.getTopState(), currentStateOutput);
           reportTopStateHandoffFailIfNecessary(cache, resourceName, partition, durationThreshold,
               clusterStatusMonitor);
-
-          // Also clear in-progress handoff tracking when top state is missing
-          clearInProgressHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
         }
       }
 
@@ -618,12 +615,19 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           partitionName, resourceName));
     }
 
+    // If already flagged as beyond threshold, skip to avoid duplicate metric increments.
+    // The gauge should only be incremented once when the handoff first exceeds the threshold,
+    // not on every subsequent pipeline run.
+    if (record.isBeyondThreshold()) {
+      return;
+    }
+
     // Check if handoff duration exceeds threshold
     long startTime = record.getStartTimeStamp();
     long handoffDuration = System.currentTimeMillis() - startTime;
 
-    if (startTime > 0 && handoffDuration > durationThreshold && !record.isBeyondThreshold()) {
-      // Mark as beyond threshold and increment gauge
+    if (startTime > 0 && handoffDuration > durationThreshold) {
+      // First time exceeding threshold - mark as beyond threshold and increment gauge
       record.setBeyondThreshold();
       inProgressHandoffMap.get(resourceName).put(partitionName, record);
 
