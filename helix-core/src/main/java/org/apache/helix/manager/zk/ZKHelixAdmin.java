@@ -60,8 +60,12 @@ import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
+import org.apache.helix.constants.EvacuateExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
+import org.apache.helix.manager.zk.evacuation.PartitionExclusionFilter;
+import org.apache.helix.manager.zk.evacuation.PartitionExclusionHelper;
+import org.apache.helix.manager.zk.evacuation.PartitionInfo;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.CloudConfig;
@@ -460,17 +464,23 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
+    return isEvacuateFinished(clusterName, instanceName, Collections.emptySet());
+  }
+
+  @Override
+  public boolean isEvacuateFinished(String clusterName, String instanceName,
+      Set<EvacuateExclusionType> exclusionTypes) {
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
     if (config == null || config.getInstanceOperation().getOperation() !=
         InstanceConstants.InstanceOperation.EVACUATE ) {
       return false;
     }
-    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes);
   }
 
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
-    return !instanceHasCurrentStateOrMessage(clusterName, instanceName);
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
   }
 
   /**
@@ -748,7 +758,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isReadyForPreparingJoiningCluster(String clusterName, String instanceName) {
-    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName)) {
+    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet())) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
       return config != null && INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT.contains(
           config.getInstanceOperation().getOperation());
@@ -788,35 +798,44 @@ public class ZKHelixAdmin implements HelixAdmin {
    * FULL_AUTO and CUSTOMIZED resources in current states, false otherwise. For offline instances,
    * returns false if all CUSTOMIZED resources in current states are migrated to other instances
    * in ideal state, true otherwise.
-   * @param clusterName
-   * @param instanceName
-   * @return
+   *
+   * This method follows below structure:
+   * 1. Collect all partitions from current states
+   * 2. Apply exclusion filters based on the exclusionTypes parameter
+   * 3. Check if any partitions remain after exclusions
+   *
+   * @param clusterName The cluster name
+   * @param instanceName The instance name
+   * @param exclusionTypes Set of exclusion types to filter out resources/partitions
+   * @return true if instance has current state or messages that block evacuation, false otherwise
    */
   private boolean instanceHasCurrentStateOrMessage(String clusterName,
-      String instanceName) {
+      String instanceName, Set<EvacuateExclusionType> exclusionTypes) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
-    // check the instance is alive
+    // Check the instance is alive
     LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
 
     BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
-    // count number of sessions under CurrentState folder. If it is carrying over from prv session,
+    // Count number of sessions under CurrentState folder. If it is carrying over from prev session,
     // then there are > 1 session ZNodes.
-    List<String> sessions = baseAccessor.getChildNames(PropertyPathBuilder.instanceCurrentState(clusterName, instanceName), 0);
+    List<String> sessions = baseAccessor.getChildNames(
+        PropertyPathBuilder.instanceCurrentState(clusterName, instanceName), 0);
     if (sessions.isEmpty()) {
-      logger.info("Instance {} in cluster {} does not have any session.  The instance can be removed anyway.",
+      logger.info("Instance {} in cluster {} does not have any session. The instance can be removed.",
           instanceName, clusterName);
       return false;
     }
     if (sessions.size() > 1) {
-      logger.info("Instance {} in cluster {} is carrying over from prev session.", instanceName,
-          clusterName);
+      logger.info("Instance {} in cluster {} is carrying over from prev session.",
+          instanceName, clusterName);
       return true;
     }
 
     String sessionId = sessions.get(0);
-    List<CurrentState> currentStates = accessor.getChildValues(keyBuilder.currentStates(instanceName, sessionId), true);
+    List<CurrentState> currentStates = accessor.getChildValues(
+        keyBuilder.currentStates(instanceName, sessionId), true);
     if (currentStates == null || currentStates.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any current state.",
           instanceName, clusterName);
@@ -824,27 +843,80 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
-    if (liveInstance == null) {
-      boolean customizedResourcesReassigned =
-          areAllCustomizedResourcesReassigned(currentStates, idealStates, instanceName);
-      logger.info("check for customizedResourcesReassigned for instance {} in cluster {} returned {}",
-          instanceName, clusterName, customizedResourcesReassigned);
-      return !customizedResourcesReassigned;
+
+    // Step 1: Get set of FULL_AUTO and CUSTOMIZED resources, applying DISABLED_RESOURCE exclusion
+    Set<String> allowedResources = filterResourcesByModeAndExclusions(idealStates, exclusionTypes);
+
+    // Step 2: Only fetch InstanceConfig if DISABLED_PARTITION exclusion is requested
+    // This addresses the performance concern from review comment #2
+    Map<String, List<String>> disabledPartitionsMap = null;
+    if (exclusionTypes.contains(EvacuateExclusionType.DISABLED_PARTITION)) {
+      InstanceConfig instanceConfig = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
+      disabledPartitionsMap = instanceConfig != null ?
+          instanceConfig.getDisabledPartitionsMap() : Collections.emptyMap();
     }
 
-    // see if instance has pending message.
+    // Step 3: Create exclusion filters based on requested exclusion types
+    Map<EvacuateExclusionType, PartitionExclusionFilter> filters =
+        PartitionExclusionHelper.createExclusionFilters(exclusionTypes, disabledPartitionsMap);
+
+    // Handle offline instances - check if CUSTOMIZED resources are reassigned
+    if (liveInstance == null) {
+      List<PartitionInfo> partitionsStillOnInstance =
+          PartitionExclusionHelper.getCustomizedPartitionsStillOnInstance(
+              currentStates, idealStates, instanceName, allowedResources, filters);
+
+      boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
+      logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
+          instanceName, clusterName, partitionsStillOnInstance.size());
+      return hasPartitionsStillOnInstance;
+    }
+
+    // Handle online instances - check for pending messages first
     List<String> messages = accessor.getChildNames(keyBuilder.messages(instanceName));
     if (messages != null && !messages.isEmpty()) {
-      logger.info("Instance {} in cluster {} has pending messages.", instanceName, clusterName);
+      logger.info("Instance {} in cluster {} has {} pending messages.",
+          instanceName, clusterName, messages.size());
       return true;
     }
-    // Get set of FULL_AUTO and CUSTOMIZED resources
-    Set<String> resources = idealStates != null ? idealStates.stream()
+
+    // Step 4: Collect all partitions from current states
+    List<PartitionInfo> allPartitions =
+        PartitionExclusionHelper.collectPartitions(currentStates, allowedResources);
+
+    // Step 5: Apply exclusions to the collected partitions
+    List<PartitionInfo> remainingPartitions =
+        PartitionExclusionHelper.applyExclusions(allPartitions, filters);
+
+    // Step 6: Check if any partitions remain after exclusions
+    boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
+    logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
+        instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+
+    return hasRemainingPartitions;
+  }
+
+  /**
+   * Filters resources to only include FULL_AUTO and CUSTOMIZED mode resources,
+   * and applies DISABLED_RESOURCE exclusion if requested.
+   *
+   * @param idealStates List of ideal states to filter
+   * @param exclusionTypes Set of exclusion types to apply
+   * @return Set of resource names that match the criteria
+   */
+  private Set<String> filterResourcesByModeAndExclusions(List<IdealState> idealStates,
+      Set<EvacuateExclusionType> exclusionTypes) {
+    if (idealStates == null) {
+      return Collections.emptySet();
+    }
+
+    return idealStates.stream()
         .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO ||
             idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
-        .map(IdealState::getResourceName).collect(Collectors.toSet()) : Collections.emptySet();
-
-    return currentStates.stream().map(CurrentState::getResourceName).anyMatch(resources::contains);
+        .filter(idealState -> !exclusionTypes.contains(EvacuateExclusionType.DISABLED_RESOURCE) ||
+            idealState.isEnabled())
+        .map(IdealState::getResourceName)
+        .collect(Collectors.toSet());
   }
 
   /**

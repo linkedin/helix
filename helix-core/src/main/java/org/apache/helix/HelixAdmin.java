@@ -22,12 +22,14 @@ package org.apache.helix;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
+import org.apache.helix.constants.EvacuateExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConstraints;
@@ -806,6 +808,21 @@ public interface HelixAdmin {
    */
   default boolean isEvacuateFinished(String clusterName, String instancesName) {
     throw new UnsupportedOperationException("isEvacuateFinished is not implemented.");
+  }
+
+  /**
+   * Return if instance operation 'Evacuate' is finished with exclusions.
+   * This method allows certain resources or partitions to be excluded from blocking evacuation completion.
+   *
+   * @param clusterName The name of the cluster
+   * @param instancesName The name of the instance
+   * @param exclusionTypes Set of exclusion types to apply (e.g., DISABLED_RESOURCE, ERROR_PARTITIONS, DISABLED_PARTITION)
+   * @return Return true if there is no FULL_AUTO or CUSTOMIZED resources (after applying exclusions)
+   *         in the current state nor any pending message on the instance.
+   */
+  default boolean isEvacuateFinished(String clusterName, String instancesName,
+      Set<EvacuateExclusionType> exclusionTypes) {
+    throw new UnsupportedOperationException("isEvacuateFinished with exclusions is not implemented.");
   }
 
   /**
