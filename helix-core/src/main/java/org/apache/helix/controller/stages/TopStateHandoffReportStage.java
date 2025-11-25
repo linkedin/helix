@@ -30,6 +30,7 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
@@ -88,15 +89,20 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       long lastPipelineFinishTimestamp) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
+    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+        cache.getInProgressHandoffMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
 
     long durationThreshold = Long.MAX_VALUE;
+    long handoffDurationThreshold = Long.MAX_VALUE;
     if (cache.getClusterConfig() != null) {
       durationThreshold = cache.getClusterConfig().getMissTopStateDurationThreshold();
+      handoffDurationThreshold = cache.getClusterConfig().getTopStateHandoffDurationThreshold();
     }
 
     // Remove any resource records that no longer exists
     missingTopStateMap.keySet().retainAll(resourceMap.keySet());
+    inProgressHandoffMap.keySet().retainAll(resourceMap.keySet());
     lastTopStateMap.keySet().retainAll(resourceMap.keySet());
 
     for (Resource resource : resourceMap.values()) {
@@ -113,6 +119,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       for (Partition partition : resource.getPartitions()) {
         String currentTopStateInstance =
             findCurrentTopStateLocation(currentStateOutput, resourceName, partition, stateModelDef);
+        String expectedTopStateInstance =
+            findExpectedTopStateLocation(cache, resourceName, partition, stateModelDef);
         String lastTopStateInstance = findCachedTopStateLocation(cache, resourceName, partition);
 
         if (currentTopStateInstance != null) {
@@ -120,6 +128,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
               lastTopStateInstance, currentTopStateInstance, clusterStatusMonitor,
               durationThreshold, lastPipelineFinishTimestamp);
           updateCachedTopStateLocation(cache, resourceName, partition, currentTopStateInstance);
+
+          // Check for in-progress handoff: IdealState expects different instance than current
+          if (expectedTopStateInstance != null && !expectedTopStateInstance.equals(currentTopStateInstance)) {
+            trackInProgressHandoff(cache, resourceName, partition, handoffDurationThreshold, clusterStatusMonitor);
+          } else {
+            // Handoff completed or no handoff in progress, clear tracking if exists
+            clearInProgressHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
+          }
         } else {
           reportTopStateMissing(cache, resourceName,
               partition, stateModelDef.getTopState(), currentStateOutput);
@@ -172,6 +188,36 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     return lastTopStateMap.containsKey(resourceName) && lastTopStateMap.get(resourceName)
         .containsKey(partition.getPartitionName()) ? lastTopStateMap.get(resourceName)
         .get(partition.getPartitionName()) : null;
+  }
+
+  /**
+   * Find expected top state location from IdealState for the given resource and partition
+   *
+   * @param cache cluster data cache object
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model definition
+   * @return expected instance name that should have top state according to IdealState, null if not defined
+   */
+  private String findExpectedTopStateLocation(ResourceControllerDataProvider cache, String resourceName,
+      Partition partition, StateModelDefinition stateModelDef) {
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return null;
+    }
+
+    Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition.getPartitionName());
+    if (instanceStateMap == null || instanceStateMap.isEmpty()) {
+      return null;
+    }
+
+    String topState = stateModelDef.getTopState();
+    for (Map.Entry<String, String> entry : instanceStateMap.entrySet()) {
+      if (topState.equals(entry.getValue())) {
+        return entry.getKey();
+      }
+    }
+    return null;
   }
 
   /**
@@ -536,5 +582,99 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     LogUtil.logInfo(LOG, _eventId, String.format(
         "Missing top state duration is %s/%s (helix latency / end to end latency) for partition %s. Graceful: %s",
         helixLatency, totalDuration, partitionName, isGraceful));
+  }
+
+  /**
+   * Track in-progress top state handoff and increment gauge if beyond threshold
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param durationThreshold top state handoff duration threshold
+   * @param clusterStatusMonitor monitor object
+   */
+  private void trackInProgressHandoff(ResourceControllerDataProvider cache, String resourceName,
+      Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+        cache.getInProgressHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    // Initialize resource map if not exists
+    if (!inProgressHandoffMap.containsKey(resourceName)) {
+      inProgressHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
+    }
+
+    InProgressHandoffRecord record = inProgressHandoffMap.get(resourceName).get(partitionName);
+
+    if (record == null) {
+      // First time detecting this in-progress handoff, start tracking
+      record = new InProgressHandoffRecord(System.currentTimeMillis());
+      inProgressHandoffMap.get(resourceName).put(partitionName, record);
+      LogUtil.logDebug(LOG, _eventId, String.format(
+          "Started tracking in-progress handoff for partition %s of resource %s",
+          partitionName, resourceName));
+    }
+
+    // If already flagged as beyond threshold, skip to avoid duplicate metric increments.
+    // The gauge should only be incremented once when the handoff first exceeds the threshold,
+    // not on every subsequent pipeline run.
+    if (record.isBeyondThreshold()) {
+      return;
+    }
+
+    // Check if handoff duration exceeds threshold
+    long startTime = record.getStartTimeStamp();
+    long handoffDuration = System.currentTimeMillis() - startTime;
+
+    if (startTime > 0 && handoffDuration > durationThreshold) {
+      // First time exceeding threshold - mark as beyond threshold and increment gauge
+      record.setBeyondThreshold();
+
+      LogUtil.logWarn(LOG, _eventId, String.format(
+          "In-progress handoff for partition %s of resource %s has exceeded threshold. Duration: %s ms",
+          partitionName, resourceName, handoffDuration));
+
+      if (clusterStatusMonitor != null) {
+        clusterStatusMonitor.incrementInProgressHandoffBeyondThresholdGauge(resourceName);
+      }
+    }
+  }
+
+  /**
+   * Clear in-progress handoff tracking and decrement gauge if it was beyond threshold
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param clusterStatusMonitor monitor object
+   */
+  private void clearInProgressHandoffTracking(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+        cache.getInProgressHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    if (!inProgressHandoffMap.containsKey(resourceName)) {
+      return;
+    }
+
+    InProgressHandoffRecord record = inProgressHandoffMap.get(resourceName).get(partitionName);
+    if (record == null) {
+      return;
+    }
+
+    // If the record was beyond threshold, decrement the gauge
+    if (record.isBeyondThreshold() && clusterStatusMonitor != null) {
+      LogUtil.logInfo(LOG, _eventId, String.format(
+          "In-progress handoff completed for partition %s of resource %s. Decrementing gauge.",
+          partitionName, resourceName));
+      clusterStatusMonitor.decrementInProgressHandoffBeyondThresholdGauge(resourceName);
+    }
+
+    // Remove the tracking record
+    inProgressHandoffMap.get(resourceName).remove(partitionName);
+    if (inProgressHandoffMap.get(resourceName).isEmpty()) {
+      inProgressHandoffMap.remove(resourceName);
+    }
   }
 }

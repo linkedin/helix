@@ -697,6 +697,22 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  public void incrementInProgressHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.incrementInProgressHandoffBeyondThresholdGauge();
+    }
+  }
+
+  public void decrementInProgressHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.decrementInProgressHandoffBeyondThresholdGauge();
+    }
+  }
+
   public void updateRebalancerStats(String resourceName, long numPendingRecoveryRebalancePartitions,
       long numPendingLoadRebalancePartitions, long numRecoveryRebalanceThrottledPartitions,
       long numLoadRebalanceThrottledPartitions, boolean rebalanceThrottledByErrorPartitions) {
