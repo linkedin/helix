@@ -629,7 +629,6 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (startTime > 0 && handoffDuration > durationThreshold) {
       // First time exceeding threshold - mark as beyond threshold and increment gauge
       record.setBeyondThreshold();
-      inProgressHandoffMap.get(resourceName).put(partitionName, record);
 
       LogUtil.logWarn(LOG, _eventId, String.format(
           "In-progress handoff for partition %s of resource %s has exceeded threshold. Duration: %s ms",
