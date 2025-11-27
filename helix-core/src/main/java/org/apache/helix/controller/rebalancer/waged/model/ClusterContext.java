@@ -61,10 +61,8 @@ public class ClusterContext {
   // <ResourceName, ResourceAssignment contains the best possible assignment>
   private final Map<String, ResourceAssignment> _bestPossibleAssignment;
   // Estimate remaining capacity after assignment. Used to compute score when sorting replicas.
-  // NOTE: Using Long to avoid integer overflow for large clusters (e.g., 450 instances × 5M capacity > Integer.MAX_VALUE)
   private final Map<String, Long> _estimateUtilizationMap;
   // Cluster total capacity. Used to compute score when sorting replicas.
-  // NOTE: Using Long to avoid integer overflow for large clusters
   private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
   private final String _clusterName;
