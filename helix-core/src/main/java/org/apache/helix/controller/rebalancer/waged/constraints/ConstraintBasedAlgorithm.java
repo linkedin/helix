@@ -73,18 +73,24 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
     // create a always >0 capacity map to avoid divide by 0.
     Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
-    for (Map.Entry<String, Integer> clusterRemainingCap : clusterModel.getContext()
+    for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
         .getEstimateUtilizationMap().entrySet()) {
       String capacityKey = clusterRemainingCap.getKey();
       if (clusterRemainingCap.getValue() < 0) {
         // all replicas' assignment will fail if there is one dimension's remain capacity <0.
+        Long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
+        Long remainingCapacity = clusterRemainingCap.getValue();
+        Long totalUsage = totalCapacity - remainingCapacity;
+        LOG.error("Insufficient {} capacity in cluster. Total capacity: {}, Total usage required: {}, Deficit: {}",
+            capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity));
         throw new HelixRebalanceException(String
-            .format("The cluster does not have enough %s capacity for all partitions. ",
-                capacityKey), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+            .format("The cluster does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
+                capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
       }
       // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
       positiveEstimateClusterRemainCap.put(capacityKey,
-           clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
+           (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
           (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
     }
 
