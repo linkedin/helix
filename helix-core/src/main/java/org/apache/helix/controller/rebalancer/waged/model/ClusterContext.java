@@ -61,9 +61,9 @@ public class ClusterContext {
   // <ResourceName, ResourceAssignment contains the best possible assignment>
   private final Map<String, ResourceAssignment> _bestPossibleAssignment;
   // Estimate remaining capacity after assignment. Used to compute score when sorting replicas.
-  private final Map<String, Integer> _estimateUtilizationMap;
+  private final Map<String, Long> _estimateUtilizationMap;
   // Cluster total capacity. Used to compute score when sorting replicas.
-  private final Map<String, Integer> _clusterCapacityMap;
+  private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
   private final String _clusterName;
   // Reference to the data provider for accessing resource configurations
@@ -90,9 +90,9 @@ public class ClusterContext {
     int instanceCount = nodeSet.size();
     int totalReplicas = 0;
     int totalTopStateReplicas = 0;
-    Map<String, Integer> totalUsage = new HashMap<>();
-    Map<String, Integer> totalTopStateUsage = new HashMap<>();
-    Map<String, Integer> totalCapacity = new HashMap<>();
+    Map<String, Long> totalUsage = new HashMap<>();
+    Map<String, Long> totalTopStateUsage = new HashMap<>();
+    Map<String, Long> totalCapacity = new HashMap<>();
     _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
     _dataProvider = dataProvider;
@@ -110,14 +110,14 @@ public class ClusterContext {
         if (replica.isReplicaTopState()) {
           totalTopStateReplicas += 1;
           replica.getCapacity().forEach(
-              (key, value) -> totalTopStateUsage.compute(key, (k, v) -> (v == null) ? value : (v + value)));
+              (key, value) -> totalTopStateUsage.compute(key, (k, v) -> (v == null) ? (long) value : (v + value)));
         }
         replica.getCapacity().forEach(
-            (key, value) -> totalUsage.compute(key, (k, v) -> (v == null) ? value : (v + value)));
+            (key, value) -> totalUsage.compute(key, (k, v) -> (v == null) ? (long) value : (v + value)));
       }
     }
     nodeSet.forEach(node -> node.getMaxCapacity().forEach(
-        (key, value) -> totalCapacity.compute(key, (k, v) -> (v == null) ? value : (v + value))));
+        (key, value) -> totalCapacity.compute(key, (k, v) -> (v == null) ? (long) value : (v + value))));
 
     // TODO: these variables correspond to one constraint each, and may become unnecessary if the
     // constraints are not used. A better design is to make them pluggable.
@@ -186,11 +186,11 @@ public class ClusterContext {
     return _estimatedTopStateMaxUtilization;
   }
 
-  public Map<String, Integer> getEstimateUtilizationMap() {
+  public Map<String, Long> getEstimateUtilizationMap() {
     return _estimateUtilizationMap;
   }
 
-  public Map<String, Integer> getClusterCapacityMap() {
+  public Map<String, Long> getClusterCapacityMap() {
     return _clusterCapacityMap;
   }
 
@@ -249,8 +249,8 @@ public class ClusterContext {
    * @return The max utilization number from the specified capacity categories.
    */
 
-  private static float estimateMaxUtilization(Map<String, Integer> totalCapacity,
-                                              Map<String, Integer> totalUsage,
+  private static float estimateMaxUtilization(Map<String, Long> totalCapacity,
+                                              Map<String, Long> totalUsage,
                                               List<String> preferredScoringKeys) {
     float estimatedMaxUsage = 0;
     Set<String> capacityKeySet = totalCapacity.keySet();
@@ -258,8 +258,8 @@ public class ClusterContext {
       capacityKeySet = preferredScoringKeys.stream().collect(Collectors.toSet());
     }
     for (String capacityKey : capacityKeySet) {
-      int maxCapacity = totalCapacity.get(capacityKey);
-      int usage = totalUsage.getOrDefault(capacityKey, 0);
+      long maxCapacity = totalCapacity.get(capacityKey);
+      long usage = totalUsage.getOrDefault(capacityKey, 0L);
       float utilization = (maxCapacity == 0) ? 1 : (float) usage / maxCapacity;
       estimatedMaxUsage = Math.max(estimatedMaxUsage, utilization);
     }
@@ -267,12 +267,12 @@ public class ClusterContext {
     return estimatedMaxUsage;
   }
 
-  private static Map<String, Integer> estimateUtilization(Map<String, Integer> totalCapacity,
-      Map<String, Integer> totalUsage) {
-    Map<String, Integer> estimateUtilization = new HashMap<>();
+  private static Map<String, Long> estimateUtilization(Map<String, Long> totalCapacity,
+      Map<String, Long> totalUsage) {
+    Map<String, Long> estimateUtilization = new HashMap<>();
     for (String capacityKey : totalCapacity.keySet()) {
-      int maxCapacity = totalCapacity.get(capacityKey);
-      int usage = totalUsage.getOrDefault(capacityKey, 0);
+      long maxCapacity = totalCapacity.get(capacityKey);
+      long usage = totalUsage.getOrDefault(capacityKey, 0L);
       estimateUtilization.put(capacityKey, maxCapacity - usage);
     }
 
