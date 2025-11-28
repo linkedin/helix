@@ -276,9 +276,17 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     // the target assignment.
     newIdealStates.values().parallelStream().forEach(idealState -> {
       String resourceName = idealState.getResourceName();
+      Resource resource = resourceMap.get(resourceName);
+
+      // This can happen when a resource is deleted but still exists in cached assignment
+      if (resource == null) {
+        LOG.warn("Resource {} not found in current resourceMap. Skipping ideal state calculation.", resourceName);
+        return;
+      }
+
       // Adjust the states according to the current state.
       ResourceAssignment finalAssignment = _mappingCalculator
-          .computeBestPossiblePartitionState(clusterData, idealState, resourceMap.get(resourceName),
+          .computeBestPossiblePartitionState(clusterData, idealState, resource,
               currentStateOutput);
 
       // Clean up the state mapping fields. Use the final assignment that is calculated by the
@@ -291,6 +299,17 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             newStateMap == null ? Collections.emptyMap() : newStateMap);
       }
     });
+
+    // Remove any resources from newIdealStates that don't exist in the current resourceMap
+    // This ensures we don't return stale IdealStates for deleted resources
+    newIdealStates.keySet().removeIf(resourceName -> {
+      if (!resourceMap.containsKey(resourceName)) {
+        LOG.warn("Removing stale resource {} from ideal states as it no longer exists in cluster.", resourceName);
+        return true;
+      }
+      return false;
+    });
+
     LOG.info("Finish computing new ideal states for resources: {}",
         resourceMap.keySet().toString());
     return newIdealStates;
