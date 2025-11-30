@@ -19,8 +19,10 @@ package org.apache.helix;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -49,8 +51,8 @@ import org.slf4j.LoggerFactory;
 public class PropertyPathBuilder {
   private static Logger logger = LoggerFactory.getLogger(PropertyPathBuilder.class);
 
-  static final Map<PropertyType, Map<Integer, String>> templateMap =
-      new HashMap<PropertyType, Map<Integer, String>>();
+  static final Map<PropertyType, Map<Integer, PathTemplate>> templateMap =
+      new HashMap<PropertyType, Map<Integer, PathTemplate>>();
   @Deprecated // typeToClassMapping is not being used anywhere
   static final Map<PropertyType, Class<? extends HelixProperty>> typeToClassMapping =
       new HashMap<PropertyType, Class<? extends HelixProperty>>();
@@ -180,15 +182,67 @@ public class PropertyPathBuilder {
     addEntry(PropertyType.JOB_CONTEXT, 3, "/{clusterName}/PROPERTYSTORE"
         + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}" + "_" + "{jobName}/Context");
   }
-  static Pattern pattern = Pattern.compile("(\\{.+?\\})");
+
+  /**
+   * Pre-parsed path template for efficient path construction.
+   * Parses template strings once at initialization to avoid repeated regex operations.
+   */
+  static class PathTemplate {
+    private final String[] parts;
+
+    /**
+     * Parse a template string like "/{clusterName}/INSTANCES/{instanceName}"
+     * into reusable parts: ["/", "/INSTANCES/", ""]
+     */
+    PathTemplate(String template) {
+      List<String> partsList = new ArrayList<>();
+      int lastEnd = 0;
+
+      // Find all {placeholders} and split the template into static parts
+      int start = template.indexOf('{');
+      while (start != -1) {
+        partsList.add(template.substring(lastEnd, start));
+        int end = template.indexOf('}', start);
+        if (end == -1) {
+          logger.error("Malformed template: missing closing brace in " + template);
+          break;
+        }
+        lastEnd = end + 1;
+        start = template.indexOf('{', lastEnd);
+      }
+      partsList.add(template.substring(lastEnd));
+
+      this.parts = partsList.toArray(new String[0]);
+    }
+
+    /**
+     * Build path by concatenating static parts with parameters.
+     */
+    String buildPath(String clusterName, String... keys) {
+      StringBuilder sb = new StringBuilder(128);
+      sb.append(parts[0]).append(clusterName);
+
+      for (int i = 0; i < keys.length; i++) {
+        if (i + 1 < parts.length) {
+          sb.append(parts[i + 1]);
+        }
+        sb.append(keys[i]);
+      }
+
+      if (keys.length + 1 < parts.length) {
+        sb.append(parts[keys.length + 1]);
+      }
+
+      return sb.toString();
+    }
+  }
 
   private static void addEntry(PropertyType type, int numKeys, String template) {
     if (!templateMap.containsKey(type)) {
-      templateMap.put(type, new HashMap<Integer, String>());
+      templateMap.put(type, new HashMap<Integer, PathTemplate>());
     }
-    logger.trace("Adding template for type:" + type.getType() + " arguments:" + numKeys
-        + " template:" + template);
-    templateMap.get(type).put(numKeys, template);
+    logger.trace("Adding template for type:" + type.getType() + " arguments:" + numKeys + " template:" + template);
+    templateMap.get(type).put(numKeys, new PathTemplate(template));
   }
 
   /**
@@ -204,33 +258,22 @@ public class PropertyPathBuilder {
       return null;
     }
     if (keys == null) {
-      keys = new String[] {};
+      keys = new String[]{};
     }
-    String template = null;
+
+    PathTemplate template = null;
     if (templateMap.containsKey(type)) {
-      // keys.length+1 since we add clusterName
       template = templateMap.get(type).get(keys.length + 1);
     }
 
     String result = null;
-
     if (template != null) {
-      result = template;
-      Matcher matcher = pattern.matcher(template);
-      int count = 0;
-      while (matcher.find()) {
-        count = count + 1;
-        String var = matcher.group();
-        if (count == 1) {
-          result = result.replace(var, clusterName);
-        } else {
-          result = result.replace(var, keys[count - 2]);
-        }
-      }
+      result = template.buildPath(clusterName, keys);
     }
+
     if (result == null || result.indexOf('{') > -1 || result.indexOf('}') > -1) {
-      logger.warn("Unable to instantiate template:" + template + " using clusterName:" + clusterName
-          + " and keys:" + Arrays.toString(keys));
+      logger.warn("Unable to instantiate template for type:" + type + " using clusterName:" + clusterName + " and keys:"
+          + Arrays.toString(keys));
     }
     return result;
   }
