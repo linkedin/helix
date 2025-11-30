@@ -585,7 +585,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
   }
 
   /**
-   * Track in-progress top state handoff and increment gauge if beyond threshold
+   * Track in-progress top state handoff and increment gauge if beyond threshold.
+   * Only starts tracking when the participant begins executing the transition (consistent with MaxSinglePartitionTopStateHandoffDurationGauge).
+   * This excludes controller-side throttling time from the handoff duration.
    *
    * @param cache cluster data cache
    * @param resourceName resource name
@@ -607,12 +609,24 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     InProgressHandoffRecord record = inProgressHandoffMap.get(resourceName).get(partitionName);
 
     if (record == null) {
-      // First time detecting this in-progress handoff, start tracking
-      record = new InProgressHandoffRecord(System.currentTimeMillis());
+      // Check if participant has started executing the transition
+      // This is consistent with MaxSinglePartitionTopStateHandoffDurationGauge's approach
+      Long participantStartTime = getParticipantTransitionStartTime(cache, resourceName, partitionName);
+      
+      if (participantStartTime == null) {
+        // Participant hasn't started yet (message may be throttled or in participant's queue)
+        LogUtil.logDebug(LOG, _eventId, String.format(
+            "Top-state mismatch detected but participant has not started transition for partition %s of resource %s",
+            partitionName, resourceName));
+        return;
+      }
+      
+      // Participant has started the transition, start tracking from participant's start time
+      record = new InProgressHandoffRecord(participantStartTime);
       inProgressHandoffMap.get(resourceName).put(partitionName, record);
       LogUtil.logDebug(LOG, _eventId, String.format(
-          "Started tracking in-progress handoff for partition %s of resource %s",
-          partitionName, resourceName));
+          "Started tracking in-progress handoff for partition %s of resource %s from participant start time: %d",
+          partitionName, resourceName, participantStartTime));
     }
 
     // If already flagged as beyond threshold, skip to avoid duplicate metric increments.
@@ -676,5 +690,82 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (inProgressHandoffMap.get(resourceName).isEmpty()) {
       inProgressHandoffMap.remove(resourceName);
     }
+  }
+
+  /**
+   * Get the timestamp when the participant started executing the top-state transition.
+   * This is consistent with MaxSinglePartitionTopStateHandoffDurationGauge's approach:
+   * - Uses participant's JVM timestamp (not controller's)
+   * - Excludes controller-side throttling time
+   * - Available during in-progress execution
+   * 
+   * Uses message.getExecuteStartTimeStamp() which is set when participant starts processing,
+   * right before the actual state transition logic is invoked.
+   * 
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partitionName partition name
+   * @return participant's execution start time if transition has started, null otherwise
+   */
+  private Long getParticipantTransitionStartTime(ResourceControllerDataProvider cache,
+      String resourceName, String partitionName) {
+    // Get the state model definition for this resource
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return null;
+    }
+    
+    StateModelDefinition stateModelDef = cache.getStateModelDef(idealState.getStateModelDefRef());
+    if (stateModelDef == null) {
+      return null;
+    }
+    
+    String topState = stateModelDef.getTopState();
+    Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
+    
+    // Get the instance that currently/previously had top state
+    Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
+    String topStateInstance = null;
+    if (lastTopStateMap.containsKey(resourceName)) {
+      topStateInstance = lastTopStateMap.get(resourceName).get(partitionName);
+    }
+    
+    if (topStateInstance == null || !liveInstances.containsKey(topStateInstance)) {
+      return null;
+    }
+    
+    // Check for message being executed on this instance for this partition
+    Map<String, Message> messages = cache.getMessages(topStateInstance);
+    for (Message message : messages.values()) {
+      if (!resourceName.equals(message.getResourceName())) {
+        continue;
+      }
+      
+      // Check if this message is for our partition
+      boolean isForPartition = partitionName.equals(message.getPartitionName())
+          || (message.getPartitionNames() != null && message.getPartitionNames().contains(partitionName));
+      
+      if (!isForPartition) {
+        continue;
+      }
+      
+      // Check if this is a top-state transition (FROM top state)
+      if (topState.equals(message.getFromState())) {
+        // Found the top-state transition message
+        // Use executeStartTimeStamp if available (set when participant starts processing)
+        // Otherwise fall back to readTimeStamp (set when message marked as READ)
+        // Both are participant's JVM timestamps, written to ZK immediately when processing starts
+        long startTime = message.getExecuteStartTimeStamp();
+        if (startTime <= 0) {
+          startTime = message.getReadTimeStamp();
+        }
+        
+        if (startTime > 0) {
+          return startTime;
+        }
+      }
+    }
+    
+    return null;
   }
 }
