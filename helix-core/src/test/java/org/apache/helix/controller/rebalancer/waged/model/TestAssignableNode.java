@@ -287,7 +287,7 @@ public class TestAssignableNode extends AbstractTestClusterModel {
     Assert.assertEquals(assignableNode.getMaxCapacity(), _capacityDataMap);
   }
 
-  @Test
+  @Test(expectedExceptions = HelixException.class, expectedExceptionsMessageRegExp = "The required capacity keys: \\[.*(item1|item2|item3|AdditionalCapacityKey).*(item1|item2|item3|AdditionalCapacityKey).*(item1|item2|item3|AdditionalCapacityKey).*(item1|item2|item3|AdditionalCapacityKey).*\\] are not fully configured in the instance: testInstanceId, capacity map: \\{.*(item1=20|item2=40|item3=30).*(item1=20|item2=40|item3=30).*(item1=20|item2=40|item3=30).*\\}\\.")
   public void testIncompleteInstanceCapacity() {
     ClusterConfig testClusterConfig = new ClusterConfig("testClusterConfigId");
     List<String> requiredCapacityKeys = new ArrayList<>(_capacityDataMap.keySet());
@@ -297,18 +297,6 @@ public class TestAssignableNode extends AbstractTestClusterModel {
     InstanceConfig testInstanceConfig = new InstanceConfig(_testInstanceId);
     testInstanceConfig.setInstanceCapacityMap(_capacityDataMap);
 
-    try {
-      new AssignableNode(testClusterConfig, testInstanceConfig, _testInstanceId);
-      Assert.fail("Should have thrown HelixException for incomplete instance capacity");
-    } catch (HelixException e) {
-      // Verify the error message contains the key information (without relying on HashMap ordering)
-      Assert.assertTrue(e.getMessage().contains("The required capacity keys"));
-      Assert.assertTrue(e.getMessage().contains("AdditionalCapacityKey"));
-      Assert.assertTrue(e.getMessage().contains("are not fully configured in the instance"));
-      Assert.assertTrue(e.getMessage().contains("testInstanceId"));
-      Assert.assertTrue(e.getMessage().contains("item1=20"));
-      Assert.assertTrue(e.getMessage().contains("item2=40"));
-      Assert.assertTrue(e.getMessage().contains("item3=30"));
-    }
+    new AssignableNode(testClusterConfig, testInstanceConfig, _testInstanceId);
   }
 }
