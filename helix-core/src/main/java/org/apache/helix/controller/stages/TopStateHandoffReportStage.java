@@ -612,7 +612,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       // Check if participant has started executing the transition
       // This is consistent with MaxSinglePartitionTopStateHandoffDurationGauge's approach
       Long participantStartTime = getParticipantTransitionStartTime(cache, resourceName, partitionName);
-      
+
       if (participantStartTime == null) {
         // Participant hasn't started yet (message may be throttled or in participant's queue)
         LogUtil.logDebug(LOG, _eventId, String.format(
@@ -620,7 +620,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
             partitionName, resourceName));
         return;
       }
-      
+
       // Participant has started the transition, start tracking from participant's start time
       record = new InProgressHandoffRecord(participantStartTime);
       inProgressHandoffMap.get(resourceName).put(partitionName, record);
@@ -698,10 +698,10 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * - Uses participant's JVM timestamp (not controller's)
    * - Excludes controller-side throttling time
    * - Available during in-progress execution
-   * 
-   * Uses message.getExecuteStartTimeStamp() which is set when participant starts processing,
-   * right before the actual state transition logic is invoked.
-   * 
+   *
+   * Uses message.getReadTimeStamp() which is set when participant marks the message as READ,
+   * right before scheduling the task. This is the best proxy for execution start time available in ZK.
+   *
    * @param cache cluster data cache
    * @param resourceName resource name
    * @param partitionName partition name
@@ -714,58 +714,55 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (idealState == null) {
       return null;
     }
-    
+
     StateModelDefinition stateModelDef = cache.getStateModelDef(idealState.getStateModelDefRef());
     if (stateModelDef == null) {
       return null;
     }
-    
+
     String topState = stateModelDef.getTopState();
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
-    
+
     // Get the instance that currently/previously had top state
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
     String topStateInstance = null;
     if (lastTopStateMap.containsKey(resourceName)) {
       topStateInstance = lastTopStateMap.get(resourceName).get(partitionName);
     }
-    
+
     if (topStateInstance == null || !liveInstances.containsKey(topStateInstance)) {
       return null;
     }
-    
+
     // Check for message being executed on this instance for this partition
     Map<String, Message> messages = cache.getMessages(topStateInstance);
+
     for (Message message : messages.values()) {
       if (!resourceName.equals(message.getResourceName())) {
         continue;
       }
-      
+
       // Check if this message is for our partition
       boolean isForPartition = partitionName.equals(message.getPartitionName())
           || (message.getPartitionNames() != null && message.getPartitionNames().contains(partitionName));
-      
+
       if (!isForPartition) {
         continue;
       }
-      
+
       // Check if this is a top-state transition (FROM top state)
       if (topState.equals(message.getFromState())) {
         // Found the top-state transition message
-        // Use executeStartTimeStamp if available (set when participant starts processing)
-        // Otherwise fall back to readTimeStamp (set when message marked as READ)
-        // Both are participant's JVM timestamps, written to ZK immediately when processing starts
-        long startTime = message.getExecuteStartTimeStamp();
-        if (startTime <= 0) {
-          startTime = message.getReadTimeStamp();
-        }
-        
+        // Use readTimeStamp (set when message marked as READ) as the start time.
+        // This is the most accurate timestamp available in ZK that indicates the participant
+        // has picked up the message and is about to execute it.
+        long startTime = message.getReadTimeStamp();
+
         if (startTime > 0) {
           return startTime;
         }
       }
     }
-    
     return null;
   }
 }

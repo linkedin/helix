@@ -124,15 +124,28 @@ public class InstanceMessagesCache {
       long purgeEnd = System.currentTimeMillis();
       purgeSum += purgeEnd - purgeStart;
 
-      // get the keys for the new messages
+      // get the keys for the new messages AND existing messages that might have been updated
+      // (e.g., participant updated msgState from NEW to READ, or set readTimeStamp)
       for (String messageName : messageNames) {
         if (!cachedMap.containsKey(messageName)) {
+          // New message - need to read
           newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+        } else {
+          // Existing message - check if it might have been updated by participant
+          Message cachedMessage = cachedMap.get(messageName);
+          // Refresh if message is still in NEW state (participant might have updated it to READ)
+          // or if readTimeStamp is 0 (participant might have set it)
+          if (cachedMessage != null) {
+            Message.MessageState msgState = cachedMessage.getMsgState();
+            if (Message.MessageState.NEW.equals(msgState) || cachedMessage.getReadTimeStamp() == 0) {
+              newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+            }
+          }
         }
       }
     }
 
-    // get the new messages
+    // get the new and updated messages
     if (newMessageKeys.size() > 0) {
       List<Message> newMessages = accessor.getProperty(newMessageKeys, true);
       for (Message message : newMessages) {
