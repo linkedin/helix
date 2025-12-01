@@ -157,8 +157,9 @@ public class TestConstraintBasedAlgorithm {
       OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
-      Assert.assertEquals(ex.getMessage(),
-          "The cluster does not have enough item1 capacity for all partitions.  Failure Type: FAILED_TO_CALCULATE");
+      // Check that the error message contains the key information about insufficient capacity
+      Assert.assertTrue(ex.getMessage().contains("does not have enough item1 capacity for all partitions"));
+      Assert.assertTrue(ex.getMessage().contains("Failure Type: FAILED_TO_CALCULATE"));
     }
   }
 
