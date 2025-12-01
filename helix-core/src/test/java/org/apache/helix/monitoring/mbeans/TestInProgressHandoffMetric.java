@@ -103,4 +103,28 @@ public class TestInProgressHandoffMetric {
 
     clusterMonitor.reset();
   }
+
+  @Test
+  public void testPostDispatchGaugeIncrementAndDecrement() {
+    ClusterStatusMonitor clusterMonitor = new ClusterStatusMonitor(CLUSTER_NAME);
+    clusterMonitor.active();
+
+    clusterMonitor.incrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    ResourceMonitor resourceMonitor = clusterMonitor.getResourceMonitor(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 1L);
+
+    clusterMonitor.incrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 2L);
+
+    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 1L);
+
+    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 0L);
+
+    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 0L);
+
+    clusterMonitor.reset();
+  }
 }
