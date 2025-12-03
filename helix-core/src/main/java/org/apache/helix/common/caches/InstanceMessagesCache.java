@@ -124,27 +124,18 @@ public class InstanceMessagesCache {
       long purgeEnd = System.currentTimeMillis();
       purgeSum += purgeEnd - purgeStart;
 
-      // Build list of messages to fetch from ZK:
-      // 1. Truly new messages (not in cache)
-      // 2. Existing messages that might have been updated by participant
-      //    (e.g., participant updated msgState from NEW to READ, or set readTimeStamp)
+      // Determine which messages need to be fetched/refreshed from ZK
       for (String messageName : messageNames) {
-        if (!cachedMap.containsKey(messageName)) {
+        Message cachedMessage = cachedMap.get(messageName);
+        
+        // Fetch from ZK if:
+        // 1. Message is not cached yet (new message)
+        // 2. Message is in NEW state (participant may have updated it to READ)
+        // 3. readTimeStamp is not set (participant may have set it after marking READ)
+        if (cachedMessage == null 
+            || Message.MessageState.NEW.equals(cachedMessage.getMsgState()) 
+            || cachedMessage.getReadTimeStamp() == 0) {
           messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
-        } else {
-          // Existing cached message - check if we need to refresh it
-          Message cachedMessage = cachedMap.get(messageName);
-          if (cachedMessage != null) {
-            Message.MessageState cachedMsgState = cachedMessage.getMsgState();
-            // Refresh from ZK if:
-            // 1. Message is in NEW state (participant may have updated it to READ)
-            // 2. readTimeStamp is not set (participant may have set it after marking READ)
-            if (Message.MessageState.NEW.equals(cachedMsgState) || cachedMessage.getReadTimeStamp() == 0) {
-              messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
-            }
-          }
-          // Note: if cachedMessage is null here, it indicates a cache inconsistency
-          // since containsKey returned true. We skip refresh in this edge case.
         }
       }
     }
