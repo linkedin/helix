@@ -248,6 +248,64 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testDisabledResourceMissingTopState() throws JMException {
+    final int n = 5;
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=disabledResource"));
+    monitor.register();
+
+    try {
+      List<String> instances = new ArrayList<>();
+      for (int i = 0; i < n; i++) {
+        String instance = "localhost_" + (12918 + i);
+        instances.add(instance);
+      }
+
+      ZNRecord idealStateRecord = DefaultIdealStateCalculator
+          .calculateIdealState(instances, _partitions, _replicas - 1, _dbName, "MASTER", "SLAVE");
+      IdealState idealState = new IdealState(deepCopyZNRecord(idealStateRecord));
+      idealState.setMinActiveReplicas(_replicas - 1);
+      ExternalView externalView = new ExternalView(deepCopyZNRecord(idealStateRecord));
+      StateModelDefinition stateModelDef =
+          BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
+
+      // create missing top state for all partitions
+      int missTopState = _partitions;
+      for (int i = 0; i < missTopState; i++) {
+        String partition = _dbName + "_" + i;
+        Map<String, String> map = externalView.getStateMap(partition);
+        for (String key : map.keySet()) {
+          if (map.get(key).equalsIgnoreCase("MASTER")) {
+            map.put(key, "SLAVE");
+            break;
+          }
+        }
+        externalView.setStateMap(partition, map);
+      }
+
+      // Should record missing top state
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), missTopState,
+          "Missing top state should be recorded for enabled resource");
+
+
+      idealState.enable(false);
+      // Missing top state gauge should not be updated 
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), 0,
+          "Missing top state should not be recorded for disabled resource");
+
+      // Re-enable the resource and verify the metric is recorded again
+      idealState.enable(true);
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), missTopState,
+          "Missing top state should be recorded again when resource is re-enabled");
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testUpdatePartitionWeightStats() throws JMException, IOException {
     final MBeanServerConnection mBeanServer = ManagementFactory.getPlatformMBeanServer();
     final String clusterName = TestHelper.getTestMethodName();

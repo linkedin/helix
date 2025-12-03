@@ -335,7 +335,11 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _numOfErrorPartitions.updateValue(numOfErrorPartitions);
     _externalViewIdealStateDiff.updateValue(numOfDiff);
     _numOfPartitionsInExternalView.updateValue((long) externalView.getPartitionSet().size());
-    _numNonTopStatePartitions.updateValue(_numOfPartitions.getValue() - numOfPartitionWithTopState);
+    
+    // Only record missing top state gauge if the resource is enabled
+    if (idealState.isEnabled()) {
+      _numNonTopStatePartitions.updateValue(_numOfPartitions.getValue() - numOfPartitionWithTopState);
+    }
 
     String tag = idealState.getInstanceGroupTag();
     if (tag == null || tag.equals("") || tag.equals("null")) {
