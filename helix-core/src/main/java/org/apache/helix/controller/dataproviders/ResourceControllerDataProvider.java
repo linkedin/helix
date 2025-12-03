@@ -84,6 +84,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // records for top state handoff
   private Map<String, Map<String, MissingTopStateRecord>> _missingTopStateMap;
   private Map<String, Map<String, InProgressHandoffRecord>> _inProgressHandoffMap;
+  private Map<String, Map<String, InProgressHandoffRecord>> _postDispatchHandoffMap;
   private Map<String, Map<String, String>> _lastTopStateLocationMap;
 
   // Maintain a set of all ChangeTypes for change detection
@@ -148,6 +149,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _idealMappingCache = new HashMap<>();
     _missingTopStateMap = new HashMap<>();
     _inProgressHandoffMap = new HashMap<>();
+    _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
@@ -389,6 +391,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
 
   public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
     return _inProgressHandoffMap;
+  }
+
+  public Map<String, Map<String, InProgressHandoffRecord>> getPostDispatchHandoffMap() {
+    return _postDispatchHandoffMap;
   }
 
   public Map<String, Map<String, String>> getLastTopStateLocationMap() {

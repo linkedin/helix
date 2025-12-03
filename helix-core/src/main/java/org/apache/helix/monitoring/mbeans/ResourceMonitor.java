@@ -55,7 +55,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   // Gauges
   private SimpleDynamicMetric<Long> _numOfPartitions;
   private SimpleDynamicMetric<Long> _missingTopStatePartitionsBeyondThresholdGauge;
-  private SimpleDynamicMetric<Long> _inProgressHandoffBeyondThresholdGauge;
+  private SimpleDynamicMetric<Long> _controllerHandoffBeyondThresholdGauge;
+  private SimpleDynamicMetric<Long> _postDispatchHandoffBeyondThresholdGauge;
   private SimpleDynamicMetric<Long> _numOfPartitionsInExternalView;
   private SimpleDynamicMetric<Long> _numOfErrorPartitions;
   private SimpleDynamicMetric<Long> _numNonTopStatePartitions;
@@ -136,7 +137,10 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         new SimpleDynamicMetric("MissingMinActiveReplicaPartitionGauge", 0L);
     _numNonTopStatePartitions = new SimpleDynamicMetric("MissingTopStatePartitionGauge", 0L);
     _missingTopStatePartitionsBeyondThresholdGauge = new SimpleDynamicMetric("MissingTopStatePartitionsBeyondThresholdGauge", 0L);
-    _inProgressHandoffBeyondThresholdGauge = new SimpleDynamicMetric("PartitionsTopStateHandoffDurationBeyondThreshold", 0L);
+    _controllerHandoffBeyondThresholdGauge =
+        new SimpleDynamicMetric("PartitionsTopStateControllerHandoffDurationBeyondThreshold", 0L);
+    _postDispatchHandoffBeyondThresholdGauge =
+        new SimpleDynamicMetric("PartitionsTopStateHandoffDurationBeyondThreshold", 0L);
     _numOfErrorPartitions = new SimpleDynamicMetric("ErrorPartitionGauge", 0L);
     _numOfPartitionsInExternalView = new SimpleDynamicMetric("ExternalViewPartitionGauge", 0L);
     _numOfPartitions = new SimpleDynamicMetric("PartitionGauge", 0L);
@@ -205,8 +209,12 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     return _maxSinglePartitionTopStateHandoffDuration.getValue();
   }
 
-  public long getInProgressHandoffBeyondThresholdGauge() {
-    return _inProgressHandoffBeyondThresholdGauge.getValue();
+  public long getControllerHandoffBeyondThresholdGauge() {
+    return _controllerHandoffBeyondThresholdGauge.getValue();
+  }
+
+  public long getParticipantHandoffBeyondThresholdGauge() {
+    return _postDispatchHandoffBeyondThresholdGauge.getValue();
   }
 
   public HistogramDynamicMetric getPartitionTopStateHandoffDurationGauge() {
@@ -492,13 +500,25 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void incrementInProgressHandoffBeyondThresholdGauge() {
-    _inProgressHandoffBeyondThresholdGauge.updateValue(_inProgressHandoffBeyondThresholdGauge.getValue() + 1);
+  public void incrementControllerHandoffBeyondThresholdGauge() {
+    _controllerHandoffBeyondThresholdGauge.updateValue(_controllerHandoffBeyondThresholdGauge.getValue() + 1);
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void decrementInProgressHandoffBeyondThresholdGauge() {
-    _inProgressHandoffBeyondThresholdGauge.updateValue(Math.max(0, _inProgressHandoffBeyondThresholdGauge.getValue() - 1));
+  public void decrementControllerHandoffBeyondThresholdGauge() {
+    _controllerHandoffBeyondThresholdGauge.updateValue(Math.max(0, _controllerHandoffBeyondThresholdGauge.getValue() - 1));
+    _lastResetTime = System.currentTimeMillis();
+  }
+
+  public void incrementParticipantHandoffBeyondThresholdGauge() {
+    _postDispatchHandoffBeyondThresholdGauge.updateValue(
+        _postDispatchHandoffBeyondThresholdGauge.getValue() + 1);
+    _lastResetTime = System.currentTimeMillis();
+  }
+
+  public void decrementParticipantHandoffBeyondThresholdGauge() {
+    _postDispatchHandoffBeyondThresholdGauge.updateValue(
+        Math.max(0, _postDispatchHandoffBeyondThresholdGauge.getValue() - 1));
     _lastResetTime = System.currentTimeMillis();
   }
 
@@ -509,7 +529,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _numOfErrorPartitions,
         _numNonTopStatePartitions,
         _missingTopStatePartitionsBeyondThresholdGauge,
-        _inProgressHandoffBeyondThresholdGauge,
+        _controllerHandoffBeyondThresholdGauge,
+        _postDispatchHandoffBeyondThresholdGauge,
         _numLessMinActiveReplicaPartitions,
         _numLessReplicaPartitions,
         _numPendingRecoveryRebalanceReplicas,

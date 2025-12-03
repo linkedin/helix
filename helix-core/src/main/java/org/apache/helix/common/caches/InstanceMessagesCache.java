@@ -97,7 +97,7 @@ public class InstanceMessagesCache {
 
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     Map<String, Map<String, Message>> msgMap = new HashMap<>();
-    List<PropertyKey> newMessageKeys = Lists.newLinkedList();
+    List<PropertyKey> messagesToFetchFromZk = Lists.newLinkedList();
     long purgeSum = 0;
     for (String instanceName : liveInstanceMap.keySet()) {
       // get the cache
@@ -124,18 +124,22 @@ public class InstanceMessagesCache {
       long purgeEnd = System.currentTimeMillis();
       purgeSum += purgeEnd - purgeStart;
 
-      // get the keys for the new messages
+      // Determine which messages need to be fetched/refreshed from ZK
       for (String messageName : messageNames) {
-        if (!cachedMap.containsKey(messageName)) {
-          newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+        Message cachedMessage = cachedMap.get(messageName);
+        
+        // Fetch from ZK if:
+        // 1. Message is not cached yet (new message)
+        // 2. Message is in NEW state (participant may have updated it to READ)
+        if (cachedMessage == null || Message.MessageState.NEW.equals(cachedMessage.getMsgState())) {
+          messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
         }
       }
     }
 
-    // get the new messages
-    if (newMessageKeys.size() > 0) {
-      List<Message> newMessages = accessor.getProperty(newMessageKeys, true);
-      for (Message message : newMessages) {
+    if (messagesToFetchFromZk.size() > 0) {
+      List<Message> fetchedMessages = accessor.getProperty(messagesToFetchFromZk, true);
+      for (Message message : fetchedMessages) {
         if (message != null) {
           Map<String, Message> cachedMap = _messageCache.get(message.getTgtName());
           cachedMap.put(message.getId(), message);
@@ -152,7 +156,7 @@ public class InstanceMessagesCache {
 
     LOG.info(
         "END: InstanceMessagesCache.refresh(), {} of Messages read from ZooKeeper. took {} ms. ",
-        newMessageKeys.size(), (System.currentTimeMillis() - startTime));
+        messagesToFetchFromZk.size(), (System.currentTimeMillis() - startTime));
 
     refreshStaleMessageCache();
     return true;
