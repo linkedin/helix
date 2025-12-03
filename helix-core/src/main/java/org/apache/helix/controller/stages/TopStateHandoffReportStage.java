@@ -134,14 +134,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
 
           // Check for in-progress handoff: IdealState expects different instance than current
           if (expectedTopStateInstance != null && !expectedTopStateInstance.equals(currentTopStateInstance)) {
-            trackInProgressHandoff(cache, resourceName, partition, handoffDurationThreshold,
+            trackControllerObservedHandoff(cache, resourceName, partition, handoffDurationThreshold,
                 clusterStatusMonitor);
-            trackPostDispatchHandoff(cache, resourceName, partition, handoffDurationThreshold,
+            trackParticipantExecutionHandoff(cache, resourceName, partition, handoffDurationThreshold,
                 clusterStatusMonitor);
           } else {
             // Handoff completed or no handoff in progress, clear tracking if exists
-            clearInProgressHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
-            clearPostDispatchHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
+            clearControllerObservedHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
+            clearParticipantExecutionHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
           }
         } else {
           reportTopStateMissing(cache, resourceName,
@@ -592,9 +592,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
   }
 
   /**
-   * Track in-progress top state handoff and increment gauge if beyond threshold.
-   * Only starts tracking when the participant begins executing the transition (consistent with MaxSinglePartitionTopStateHandoffDurationGauge).
-   * This excludes controller-side throttling time from the handoff duration.
+   * Track controller-observed top state handoff and increment gauge if beyond threshold.
+   * Starts tracking from when the controller first detects IdealState/CurrentState divergence.
+   * Includes controller-side throttling and dispatch time in the handoff duration.
    *
    * @param cache cluster data cache
    * @param resourceName resource name
@@ -602,7 +602,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * @param durationThreshold top state handoff duration threshold
    * @param clusterStatusMonitor monitor object
    */
-  private void trackInProgressHandoff(ResourceControllerDataProvider cache, String resourceName,
+  private void trackControllerObservedHandoff(ResourceControllerDataProvider cache, String resourceName,
       Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
     Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
         cache.getInProgressHandoffMap();
@@ -613,25 +613,25 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       inProgressHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
     }
 
-    InProgressHandoffRecord record = inProgressHandoffMap.get(resourceName).get(partitionName);
+    InProgressHandoffRecord controllerHandoffRecord = inProgressHandoffMap.get(resourceName).get(partitionName);
 
-    if (record == null) {
-      record = new InProgressHandoffRecord(System.currentTimeMillis());
-      inProgressHandoffMap.get(resourceName).put(partitionName, record);
+    if (controllerHandoffRecord == null) {
+      controllerHandoffRecord = new InProgressHandoffRecord(System.currentTimeMillis());
+      inProgressHandoffMap.get(resourceName).put(partitionName, controllerHandoffRecord);
       LogUtil.logDebug(LOG, _eventId, String.format(
           "Tracking controller-observed handoff for partition %s of resource %s starting at %d",
-          partitionName, resourceName, record.getStartTimeStamp()));
+          partitionName, resourceName, controllerHandoffRecord.getStartTimeStamp()));
     }
 
-    if (record.isBeyondThreshold()) {
+    if (controllerHandoffRecord.isBeyondThreshold()) {
       return;
     }
 
-    long startTime = record.getStartTimeStamp();
+    long startTime = controllerHandoffRecord.getStartTimeStamp();
     long handoffDuration = System.currentTimeMillis() - startTime;
 
     if (startTime > 0 && handoffDuration > durationThreshold) {
-      record.setBeyondThreshold();
+      controllerHandoffRecord.setBeyondThreshold();
 
       LogUtil.logWarn(LOG, _eventId, String.format(
           "Controller-observed handoff for partition %s of resource %s exceeded threshold. Duration: %s ms",
@@ -643,7 +643,18 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     }
   }
 
-  private void trackPostDispatchHandoff(ResourceControllerDataProvider cache, String resourceName,
+  /**
+   * Track participant-execution handoff and increment gauge if beyond threshold.
+   * Only starts tracking after the participant has picked up the message (marked as READ).
+   * Excludes controller-side throttling time from the handoff duration.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param durationThreshold top state handoff duration threshold
+   * @param clusterStatusMonitor monitor object
+   */
+  private void trackParticipantExecutionHandoff(ResourceControllerDataProvider cache, String resourceName,
       Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
     Map<String, Map<String, InProgressHandoffRecord>> postDispatchHandoffMap =
         cache.getPostDispatchHandoffMap();
@@ -653,10 +664,10 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       postDispatchHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
     }
 
-    InProgressHandoffRecord record =
+    InProgressHandoffRecord participantHandoffRecord =
         postDispatchHandoffMap.get(resourceName).get(partitionName);
 
-    if (record == null) {
+    if (participantHandoffRecord == null) {
       Long participantStartTime =
           getParticipantTransitionStartTime(cache, resourceName, partitionName);
 
@@ -667,25 +678,25 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         return;
       }
 
-      record = new InProgressHandoffRecord(participantStartTime);
-      postDispatchHandoffMap.get(resourceName).put(partitionName, record);
+      participantHandoffRecord = new InProgressHandoffRecord(participantStartTime);
+      postDispatchHandoffMap.get(resourceName).put(partitionName, participantHandoffRecord);
       LogUtil.logDebug(LOG, _eventId, String.format(
-          "Tracking post-dispatch handoff for partition %s of resource %s from participant start time: %d",
+          "Tracking participant-execution handoff for partition %s of resource %s from participant start time: %d",
           partitionName, resourceName, participantStartTime));
     }
 
-    if (record.isBeyondThreshold()) {
+    if (participantHandoffRecord.isBeyondThreshold()) {
       return;
     }
 
-    long startTime = record.getStartTimeStamp();
+    long startTime = participantHandoffRecord.getStartTimeStamp();
     long handoffDuration = System.currentTimeMillis() - startTime;
 
     if (startTime > 0 && handoffDuration > durationThreshold) {
-      record.setBeyondThreshold();
+      participantHandoffRecord.setBeyondThreshold();
 
       LogUtil.logWarn(LOG, _eventId, String.format(
-          "Post-dispatch handoff for partition %s of resource %s has exceeded threshold. Duration: %s ms",
+          "Participant-execution handoff for partition %s of resource %s has exceeded threshold. Duration: %s ms",
           partitionName, resourceName, handoffDuration));
 
       if (clusterStatusMonitor != null) {
@@ -695,14 +706,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
   }
 
   /**
-   * Clear in-progress handoff tracking and decrement gauge if it was beyond threshold
+   * Clear controller-observed handoff tracking and decrement gauge if it was beyond threshold
    *
    * @param cache cluster data cache
    * @param resourceName resource name
    * @param partition partition of the given resource
    * @param clusterStatusMonitor monitor object
    */
-  private void clearInProgressHandoffTracking(ResourceControllerDataProvider cache,
+  private void clearControllerObservedHandoffTracking(ResourceControllerDataProvider cache,
       String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
     Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
         cache.getInProgressHandoffMap();
@@ -712,15 +723,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       return;
     }
 
-    InProgressHandoffRecord record = inProgressHandoffMap.get(resourceName).get(partitionName);
-    if (record == null) {
+    InProgressHandoffRecord controllerHandoffRecord = inProgressHandoffMap.get(resourceName).get(partitionName);
+    if (controllerHandoffRecord == null) {
       return;
     }
 
     // If the record was beyond threshold, decrement the gauge
-    if (record.isBeyondThreshold() && clusterStatusMonitor != null) {
+    if (controllerHandoffRecord.isBeyondThreshold() && clusterStatusMonitor != null) {
       LogUtil.logInfo(LOG, _eventId, String.format(
-          "In-progress handoff completed for partition %s of resource %s. Decrementing gauge.",
+          "Controller-observed handoff completed for partition %s of resource %s. Decrementing gauge.",
           partitionName, resourceName));
       clusterStatusMonitor.decrementInProgressHandoffBeyondThresholdGauge(resourceName);
     }
@@ -732,7 +743,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     }
   }
 
-  private void clearPostDispatchHandoffTracking(ResourceControllerDataProvider cache,
+  /**
+   * Clear participant-execution handoff tracking and decrement gauge if it was beyond threshold
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param clusterStatusMonitor monitor object
+   */
+  private void clearParticipantExecutionHandoffTracking(ResourceControllerDataProvider cache,
       String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
     Map<String, Map<String, InProgressHandoffRecord>> postDispatchHandoffMap =
         cache.getPostDispatchHandoffMap();
@@ -742,15 +761,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       return;
     }
 
-    InProgressHandoffRecord record =
+    InProgressHandoffRecord participantHandoffRecord =
         postDispatchHandoffMap.get(resourceName).get(partitionName);
-    if (record == null) {
+    if (participantHandoffRecord == null) {
       return;
     }
 
-    if (record.isBeyondThreshold() && clusterStatusMonitor != null) {
+    if (participantHandoffRecord.isBeyondThreshold() && clusterStatusMonitor != null) {
       LogUtil.logInfo(LOG, _eventId, String.format(
-          "Post-dispatch handoff completed for partition %s of resource %s. Decrementing gauge.",
+          "Participant-execution handoff completed for partition %s of resource %s. Decrementing gauge.",
           partitionName, resourceName));
       clusterStatusMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(resourceName);
     }

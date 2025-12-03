@@ -97,7 +97,7 @@ public class InstanceMessagesCache {
 
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     Map<String, Map<String, Message>> msgMap = new HashMap<>();
-    List<PropertyKey> newMessageKeys = Lists.newLinkedList();
+    List<PropertyKey> messagesToFetchFromZk = Lists.newLinkedList();
     long purgeSum = 0;
     for (String instanceName : liveInstanceMap.keySet()) {
       // get the cache
@@ -124,31 +124,35 @@ public class InstanceMessagesCache {
       long purgeEnd = System.currentTimeMillis();
       purgeSum += purgeEnd - purgeStart;
 
-      // get the keys for the new messages AND existing messages that might have been updated
-      // (e.g., participant updated msgState from NEW to READ, or set readTimeStamp)
+      // Build list of messages to fetch from ZK:
+      // 1. Truly new messages (not in cache)
+      // 2. Existing messages that might have been updated by participant
+      //    (e.g., participant updated msgState from NEW to READ, or set readTimeStamp)
       for (String messageName : messageNames) {
         if (!cachedMap.containsKey(messageName)) {
-          // New message - need to read
-          newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+          messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
         } else {
-          // Existing message - check if it might have been updated by participant
+          // Existing cached message - check if we need to refresh it
           Message cachedMessage = cachedMap.get(messageName);
-          // Refresh if message is still in NEW state (participant might have updated it to READ)
-          // or if readTimeStamp is 0 (participant might have set it)
           if (cachedMessage != null) {
-            Message.MessageState msgState = cachedMessage.getMsgState();
-            if (Message.MessageState.NEW.equals(msgState) || cachedMessage.getReadTimeStamp() == 0) {
-              newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+            Message.MessageState cachedMsgState = cachedMessage.getMsgState();
+            // Refresh from ZK if:
+            // 1. Message is in NEW state (participant may have updated it to READ)
+            // 2. readTimeStamp is not set (participant may have set it after marking READ)
+            if (Message.MessageState.NEW.equals(cachedMsgState) || cachedMessage.getReadTimeStamp() == 0) {
+              messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
             }
           }
+          // Note: if cachedMessage is null here, it indicates a cache inconsistency
+          // since containsKey returned true. We skip refresh in this edge case.
         }
       }
     }
 
-    // get the new and updated messages
-    if (newMessageKeys.size() > 0) {
-      List<Message> newMessages = accessor.getProperty(newMessageKeys, true);
-      for (Message message : newMessages) {
+    // Fetch messages from ZK (both new and potentially updated)
+    if (messagesToFetchFromZk.size() > 0) {
+      List<Message> fetchedMessages = accessor.getProperty(messagesToFetchFromZk, true);
+      for (Message message : fetchedMessages) {
         if (message != null) {
           Map<String, Message> cachedMap = _messageCache.get(message.getTgtName());
           cachedMap.put(message.getId(), message);
@@ -165,7 +169,7 @@ public class InstanceMessagesCache {
 
     LOG.info(
         "END: InstanceMessagesCache.refresh(), {} of Messages read from ZooKeeper. took {} ms. ",
-        newMessageKeys.size(), (System.currentTimeMillis() - startTime));
+        messagesToFetchFromZk.size(), (System.currentTimeMillis() - startTime));
 
     refreshStaleMessageCache();
     return true;
