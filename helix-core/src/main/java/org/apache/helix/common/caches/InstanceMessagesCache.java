@@ -131,16 +131,12 @@ public class InstanceMessagesCache {
         // Fetch from ZK if:
         // 1. Message is not cached yet (new message)
         // 2. Message is in NEW state (participant may have updated it to READ)
-        // 3. readTimeStamp is not set (participant may have set it after marking READ)
-        if (cachedMessage == null 
-            || Message.MessageState.NEW.equals(cachedMessage.getMsgState()) 
-            || cachedMessage.getReadTimeStamp() == 0) {
+        if (cachedMessage == null || Message.MessageState.NEW.equals(cachedMessage.getMsgState())) {
           messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
         }
       }
     }
 
-    // Fetch messages from ZK (both new and potentially updated)
     if (messagesToFetchFromZk.size() > 0) {
       List<Message> fetchedMessages = accessor.getProperty(messagesToFetchFromZk, true);
       for (Message message : fetchedMessages) {

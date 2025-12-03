@@ -697,35 +697,35 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
-  public void incrementInProgressHandoffBeyondThresholdGauge(String resourceName) {
+  public void incrementControllerHandoffBeyondThresholdGauge(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      resourceMonitor.incrementInProgressHandoffBeyondThresholdGauge();
+      resourceMonitor.incrementControllerHandoffBeyondThresholdGauge();
     }
   }
 
-  public void decrementInProgressHandoffBeyondThresholdGauge(String resourceName) {
+  public void decrementControllerHandoffBeyondThresholdGauge(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      resourceMonitor.decrementInProgressHandoffBeyondThresholdGauge();
+      resourceMonitor.decrementControllerHandoffBeyondThresholdGauge();
     }
   }
 
-  public void incrementPostDispatchHandoffBeyondThresholdGauge(String resourceName) {
+  public void incrementParticipantHandoffBeyondThresholdGauge(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      resourceMonitor.incrementPostDispatchHandoffBeyondThresholdGauge();
+      resourceMonitor.incrementParticipantHandoffBeyondThresholdGauge();
     }
   }
 
-  public void decrementPostDispatchHandoffBeyondThresholdGauge(String resourceName) {
+  public void decrementParticipantHandoffBeyondThresholdGauge(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      resourceMonitor.decrementPostDispatchHandoffBeyondThresholdGauge();
+      resourceMonitor.decrementParticipantHandoffBeyondThresholdGauge();
     }
   }
 

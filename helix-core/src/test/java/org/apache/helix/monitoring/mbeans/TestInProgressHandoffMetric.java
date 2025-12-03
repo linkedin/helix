@@ -23,7 +23,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 /**
- * Unit tests for InProgressHandoffBeyondThresholdGauge metric
+ * Unit tests for controller and participant handoff metrics
  */
 public class TestInProgressHandoffMetric {
 
@@ -31,38 +31,38 @@ public class TestInProgressHandoffMetric {
   private static final String RESOURCE_NAME = "TestDB";
 
   @Test
-  public void testGaugeIncrementAndDecrement() {
+  public void testControllerHandoffGaugeIncrementAndDecrement() {
     ClusterStatusMonitor clusterMonitor = new ClusterStatusMonitor(CLUSTER_NAME);
     clusterMonitor.active();
 
     // Increment gauge - this will create the resource monitor
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
 
     // Get the resource monitor and verify
     ResourceMonitor resourceMonitor = clusterMonitor.getResourceMonitor(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 1L);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 1L);
 
     // Increment again
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 2L);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 2L);
 
     // Decrement
-    clusterMonitor.decrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 1L);
+    clusterMonitor.decrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 1L);
 
     // Decrement to 0
-    clusterMonitor.decrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 0L);
+    clusterMonitor.decrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 0L);
 
     // Decrement below 0 should stay at 0
-    clusterMonitor.decrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 0L);
+    clusterMonitor.decrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 0L);
 
     clusterMonitor.reset();
   }
 
   @Test
-  public void testMultipleResources() {
+  public void testControllerHandoffMultipleResources() {
     ClusterStatusMonitor clusterMonitor = new ClusterStatusMonitor(CLUSTER_NAME);
     clusterMonitor.active();
 
@@ -70,60 +70,60 @@ public class TestInProgressHandoffMetric {
     String resource1 = "DB1";
     String resource2 = "DB2";
 
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(resource1);
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(resource1);
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(resource2);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(resource1);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(resource1);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(resource2);
 
     ResourceMonitor monitor1 = clusterMonitor.getResourceMonitor(resource1);
     ResourceMonitor monitor2 = clusterMonitor.getResourceMonitor(resource2);
 
-    Assert.assertEquals(monitor1.getInProgressHandoffBeyondThresholdGauge(), 2L);
-    Assert.assertEquals(monitor2.getInProgressHandoffBeyondThresholdGauge(), 1L);
+    Assert.assertEquals(monitor1.getControllerHandoffBeyondThresholdGauge(), 2L);
+    Assert.assertEquals(monitor2.getControllerHandoffBeyondThresholdGauge(), 1L);
 
     // Decrement one resource
-    clusterMonitor.decrementInProgressHandoffBeyondThresholdGauge(resource1);
-    Assert.assertEquals(monitor1.getInProgressHandoffBeyondThresholdGauge(), 1L);
-    Assert.assertEquals(monitor2.getInProgressHandoffBeyondThresholdGauge(), 1L);
+    clusterMonitor.decrementControllerHandoffBeyondThresholdGauge(resource1);
+    Assert.assertEquals(monitor1.getControllerHandoffBeyondThresholdGauge(), 1L);
+    Assert.assertEquals(monitor2.getControllerHandoffBeyondThresholdGauge(), 1L);
 
     clusterMonitor.reset();
   }
 
   @Test
-  public void testMetricRegistration() {
+  public void testControllerHandoffMetricRegistration() {
     ClusterStatusMonitor clusterMonitor = new ClusterStatusMonitor(CLUSTER_NAME);
     clusterMonitor.active();
 
     // Increment to create resource monitor
-    clusterMonitor.incrementInProgressHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    clusterMonitor.incrementControllerHandoffBeyondThresholdGauge(RESOURCE_NAME);
 
     // Verify resource monitor exists and metric can be read
     ResourceMonitor resourceMonitor = clusterMonitor.getResourceMonitor(RESOURCE_NAME);
     Assert.assertNotNull(resourceMonitor);
-    Assert.assertEquals(resourceMonitor.getInProgressHandoffBeyondThresholdGauge(), 1L);
+    Assert.assertEquals(resourceMonitor.getControllerHandoffBeyondThresholdGauge(), 1L);
 
     clusterMonitor.reset();
   }
 
   @Test
-  public void testPostDispatchGaugeIncrementAndDecrement() {
+  public void testParticipantHandoffGaugeIncrementAndDecrement() {
     ClusterStatusMonitor clusterMonitor = new ClusterStatusMonitor(CLUSTER_NAME);
     clusterMonitor.active();
 
-    clusterMonitor.incrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    clusterMonitor.incrementParticipantHandoffBeyondThresholdGauge(RESOURCE_NAME);
     ResourceMonitor resourceMonitor = clusterMonitor.getResourceMonitor(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 1L);
+    Assert.assertEquals(resourceMonitor.getParticipantHandoffBeyondThresholdGauge(), 1L);
 
-    clusterMonitor.incrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 2L);
+    clusterMonitor.incrementParticipantHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getParticipantHandoffBeyondThresholdGauge(), 2L);
 
-    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 1L);
+    clusterMonitor.decrementParticipantHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getParticipantHandoffBeyondThresholdGauge(), 1L);
 
-    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 0L);
+    clusterMonitor.decrementParticipantHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getParticipantHandoffBeyondThresholdGauge(), 0L);
 
-    clusterMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(RESOURCE_NAME);
-    Assert.assertEquals(resourceMonitor.getPostDispatchHandoffBeyondThresholdGauge(), 0L);
+    clusterMonitor.decrementParticipantHandoffBeyondThresholdGauge(RESOURCE_NAME);
+    Assert.assertEquals(resourceMonitor.getParticipantHandoffBeyondThresholdGauge(), 0L);
 
     clusterMonitor.reset();
   }

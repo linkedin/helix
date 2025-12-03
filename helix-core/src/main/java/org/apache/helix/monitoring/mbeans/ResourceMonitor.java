@@ -209,11 +209,11 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     return _maxSinglePartitionTopStateHandoffDuration.getValue();
   }
 
-  public long getInProgressHandoffBeyondThresholdGauge() {
+  public long getControllerHandoffBeyondThresholdGauge() {
     return _controllerHandoffBeyondThresholdGauge.getValue();
   }
 
-  public long getPostDispatchHandoffBeyondThresholdGauge() {
+  public long getParticipantHandoffBeyondThresholdGauge() {
     return _postDispatchHandoffBeyondThresholdGauge.getValue();
   }
 
@@ -500,23 +500,23 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void incrementInProgressHandoffBeyondThresholdGauge() {
+  public void incrementControllerHandoffBeyondThresholdGauge() {
     _controllerHandoffBeyondThresholdGauge.updateValue(_controllerHandoffBeyondThresholdGauge.getValue() + 1);
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void decrementInProgressHandoffBeyondThresholdGauge() {
+  public void decrementControllerHandoffBeyondThresholdGauge() {
     _controllerHandoffBeyondThresholdGauge.updateValue(Math.max(0, _controllerHandoffBeyondThresholdGauge.getValue() - 1));
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void incrementPostDispatchHandoffBeyondThresholdGauge() {
+  public void incrementParticipantHandoffBeyondThresholdGauge() {
     _postDispatchHandoffBeyondThresholdGauge.updateValue(
         _postDispatchHandoffBeyondThresholdGauge.getValue() + 1);
     _lastResetTime = System.currentTimeMillis();
   }
 
-  public void decrementPostDispatchHandoffBeyondThresholdGauge() {
+  public void decrementParticipantHandoffBeyondThresholdGauge() {
     _postDispatchHandoffBeyondThresholdGauge.updateValue(
         Math.max(0, _postDispatchHandoffBeyondThresholdGauge.getValue() - 1));
     _lastResetTime = System.currentTimeMillis();

@@ -89,9 +89,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       long lastPipelineFinishTimestamp) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
-    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
         cache.getInProgressHandoffMap();
-    Map<String, Map<String, InProgressHandoffRecord>> postDispatchHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
         cache.getPostDispatchHandoffMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
 
@@ -104,8 +104,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
 
     // Remove any resource records that no longer exists
     missingTopStateMap.keySet().retainAll(resourceMap.keySet());
-    inProgressHandoffMap.keySet().retainAll(resourceMap.keySet());
-    postDispatchHandoffMap.keySet().retainAll(resourceMap.keySet());
+    controllerObservedHandoffMap.keySet().retainAll(resourceMap.keySet());
+    participantExecutionHandoffMap.keySet().retainAll(resourceMap.keySet());
     lastTopStateMap.keySet().retainAll(resourceMap.keySet());
 
     for (Resource resource : resourceMap.values()) {
@@ -604,20 +604,20 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void trackControllerObservedHandoff(ResourceControllerDataProvider cache, String resourceName,
       Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
-    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
         cache.getInProgressHandoffMap();
     String partitionName = partition.getPartitionName();
 
     // Initialize resource map if not exists
-    if (!inProgressHandoffMap.containsKey(resourceName)) {
-      inProgressHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
+    if (!controllerObservedHandoffMap.containsKey(resourceName)) {
+      controllerObservedHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
     }
 
-    InProgressHandoffRecord controllerHandoffRecord = inProgressHandoffMap.get(resourceName).get(partitionName);
+    InProgressHandoffRecord controllerHandoffRecord = controllerObservedHandoffMap.get(resourceName).get(partitionName);
 
     if (controllerHandoffRecord == null) {
       controllerHandoffRecord = new InProgressHandoffRecord(System.currentTimeMillis());
-      inProgressHandoffMap.get(resourceName).put(partitionName, controllerHandoffRecord);
+      controllerObservedHandoffMap.get(resourceName).put(partitionName, controllerHandoffRecord);
       LogUtil.logDebug(LOG, _eventId, String.format(
           "Tracking controller-observed handoff for partition %s of resource %s starting at %d",
           partitionName, resourceName, controllerHandoffRecord.getStartTimeStamp()));
@@ -638,7 +638,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           partitionName, resourceName, handoffDuration));
 
       if (clusterStatusMonitor != null) {
-        clusterStatusMonitor.incrementInProgressHandoffBeyondThresholdGauge(resourceName);
+        clusterStatusMonitor.incrementControllerHandoffBeyondThresholdGauge(resourceName);
       }
     }
   }
@@ -656,30 +656,30 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void trackParticipantExecutionHandoff(ResourceControllerDataProvider cache, String resourceName,
       Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
-    Map<String, Map<String, InProgressHandoffRecord>> postDispatchHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
         cache.getPostDispatchHandoffMap();
     String partitionName = partition.getPartitionName();
 
-    if (!postDispatchHandoffMap.containsKey(resourceName)) {
-      postDispatchHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
+    if (!participantExecutionHandoffMap.containsKey(resourceName)) {
+      participantExecutionHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
     }
 
     InProgressHandoffRecord participantHandoffRecord =
-        postDispatchHandoffMap.get(resourceName).get(partitionName);
+        participantExecutionHandoffMap.get(resourceName).get(partitionName);
 
     if (participantHandoffRecord == null) {
       Long participantStartTime =
           getParticipantTransitionStartTime(cache, resourceName, partitionName);
 
-      if (participantStartTime == null) {
+      if (participantStartTime == null || participantStartTime == 0) {
         LogUtil.logDebug(LOG, _eventId, String.format(
-            "Post-dispatch metric: participant has not started transition for partition %s of resource %s",
+            "Participant-execution metric: participant has not started transition for partition %s of resource %s",
             partitionName, resourceName));
         return;
       }
 
       participantHandoffRecord = new InProgressHandoffRecord(participantStartTime);
-      postDispatchHandoffMap.get(resourceName).put(partitionName, participantHandoffRecord);
+      participantExecutionHandoffMap.get(resourceName).put(partitionName, participantHandoffRecord);
       LogUtil.logDebug(LOG, _eventId, String.format(
           "Tracking participant-execution handoff for partition %s of resource %s from participant start time: %d",
           partitionName, resourceName, participantStartTime));
@@ -700,7 +700,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           partitionName, resourceName, handoffDuration));
 
       if (clusterStatusMonitor != null) {
-        clusterStatusMonitor.incrementPostDispatchHandoffBeyondThresholdGauge(resourceName);
+        clusterStatusMonitor.incrementParticipantHandoffBeyondThresholdGauge(resourceName);
       }
     }
   }
@@ -715,15 +715,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void clearControllerObservedHandoffTracking(ResourceControllerDataProvider cache,
       String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
-    Map<String, Map<String, InProgressHandoffRecord>> inProgressHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
         cache.getInProgressHandoffMap();
     String partitionName = partition.getPartitionName();
 
-    if (!inProgressHandoffMap.containsKey(resourceName)) {
+    if (!controllerObservedHandoffMap.containsKey(resourceName)) {
       return;
     }
 
-    InProgressHandoffRecord controllerHandoffRecord = inProgressHandoffMap.get(resourceName).get(partitionName);
+    InProgressHandoffRecord controllerHandoffRecord = controllerObservedHandoffMap.get(resourceName).get(partitionName);
     if (controllerHandoffRecord == null) {
       return;
     }
@@ -733,13 +733,13 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       LogUtil.logInfo(LOG, _eventId, String.format(
           "Controller-observed handoff completed for partition %s of resource %s. Decrementing gauge.",
           partitionName, resourceName));
-      clusterStatusMonitor.decrementInProgressHandoffBeyondThresholdGauge(resourceName);
+      clusterStatusMonitor.decrementControllerHandoffBeyondThresholdGauge(resourceName);
     }
 
     // Remove the tracking record
-    inProgressHandoffMap.get(resourceName).remove(partitionName);
-    if (inProgressHandoffMap.get(resourceName).isEmpty()) {
-      inProgressHandoffMap.remove(resourceName);
+    controllerObservedHandoffMap.get(resourceName).remove(partitionName);
+    if (controllerObservedHandoffMap.get(resourceName).isEmpty()) {
+      controllerObservedHandoffMap.remove(resourceName);
     }
   }
 
@@ -753,16 +753,16 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void clearParticipantExecutionHandoffTracking(ResourceControllerDataProvider cache,
       String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
-    Map<String, Map<String, InProgressHandoffRecord>> postDispatchHandoffMap =
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
         cache.getPostDispatchHandoffMap();
     String partitionName = partition.getPartitionName();
 
-    if (!postDispatchHandoffMap.containsKey(resourceName)) {
+    if (!participantExecutionHandoffMap.containsKey(resourceName)) {
       return;
     }
 
     InProgressHandoffRecord participantHandoffRecord =
-        postDispatchHandoffMap.get(resourceName).get(partitionName);
+        participantExecutionHandoffMap.get(resourceName).get(partitionName);
     if (participantHandoffRecord == null) {
       return;
     }
@@ -771,12 +771,12 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       LogUtil.logInfo(LOG, _eventId, String.format(
           "Participant-execution handoff completed for partition %s of resource %s. Decrementing gauge.",
           partitionName, resourceName));
-      clusterStatusMonitor.decrementPostDispatchHandoffBeyondThresholdGauge(resourceName);
+      clusterStatusMonitor.decrementParticipantHandoffBeyondThresholdGauge(resourceName);
     }
 
-    postDispatchHandoffMap.get(resourceName).remove(partitionName);
-    if (postDispatchHandoffMap.get(resourceName).isEmpty()) {
-      postDispatchHandoffMap.remove(resourceName);
+    participantExecutionHandoffMap.get(resourceName).remove(partitionName);
+    if (participantExecutionHandoffMap.get(resourceName).isEmpty()) {
+      participantExecutionHandoffMap.remove(resourceName);
     }
   }
 
