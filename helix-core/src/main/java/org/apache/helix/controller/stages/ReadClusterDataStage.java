@@ -83,7 +83,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, LiveInstance> liveInstanceMap = dataProvider.getLiveInstances();
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
             Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
-            Map<String, Long> errorPartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceErrorPartitionCounts = Maps.newHashMap();
             
             for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
@@ -96,7 +96,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 
                 // Count ERROR partitions for this live instance
                 long errorCount = countErrorPartitions(dataProvider, instanceName);
-                errorPartitionCounts.put(instanceName, errorCount);
+                instanceErrorPartitionCounts.put(instanceName, errorCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -112,7 +112,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
                     disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
-                    instanceConfigMap, errorPartitionCounts);
+                    instanceConfigMap, instanceErrorPartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
@@ -144,23 +144,31 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
       LiveInstance liveInstance = liveInstances.get(instanceName);
       
-      if (liveInstance != null) {
-        String sessionId = liveInstance.getEphemeralOwner();
-        Map<String, CurrentState> currentStateMap = 
-            dataProvider.getCurrentState(instanceName, sessionId, false);
+      if (liveInstance == null) {
+        return errorCount;
+      }
+      
+      String sessionId = liveInstance.getEphemeralOwner();
+      Map<String, CurrentState> currentStateMap = 
+          dataProvider.getCurrentState(instanceName, sessionId, false);
+      
+      if (currentStateMap == null) {
+        return errorCount;
+      }
+      
+      for (CurrentState currentState : currentStateMap.values()) {
+        if (currentState == null) {
+          continue;
+        }
         
-        if (currentStateMap != null) {
-          for (CurrentState currentState : currentStateMap.values()) {
-            if (currentState != null) {
-              Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
-              if (partitionStateMap != null) {
-                for (String state : partitionStateMap.values()) {
-                  if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
-                    errorCount++;
-                  }
-                }
-              }
-            }
+        Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
+        if (partitionStateMap == null) {
+          continue;
+        }
+        
+        for (String state : partitionStateMap.values()) {
+          if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
+            errorCount++;
           }
         }
       }
