@@ -155,10 +155,12 @@ public class TestConstraintBasedAlgorithm {
         new ClusterModelTestHelper().getMultiNodeClusterModelNegativeSetup();
     try {
       OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
+      Assert.fail("Should have thrown HelixRebalanceException for insufficient capacity");
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
-      Assert.assertEquals(ex.getMessage(),
-          "The cluster does not have enough item1 capacity for all partitions.  Failure Type: FAILED_TO_CALCULATE");
+      String expectedPattern = "The cluster 'TestCluster' does not have enough item1 capacity for all partitions\\. Total capacity: \\d+, Required: \\d+, Deficit: \\d+ Failure Type: FAILED_TO_CALCULATE";
+      Assert.assertTrue(ex.getMessage().matches(expectedPattern),
+          "Expected message to match pattern: " + expectedPattern + ", but got: " + ex.getMessage());
     }
   }
 
