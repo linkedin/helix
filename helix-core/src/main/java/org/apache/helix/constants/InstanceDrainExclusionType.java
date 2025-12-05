@@ -25,39 +25,40 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * Types of exclusions that can be applied when checking if evacuation is finished.
+ * Types of exclusions that can be applied when checking instance drain status (evacuation, instance drain, etc.).
  * These exclusions allow certain resources or partitions to be ignored when determining
- * if an instance has completed evacuation.
+ * if an instance has completed draining/evacuation.
  */
-public enum EvacuateExclusionType {
+public enum InstanceDrainExclusionType {
   /**
-   * Exclude resources that are disabled from blocking evacuation completion
+   * Exclude resources that are disabled from blocking instance drain completion
    */
   DISABLED_RESOURCE,
 
   /**
-   * Exclude partitions that are in ERROR state from blocking evacuation completion
+   * Exclude partitions that are in ERROR state from blocking instance drain completion
    */
   ERROR_PARTITIONS,
 
   /**
-   * Exclude partitions that are disabled from blocking evacuation completion
+   * Exclude partitions that are disabled from blocking instance drain completion
    */
   DISABLED_PARTITION;
 
   /**
    * Parse a comma-separated string of exclusion types into a Set
    * @param exclusionStr comma-separated string of exclusion types (e.g., "DISABLED_RESOURCE,ERROR_PARTITIONS")
-   * @return Set of EvacuateExclusionType enums
+   * @return Set of InstanceDrainExclusionType enums
    */
-  public static Set<EvacuateExclusionType> parseExclusionTypes(String exclusionStr) {
+  public static Set<InstanceDrainExclusionType> parseExclusionTypes(String exclusionStr) {
     if (exclusionStr == null || exclusionStr.trim().isEmpty()) {
       return Collections.emptySet();
     }
     return Stream.of(exclusionStr.split(","))
         .map(String::trim)
         .filter(s -> !s.isEmpty())
-        .map(EvacuateExclusionType::valueOf)
+        .map(InstanceDrainExclusionType::valueOf)
         .collect(Collectors.toSet());
   }
 }
+

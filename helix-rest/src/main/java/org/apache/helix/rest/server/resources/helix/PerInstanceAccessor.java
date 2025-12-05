@@ -49,7 +49,7 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
-import org.apache.helix.constants.EvacuateExclusionType;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -506,8 +506,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           boolean evacuateFinished;
           try {
             if (exclusions != null && !exclusions.trim().isEmpty()) {
-              Set<EvacuateExclusionType> exclusionTypes =
-                  EvacuateExclusionType.parseExclusionTypes(exclusions);
+              Set<InstanceDrainExclusionType> exclusionTypes =
+                  InstanceDrainExclusionType.parseExclusionTypes(exclusions);
               evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
             } else {
               evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName);

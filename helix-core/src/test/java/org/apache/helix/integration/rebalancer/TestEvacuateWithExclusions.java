@@ -28,7 +28,7 @@ import java.util.Set;
 
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.TestHelper;
-import org.apache.helix.constants.EvacuateExclusionType;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
@@ -165,8 +165,8 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
 
     // POSITIVE TEST: New method with DISABLED_RESOURCE exclusion should return TRUE
     // because we're ignoring the disabled resource
-    Set<EvacuateExclusionType> exclusions = new HashSet<>();
-    exclusions.add(EvacuateExclusionType.DISABLED_RESOURCE);
+    Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
+    exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
 
     boolean evacuatedWithExclusions = _admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, exclusions);
     Assert.assertTrue(evacuatedWithExclusions,
@@ -227,8 +227,8 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     System.out.println("Old method result (without exclusions): " + evacuatedOldMethod);
 
     // POSITIVE TEST: New method with DISABLED_RESOURCE exclusion should handle this gracefully
-    Set<EvacuateExclusionType> exclusions = new HashSet<>();
-    exclusions.add(EvacuateExclusionType.DISABLED_RESOURCE);
+    Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
+    exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
 
     boolean evacuatedWithExclusions = _admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, exclusions);
     System.out.println("New method result (with DISABLED_RESOURCE exclusion): " + evacuatedWithExclusions);
@@ -297,8 +297,8 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet()));
 
     // With DISABLED_RESOURCE exclusion, SHOULD be finished
-    Set<EvacuateExclusionType> exclusions = new HashSet<>();
-    exclusions.add(EvacuateExclusionType.DISABLED_RESOURCE);
+    Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
+    exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
     Assert.assertTrue(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, exclusions),
         "Evacuation should be considered finished when excluding disabled resources");
 
@@ -422,14 +422,14 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     Thread.sleep(5000);
 
     // With DISABLED_RESOURCE exclusion, SHOULD be finished
-    Set<EvacuateExclusionType> exclusions = new HashSet<>();
-    exclusions.add(EvacuateExclusionType.DISABLED_RESOURCE);
+    Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
+    exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
     Assert.assertTrue(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, exclusions),
         "Evacuation should be finished with DISABLED_RESOURCE exclusion");
 
     // Test multiple exclusions together
-    exclusions.add(EvacuateExclusionType.ERROR_PARTITIONS);
-    exclusions.add(EvacuateExclusionType.DISABLED_PARTITION);
+    exclusions.add(InstanceDrainExclusionType.ERROR_PARTITIONS);
+    exclusions.add(InstanceDrainExclusionType.DISABLED_PARTITION);
     Assert.assertTrue(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, exclusions),
         "Evacuation should be finished with multiple exclusions");
 

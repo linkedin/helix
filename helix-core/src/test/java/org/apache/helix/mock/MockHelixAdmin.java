@@ -35,7 +35,7 @@ import org.apache.helix.PropertyType;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
-import org.apache.helix.constants.EvacuateExclusionType;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
@@ -581,7 +581,7 @@ public class MockHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instancesNames,
-      Set<EvacuateExclusionType> exclusionTypes) {
+      Set<InstanceDrainExclusionType> exclusionTypes) {
     return false;
   }
 

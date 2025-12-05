@@ -60,7 +60,7 @@ import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
-import org.apache.helix.constants.EvacuateExclusionType;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
 import org.apache.helix.manager.zk.evacuation.PartitionExclusionFilter;
@@ -469,7 +469,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName,
-      Set<EvacuateExclusionType> exclusionTypes) {
+      Set<InstanceDrainExclusionType> exclusionTypes) {
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
     if (config == null || config.getInstanceOperation().getOperation() !=
         InstanceConstants.InstanceOperation.EVACUATE ) {
@@ -810,7 +810,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    * @return true if instance has current state or messages that block evacuation, false otherwise
    */
   private boolean instanceHasCurrentStateOrMessage(String clusterName,
-      String instanceName, Set<EvacuateExclusionType> exclusionTypes) {
+      String instanceName, Set<InstanceDrainExclusionType> exclusionTypes) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
@@ -844,21 +844,12 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
 
-    // Step 1: Get set of FULL_AUTO and CUSTOMIZED resources, applying DISABLED_RESOURCE exclusion
+    // Step 1: Get set of FULL_AUTO and CUSTOMIZED resources, except for excluded ones through exclusion list
     Set<String> allowedResources = filterResourcesByModeAndExclusions(idealStates, exclusionTypes);
 
-    // Step 2: Only fetch InstanceConfig if DISABLED_PARTITION exclusion is requested
-    // This addresses the performance concern from review comment #2
-    Map<String, List<String>> disabledPartitionsMap = null;
-    if (exclusionTypes.contains(EvacuateExclusionType.DISABLED_PARTITION)) {
-      InstanceConfig instanceConfig = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
-      disabledPartitionsMap = instanceConfig != null ?
-          instanceConfig.getDisabledPartitionsMap() : Collections.emptyMap();
-    }
-
-    // Step 3: Create exclusion filters based on requested exclusion types
-    Map<EvacuateExclusionType, PartitionExclusionFilter> filters =
-        PartitionExclusionHelper.createExclusionFilters(exclusionTypes, disabledPartitionsMap);
+    // Step 2: Create exclusion filters based on requested exclusion types
+    Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters =
+        PartitionExclusionHelper.createExclusionFilters(exclusionTypes, accessor, instanceName);
 
     // Handle offline instances - check if CUSTOMIZED resources are reassigned
     if (liveInstance == null) {
@@ -905,7 +896,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    * @return Set of resource names that match the criteria
    */
   private Set<String> filterResourcesByModeAndExclusions(List<IdealState> idealStates,
-      Set<EvacuateExclusionType> exclusionTypes) {
+      Set<InstanceDrainExclusionType> exclusionTypes) {
     if (idealStates == null) {
       return Collections.emptySet();
     }
@@ -913,7 +904,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     return idealStates.stream()
         .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO ||
             idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
-        .filter(idealState -> !exclusionTypes.contains(EvacuateExclusionType.DISABLED_RESOURCE) ||
+        .filter(idealState -> !exclusionTypes.contains(InstanceDrainExclusionType.DISABLED_RESOURCE) ||
             idealState.isEnabled())
         .map(IdealState::getResourceName)
         .collect(Collectors.toSet());

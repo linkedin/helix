@@ -26,9 +26,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
-import org.apache.helix.constants.EvacuateExclusionType;
+import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 
 /**
  * Helper class for applying exclusion filters to partitions during evacuation checks.
@@ -36,10 +38,10 @@ import org.apache.helix.model.IdealState;
 public class PartitionExclusionHelper {
 
   /**
-   * Collects all partitions from current states that belong to FULL_AUTO or CUSTOMIZED resources.
+   * Collects all partitions from current states for the specified resources.
    *
    * @param currentStates List of current states for the instance
-   * @param allowedResources Set of resources that are FULL_AUTO/CUSTOMIZED and enabled (if required)
+   * @param allowedResources Set of resources to consider
    * @return List of PartitionInfo objects representing all partitions on the instance
    */
   public static List<PartitionInfo> collectPartitions(List<CurrentState> currentStates,
@@ -52,7 +54,7 @@ public class PartitionExclusionHelper {
     for (CurrentState cs : currentStates) {
       String resourceName = cs.getResourceName();
 
-      // Only consider resources in the allowed set (FULL_AUTO/CUSTOMIZED and possibly enabled)
+      // Only consider resources in the allowed set
       if (!allowedResources.contains(resourceName)) {
         continue;
       }
@@ -76,24 +78,31 @@ public class PartitionExclusionHelper {
    * This method only creates filters for exclusion types that are present in the exclusionTypes set.
    *
    * @param exclusionTypes Set of exclusion types to apply
-   * @param disabledPartitionsMap Map of resource to disabled partitions (can be null if not needed)
+   * @param accessor HelixDataAccessor to fetch instance configuration data if needed
+   * @param instanceName Instance name for which to fetch configuration
    * @return Map of exclusion type to corresponding filter
    */
-  public static Map<EvacuateExclusionType, PartitionExclusionFilter> createExclusionFilters(
-      Set<EvacuateExclusionType> exclusionTypes, Map<String, List<String>> disabledPartitionsMap) {
+  public static Map<InstanceDrainExclusionType, PartitionExclusionFilter> createExclusionFilters(
+      Set<InstanceDrainExclusionType> exclusionTypes, HelixDataAccessor accessor,
+      String instanceName) {
 
     if (exclusionTypes == null || exclusionTypes.isEmpty()) {
       return Collections.emptyMap();
     }
 
-    Map<EvacuateExclusionType, PartitionExclusionFilter> filters = new HashMap<>();
+    Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters = new HashMap<>();
 
-    for (EvacuateExclusionType exclusionType : exclusionTypes) {
+    for (InstanceDrainExclusionType exclusionType : exclusionTypes) {
       switch (exclusionType) {
         case ERROR_PARTITIONS:
           filters.put(exclusionType, new ErrorPartitionExclusionFilter());
           break;
         case DISABLED_PARTITION:
+          // Fetch InstanceConfig only when DISABLED_PARTITION exclusion is requested
+          InstanceConfig instanceConfig =
+              accessor.getProperty(accessor.keyBuilder().instanceConfig(instanceName));
+          Map<String, List<String>> disabledPartitionsMap = instanceConfig != null ?
+              instanceConfig.getDisabledPartitionsMap() : Collections.emptyMap();
           filters.put(exclusionType, new DisabledPartitionExclusionFilter(disabledPartitionsMap));
           break;
         case DISABLED_RESOURCE:
@@ -114,7 +123,7 @@ public class PartitionExclusionHelper {
    * @return List of partitions that should NOT be excluded (i.e., should block evacuation)
    */
   public static List<PartitionInfo> applyExclusions(List<PartitionInfo> partitions,
-      Map<EvacuateExclusionType, PartitionExclusionFilter> filters) {
+      Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters) {
 
     if (partitions == null || partitions.isEmpty()) {
       return Collections.emptyList();
@@ -137,7 +146,7 @@ public class PartitionExclusionHelper {
    * @return true if the partition should be excluded, false otherwise
    */
   private static boolean shouldExcludePartition(PartitionInfo partition,
-      Map<EvacuateExclusionType, PartitionExclusionFilter> filters) {
+      Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters) {
 
     // If ANY filter says to exclude this partition, then exclude it
     for (PartitionExclusionFilter filter : filters.values()) {
@@ -163,7 +172,7 @@ public class PartitionExclusionHelper {
    */
   public static List<PartitionInfo> getCustomizedPartitionsStillOnInstance(
       List<CurrentState> currentStates, List<IdealState> idealStates, String instanceName,
-      Set<String> allowedResources, Map<EvacuateExclusionType, PartitionExclusionFilter> filters) {
+      Set<String> allowedResources, Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters) {
 
     if (currentStates == null || idealStates == null) {
       return Collections.emptyList();
