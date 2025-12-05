@@ -248,10 +248,10 @@ public class TestResourceMonitor {
   }
 
   @Test
-  public void testDisabledResourceMissingTopState() throws JMException {
+  public void testNoMetricsRecordedForNullOrDisabledIdealState() throws JMException {
     final int n = 5;
     ResourceMonitor monitor =
-        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=disabledResource"));
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=nullOrDisabledTest"));
     monitor.register();
 
     try {
@@ -269,9 +269,11 @@ public class TestResourceMonitor {
       StateModelDefinition stateModelDef =
           BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
 
-      // create missing top state for all partitions
-      int missTopState = _partitions;
-      for (int i = 0; i < missTopState; i++) {
+      // Create a scenario where some partitions are missing top state
+      int missTopState = 10;
+      Random r = new Random();
+      int start = r.nextInt(_partitions - missTopState - 1);
+      for (int i = start; i < start + missTopState; i++) {
         String partition = _dbName + "_" + i;
         Map<String, String> map = externalView.getStateMap(partition);
         for (String key : map.keySet()) {
@@ -283,23 +285,53 @@ public class TestResourceMonitor {
         externalView.setStateMap(partition, map);
       }
 
-      // Should record missing top state
-      monitor.updateResourceState(externalView, idealState, stateModelDef);
-      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), missTopState,
-          "Missing top state should be recorded for enabled resource");
+      // Update with null ideal state - should not record any metrics
+      monitor.updateResourceState(externalView, null, stateModelDef);
 
-
-      idealState.enable(false);
-      // Missing top state gauge should not be updated 
-      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      Assert.assertEquals(monitor.getPartitionGauge(), 0,
+          "PartitionGauge should be 0 when ideal state is null");
       Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), 0,
-          "Missing top state should not be recorded for disabled resource");
+          "MissingTopStatePartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getErrorPartitionGauge(), 0,
+          "ErrorPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getDifferenceWithIdealStateGauge(), 0,
+          "DifferenceWithIdealStateGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getExternalViewPartitionGauge(), 0,
+          "ExternalViewPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getMissingMinActiveReplicaPartitionGauge(), 0,
+          "MissingMinActiveReplicaPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getMissingReplicaPartitionGauge(), 0,
+          "MissingReplicaPartitionGauge should be 0 when ideal state is null");
 
-      // Re-enable the resource and verify the metric is recorded again
+      // Update with disabled ideal state - should not record any metrics
+      idealState.enable(false);
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      
+      Assert.assertEquals(monitor.getPartitionGauge(), 0,
+          "PartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), 0,
+          "MissingTopStatePartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getErrorPartitionGauge(), 0,
+          "ErrorPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getDifferenceWithIdealStateGauge(), 0,
+          "DifferenceWithIdealStateGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getExternalViewPartitionGauge(), 0,
+          "ExternalViewPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingMinActiveReplicaPartitionGauge(), 0,
+          "MissingMinActiveReplicaPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingReplicaPartitionGauge(), 0,
+          "MissingReplicaPartitionGauge should be 0 when ideal state is disabled");
+
+      // Enable the resource and verify metrics are now recorded
       idealState.enable(true);
       monitor.updateResourceState(externalView, idealState, stateModelDef);
+      
+      Assert.assertEquals(monitor.getPartitionGauge(), _partitions,
+          "PartitionGauge should be recorded when ideal state is enabled");
       Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), missTopState,
-          "Missing top state should be recorded again when resource is re-enabled");
+          "MissingTopStatePartitionGauge should be recorded when ideal state is enabled");
+      Assert.assertTrue(monitor.getExternalViewPartitionGauge() > 0,
+          "ExternalViewPartitionGauge should be recorded when ideal state is enabled");
     } finally {
       monitor.unregister();
     }

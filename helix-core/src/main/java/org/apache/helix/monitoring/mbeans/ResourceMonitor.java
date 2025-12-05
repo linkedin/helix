@@ -265,8 +265,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
 
     resetResourceStateGauges();
 
-    if (idealState == null) {
-      _logger.warn("ideal state is null for {}", _resourceName);
+    if (idealState == null || !idealState.isEnabled()) {
+      _logger.warn("ideal state is null or disabled for {}", _resourceName);
       return;
     }
 
@@ -335,11 +335,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _numOfErrorPartitions.updateValue(numOfErrorPartitions);
     _externalViewIdealStateDiff.updateValue(numOfDiff);
     _numOfPartitionsInExternalView.updateValue((long) externalView.getPartitionSet().size());
-    
-    // Only record missing top state gauge if the resource is enabled
-    if (idealState.isEnabled()) {
-      _numNonTopStatePartitions.updateValue(_numOfPartitions.getValue() - numOfPartitionWithTopState);
-    }
+    _numNonTopStatePartitions.updateValue(_numOfPartitions.getValue() - numOfPartitionWithTopState);
 
     String tag = idealState.getInstanceGroupTag();
     if (tag == null || tag.equals("") || tag.equals("null")) {
