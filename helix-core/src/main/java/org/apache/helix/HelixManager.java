@@ -409,7 +409,14 @@ public interface HelixManager {
 
   /**
    * Messaging service which can be used to send cluster wide messages.
+   * 
+   * <p><b>IMPORTANT:</b> When using the messaging service, configure {@link Criteria} carefully
+   * to avoid performance issues. See {@link ClusterMessagingService#send(Criteria, Message)}
+   * and {@link Criteria} for guidance.
+   * 
    * @return messaging service
+   * @see ClusterMessagingService
+   * @see Criteria
    */
   ClusterMessagingService getMessagingService();
 
