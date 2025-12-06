@@ -714,12 +714,12 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Get the top state handoff duration threshold. If not configured, defaults to 10000ms.
+   * Get the top state handoff duration threshold. If not configured, defaults to 300000ms (5 minutes).
    * @return the threshold in milliseconds
    */
   public long getTopStateHandoffDurationThreshold() {
     return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
-        10000L);
+        300000L);
   }
 
   /**
