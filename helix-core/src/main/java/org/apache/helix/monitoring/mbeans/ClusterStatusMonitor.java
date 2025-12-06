@@ -269,11 +269,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
    * @param instanceConfigMap a map of instance name to InstanceConfig (for operation tracking)
+   * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
       Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
-      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap) {
+      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
+      Map<String, Long> errorPartitionCounts) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -288,9 +290,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         try {
           ObjectName objectName = getObjectName(getInstanceBeanName(instanceName));
           InstanceMonitor bean = new InstanceMonitor(_clusterName, instanceName, objectName);
+          long errorPartitionCount = errorPartitionCounts != null && errorPartitionCounts.containsKey(instanceName)
+              ? errorPartitionCounts.get(instanceName) : 0L;
           bean.updateInstance(tags.get(instanceName), disabledPartitions.get(instanceName),
               oldDisabledPartitions.get(instanceName), liveInstanceSet.contains(instanceName),
-              !disabledInstanceSet.contains(instanceName));
+              !disabledInstanceSet.contains(instanceName), errorPartitionCount);
           monitorsToRegister.add(bean);
         } catch (MalformedObjectNameException ex) {
           LOG.error("Failed to create instance monitor for instance: {}.", instanceName);
@@ -322,9 +326,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           // Update the bean
           InstanceMonitor bean = _instanceMonitorMap.get(instanceName);
           String oldSensorName = bean.getSensorName();
+          long errorPartitionCount = errorPartitionCounts != null && errorPartitionCounts.containsKey(instanceName)
+              ? errorPartitionCounts.get(instanceName) : 0L;
           bean.updateInstance(tags.get(instanceName), disabledPartitions.get(instanceName),
               oldDisabledPartitions.get(instanceName), liveInstanceSet.contains(instanceName),
-              !disabledInstanceSet.contains(instanceName));
+              !disabledInstanceSet.contains(instanceName), errorPartitionCount);
 
           // Update instance operation duration metrics
           if (instanceConfigMap != null && instanceConfigMap.containsKey(instanceName)) {

@@ -226,7 +226,7 @@ public class TestClusterStatusMonitor {
 
     monitor.setClusterInstanceStatus(liveInstanceSet, liveInstanceSet, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceMessageMap,
-        Collections.emptyMap());
+        Collections.emptyMap(), Collections.emptyMap());
 
     Assert.assertEquals(monitor.getInstanceMessageQueueBacklog(), 25 * n);
     Assert.assertEquals(monitor.getTotalPastDueMessageGauge(), 15 * n);
@@ -446,7 +446,8 @@ public class TestClusterStatusMonitor {
     // Call setClusterInstanceStatus to register instance monitors.
     monitor.setClusterInstanceStatus(maxUsageMap.keySet(), maxUsageMap.keySet(),
         Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(),
-        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap());
 
     // Update instance capacity status.
     for (Map.Entry<String, Double> usageEntry : maxUsageMap.entrySet()) {
@@ -694,7 +695,8 @@ public class TestClusterStatusMonitor {
         Collections.emptyMap(),      // oldDisabledPartitions
         Collections.emptyMap(),      // tags
         Collections.emptyMap(),      // instanceMessageMap
-        instanceConfigMap            // instanceConfigMap
+        instanceConfigMap,           // instanceConfigMap
+        Collections.emptyMap()       // errorPartitionCounts
     );
 
     // Verify cluster-level counts
@@ -750,7 +752,8 @@ public class TestClusterStatusMonitor {
         Collections.emptyMap(),
         Collections.emptyMap(),
         Collections.emptyMap(),
-        instanceConfigMap
+        instanceConfigMap,
+        Collections.emptyMap()
     );
 
     // Verify updated counts

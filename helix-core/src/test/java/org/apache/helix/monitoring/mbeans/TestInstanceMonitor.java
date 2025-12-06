@@ -61,7 +61,7 @@ public class TestInstanceMonitor {
     // Update metrics.
     monitor.updateMaxCapacityUsage(0.5d);
     monitor.increaseMessageCount(10L);
-    monitor.updateInstance(tags, disabledPartitions, Collections.emptyList(), true, true);
+    monitor.updateInstance(tags, disabledPartitions, Collections.emptyList(), true, true, 0L);
     monitor.updateMessageQueueSize(100L);
     monitor.updatePastDueMessageGauge(50L);
 
@@ -77,6 +77,7 @@ public class TestInstanceMonitor {
     Assert.assertEquals(monitor.getMaxCapacityUsageGauge(), 0.5d);
     Assert.assertEquals(monitor.getMessageQueueSizeGauge(), 100L);
     Assert.assertEquals(monitor.getPastDueMessageGauge(), 50L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 0L);
 
     monitor.unregister();
   }
@@ -321,6 +322,39 @@ public class TestInstanceMonitor {
   }
 
   @Test
+  public void testErrorPartitionsGauge() throws JMException {
+    String testCluster = "testCluster";
+    String testInstance = "testInstance";
+    String testDomain = "testDomain:key=value";
+    Set<String> tags = ImmutableSet.of("test");
+    
+    InstanceMonitor monitor =
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+
+    // Verify initial state - no error partitions
+    Assert.assertEquals(monitor.getErrorPartitions(), 0L);
+
+    // Simulate instance with 3 error partitions
+    monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, true, 3L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 3L);
+
+    // Update with more error partitions
+    monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, true, 5L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 5L);
+
+    // Update with zero error partitions (partitions recovered)
+    monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, true, 0L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 0L);
+
+    // Test with instance offline - error partition count should still be tracked
+    monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), false, true, 2L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 2L);
+    Assert.assertEquals(monitor.getOnline(), 0L);
+
+    // Test with instance disabled - error partition count should still be tracked
+    monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, false, 4L);
+    Assert.assertEquals(monitor.getErrorPartitions(), 4L);
+    Assert.assertEquals(monitor.getEnabled(), 0L);
   public void testPartitionCountMetrics() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
@@ -359,6 +393,52 @@ public class TestInstanceMonitor {
   }
 
   @Test
+  public void testErrorPartitionsWithDisabledPartitions() throws JMException {
+    String testCluster = "testCluster";
+    String testInstance = "testInstance";
+    String testDomain = "testDomain:key=value";
+    Set<String> tags = ImmutableSet.of("test");
+    Map<String, List<String>> disabledPartitions = ImmutableMap.of(
+        "resource1", ImmutableList.of("partition1", "partition2"),
+        "resource2", ImmutableList.of("partition3")
+    );
+    
+    InstanceMonitor monitor =
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+
+    // Instance has both disabled partitions and error partitions
+    monitor.updateInstance(tags, disabledPartitions, Collections.emptyList(), true, true, 2L);
+    
+    // Verify both metrics are tracked independently
+    Assert.assertEquals(monitor.getDisabledPartitions(), 3L, "Should have 3 disabled partitions");
+    Assert.assertEquals(monitor.getErrorPartitions(), 2L, "Should have 2 error partitions");
+
+    // Update error partition count while keeping disabled partitions the same
+    monitor.updateInstance(tags, disabledPartitions, Collections.emptyList(), true, true, 5L);
+    Assert.assertEquals(monitor.getDisabledPartitions(), 3L, "Disabled partitions should remain 3");
+    Assert.assertEquals(monitor.getErrorPartitions(), 5L, "Error partitions should now be 5");
+
+    monitor.unregister();
+  }
+
+  @Test
+  public void testErrorPartitionsMultipleUpdates() throws JMException {
+    String testCluster = "testCluster";
+    String testInstance = "testInstance";
+    String testDomain = "testDomain:key=value";
+    Set<String> tags = ImmutableSet.of("test");
+    
+    InstanceMonitor monitor =
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+
+    // Simulate multiple updates with varying error partition counts
+    long[] errorCounts = {0L, 1L, 3L, 2L, 5L, 0L, 1L};
+    
+    for (long errorCount : errorCounts) {
+      monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, true, errorCount);
+      Assert.assertEquals(monitor.getErrorPartitions(), errorCount,
+          "Error partition count should be " + errorCount);
+    }
   public void testPartitionCountEdgeCases() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
