@@ -273,8 +273,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
 
     resetResourceStateGauges();
 
-    if (idealState == null) {
-      _logger.warn("ideal state is null for {}", _resourceName);
+    if (idealState == null || !idealState.isEnabled()) {
+      _logger.warn("ideal state is null or disabled for {}", _resourceName);
       return;
     }
 
