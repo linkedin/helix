@@ -209,6 +209,7 @@ public class ClusterConfig extends HelixProperty {
   private static final int OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
+  private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
 
   /**
    * Instantiate for a specific cluster
@@ -719,7 +720,7 @@ public class ClusterConfig extends HelixProperty {
    */
   public long getTopStateHandoffDurationThreshold() {
     return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
-        300000L);
+        DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD);
   }
 
   /**
