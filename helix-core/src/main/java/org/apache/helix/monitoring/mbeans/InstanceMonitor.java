@@ -152,6 +152,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
             0L);
     _errorPartitionsGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.ERROR_PARTITIONS_GAUGE.metricName(),
+            0L);
     _partitionCountGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.PARTITION_COUNT_GAUGE.metricName(),
             0L);
