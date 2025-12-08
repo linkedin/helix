@@ -355,6 +355,11 @@ public class TestInstanceMonitor {
     monitor.updateInstance(tags, ImmutableMap.of(), Collections.emptyList(), true, false, 4L);
     Assert.assertEquals(monitor.getErrorPartitions(), 4L);
     Assert.assertEquals(monitor.getEnabled(), 0L);
+
+    monitor.unregister();
+  }
+
+  @Test
   public void testPartitionCountMetrics() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
@@ -439,6 +444,11 @@ public class TestInstanceMonitor {
       Assert.assertEquals(monitor.getErrorPartitions(), errorCount,
           "Error partition count should be " + errorCount);
     }
+
+    monitor.unregister();
+  }
+
+  @Test
   public void testPartitionCountEdgeCases() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
