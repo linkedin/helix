@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
@@ -62,8 +63,14 @@ public class AuditLogFilter implements ContainerRequestFilter, ContainerResponse
   public void filter(ContainerRequestContext request) throws IOException {
     AuditLog.Builder auditLogBuilder = new AuditLog.Builder();
 
+    String path = request.getUriInfo().getPath();
+    String queryString = request.getUriInfo().getRequestUri().getRawQuery();
+    String fullRequestPath = Optional.ofNullable(queryString)
+                    .map(q -> path + "?" + q)
+                    .orElse(path);
+
     auditLogBuilder.namespace(getNamespace())
-        .requestPath(request.getUriInfo().getPath())
+        .requestPath(fullRequestPath)
         .httpMethod(request.getMethod())
         .startTime(new Date())
         .requestHeaders(getHeaders(request.getHeaders()))

@@ -178,6 +178,31 @@ public class TestClusterAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testAuditLogIncludesQueryParams() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    _auditLogger.clearupLogs();
+    String cluster = _clusters.iterator().next();
+    // Make a request with query parameters
+    Map<String, String> queryParams = ImmutableMap.of("command", "activate", "superCluster", _superCluster);
+    get("clusters/" + cluster, queryParams, Response.Status.OK.getStatusCode(), true);
+
+    validateAuditLogSize(1);
+    AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
+
+    // Verify that query parameters are included in the request path
+    String requestPath = auditLog.getRequestPath();
+    Assert.assertTrue(requestPath.contains("?"),
+        "Request path should contain query string separator '?'. Actual: " + requestPath);
+    Assert.assertTrue(requestPath.contains("command=activate"),
+        "Request path should contain 'command=activate'. Actual: " + requestPath);
+    Assert.assertTrue(requestPath.contains("superCluster=" + _superCluster),
+        "Request path should contain 'superCluster=" + _superCluster + "'. Actual: " + requestPath);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testGetClusters")
   public void testGetClusterTopology() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
