@@ -195,8 +195,12 @@ public class TestClusterAccessor extends AbstractTestClass {
     String requestPath = auditLog.getRequestPath();
     Assert.assertTrue(requestPath.contains("?"),
         "Request path should contain query string separator '?'. Actual: " + requestPath);
+    Assert.assertTrue(requestPath.indexOf("?") == requestPath.lastIndexOf("?"),
+        "Request path should have only one query string separator '?'. Actual: " + requestPath);
     Assert.assertTrue(requestPath.contains("command=activate"),
         "Request path should contain 'command=activate'. Actual: " + requestPath);
+    Assert.assertTrue(requestPath.indexOf("command=activate") == requestPath.lastIndexOf("command=activate"),
+        "Request path should have only one \"command=activate\". Actual: " + requestPath);
     Assert.assertTrue(requestPath.contains("superCluster=" + _superCluster),
         "Request path should contain 'superCluster=" + _superCluster + "'. Actual: " + requestPath);
 

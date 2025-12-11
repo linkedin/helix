@@ -36,6 +36,7 @@ import javax.ws.rs.container.ContainerResponseFilter;
 import javax.ws.rs.container.PreMatching;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.core.UriInfo;
 import javax.ws.rs.ext.Provider;
 
 import com.google.common.io.CharStreams;
@@ -63,8 +64,9 @@ public class AuditLogFilter implements ContainerRequestFilter, ContainerResponse
   public void filter(ContainerRequestContext request) throws IOException {
     AuditLog.Builder auditLogBuilder = new AuditLog.Builder();
 
-    String path = request.getUriInfo().getPath();
-    String queryString = request.getUriInfo().getRequestUri().getRawQuery();
+    UriInfo uriInfo = request.getUriInfo();
+    String path = uriInfo.getPath();
+    String queryString = uriInfo.getRequestUri().getRawQuery();
     String fullRequestPath = Optional.ofNullable(queryString)
                     .map(q -> path + "?" + q)
                     .orElse(path);
