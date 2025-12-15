@@ -192,17 +192,9 @@ public class TestClusterAccessor extends AbstractTestClass {
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
 
     // Verify that query parameters are included in the request path
-    String requestPath = auditLog.getRequestPath();
-    Assert.assertTrue(requestPath.contains("?"),
-        "Request path should contain query string separator '?'. Actual: " + requestPath);
-    Assert.assertTrue(requestPath.indexOf("?") == requestPath.lastIndexOf("?"),
-        "Request path should have only one query string separator '?'. Actual: " + requestPath);
-    Assert.assertTrue(requestPath.contains("command=activate"),
-        "Request path should contain 'command=activate'. Actual: " + requestPath);
-    Assert.assertTrue(requestPath.indexOf("command=activate") == requestPath.lastIndexOf("command=activate"),
-        "Request path should have only one \"command=activate\". Actual: " + requestPath);
-    Assert.assertTrue(requestPath.contains("superCluster=" + _superCluster),
-        "Request path should contain 'superCluster=" + _superCluster + "'. Actual: " + requestPath);
+    String expectedPath = "clusters/" + cluster + "?command=activate&superCluster=" + _superCluster;
+    Assert.assertEquals(auditLog.getRequestPath(), expectedPath,
+        "Request path should include query parameters");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
