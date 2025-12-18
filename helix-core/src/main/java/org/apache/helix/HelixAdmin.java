@@ -236,6 +236,17 @@ public interface HelixAdmin {
   void dropInstance(String clusterName, InstanceConfig instanceConfig);
 
   /**
+   * Soft drop an instance from a cluster. Deletes InstanceConfig immediately to make the instance
+   * non-assignable, then relies on async cleanup to remove the instance runtime path.
+   * Use this for instances with large numbers of pending messages to avoid jute.maxbuffer issues.
+   * @param clusterName
+   * @param instanceConfig
+   */
+  default void softDropInstance(String clusterName, InstanceConfig instanceConfig) {
+    throw new UnsupportedOperationException("softDropInstance is not implemented.");
+  }
+
+  /**
    * Purge offline instances that have been offline for longer than the offline duration time
    * from a cluster
    * @param clusterName

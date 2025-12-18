@@ -170,6 +170,9 @@ public class ClusterConfig extends HelixProperty {
     // How long offline nodes will stay in the cluster before they are automatically purged, in milliseconds
     PARTICIPANT_DEREGISTRATION_TIMEOUT,
 
+    // Enables async instance drop cleanup to avoid jute.maxbuffer failures
+    ASYNC_INSTANCE_DROP_ENABLED,
+
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
   }
@@ -1328,5 +1331,13 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  public boolean isAsyncInstanceDropEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.ASYNC_INSTANCE_DROP_ENABLED.name(), false);
+  }
+
+  public void setAsyncInstanceDropEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.ASYNC_INSTANCE_DROP_ENABLED.name(), enabled);
   }
 }

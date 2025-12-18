@@ -292,9 +292,6 @@ public class ZKHelixAdmin implements HelixAdmin {
       } catch (ZkClientException e) {
         if (retryCnt < 3 && e.getCause() instanceof ZkException && e.getCause()
             .getCause() instanceof KeeperException.NotEmptyException) {
-          // Racing condition with controller's persisting node history, retryable.
-          // We don't need to backoff here as this racing condition only happens once (controller
-          // does not repeatedly write instance history)
           logger.warn("Retrying dropping instance {} with exception {}", instanceName,
               e.getCause().getMessage());
           retryCnt++;
@@ -306,6 +303,27 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
       }
     }
+  }
+
+  @Override
+  public void softDropInstance(String clusterName, InstanceConfig instanceConfig) {
+    logger.info("Soft drop instance {} from cluster {}.", instanceConfig.getInstanceName(), clusterName);
+    String instanceName = instanceConfig.getInstanceName();
+
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    if (!_zkClient.exists(instanceConfigPath)) {
+      throw new HelixException(
+          "Node " + instanceName + " does not exist in config for cluster " + clusterName);
+    }
+
+    String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
+    if (_zkClient.exists(liveInstancePath)) {
+      throw new HelixException(
+          "Node " + instanceName + " is still alive for cluster " + clusterName + ", can't drop.");
+    }
+
+    _zkClient.delete(instanceConfigPath);
+    logger.info("Deleted InstanceConfig for {}. OrphanedInstanceCleanupStage will clean up INSTANCES path asynchronously.", instanceName);
   }
 
   /**

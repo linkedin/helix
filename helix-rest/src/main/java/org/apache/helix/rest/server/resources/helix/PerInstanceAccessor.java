@@ -554,11 +554,16 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("soft") boolean softDelete) {
     HelixAdmin admin = getHelixAdmin();
     try {
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
-      admin.dropInstance(clusterId, instanceConfig);
+      if (softDelete) {
+        admin.softDropInstance(clusterId, instanceConfig);
+      } else {
+        admin.dropInstance(clusterId, instanceConfig);
+      }
     } catch (HelixException e) {
       return badRequest(e.getMessage());
     }
