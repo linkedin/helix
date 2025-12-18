@@ -19,10 +19,14 @@ package org.apache.helix.participant;
  * under the License.
  */
 
+import org.apache.helix.BaseDataAccessor;
+import org.apache.helix.HelixManager;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.TestHelper;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.ZkUnitTestBase;
+import org.apache.helix.manager.zk.ZkCacheBaseDataAccessor;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageType;
 import org.slf4j.Logger;
@@ -33,6 +37,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.lang.reflect.Field;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -264,5 +269,114 @@ public class TestDistControllerStateModel extends ZkUnitTestBase {
         "Instance2 should complete immediately, proving locks are not shared");
     Assert.assertTrue(instance1Interrupted.get(),
         "Instance1 should have been interrupted while holding its lock");
+  }
+
+  /**
+   * Test to verify that when a DistClusterControllerStateModel becomes leader,
+   * the created CONTROLLER HelixManager uses ZkCacheBaseDataAccessor for caching.
+   * 
+   * In distributed controller mode, CONTROLLER instances manage clusters and benefit
+   * from caching to reduce ZooKeeper load during the ReadClusterDataStage pipeline.
+   */
+  @Test()
+  public void testControllerUsesCacheAccessor() throws Exception {
+    LOG.info("Testing that CONTROLLER created by DistClusterControllerStateModel uses ZkCacheBaseDataAccessor");
+
+    Message message = new Message(MessageType.STATE_TRANSITION, "0");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_0");
+
+    // Trigger the state transition to become leader
+    try {
+      stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+    } catch (Exception e) {
+      LOG.error("Exception becoming leader from standby", e);
+      Assert.fail("Should not throw exception during leader transition: " + e.getMessage());
+    }
+
+    // Use reflection to get the created controller
+    Field controllerOptField = DistClusterControllerStateModel.class.getDeclaredField("_controllerOpt");
+    controllerOptField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Optional<HelixManager> controllerOpt = (Optional<HelixManager>) controllerOptField.get(stateModel);
+
+    Assert.assertTrue(controllerOpt.isPresent(), "Controller should be created after becoming leader");
+
+    HelixManager controller = controllerOpt.get();
+    
+    // Get the data accessor from the controller
+    ZKHelixDataAccessor dataAccessor = (ZKHelixDataAccessor) controller.getHelixDataAccessor();
+    Assert.assertNotNull(dataAccessor, "Data accessor should not be null");
+
+    // Use reflection to get the underlying base data accessor
+    Field baseAccessorField = ZKHelixDataAccessor.class.getDeclaredField("_baseDataAccessor");
+    baseAccessorField.setAccessible(true);
+    BaseDataAccessor<ZNRecord> baseAccessor = 
+        (BaseDataAccessor<ZNRecord>) baseAccessorField.get(dataAccessor);
+
+    Assert.assertNotNull(baseAccessor, "Base data accessor should not be null");
+    Assert.assertTrue(baseAccessor instanceof ZkCacheBaseDataAccessor,
+        "CONTROLLER should use ZkCacheBaseDataAccessor but was: " + baseAccessor.getClass().getName());
+
+    LOG.info("Verified: CONTROLLER uses ZkCacheBaseDataAccessor as expected");
+
+    // Clean up
+    stateModel.onBecomeStandbyFromLeader(message, new NotificationContext(null));
+  }
+
+  /**
+   * Test to verify that after reset(), a new leader transition creates a fresh
+   * CONTROLLER with ZkCacheBaseDataAccessor (not reusing old accessor).
+   */
+  @Test()
+  public void testControllerCacheAccessorAfterReset() throws Exception {
+    LOG.info("Testing that CONTROLLER uses ZkCacheBaseDataAccessor after reset and re-election");
+
+    Message message = new Message(MessageType.STATE_TRANSITION, "0");
+    message.setPartitionName(clusterName);
+    message.setTgtName("controller_0");
+
+    // First leader transition
+    try {
+      stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+    } catch (Exception e) {
+      LOG.error("Exception becoming leader from standby", e);
+    }
+
+    // Reset (simulates leadership loss)
+    stateModel.reset();
+
+    // Second leader transition
+    try {
+      stateModel.onBecomeLeaderFromStandby(message, new NotificationContext(null));
+    } catch (Exception e) {
+      LOG.error("Exception becoming leader from standby after reset", e);
+      Assert.fail("Should not throw exception during leader transition after reset: " + e.getMessage());
+    }
+
+    // Verify the new controller also uses cache accessor
+    Field controllerOptField = DistClusterControllerStateModel.class.getDeclaredField("_controllerOpt");
+    controllerOptField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Optional<HelixManager> controllerOpt = (Optional<HelixManager>) controllerOptField.get(stateModel);
+
+    Assert.assertTrue(controllerOpt.isPresent(), "Controller should be created after second leader transition");
+
+    HelixManager controller = controllerOpt.get();
+    ZKHelixDataAccessor dataAccessor = (ZKHelixDataAccessor) controller.getHelixDataAccessor();
+    
+    Field baseAccessorField = ZKHelixDataAccessor.class.getDeclaredField("_baseDataAccessor");
+    baseAccessorField.setAccessible(true);
+    BaseDataAccessor<ZNRecord> baseAccessor = 
+        (BaseDataAccessor<ZNRecord>) baseAccessorField.get(dataAccessor);
+
+    Assert.assertTrue(baseAccessor instanceof ZkCacheBaseDataAccessor,
+        "CONTROLLER after reset should still use ZkCacheBaseDataAccessor but was: " 
+        + baseAccessor.getClass().getName());
+
+    LOG.info("Verified: CONTROLLER uses ZkCacheBaseDataAccessor after reset and re-election");
+
+    // Clean up
+    stateModel.reset();
   }
 }
