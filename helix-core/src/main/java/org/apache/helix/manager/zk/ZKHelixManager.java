@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -728,6 +729,37 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   }
 
   /**
+   * Creates a BaseDataAccessor with caching enabled for CONTROLLER instances.
+   * 
+   * In distributed controller mode, CONTROLLER instances manage clusters and run the
+   * intensive ReadClusterDataStage pipeline. Enabling caching for these instances
+   * significantly reduces ZooKeeper load.
+   * 
+   * CONTROLLER_PARTICIPANT instances (which participate in the grand cluster for leader
+   * election) do not get caching since they don't run the ReadClusterDataStage pipeline.
+   *
+   * @return ZkCacheBaseDataAccessor for CONTROLLER instances, ZkBaseDataAccessor otherwise
+   */
+  BaseDataAccessor<ZNRecord> createCacheBaseDataAccessor() {
+    if (_instanceType == InstanceType.CONTROLLER) {
+      String clusterPath = "/" + _clusterName;
+      List<String> zkCachePaths = Arrays.asList(
+          clusterPath + "/LIVEINSTANCES",
+          clusterPath + "/INSTANCES",
+          clusterPath + "/IDEALSTATES",
+          clusterPath + "/CONFIGS"
+      );
+
+      LOG.info("Creating cached base data accessor for CONTROLLER instance: {} for cluster: {}",
+          _instanceName, _clusterName);
+      ZkBaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkclient);
+      return new ZkCacheBaseDataAccessor<>(baseAccessor, null, null, zkCachePaths);
+    }
+
+    return new ZkBaseDataAccessor<>(_zkclient);
+  }
+
+  /**
    * Add Helix built-in state model definitions if not exist
    */
   private void addBuiltInStateModelDefinitions() {
@@ -759,7 +791,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       }
       _zkclient = newClient;
 
-      _baseDataAccessor = createBaseDataAccessor();
+      _baseDataAccessor = createCacheBaseDataAccessor();
 
       _dataAccessor = new ZKHelixDataAccessor(_clusterName, _baseDataAccessor);
       _configAccessor = new ConfigAccessor(_zkclient);
