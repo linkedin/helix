@@ -34,7 +34,8 @@ import org.apache.helix.model.Partition;
  */
 public class BestPossibleStateOutput extends ResourcesStateMap {
   /* resource -> partition -> preference list */
-  private Map<String, Map<String, List<String>>> _preferenceLists;
+  // Initialize eagerly to avoid race condition during parallel resource computation
+  private final Map<String, Map<String, List<String>>> _preferenceLists = new ConcurrentHashMap<>();
   /**
    * Deprecated, use getResourceStatesMap instead.
    *
@@ -72,38 +73,27 @@ public class BestPossibleStateOutput extends ResourcesStateMap {
   }
 
   public Map<String, List<String>> getPreferenceLists(String resource) {
-    if (_preferenceLists != null && _preferenceLists.containsKey(resource)) {
-      return _preferenceLists.get(resource);
-    }
-
-    return null;
+    return _preferenceLists.get(resource);
   }
 
   public List<String> getPreferenceList(String resource, String partition) {
-    if (_preferenceLists != null && _preferenceLists.containsKey(resource) && _preferenceLists
-        .get(resource).containsKey(partition)) {
-      return _preferenceLists.get(resource).get(partition);
+    Map<String, List<String>> resourcePrefs = _preferenceLists.get(resource);
+    if (resourcePrefs != null) {
+      return resourcePrefs.get(partition);
     }
-
     return null;
   }
 
   public void setPreferenceList(String resource, String partition, List<String> list) {
-    if (_preferenceLists == null) {
-      _preferenceLists = new ConcurrentHashMap<>();
-    }
     _preferenceLists.computeIfAbsent(resource, k -> new ConcurrentHashMap<>()).put(partition, list);
   }
 
   public void setPreferenceLists(String resource,
       Map<String, List<String>> resourcePreferenceLists) {
-    if (_preferenceLists == null) {
-      _preferenceLists = new ConcurrentHashMap<>();
-    }
     _preferenceLists.put(resource, resourcePreferenceLists);
   }
 
   protected boolean containsResource(String resource) {
-    return _preferenceLists != null && _preferenceLists.containsKey(resource);
+    return _preferenceLists.containsKey(resource);
   }
 }
