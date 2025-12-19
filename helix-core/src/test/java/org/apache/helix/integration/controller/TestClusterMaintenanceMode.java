@@ -109,13 +109,22 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
   }
 
   @Test(dependsOnMethods = "testMaintenanceModeAddNewInstance")
-  public void testMaintenanceModeAddNewResource() {
+  public void testMaintenanceModeAddNewResource() throws Exception {
     _gSetupTool.getClusterManagementTool().addResource(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 7, "MasterSlave",
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
     _gSetupTool.getClusterManagementTool().rebalance(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 3);
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    // In maintenance mode, new resources won't get ExternalView populated (no rebalance happens).
+    // Instead of using _clusterVerifier.verifyByPolling() which would timeout,
+    // we wait for the IdealState to be created and then verify that ExternalView remains null.
+    Assert.assertTrue(TestHelper.verify(() -> {
+      IdealState idealState = _gSetupTool.getClusterManagementTool()
+          .getResourceIdealState(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
+      return idealState != null && idealState.getNumPartitions() == 7;
+    }, TestHelper.WAIT_DURATION));
+    // Give controller a chance to process the new resource (it should do nothing in maintenance mode)
+    Thread.sleep(2000);
     ExternalView externalView = _gSetupTool.getClusterManagementTool()
         .getResourceExternalView(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
     Assert.assertNull(externalView);

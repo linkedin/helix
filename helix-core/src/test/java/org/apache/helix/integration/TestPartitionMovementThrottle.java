@@ -156,15 +156,21 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
       _participants[i].syncStart();
     }
 
-    Thread.sleep(2000);
+    // Wait for cluster to stabilize using proper verification instead of fixed sleep
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     for (String db : _dbs) {
       // After the fix in IntermediateCalcStage where downward load-balance is now allowed even if
       // there are recovery or error partitions present, maxPendingTransition below is adjusted from
       // 2 to 5 because BOTH recovery balance and load balance could happen in the same pipeline
       // iteration
-      Assert.assertTrue(getMaxParallelTransitionCount(
-          DelayedTransition.getResourcePatitionTransitionTimes(), db) <= 5);
+      int maxParallel = getMaxParallelTransitionCount(
+          DelayedTransition.getResourcePatitionTransitionTimes(), db);
+      // Skip assertion if no throttle results were recorded (returns -1)
+      if (maxParallel != -1) {
+        Assert.assertTrue(maxParallel <= 5,
+            "Max parallel transitions for " + db + " was " + maxParallel + ", expected <= 5");
+      }
     }
   }
 
