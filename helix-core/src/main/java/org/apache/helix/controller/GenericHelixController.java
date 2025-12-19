@@ -1492,9 +1492,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
 
-    // Note: We intentionally do NOT shutdown StageThreadPoolHelper here because
-    // it's a shared static pool. Other controllers in the same JVM may still need it.
-    // The pool uses daemon threads and will be cleaned up when JVM exits.
+    // shutdown shared stage thread pool
+    StageThreadPoolHelper.shutdown();
 
     enableClusterStatusMonitor(false);
 
