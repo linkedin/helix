@@ -26,6 +26,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
@@ -34,8 +35,9 @@ public class TestStageThreadPoolHelper {
 
   @AfterMethod
   public void afterMethod() {
-    // Clean up after each test
+    // Clean up after each test and reset to default pool size
     StageThreadPoolHelper.shutdown();
+    StageThreadPoolHelper.setPoolSize(StageThreadPoolHelper.DEFAULT_POOL_SIZE);
   }
 
   @Test
@@ -100,6 +102,8 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testParallelExecution() throws InterruptedException {
+    StageThreadPoolHelper.setPoolSize(4);
+
     // Test that tasks are actually executed in parallel
     int numTasks = 4;
     CountDownLatch startLatch = new CountDownLatch(numTasks);
@@ -156,7 +160,6 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testShutdown() throws InterruptedException {
-    // Test shutdown functionality
     AtomicInteger counter = new AtomicInteger(0);
     List<Callable<Void>> tasks = new ArrayList<>();
 
@@ -178,7 +181,6 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testExecutorReinitialization() throws InterruptedException {
-    // Test that executor is reinitialized after shutdown
     AtomicInteger counter = new AtomicInteger(0);
     List<Callable<Void>> tasks = new ArrayList<>();
 
@@ -235,7 +237,6 @@ public class TestStageThreadPoolHelper {
 
   @Test(expectedExceptions = InterruptedException.class)
   public void testInterruptedExecution() throws InterruptedException {
-    // Test behavior when thread is interrupted during execution
     List<Callable<Void>> tasks = new ArrayList<>();
 
     tasks.add(() -> {
@@ -285,5 +286,57 @@ public class TestStageThreadPoolHelper {
 
     Assert.assertEquals(shortTaskCount.get(), 5, "All short tasks should complete");
     Assert.assertEquals(longTaskCount.get(), 3, "All long tasks should complete");
+  }
+
+  @Test
+  public void testConfigurablePoolSize() throws InterruptedException {
+    // Test that the pool size can be configured
+    StageThreadPoolHelper.setPoolSize(2);
+    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), 2, "Pool size should be 2");
+
+    // Test with tasks that require parallel execution
+    int numTasks = 4;
+    AtomicInteger concurrentCount = new AtomicInteger(0);
+    AtomicInteger maxConcurrent = new AtomicInteger(0);
+    List<Callable<Void>> tasks = new ArrayList<>();
+
+    for (int i = 0; i < numTasks; i++) {
+      tasks.add(() -> {
+        int current = concurrentCount.incrementAndGet();
+        // Track max concurrent execution
+        synchronized (maxConcurrent) {
+          if (current > maxConcurrent.get()) {
+            maxConcurrent.set(current);
+          }
+        }
+        TimeUnit.MILLISECONDS.sleep(100); // Simulate work
+        concurrentCount.decrementAndGet();
+        return null;
+      });
+    }
+
+    StageThreadPoolHelper.executeAndWait("ConfiguredPoolStage", tasks);
+
+    // With pool size of 2, max concurrent should be 2
+    Assert.assertTrue(maxConcurrent.get() <= 2,
+        "Max concurrent tasks should not exceed configured pool size of 2, but was: " + maxConcurrent.get());
+  }
+
+  @Test
+  public void testDefaultPoolSize() {
+    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+        "Pool size should be the default");
+  }
+
+  @Test
+  public void testInvalidPoolSizeFallsBackToDefault() {
+    // Test that invalid pool sizes fall back to default
+    StageThreadPoolHelper.setPoolSize(0);
+    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+        "Pool size 0 should fall back to default");
+
+    StageThreadPoolHelper.setPoolSize(-1);
+    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+        "Negative pool size should fall back to default");
   }
 }

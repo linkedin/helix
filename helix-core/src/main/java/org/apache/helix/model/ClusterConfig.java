@@ -144,6 +144,11 @@ public class ClusterConfig extends HelixProperty {
     // TaskConstants.DEFAULT_TASK_THREAD_POOL_SIZE will be used to create pool sizes.
     GLOBAL_TARGET_TASK_THREAD_POOL_SIZE,
 
+    // The thread pool size for parallel execution in controller pipeline stages.
+    // This controls parallelism for stages like BestPossibleStateCalcStage.
+    // Default is min(4, availableProcessors).
+    STAGE_PARALLEL_THREAD_POOL_SIZE,
+
     // The time out window for offline nodes during maintenance mode; if an offline node has been
     // offline for more than this specified time period, it's treated as offline for the rest of
     // the maintenance mode's duration even when it comes online.
@@ -206,6 +211,7 @@ public class ClusterConfig extends HelixProperty {
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   public final static boolean DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   private static final int GLOBAL_TARGET_TASK_THREAD_POOL_SIZE_NOT_SET = -1;
+  private static final int STAGE_PARALLEL_THREAD_POOL_SIZE_NOT_SET = -1;
   private static final int OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
@@ -951,6 +957,41 @@ public class ClusterConfig extends HelixProperty {
     _record
         .setIntField(ClusterConfig.ClusterConfigProperty.GLOBAL_TARGET_TASK_THREAD_POOL_SIZE.name(),
             globalTargetTaskThreadPoolSize);
+  }
+
+  /**
+   * Get the thread pool size for parallel execution in controller pipeline stages.
+   * This controls parallelism for stages like BestPossibleStateCalcStage.
+   * <p>
+   * Unlike GLOBAL_TARGET_TASK_THREAD_POOL_SIZE which requires a restart,
+   * changes to this value take effect dynamically within one pipeline cycle.
+   *
+   * @return the configured thread pool size, or -1 if not set (default is used)
+   */
+  public int getStageParallelThreadPoolSize() {
+    return _record.getIntField(
+        ClusterConfigProperty.STAGE_PARALLEL_THREAD_POOL_SIZE.name(),
+        STAGE_PARALLEL_THREAD_POOL_SIZE_NOT_SET);
+  }
+
+  /**
+   * Set the thread pool size for parallel execution in controller pipeline stages.
+   * This controls parallelism for stages like BestPossibleStateCalcStage.
+   * <p>
+   * Changes take effect dynamically - the controller will pick up the new value
+   * on the next pipeline cycle and recreate the thread pool with the new size.
+   *
+   * @param stageParallelThreadPoolSize the thread pool size (must be positive)
+   * @throws IllegalArgumentException when the provided thread pool size is not positive
+   */
+  public void setStageParallelThreadPoolSize(int stageParallelThreadPoolSize)
+      throws IllegalArgumentException {
+    if (stageParallelThreadPoolSize <= 0) {
+      throw new IllegalArgumentException("stageParallelThreadPoolSize must be positive!");
+    }
+    _record.setIntField(
+        ClusterConfigProperty.STAGE_PARALLEL_THREAD_POOL_SIZE.name(),
+        stageParallelThreadPoolSize);
   }
 
   /**

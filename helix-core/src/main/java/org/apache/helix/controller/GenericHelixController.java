@@ -752,6 +752,20 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     addController(this);
   }
 
+  /**
+   * Update the stage thread pool size from ClusterConfig if configured.
+   */
+  private void updateStageThreadPoolSize(ClusterConfig clusterConfig) {
+    if (clusterConfig == null) {
+      return;
+    }
+
+    int configuredPoolSize = clusterConfig.getStageParallelThreadPoolSize();
+    if (configuredPoolSize > 0) {
+      StageThreadPoolHelper.setPoolSize(configuredPoolSize);
+    }
+  }
+
   private void initializeAsyncFIFOWorkers() {
     for (AsyncWorkerType type : AsyncWorkerType.values()) {
       DedupEventProcessor<String, Runnable> worker =
@@ -892,6 +906,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     dataProvider.setClusterEventId(event.getEventId());
     event.addAttribute(AttributeName.LastRebalanceFinishTimeStamp.name(), _lastPipelineEndTimestamp);
     event.addAttribute(AttributeName.ControllerDataProvider.name(), dataProvider);
+
+    // Update stage thread pool size from ClusterConfig if configured
+    updateStageThreadPoolSize(dataProvider.getClusterConfig());
 
     logger.info("START: Invoking {} controller pipeline for cluster: {}. Event type: {}, ID: {}. "
             + "Event session ID: {}", dataProvider.getPipelineName(), manager.getClusterName(),
@@ -1475,8 +1492,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
 
-    // shutdown shared stage thread pool
-    StageThreadPoolHelper.shutdown();
+    // Note: We intentionally do NOT shutdown StageThreadPoolHelper here because
+    // it's a shared static pool. Other controllers in the same JVM may still need it.
+    // The pool uses daemon threads and will be cleaned up when JVM exits.
 
     enableClusterStatusMonitor(false);
 
