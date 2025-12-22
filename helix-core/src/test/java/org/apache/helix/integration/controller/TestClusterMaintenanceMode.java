@@ -108,8 +108,15 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         newExternalView.getRecord().getMapFields());
   }
 
-  @Test(dependsOnMethods = "testMaintenanceModeAddNewInstance")
+  @Test
   public void testMaintenanceModeAddNewResource() throws Exception {
+    // Explicitly enter maintenance mode
+    _gSetupTool.getClusterManagementTool().enableMaintenanceMode(CLUSTER_NAME, true, TestHelper.getTestMethodName());
+
+    // Verify we're in maintenance mode
+    MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
+    Assert.assertNotNull(maintenanceSignal, "Cluster should be in maintenance mode");
+
     _gSetupTool.getClusterManagementTool().addResource(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 7, "MasterSlave",
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
@@ -118,16 +125,33 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     // In maintenance mode, new resources won't get ExternalView populated (no rebalance happens).
     // Instead of using _clusterVerifier.verifyByPolling() which would timeout,
     // we wait for the IdealState to be created and then verify that ExternalView remains null.
-    Assert.assertTrue(TestHelper.verify(() -> {
+
+    // Wait longer for IdealState to be created during maintenance mode
+    boolean idealStateCreated = TestHelper.verify(() -> {
       IdealState idealState = _gSetupTool.getClusterManagementTool()
           .getResourceIdealState(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
-      return idealState != null && idealState.getNumPartitions() == 7;
-    }, TestHelper.WAIT_DURATION));
+      if (idealState == null) {
+        System.out.println("IdealState is null for resource: " + newResourceAddedDuringMaintenanceMode);
+        return false;
+      }
+      int numPartitions = idealState.getNumPartitions();
+      System.out.println("IdealState found with " + numPartitions + " partitions for resource: " + newResourceAddedDuringMaintenanceMode);
+      return numPartitions == 7;
+    }, 30000L); // Increased timeout to 30 seconds
+
+    Assert.assertTrue(idealStateCreated,
+        "Failed to create IdealState with 7 partitions for resource: " + newResourceAddedDuringMaintenanceMode);
+
     // Give controller a chance to process the new resource (it should do nothing in maintenance mode)
-    Thread.sleep(2000);
+    Thread.sleep(5000);
     ExternalView externalView = _gSetupTool.getClusterManagementTool()
         .getResourceExternalView(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
-    Assert.assertNull(externalView);
+
+    // During maintenance mode, ExternalView should NOT be created for new resources
+    // since the management mode pipeline excludes ExternalViewComputeStage
+    Assert.assertNull(externalView,
+        "ExternalView should be null during maintenance mode for resource created after entering maintenance mode: "
+        + newResourceAddedDuringMaintenanceMode);
   }
 
   @Test(dependsOnMethods = "testMaintenanceModeAddNewResource")

@@ -74,6 +74,14 @@ public class ExternalViewComputeStage extends AbstractAsyncBaseStage {
     HelixDataAccessor dataAccessor = manager.getHelixDataAccessor();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
 
+    // Skip external view computation if cluster is in maintenance mode
+    // This prevents ExternalView creation for new resources during maintenance mode
+    if (dataAccessor.getProperty(keyBuilder.maintenance()) != null) {
+      LogUtil.logInfo(LOG, _eventId, 
+          "Skipping ExternalView computation - cluster is in maintenance mode");
+      return;
+    }
+
     CurrentStateOutput currentStateOutput =
         event.getAttribute(AttributeName.CURRENT_STATE.name());
     ClusterStatusMonitor clusterStatusMonitor =

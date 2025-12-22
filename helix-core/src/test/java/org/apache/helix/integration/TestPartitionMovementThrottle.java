@@ -159,6 +159,21 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
     // Wait for cluster to stabilize using proper verification instead of fixed sleep
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
+    boolean allTransitionsRecorded = TestHelper.verify(() -> {
+      for (String db : _dbs) {
+        int maxParallel = getMaxParallelTransitionCount(
+            DelayedTransition.getResourcePatitionTransitionTimes(), db);
+        if (maxParallel == -1) {
+          // Transitions not yet recorded for this resource
+          return false;
+        }
+      }
+      return true;
+    }, 10000); // 10 second timeout for transition recording
+
+    Assert.assertTrue(allTransitionsRecorded,
+        "Transition tracking data was not properly recorded for all resources");
+
     for (String db : _dbs) {
       // After the fix in IntermediateCalcStage where downward load-balance is now allowed even if
       // there are recovery or error partitions present, maxPendingTransition below is adjusted from
@@ -167,10 +182,10 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
       int maxParallel = getMaxParallelTransitionCount(
           DelayedTransition.getResourcePatitionTransitionTimes(), db);
       // Skip assertion if no throttle results were recorded (returns -1)
-      if (maxParallel != -1) {
-        Assert.assertTrue(maxParallel <= 5,
-            "Max parallel transitions for " + db + " was " + maxParallel + ", expected <= 5");
-      }
+      Assert.assertTrue(maxParallel != -1,
+          "No throttle tracking data recorded for resource: " + db);
+      Assert.assertTrue(maxParallel <= 5,
+          "Max parallel transitions for " + db + " was " + maxParallel + ", expected <= 5");
     }
   }
 
