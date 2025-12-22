@@ -250,8 +250,6 @@ public class InstanceConfig extends HelixProperty {
    */
   public InstanceConfig(String instanceId) {
     super(instanceId);
-    // Initialize the INSTANCE_OPERATION_STATE field
-    updateInstanceOperationState();
   }
 
   /**
