@@ -110,7 +110,7 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
 
   @Test
   public void testMaintenanceModeAddNewResource() throws Exception {
-    // Explicitly enter maintenance mode
+    // Enter maintenance mode
     _gSetupTool.getClusterManagementTool().enableMaintenanceMode(CLUSTER_NAME, true, TestHelper.getTestMethodName());
 
     // Verify we're in maintenance mode
@@ -122,11 +122,10 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
     _gSetupTool.getClusterManagementTool().rebalance(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 3);
-    // In maintenance mode, new resources won't get ExternalView populated (no rebalance happens).
-    // Instead of using _clusterVerifier.verifyByPolling() which would timeout,
-    // we wait for the IdealState to be created and then verify that ExternalView remains null.
 
-    // Wait longer for IdealState to be created during maintenance mode
+    // In maintenance mode, new resources won't get ExternalView populated (no rebalance happens).
+
+    // Wait for IdealState to be created during maintenance mode
     boolean idealStateCreated = TestHelper.verify(() -> {
       IdealState idealState = _gSetupTool.getClusterManagementTool()
           .getResourceIdealState(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
@@ -148,7 +147,6 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         .getResourceExternalView(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
 
     // During maintenance mode, ExternalView should NOT be created for new resources
-    // since the management mode pipeline excludes ExternalViewComputeStage
     Assert.assertNull(externalView,
         "ExternalView should be null during maintenance mode for resource created after entering maintenance mode: "
         + newResourceAddedDuringMaintenanceMode);

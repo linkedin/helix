@@ -156,7 +156,7 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
       _participants[i].syncStart();
     }
 
-    // Wait for cluster to stabilize using proper verification instead of fixed sleep
+    // Wait for cluster to stabilize
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     boolean allTransitionsRecorded = TestHelper.verify(() -> {
@@ -169,7 +169,7 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
         }
       }
       return true;
-    }, 10000); // 10 second timeout for transition recording
+    }, 10000);
 
     Assert.assertTrue(allTransitionsRecorded,
         "Transition tracking data was not properly recorded for all resources");
