@@ -178,6 +178,27 @@ public class TestClusterAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testAuditLogIncludesQueryParams() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    _auditLogger.clearupLogs();
+    String cluster = _clusters.iterator().next();
+    // Make a request with query parameters
+    Map<String, String> queryParams = ImmutableMap.of("command", "activate", "superCluster", _superCluster);
+    get("clusters/" + cluster, queryParams, Response.Status.OK.getStatusCode(), true);
+
+    validateAuditLogSize(1);
+    AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
+
+    // Verify that query parameters are included in the request path
+    String expectedPath = "clusters/" + cluster + "?command=activate&superCluster=" + _superCluster;
+    Assert.assertEquals(auditLog.getRequestPath(), expectedPath,
+        "Request path should include query parameters");
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testGetClusters")
   public void testGetClusterTopology() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
