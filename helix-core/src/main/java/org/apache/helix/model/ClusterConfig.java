@@ -962,10 +962,6 @@ public class ClusterConfig extends HelixProperty {
   /**
    * Get the thread pool size for parallel execution in controller pipeline stages.
    * This controls parallelism for stages like BestPossibleStateCalcStage.
-   * <p>
-   * Unlike GLOBAL_TARGET_TASK_THREAD_POOL_SIZE which requires a restart,
-   * changes to this value take effect dynamically within one pipeline cycle.
-   *
    * @return the configured thread pool size, or -1 if not set (default is used)
    */
   public int getStageParallelThreadPoolSize() {
@@ -977,10 +973,6 @@ public class ClusterConfig extends HelixProperty {
   /**
    * Set the thread pool size for parallel execution in controller pipeline stages.
    * This controls parallelism for stages like BestPossibleStateCalcStage.
-   * <p>
-   * Changes take effect dynamically - the controller will pick up the new value
-   * on the next pipeline cycle and recreate the thread pool with the new size.
-   *
    * @param stageParallelThreadPoolSize the thread pool size (must be positive)
    * @throws IllegalArgumentException when the provided thread pool size is not positive
    */
