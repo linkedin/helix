@@ -109,15 +109,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         newExternalView.getRecord().getMapFields());
   }
 
-  @Test
-  public void testMaintenanceModeAddNewResource() throws Exception {
-    // Enter maintenance mode
-    _gSetupTool.getClusterManagementTool().enableMaintenanceMode(CLUSTER_NAME, true, TestHelper.getTestMethodName());
-
-    // Verify we're in maintenance mode
-    MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
-    Assert.assertNotNull(maintenanceSignal, "Cluster should be in maintenance mode");
-
+  @Test(dependsOnMethods = "testMaintenanceModeAddNewInstance")
+  public void testMaintenanceModeAddNewResource() throws Exception{
     _gSetupTool.getClusterManagementTool().addResource(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 7, "MasterSlave",
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
@@ -140,7 +133,7 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     Assert.assertTrue(idealStateCreated,
         "Failed to create IdealState with 7 partitions for resource: " + newResourceAddedDuringMaintenanceMode);
 
-    // Give controller a chance to process the new resource (it should do nothing in maintenance mode)
+    // Give controller a chance to process the new resource
     Thread.sleep(5000);
     ExternalView externalView = _gSetupTool.getClusterManagementTool()
         .getResourceExternalView(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
