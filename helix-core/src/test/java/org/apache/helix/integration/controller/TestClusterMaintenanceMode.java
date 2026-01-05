@@ -135,7 +135,7 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       int numPartitions = idealState.getNumPartitions();
       System.out.println("IdealState found with " + numPartitions + " partitions for resource: " + newResourceAddedDuringMaintenanceMode);
       return numPartitions == 7;
-    }, 30000L); // Increased timeout to 30 seconds
+    }, 3000L);
 
     Assert.assertTrue(idealStateCreated,
         "Failed to create IdealState with 7 partitions for resource: " + newResourceAddedDuringMaintenanceMode);
