@@ -124,8 +124,6 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     _gSetupTool.getClusterManagementTool().rebalance(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 3);
 
-    // In maintenance mode, new resources won't get ExternalView populated (no rebalance happens).
-
     // Wait for IdealState to be created during maintenance mode
     boolean idealStateCreated = TestHelper.verify(() -> {
       IdealState idealState = _gSetupTool.getClusterManagementTool()
