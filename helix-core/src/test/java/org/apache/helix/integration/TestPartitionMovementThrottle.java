@@ -267,7 +267,7 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
     newNodes.forEach(node -> {
       try {
         Assert.assertTrue(TestHelper.verify(() -> getMaxParallelTransitionCount(
-                DelayedTransition.getInstancePatitionTransitionTimes(), node.getInstanceName()) <= 1,
+            DelayedTransition.getInstancePatitionTransitionTimes(), node.getInstanceName()) <= 1,
             1000 * 2));
       } catch (Exception e) {
         e.printStackTrace();
