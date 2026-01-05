@@ -73,6 +73,7 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     if (_newInstance != null && _newInstance.isConnected()) {
       _newInstance.syncStop();
     }
+    _gSetupTool.getClusterManagementTool().enableMaintenanceMode(CLUSTER_NAME, false);
     super.afterClass();
   }
 
@@ -149,12 +150,11 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     // During maintenance mode, ExternalView should be empty (no assignments) for new resources
     // The ExternalView may exist but should have no partition assignments since no rebalancing occurs
     if (externalView != null) {
-      Assert.assertTrue(externalView.getPartitionSet().isEmpty() || 
+      Assert.assertTrue(externalView.getPartitionSet().isEmpty() ||
           externalView.getRecord().getMapFields().isEmpty(),
           "ExternalView should be empty (no partition assignments) during maintenance mode for resource created after entering maintenance mode: "
           + newResourceAddedDuringMaintenanceMode);
     }
-    // Note: ExternalView could be null if no computation occurred, which is also acceptable
   }
 
   @Test(dependsOnMethods = "testMaintenanceModeAddNewResource")

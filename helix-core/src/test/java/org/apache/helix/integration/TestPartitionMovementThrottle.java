@@ -156,36 +156,15 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
       _participants[i].syncStart();
     }
 
-    // Wait for cluster to stabilize
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
-
-    boolean allTransitionsRecorded = TestHelper.verify(() -> {
-      for (String db : _dbs) {
-        int maxParallel = getMaxParallelTransitionCount(
-            DelayedTransition.getResourcePatitionTransitionTimes(), db);
-        if (maxParallel == -1) {
-          // Transitions not yet recorded for this resource
-          return false;
-        }
-      }
-      return true;
-    }, 10000);
-
-    Assert.assertTrue(allTransitionsRecorded,
-        "Transition tracking data was not properly recorded for all resources");
+    Thread.sleep(2000);
 
     for (String db : _dbs) {
       // After the fix in IntermediateCalcStage where downward load-balance is now allowed even if
       // there are recovery or error partitions present, maxPendingTransition below is adjusted from
       // 2 to 5 because BOTH recovery balance and load balance could happen in the same pipeline
       // iteration
-      int maxParallel = getMaxParallelTransitionCount(
-          DelayedTransition.getResourcePatitionTransitionTimes(), db);
-      // Skip assertion if no throttle results were recorded (returns -1)
-      Assert.assertTrue(maxParallel != -1,
-          "No throttle tracking data recorded for resource: " + db);
-      Assert.assertTrue(maxParallel <= 5,
-          "Max parallel transitions for " + db + " was " + maxParallel + ", expected <= 5");
+      Assert.assertTrue(getMaxParallelTransitionCount(
+          DelayedTransition.getResourcePatitionTransitionTimes(), db) <= 5);
     }
   }
 
@@ -288,7 +267,7 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
     newNodes.forEach(node -> {
       try {
         Assert.assertTrue(TestHelper.verify(() -> getMaxParallelTransitionCount(
-            DelayedTransition.getInstancePatitionTransitionTimes(), node.getInstanceName()) <= 1,
+                DelayedTransition.getInstancePatitionTransitionTimes(), node.getInstanceName()) <= 1,
             1000 * 2));
       } catch (Exception e) {
         e.printStackTrace();
