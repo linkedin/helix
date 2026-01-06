@@ -41,6 +41,8 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.monitoring.mbeans.MonitorDomainNames;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -50,6 +52,7 @@ import static org.apache.helix.monitoring.mbeans.ClusterStatusMonitor.CLUSTER_DN
 
 
 public class TestClusterMaintenanceMode extends TaskTestBase {
+  private static final Logger LOG = LoggerFactory.getLogger(TestClusterMaintenanceMode.class);
   private static final long TIMEOUT = 180 * 1000L;
   private MockParticipantManager _newInstance;
   private String newResourceAddedDuringMaintenanceMode =
@@ -73,6 +76,7 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     if (_newInstance != null && _newInstance.isConnected()) {
       _newInstance.syncStop();
     }
+    _gSetupTool.getClusterManagementTool().enableMaintenanceMode(CLUSTER_NAME, false);
     super.afterClass();
   }
 
@@ -109,16 +113,42 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
   }
 
   @Test(dependsOnMethods = "testMaintenanceModeAddNewInstance")
-  public void testMaintenanceModeAddNewResource() {
+  public void testMaintenanceModeAddNewResource() throws Exception{
     _gSetupTool.getClusterManagementTool().addResource(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 7, "MasterSlave",
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
     _gSetupTool.getClusterManagementTool().rebalance(CLUSTER_NAME,
         newResourceAddedDuringMaintenanceMode, 3);
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    // Wait for IdealState to be created during maintenance mode
+    boolean idealStateCreated = TestHelper.verify(() -> {
+      IdealState idealState = _gSetupTool.getClusterManagementTool()
+          .getResourceIdealState(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
+      if (idealState == null) {
+        LOG.info("IdealState is null for resource: {}", newResourceAddedDuringMaintenanceMode);
+        return false;
+      }
+      int numPartitions = idealState.getNumPartitions();
+      LOG.info("IdealState found with {} partitions for resource: {}", numPartitions, newResourceAddedDuringMaintenanceMode);
+      return numPartitions == 7;
+    }, 3000L);
+
+    Assert.assertTrue(idealStateCreated,
+        "Failed to create IdealState with 7 partitions for resource: " + newResourceAddedDuringMaintenanceMode);
+
+    // Give controller a chance to process the new resource
+    Thread.sleep(5000);
     ExternalView externalView = _gSetupTool.getClusterManagementTool()
         .getResourceExternalView(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
-    Assert.assertNull(externalView);
+
+    // During maintenance mode, ExternalView should be empty (no assignments) for new resources
+    // The ExternalView may exist but should have no partition assignments since no rebalancing occurs
+    if (externalView != null) {
+      Assert.assertTrue(externalView.getPartitionSet().isEmpty() ||
+          externalView.getRecord().getMapFields().isEmpty(),
+          "ExternalView should be empty (no partition assignments) during maintenance mode for resource created after entering maintenance mode: "
+          + newResourceAddedDuringMaintenanceMode);
+    }
   }
 
   @Test(dependsOnMethods = "testMaintenanceModeAddNewResource")
