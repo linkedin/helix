@@ -27,6 +27,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -106,6 +107,31 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // WAGED specific capacity / weight provider
   WagedInstanceCapacity _wagedInstanceCapacity;
   WagedResourceWeightsProvider _wagedPartitionWeightProvider;
+
+  /**
+   * Track capacity rejections during the mapping stage for WAGED resources.
+   * This is used as a feedback signal to the WAGED rebalancer in future pipeline runs.
+   *
+   * Note: This queue is written from parallel mapping calculations, so it must be thread-safe.
+   */
+  private final ConcurrentLinkedQueue<WagedCapacityRejectionEvent> _wagedCapacityRejectionEvents =
+      new ConcurrentLinkedQueue<>();
+
+  /**
+   * A lightweight record that indicates an instance could not host a partition due to capacity
+   * during mapping calculation.
+   */
+  public static final class WagedCapacityRejectionEvent {
+    public final String instance;
+    public final String resourceName;
+    public final String partitionName;
+
+    public WagedCapacityRejectionEvent(String instance, String resourceName, String partitionName) {
+      this.instance = instance;
+      this.resourceName = resourceName;
+      this.partitionName = partitionName;
+    }
+  }
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -553,8 +579,28 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
       return true;
     }
 
-    return _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance, resourceName, partition,
+    boolean success = _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance, resourceName, partition,
         partitionWeightMap);
+    if (!success) {
+      _wagedCapacityRejectionEvents.add(
+          new WagedCapacityRejectionEvent(instance, resourceName, partition));
+    }
+    return success;
+  }
+
+  /**
+   * Drain and clear the capacity rejection events observed since last drain.
+   */
+  public List<WagedCapacityRejectionEvent> drainWagedCapacityRejectionEvents() {
+    if (_wagedCapacityRejectionEvents.isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<WagedCapacityRejectionEvent> drained = new ArrayList<>();
+    WagedCapacityRejectionEvent e;
+    while ((e = _wagedCapacityRejectionEvents.poll()) != null) {
+      drained.add(e);
+    }
+    return drained;
   }
 
   /**

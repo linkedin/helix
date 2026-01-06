@@ -97,6 +97,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   private final PartialRebalanceRunner _partialRebalanceRunner;
   private final GlobalRebalanceRunner _globalRebalanceRunner;
 
+  // Tracks mapping-stage capacity rejections and surfaces a thresholded repair signal.
+  private final MappingCapacityRejectionTracker _capacityRejectionTracker =
+      new MappingCapacityRejectionTracker();
+
   // Note, the rebalance algorithm field is mutable so it should not be directly referred except for
   // the public method computeNewIdealStates.
   private RebalanceAlgorithm _rebalanceAlgorithm;
@@ -291,10 +295,18 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             newStateMap == null ? Collections.emptyMap() : newStateMap);
       }
     });
+
+    // Update capacity rejection counters after mapping calculation completes.
+    // This provides a feedback signal for future emergency repair if the mapping repeatedly fails
+    // to realize WAGED's intended placement due to capacity.
+    _capacityRejectionTracker.update(clusterData, LOG);
+
     LOG.info("Finish computing new ideal states for resources: {}",
         resourceMap.keySet().toString());
     return newIdealStates;
   }
+
+  // mapping-stage capacity rejection tracking is handled by MappingCapacityRejectionTracker
 
   // Coordinate global rebalance and partial rebalance according to the cluster changes.
   private Map<String, IdealState> computeBestPossibleStates(
@@ -456,9 +468,46 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         _assignmentManager.getBestPossibleAssignment(_assignmentMetadataStore, currentStateOutput,
             resourceMap.keySet());
 
+    // Step 0: Repair repeated mapping-stage capacity rejections.
+    // If a preferred placement is rejected due to capacity for N consecutive runs, treat the
+    // corresponding allocation as invalid and ask WAGED to choose an alternative.
+    Map<String, ResourceAssignment> repairedBestPossible = currentBestPossibleAssignment;
+    Set<MappingCapacityRejectionTracker.Key> toRepair = _capacityRejectionTracker.getAboveThreshold();
+    if (toRepair != null && !toRepair.isEmpty()) {
+      Map<String, ResourceAssignment> modified = deepCopyAssignmentMap(currentBestPossibleAssignment);
+      boolean changed = false;
+      for (MappingCapacityRejectionTracker.Key key : toRepair) {
+        ResourceAssignment ra = modified.get(key.resource);
+        if (ra == null) {
+          continue;
+        }
+        Partition p = new Partition(key.partition);
+        Map<String, String> replicaMap = ra.getReplicaMap(p);
+        if (replicaMap != null && replicaMap.containsKey(key.instance)) {
+          replicaMap.remove(key.instance);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        try {
+          ClusterModel repairModel = ClusterModelProvider.generateClusterModelFromExistingAssignment(
+              clusterData, resourceMap, modified);
+          Map<String, ResourceAssignment> repairDelta =
+              WagedRebalanceUtil.calculateAssignment(repairModel, algorithm);
+          DelayedRebalanceUtil.mergeAssignments(repairDelta, repairedBestPossible);
+
+          // Clear repaired keys so we don't repeatedly trigger on the same issue once we attempt a repair.
+          _capacityRejectionTracker.clearKeys(toRepair);
+        } catch (Exception e) {
+          LOG.warn("Failed to repair repeated mapping-stage capacity rejections. Will proceed with normal emergency flow.", e);
+        }
+      }
+    }
+
     // Step 1: Check for permanent node down
     AtomicBoolean allNodesActive = new AtomicBoolean(true);
-    currentBestPossibleAssignment.values().parallelStream().forEach((resourceAssignment -> {
+    repairedBestPossible.values().parallelStream().forEach((resourceAssignment -> {
       resourceAssignment.getMappedPartitions().parallelStream().forEach(partition -> {
         for (String instance : resourceAssignment.getReplicaMap(partition).keySet()) {
           if (!activeNodes.contains(instance)) {
@@ -478,14 +527,14 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       try {
         clusterModel =
             ClusterModelProvider.generateClusterModelForEmergencyRebalance(clusterData, resourceMap, activeNodes,
-                currentBestPossibleAssignment);
+                repairedBestPossible);
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to generate cluster model for emergency rebalance.",
             HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
       }
       newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
     } else {
-      newAssignment = currentBestPossibleAssignment;
+      newAssignment = repairedBestPossible;
     }
 
     // Step 3: persist result to metadata store
@@ -515,6 +564,29 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     }
 
     return assignmentWithDelayedRebalanceAdjust;
+  }
+
+  private static Map<String, ResourceAssignment> deepCopyAssignmentMap(
+      Map<String, ResourceAssignment> assignmentMap) {
+    Map<String, ResourceAssignment> copy = new HashMap<>();
+    if (assignmentMap == null) {
+      return copy;
+    }
+    assignmentMap.forEach((resource, ra) -> {
+      if (ra == null) {
+        copy.put(resource, null);
+        return;
+      }
+      ResourceAssignment newRa = new ResourceAssignment(resource);
+      ra.getMappedPartitions().forEach(partition -> {
+        Map<String, String> m = ra.getReplicaMap(partition);
+        if (m != null) {
+          newRa.addReplicaMap(partition, new HashMap<>(m));
+        }
+      });
+      copy.put(resource, newRa);
+    });
+    return copy;
   }
 
   // Generate the preference lists from the state mapping based on state priority.
