@@ -41,6 +41,8 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.monitoring.mbeans.MonitorDomainNames;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -50,6 +52,7 @@ import static org.apache.helix.monitoring.mbeans.ClusterStatusMonitor.CLUSTER_DN
 
 
 public class TestClusterMaintenanceMode extends TaskTestBase {
+  private static final Logger LOG = LoggerFactory.getLogger(TestClusterMaintenanceMode.class);
   private static final long TIMEOUT = 180 * 1000L;
   private MockParticipantManager _newInstance;
   private String newResourceAddedDuringMaintenanceMode =
@@ -122,11 +125,11 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       IdealState idealState = _gSetupTool.getClusterManagementTool()
           .getResourceIdealState(CLUSTER_NAME, newResourceAddedDuringMaintenanceMode);
       if (idealState == null) {
-        System.out.println("IdealState is null for resource: " + newResourceAddedDuringMaintenanceMode);
+        LOG.info("IdealState is null for resource: {}", newResourceAddedDuringMaintenanceMode);
         return false;
       }
       int numPartitions = idealState.getNumPartitions();
-      System.out.println("IdealState found with " + numPartitions + " partitions for resource: " + newResourceAddedDuringMaintenanceMode);
+      LOG.info("IdealState found with {} partitions for resource: {}", numPartitions, newResourceAddedDuringMaintenanceMode);
       return numPartitions == 7;
     }, 3000L);
 
