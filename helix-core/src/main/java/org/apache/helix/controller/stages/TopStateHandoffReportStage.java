@@ -19,7 +19,9 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.helix.controller.LogUtil;
@@ -818,9 +820,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     }
 
     // Check for message being executed on this instance for this partition
-    Map<String, Message> messages = cache.getMessages(topStateInstance);
-
-    for (Message message : messages.values()) {
+    List<Message> readMessages = new ArrayList<>(cache.getMessages(topStateInstance).values());
+    for (Message message : readMessages) {
       if (!resourceName.equals(message.getResourceName())) {
         continue;
       }
