@@ -739,17 +739,24 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
     Response response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
-    Map<String, Boolean> evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
+    Map<String, Object> evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
     // Returns true because the node only contains semi-auto resources
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    Assert.assertTrue((Boolean) evacuateFinishedResult.get("successful"));
+    // Verify new fields are present in the response
+    Assert.assertTrue(evacuateFinishedResult.containsKey("remainingCount"),
+        "Response should contain remainingCount field");
+    Assert.assertTrue(evacuateFinishedResult.containsKey("pendingMessageCount"),
+        "Response should contain pendingMessageCount field");
+    Assert.assertEquals(evacuateFinishedResult.get("remainingCount"), 0,
+        "remainingCount should be 0 for successful evacuation");
 
     // Because the resources are now all semi-auto, is EvacuateFinished should return true
     response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    Assert.assertTrue((Boolean) evacuateFinishedResult.get("successful"));
 
     response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isInstanceDrained")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
@@ -776,7 +783,10 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, test_instance_name).post(this, entity);
     evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    Assert.assertTrue((Boolean) evacuateFinishedResult.get("successful"));
+    // Verify new fields for instance with no currentState
+    Assert.assertEquals(evacuateFinishedResult.get("remainingCount"), 0,
+        "remainingCount should be 0 for instance with no currentState");
 
     // Remove instance created for evacuate test
     delete("clusters/" + CLUSTER_NAME + "/instances/" + test_instance_name, Response.Status.OK.getStatusCode());
