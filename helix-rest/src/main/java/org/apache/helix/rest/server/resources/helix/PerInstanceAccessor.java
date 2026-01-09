@@ -51,6 +51,7 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CurrentState;
@@ -503,25 +504,30 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       .constructCollectionType(List.class, String.class)));
           break;
         case isEvacuateFinished:
-          boolean evacuateFinished;
+          Map<String, Object> evacuationStatus;
           try {
+            Set<InstanceDrainExclusionType> exclusionTypes = Collections.emptySet();
             if (exclusions != null && !exclusions.trim().isEmpty()) {
-              Set<InstanceDrainExclusionType> exclusionTypes =
-                  InstanceDrainExclusionType.parseExclusionTypes(exclusions);
-              evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
+              exclusionTypes = InstanceDrainExclusionType.parseExclusionTypes(exclusions);
+            }
+            if (admin instanceof ZKHelixAdmin) {
+              evacuationStatus =
+                  ((ZKHelixAdmin) admin).getEvacuationStatus(clusterId, instanceName, exclusionTypes);
             } else {
-              evacuateFinished = admin.isEvacuateFinished(clusterId, instanceName);
+              // Fallback for non-ZK HelixAdmin implementations (should not happen in Helix REST runtime).
+              boolean finished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
+              evacuationStatus = ImmutableMap.of("successful", finished, "isFinished", finished);
             }
           } catch (IllegalArgumentException e) {
             LOG.error(String.format("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
                 clusterId, instanceName, exclusions), e);
             return badRequest("Invalid exclusion type: " + exclusions);
           } catch (HelixException e) {
-            LOG.error(String.format("Encountered error when checking if evacuation finished for cluster: "
+            LOG.error(String.format("Encountered error when checking evacuation status for cluster: "
                 + "{}, instance: {}", clusterId, instanceName), e);
             return serverError(e);
           }
-          return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of("successful", evacuateFinished)));
+          return OK(OBJECT_MAPPER.writeValueAsString(evacuationStatus));
         case isInstanceDrained:
           boolean instanceDrained;
           try {

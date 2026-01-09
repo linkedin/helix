@@ -478,6 +478,37 @@ public class ZKHelixAdmin implements HelixAdmin {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes);
   }
 
+  /**
+   * Returns a detailed evacuation status map for the given instance.
+   *
+   * This is used by the Helix REST {@code isEvacuateFinished} command to return an extendable JSON
+   * response (for example, remaining partition count) without changing the {@link HelixAdmin}
+   * public interface.
+   */
+  public Map<String, Object> getEvacuationStatus(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    Map<String, Object> result = new HashMap<>();
+    // Provide a stable response shape for clients.
+    result.put("isFinished", false);
+    result.put("successful", false);
+    result.put("remainingCount", 0);
+    result.put("pendingMessageCount", 0);
+
+    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+    if (config == null || config.getInstanceOperation().getOperation() !=
+        InstanceConstants.InstanceOperation.EVACUATE) {
+      result.put("reason", "Instance is not in EVACUATE operation");
+      return result;
+    }
+
+    boolean hasBlocking = instanceHasCurrentStateOrMessage(
+        clusterName, instanceName, exclusionTypes, result);
+    boolean isFinished = !hasBlocking;
+    result.put("isFinished", isFinished);
+    result.put("successful", isFinished); // Backward-compatible alias for older clients/tests.
+    return result;
+  }
+
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
@@ -811,6 +842,15 @@ public class ZKHelixAdmin implements HelixAdmin {
    */
   private boolean instanceHasCurrentStateOrMessage(String clusterName,
       String instanceName, Set<InstanceDrainExclusionType> exclusionTypes) {
+    return instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes, null);
+  }
+
+  /**
+   * Same as {@link #instanceHasCurrentStateOrMessage(String, String, Set)} but optionally fills
+   * {@code statusMap} with additional details for REST responses.
+   */
+  private boolean instanceHasCurrentStateOrMessage(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes, @Nullable Map<String, Object> statusMap) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
@@ -825,11 +865,21 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (sessions.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any session. The instance can be removed.",
           instanceName, clusterName);
+      if (statusMap != null) {
+        statusMap.put("remainingCount", 0);
+        statusMap.put("pendingMessageCount", 0);
+      }
       return false;
     }
     if (sessions.size() > 1) {
       logger.info("Instance {} in cluster {} is carrying over from prev session.",
           instanceName, clusterName);
+      if (statusMap != null) {
+        statusMap.put("isCarryingOverFromPreviousSession", true);
+        statusMap.put("remainingCount", -1);
+        statusMap.put("pendingMessageCount", -1);
+        statusMap.put("reason", "Instance has multiple sessions and is carrying over from previous session");
+      }
       return true;
     }
 
@@ -839,6 +889,10 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (currentStates == null || currentStates.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any current state.",
           instanceName, clusterName);
+      if (statusMap != null) {
+        statusMap.put("remainingCount", 0);
+        statusMap.put("pendingMessageCount", 0);
+      }
       return false;
     }
 
@@ -860,15 +914,22 @@ public class ZKHelixAdmin implements HelixAdmin {
       boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
       logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
           instanceName, clusterName, partitionsStillOnInstance.size());
+      if (statusMap != null) {
+        statusMap.put("remainingCount", partitionsStillOnInstance.size());
+        statusMap.put("pendingMessageCount", 0);
+      }
       return hasPartitionsStillOnInstance;
     }
 
-    // Handle online instances - check for pending messages first
+    // Handle online instances - also report pending messages
     List<String> messages = accessor.getChildNames(keyBuilder.messages(instanceName));
-    if (messages != null && !messages.isEmpty()) {
+    int pendingMessageCount = messages != null ? messages.size() : 0;
+    if (statusMap != null) {
+      statusMap.put("pendingMessageCount", pendingMessageCount);
+    }
+    if (pendingMessageCount > 0) {
       logger.info("Instance {} in cluster {} has {} pending messages.",
-          instanceName, clusterName, messages.size());
-      return true;
+          instanceName, clusterName, pendingMessageCount);
     }
 
     // Step 4: Collect all partitions from current states
@@ -883,8 +944,11 @@ public class ZKHelixAdmin implements HelixAdmin {
     boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
     logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
         instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    if (statusMap != null) {
+      statusMap.put("remainingCount", remainingPartitions.size());
+    }
 
-    return hasRemainingPartitions;
+    return pendingMessageCount > 0 || hasRemainingPartitions;
   }
 
   /**
