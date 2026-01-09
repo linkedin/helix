@@ -516,7 +516,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             } else {
               // Fallback for non-ZK HelixAdmin implementations (should not happen in Helix REST runtime).
               boolean finished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
-              evacuationStatus = ImmutableMap.of("successful", finished, "isFinished", finished);
+              evacuationStatus = ImmutableMap.of("successful", finished);
             }
           } catch (IllegalArgumentException e) {
             LOG.error(String.format("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
