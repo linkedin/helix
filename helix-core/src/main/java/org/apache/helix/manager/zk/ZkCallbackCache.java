@@ -86,8 +86,11 @@ public class ZkCallbackCache<T> extends Cache<T> implements IZkChildListener, IZ
       znode.setStat(stat);
       // System.out.println("\t\t--setData. path: " + path + ", data: " + data);
 
-      // If we don't know the previous czxid (oldState is null), that means node was recreated and listeners need to resync their state
-      if (oldStat == null || oldStat.getCzxid() != stat.getCzxid()) {
+      // Null oldStat means first time seeing proper stat - fire Create only
+      if (oldStat == null) {
+        fireEvents(path, EventType.NodeCreated);
+      } else if (oldStat.getCzxid() != stat.getCzxid()) {
+        // Node was recreated (different czxid) - fire Delete + Create
         fireEvents(path, EventType.NodeDeleted);
         fireEvents(path, EventType.NodeCreated);
       } else if (oldStat.getVersion() != stat.getVersion()) {
@@ -176,8 +179,11 @@ public class ZkCallbackCache<T> extends Cache<T> implements IZkChildListener, IZ
         // if create right after delete, and zkCallback comes after create
         // no DataDelete() will be fired, instead will fire 2 DataChange()
         // see ZkClient.fireDataChangedEvents()
-        // If we don't know the previous czxid (oldState is null), that means node was recreated and listeners need to resync their state
-        if (oldStat == null || oldStat.getCzxid() != stat.getCzxid()) {
+        // Null oldStat means first time seeing proper stat - fire Create only
+        if (oldStat == null) {
+          fireEvents(dataPath, EventType.NodeCreated);
+        } else if (oldStat.getCzxid() != stat.getCzxid()) {
+          // Node was recreated (different czxid) - fire Delete + Create
           fireEvents(dataPath, EventType.NodeDeleted);
           fireEvents(dataPath, EventType.NodeCreated);
         } else if (oldStat.getVersion() != stat.getVersion()) {

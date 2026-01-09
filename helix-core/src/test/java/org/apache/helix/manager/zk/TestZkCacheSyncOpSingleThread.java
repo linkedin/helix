@@ -37,6 +37,8 @@ import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
 import org.apache.helix.store.HelixPropertyListener;
+import org.apache.helix.store.zk.ZNode;
+import org.apache.zookeeper.data.Stat;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -347,25 +349,24 @@ public class TestZkCacheSyncOpSingleThread extends ZkUnitTestBase {
     accessor.subscribe(testPath, listener);
     String nodePath = testPath + "/testNode";
 
-    // Case 1: Null oldStat should fire Delete+Create (not NPE)
-    org.apache.helix.store.zk.ZNode znodeNullStat =
-        new org.apache.helix.store.zk.ZNode(nodePath, new ZNRecord("test"), null);
+    // Case 1: Null oldStat should fire Create only (not NPE, not Delete)
+    ZNode znodeNullStat = new ZNode(nodePath, new ZNRecord("test"), null);
     accessor._zkCache._cache.put(nodePath, znodeNullStat);
     listener.reset();
 
-    org.apache.zookeeper.data.Stat newStat = new org.apache.zookeeper.data.Stat();
+    Stat newStat = new Stat();
     newStat.setCzxid(100L);
     newStat.setVersion(1);
     accessor._zkCache.update(nodePath, new ZNRecord("updated"), newStat);
     Thread.sleep(100);
 
-    Assert.assertTrue(listener._deletePathQueue.size() >= 1, "Null oldStat should fire onDelete");
-    Assert.assertTrue(listener._createPathQueue.size() >= 1, "Null oldStat should fire onCreate");
+    Assert.assertEquals(listener._deletePathQueue.size(), 0, "Null oldStat should NOT fire onDelete");
+    Assert.assertEquals(listener._createPathQueue.size(), 1, "Null oldStat should fire onCreate");
     Assert.assertNotNull(accessor._zkCache._cache.get(nodePath).getStat(), "Stat should be set");
 
     // Case 2: Valid oldStat with version change -> DataChanged only
     listener.reset();
-    org.apache.zookeeper.data.Stat versionChange = new org.apache.zookeeper.data.Stat();
+    Stat versionChange = new Stat();
     versionChange.setCzxid(100L);
     versionChange.setVersion(2);
     accessor._zkCache.update(nodePath, new ZNRecord("v2"), versionChange);
@@ -376,7 +377,7 @@ public class TestZkCacheSyncOpSingleThread extends ZkUnitTestBase {
 
     // Case 3: Valid oldStat with czxid change -> Delete+Create
     listener.reset();
-    org.apache.zookeeper.data.Stat czxidChange = new org.apache.zookeeper.data.Stat();
+    Stat czxidChange = new Stat();
     czxidChange.setCzxid(200L);
     czxidChange.setVersion(0);
     accessor._zkCache.update(nodePath, new ZNRecord("recreated"), czxidChange);
