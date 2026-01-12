@@ -349,7 +349,7 @@ public class TestZkCacheSyncOpSingleThread extends ZkUnitTestBase {
     accessor.subscribe(testPath, listener);
     String nodePath = testPath + "/testNode";
 
-    // Case 1: Null oldStat should fire Create only (not NPE, not Delete)
+    // Case 1: Null oldStat should fire Delete + Create (not NPE)
     ZNode znodeNullStat = new ZNode(nodePath, new ZNRecord("test"), null);
     accessor._zkCache._cache.put(nodePath, znodeNullStat);
     listener.reset();
@@ -360,7 +360,7 @@ public class TestZkCacheSyncOpSingleThread extends ZkUnitTestBase {
     accessor._zkCache.update(nodePath, new ZNRecord("updated"), newStat);
     Thread.sleep(100);
 
-    Assert.assertEquals(listener._deletePathQueue.size(), 0, "Null oldStat should NOT fire onDelete");
+    Assert.assertEquals(listener._deletePathQueue.size(), 1, "Null oldStat should fire onDelete");
     Assert.assertEquals(listener._createPathQueue.size(), 1, "Null oldStat should fire onCreate");
     Assert.assertNotNull(accessor._zkCache._cache.get(nodePath).getStat(), "Stat should be set");
 
