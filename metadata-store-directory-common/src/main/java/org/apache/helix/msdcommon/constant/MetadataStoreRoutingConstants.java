@@ -92,4 +92,8 @@ public class MetadataStoreRoutingConstants {
   // "localhost:9998"; with this value, the url will be "localhost:9998/admin/v2" if this
   // value is "/admin/v2".
   public static final String MSDS_CONTEXT_URL_PREFIX_KEY = "msds_context_url_prefix";
+
+  // SSL/TLS configuration for MSDS server-to-server communication (request forwarding)
+  // When set to "true", HTTPS will be used for forwarding requests to the leader
+  public static final String MSDS_SSL_ENABLED_KEY = "msds_ssl_enabled";
 }

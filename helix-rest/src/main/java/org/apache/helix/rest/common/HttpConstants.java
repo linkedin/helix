@@ -28,6 +28,7 @@ public class HttpConstants {
   }
 
   public static final String HTTP_PROTOCOL_PREFIX = "http://";
+  public static final String HTTPS_PROTOCOL_PREFIX = "https://";
   public static final int DEFAULT_HTTP_REQUEST_TIMEOUT = 60 * 1000;
 
   /** REST request categorized as read. Can be used to categorize metric names */
