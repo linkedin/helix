@@ -51,6 +51,7 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixProperty;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
@@ -861,6 +862,10 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (sessions.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any session. The instance can be removed.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return false;
     }
     if (sessions.size() > 1) {
@@ -878,7 +883,31 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (currentStates == null || currentStates.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any current state.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return false;
+    }
+
+    // Calculate max mtime across all CurrentState ZNodes for lastActivityTimestamp
+    // note: getChildValues() that is used above to fetch currentStates, doesn't populate stat data,
+    // so we need to fetch stats separately, this is not a expensive zk op, as its a batch call.
+    if (evacuationInfo != null) {
+      List<PropertyKey> currentStateKeys = new ArrayList<>();
+      for (CurrentState cs : currentStates) {
+        currentStateKeys.add(keyBuilder.currentState(instanceName, sessionId, cs.getResourceName()));
+      }
+      List<HelixProperty.Stat> stats = accessor.getPropertyStats(currentStateKeys);
+      long maxMtime = 0;
+      for (HelixProperty.Stat stat : stats) {
+        if (stat != null && stat.getModifiedTime() > maxMtime) {
+          maxMtime = stat.getModifiedTime();
+        }
+      }
+      if (maxMtime > 0) {
+        evacuationInfo.setLastActivityTimestamp(maxMtime);
+      }
     }
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);

@@ -21,16 +21,13 @@ package org.apache.helix.integration.rebalancer;
 
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.TaskTestBase;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -405,11 +402,13 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
         "Should return NOT_EVACUATING when instance is not in EVACUATE operation");
     Assert.assertEquals(statusBefore.getReason(),
         EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION.getMessage());
-    // When NOT_EVACUATING, counts should be null (won't be serialized in JSON)
+    // When NOT_EVACUATING, counts and timestamp should be null (won't be serialized in JSON)
     Assert.assertNull(statusBefore.getRemainingPartitionCount(),
         "remainingPartitionCount should be null when not evacuating");
     Assert.assertNull(statusBefore.getPendingMessageCount(),
         "pendingMessageCount should be null when not evacuating");
+    Assert.assertNull(statusBefore.getLastActivityTimestamp(),
+        "lastActivityTimestamp should be null when not evacuating");
 
     // Set instance to EVACUATE
     _gSetupTool.getClusterManagementTool()
@@ -419,7 +418,17 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     EvacuationInfo statusDuring = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
     System.out.println("During evacuation - state: " + statusDuring.getState()
         + ", remainingPartitionCount: " + statusDuring.getRemainingPartitionCount()
-        + ", pendingMessageCount: " + statusDuring.getPendingMessageCount());
+        + ", pendingMessageCount: " + statusDuring.getPendingMessageCount()
+        + ", lastActivityTimestamp: " + statusDuring.getLastActivityTimestamp());
+    // During evacuation, lastActivityTimestamp should be populated if there are current states
+    if (statusDuring.getState() == EvacuationInfo.EvacuationState.IN_PROGRESS
+        && statusDuring.getRemainingPartitionCount() != null
+        && statusDuring.getRemainingPartitionCount() > 0) {
+      Assert.assertNotNull(statusDuring.getLastActivityTimestamp(),
+          "lastActivityTimestamp should be populated during evacuation with partitions");
+      Assert.assertTrue(statusDuring.getLastActivityTimestamp() > 0,
+          "lastActivityTimestamp should be a positive Unix timestamp");
+    }
 
     // Wait for evacuation to complete
     boolean evacuated = TestHelper.verify(
@@ -433,10 +442,12 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
         "Should return COMPLETED after evacuation completes");
     Assert.assertEquals(statusAfter.getRemainingPartitionCount(), Integer.valueOf(0), "remainingPartitionCount should be 0 after evacuation");
     Assert.assertEquals(statusAfter.getPendingMessageCount(), Integer.valueOf(0), "pendingMessageCount should be 0 after evacuation");
-
+    // After evacuation, lastActivityTimestamp may or may not be set depending on whether CurrentState ZNodes exist
+    // If the instance still has a session with CurrentState ZNodes (even if empty), timestamp should be present
     System.out.println("After evacuation - state: " + statusAfter.getState()
         + ", remainingPartitionCount: " + statusAfter.getRemainingPartitionCount()
-        + ", pendingMessageCount: " + statusAfter.getPendingMessageCount());
+        + ", pendingMessageCount: " + statusAfter.getPendingMessageCount()
+        + ", lastActivityTimestamp: " + statusAfter.getLastActivityTimestamp());
 
     // Cleanup
     _gSetupTool.getClusterManagementTool()

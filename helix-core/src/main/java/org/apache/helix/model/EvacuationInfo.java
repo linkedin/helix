@@ -60,6 +60,7 @@ public class EvacuationInfo {
   private Integer remainingPartitionCount;
   private Integer pendingMessageCount;
   private String reason;
+  private Long lastActivityTimestamp;
 
   /**
    * Default constructor for Jackson deserialization.
@@ -120,6 +121,18 @@ public class EvacuationInfo {
     this.reason = reasonCode.getMessage();
   }
 
+  public Long getLastActivityTimestamp() {
+    return lastActivityTimestamp;
+  }
+
+  /**
+   * Sets the timestamp of the last activity during evacuation.
+   * This is the max modification time across all CurrentState ZNodes for the instance.
+   */
+  public void setLastActivityTimestamp(Long lastActivityTimestamp) {
+    this.lastActivityTimestamp = lastActivityTimestamp;
+  }
+
   @Override
   public String toString() {
     return "EvacuationInfo{" +
@@ -127,6 +140,7 @@ public class EvacuationInfo {
         ", remainingPartitionCount=" + remainingPartitionCount +
         ", pendingMessageCount=" + pendingMessageCount +
         ", reason='" + reason + '\'' +
+        ", lastActivityTimestamp=" + lastActivityTimestamp +
         '}';
   }
 }

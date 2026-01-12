@@ -523,12 +523,12 @@ public class PerInstanceAccessor extends AbstractHelixResource {
               evacuationInfo = new EvacuationInfo(state, 0, 0, null);
             }
           } catch (IllegalArgumentException e) {
-            LOG.error(String.format("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
-                clusterId, instanceName, exclusions), e);
+            LOG.error("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
+                clusterId, instanceName, exclusions, e);
             return badRequest("Invalid exclusion type: " + exclusions);
           } catch (HelixException e) {
-            LOG.error(String.format("Encountered error when checking evacuation status for cluster: "
-                + "{}, instance: {}", clusterId, instanceName), e);
+            LOG.error("Encountered error when checking evacuation status for cluster: {}, instance: {}",
+                clusterId, instanceName, e);
             return serverError(e);
           }
           return OK(OBJECT_MAPPER.writeValueAsString(evacuationInfo));
