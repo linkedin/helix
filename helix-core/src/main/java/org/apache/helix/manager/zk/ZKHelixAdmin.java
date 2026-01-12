@@ -493,13 +493,15 @@ public class ZKHelixAdmin implements HelixAdmin {
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
     if (config == null || config.getInstanceOperation().getOperation() !=
         InstanceConstants.InstanceOperation.EVACUATE) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
       result.setReason(EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION);
       return result;
     }
 
     boolean hasBlocking = instanceHasCurrentStateOrMessage(
         clusterName, instanceName, exclusionTypes, result);
-    result.setSuccessful(!hasBlocking);
+    result.setState(hasBlocking ? EvacuationInfo.EvacuationState.IN_PROGRESS
+        : EvacuationInfo.EvacuationState.COMPLETED);
     return result;
   }
 
@@ -897,7 +899,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
           instanceName, clusterName, partitionsStillOnInstance.size());
       if (evacuationInfo != null) {
-        evacuationInfo.setRemainingCount(partitionsStillOnInstance.size());
+        evacuationInfo.setRemainingPartitionCount(partitionsStillOnInstance.size());
         evacuationInfo.setPendingMessageCount(0);
       }
       return hasPartitionsStillOnInstance;
@@ -926,7 +928,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
         instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
     if (evacuationInfo != null) {
-      evacuationInfo.setRemainingCount(remainingPartitions.size());
+      evacuationInfo.setRemainingPartitionCount(remainingPartitions.size());
     }
 
     return pendingMessageCount > 0 || hasRemainingPartitions;

@@ -30,6 +30,15 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 public class EvacuationInfo {
 
   /**
+   * Enum representing the current state of evacuation.
+   */
+  public enum EvacuationState {
+    NOT_EVACUATING,  // Instance is not in EVACUATE operation
+    IN_PROGRESS,     // Evacuation is ongoing
+    COMPLETED        // Evacuation finished successfully
+  }
+
+  /**
    * Enum representing reasons why evacuation may be blocked or incomplete.
    */
   public enum ReasonCode {
@@ -47,8 +56,8 @@ public class EvacuationInfo {
     }
   }
 
-  private boolean successful;
-  private int remainingCount;
+  private EvacuationState state;
+  private int remainingPartitionCount;
   private int pendingMessageCount;
   private String reason;
 
@@ -56,35 +65,35 @@ public class EvacuationInfo {
    * Default constructor for Jackson deserialization.
    */
   public EvacuationInfo() {
-    this.successful = false;
-    this.remainingCount = 0;
+    this.state = EvacuationState.NOT_EVACUATING;
+    this.remainingPartitionCount = 0;
     this.pendingMessageCount = 0;
   }
 
   /**
    * Constructor with all fields.
    */
-  public EvacuationInfo(boolean successful, int remainingCount, int pendingMessageCount, String reason) {
-    this.successful = successful;
-    this.remainingCount = remainingCount;
+  public EvacuationInfo(EvacuationState state, int remainingPartitionCount, int pendingMessageCount, String reason) {
+    this.state = state;
+    this.remainingPartitionCount = remainingPartitionCount;
     this.pendingMessageCount = pendingMessageCount;
     this.reason = reason;
   }
 
-  public boolean isSuccessful() {
-    return successful;
+  public EvacuationState getState() {
+    return state;
   }
 
-  public void setSuccessful(boolean successful) {
-    this.successful = successful;
+  public void setState(EvacuationState state) {
+    this.state = state;
   }
 
-  public int getRemainingCount() {
-    return remainingCount;
+  public int getRemainingPartitionCount() {
+    return remainingPartitionCount;
   }
 
-  public void setRemainingCount(int remainingCount) {
-    this.remainingCount = remainingCount;
+  public void setRemainingPartitionCount(int remainingPartitionCount) {
+    this.remainingPartitionCount = remainingPartitionCount;
   }
 
   public int getPendingMessageCount() {
@@ -113,11 +122,10 @@ public class EvacuationInfo {
   @Override
   public String toString() {
     return "EvacuationInfo{" +
-        "successful=" + successful +
-        ", remainingCount=" + remainingCount +
+        "state=" + state +
+        ", remainingPartitionCount=" + remainingPartitionCount +
         ", pendingMessageCount=" + pendingMessageCount +
         ", reason='" + reason + '\'' +
         '}';
   }
 }
-
