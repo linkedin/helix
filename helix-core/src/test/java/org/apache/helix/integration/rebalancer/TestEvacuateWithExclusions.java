@@ -35,6 +35,7 @@ import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.TaskTestBase;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.testng.Assert;
@@ -399,21 +400,20 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
 
     // Before setting EVACUATE, getEvacuationStatus should return successful=false
     ZKHelixAdmin zkAdmin = (ZKHelixAdmin) _admin;
-    Map<String, Object> statusBefore = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
-    Assert.assertFalse((Boolean) statusBefore.get("successful"),
+    EvacuationInfo statusBefore = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertFalse(statusBefore.isSuccessful(),
         "Should return successful=false when instance is not in EVACUATE operation");
-    Assert.assertEquals(statusBefore.get("reason"), "Instance is not in EVACUATE operation");
+    Assert.assertEquals(statusBefore.getReason(),
+        EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION.getMessage());
 
     // Set instance to EVACUATE
     _gSetupTool.getClusterManagementTool()
         .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.EVACUATE);
 
     // Immediately check status - should have remainingCount > 0 (partitions still being evacuated)
-    Map<String, Object> statusDuring = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
-    Assert.assertNotNull(statusDuring.get("remainingCount"), "Should have remainingCount field");
-    Assert.assertNotNull(statusDuring.get("pendingMessageCount"), "Should have pendingMessageCount field");
-    System.out.println("During evacuation - remainingCount: " + statusDuring.get("remainingCount")
-        + ", pendingMessageCount: " + statusDuring.get("pendingMessageCount"));
+    EvacuationInfo statusDuring = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    System.out.println("During evacuation - remainingCount: " + statusDuring.getRemainingCount()
+        + ", pendingMessageCount: " + statusDuring.getPendingMessageCount());
 
     // Wait for evacuation to complete
     boolean evacuated = TestHelper.verify(
@@ -422,14 +422,14 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     Assert.assertTrue(evacuated, "Evacuation should complete");
 
     // After evacuation completes, verify final status
-    Map<String, Object> statusAfter = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
-    Assert.assertTrue((Boolean) statusAfter.get("successful"), "Should return successful=true after evacuation completes");
-    Assert.assertEquals(statusAfter.get("remainingCount"), 0, "remainingCount should be 0 after evacuation");
-    Assert.assertEquals(statusAfter.get("pendingMessageCount"), 0, "pendingMessageCount should be 0 after evacuation");
+    EvacuationInfo statusAfter = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertTrue(statusAfter.isSuccessful(), "Should return successful=true after evacuation completes");
+    Assert.assertEquals(statusAfter.getRemainingCount(), 0, "remainingCount should be 0 after evacuation");
+    Assert.assertEquals(statusAfter.getPendingMessageCount(), 0, "pendingMessageCount should be 0 after evacuation");
 
-    System.out.println("After evacuation - successful: " + statusAfter.get("successful")
-        + ", remainingCount: " + statusAfter.get("remainingCount")
-        + ", pendingMessageCount: " + statusAfter.get("pendingMessageCount"));
+    System.out.println("After evacuation - successful: " + statusAfter.isSuccessful()
+        + ", remainingCount: " + statusAfter.getRemainingCount()
+        + ", pendingMessageCount: " + statusAfter.getPendingMessageCount());
 
     // Cleanup
     _gSetupTool.getClusterManagementTool()
@@ -485,10 +485,10 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     ZKHelixAdmin zkAdmin = (ZKHelixAdmin) _admin;
 
     // Without exclusions - should NOT be finished (disabled CUSTOMIZED resource blocks)
-    Map<String, Object> statusNoExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
-    Assert.assertFalse((Boolean) statusNoExclusions.get("successful"),
+    EvacuationInfo statusNoExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertFalse(statusNoExclusions.isSuccessful(),
         "Without exclusions, evacuation should be blocked by disabled resource");
-    int remainingWithoutExclusions = (Integer) statusNoExclusions.get("remainingCount");
+    int remainingWithoutExclusions = statusNoExclusions.getRemainingCount();
     Assert.assertTrue(remainingWithoutExclusions > 0, "Should have remaining partitions without exclusions");
     System.out.println("Without exclusions - remainingCount: " + remainingWithoutExclusions);
 
@@ -496,10 +496,10 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
     exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
 
-    Map<String, Object> statusWithExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, exclusions);
-    Assert.assertTrue((Boolean) statusWithExclusions.get("successful"),
+    EvacuationInfo statusWithExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, exclusions);
+    Assert.assertTrue(statusWithExclusions.isSuccessful(),
         "With DISABLED_RESOURCE exclusion, evacuation should be finished");
-    int remainingWithExclusions = (Integer) statusWithExclusions.get("remainingCount");
+    int remainingWithExclusions = statusWithExclusions.getRemainingCount();
     Assert.assertEquals(remainingWithExclusions, 0, "remainingCount should be 0 with exclusions");
     System.out.println("With DISABLED_RESOURCE exclusion - remainingCount: " + remainingWithExclusions);
 

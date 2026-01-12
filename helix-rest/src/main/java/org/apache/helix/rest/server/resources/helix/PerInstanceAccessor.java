@@ -56,6 +56,7 @@ import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Error;
+import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
@@ -504,19 +505,19 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       .constructCollectionType(List.class, String.class)));
           break;
         case isEvacuateFinished:
-          Map<String, Object> evacuationStatus;
+          EvacuationInfo evacuationInfo;
           try {
             Set<InstanceDrainExclusionType> exclusionTypes = Collections.emptySet();
             if (exclusions != null && !exclusions.trim().isEmpty()) {
               exclusionTypes = InstanceDrainExclusionType.parseExclusionTypes(exclusions);
             }
             if (admin instanceof ZKHelixAdmin) {
-              evacuationStatus =
+              evacuationInfo =
                   ((ZKHelixAdmin) admin).getEvacuationStatus(clusterId, instanceName, exclusionTypes);
             } else {
               // Fallback for non-ZK HelixAdmin implementations (should not happen in Helix REST runtime).
               boolean finished = admin.isEvacuateFinished(clusterId, instanceName, exclusionTypes);
-              evacuationStatus = ImmutableMap.of("successful", finished);
+              evacuationInfo = new EvacuationInfo(finished, 0, 0, null);
             }
           } catch (IllegalArgumentException e) {
             LOG.error(String.format("Invalid exclusion type for cluster: {}, instance: {}, exclusions: {}",
@@ -527,7 +528,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                 + "{}, instance: {}", clusterId, instanceName), e);
             return serverError(e);
           }
-          return OK(OBJECT_MAPPER.writeValueAsString(evacuationStatus));
+          return OK(OBJECT_MAPPER.writeValueAsString(evacuationInfo));
         case isInstanceDrained:
           boolean instanceDrained;
           try {
