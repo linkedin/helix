@@ -37,6 +37,8 @@ import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
 import org.apache.helix.store.HelixPropertyListener;
+import org.apache.helix.store.zk.ZNode;
+import org.apache.zookeeper.data.Stat;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -316,6 +318,73 @@ public class TestZkCacheSyncOpSingleThread extends ZkUnitTestBase {
           updatedStats[i].getVersion(),
           "Cached stat should match returned stat for TestDB" + i);
     }
+
+    deleteCluster(clusterName);
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  /**
+   * Test that ZkCallbackCache.update() handles null oldStat gracefully.
+   *
+   * Verifies:
+   * 1. No NPE when oldStat is null
+   * 2. Delete+Create events fire when oldStat is null
+   * 3. Normal behavior preserved when oldStat is valid
+   */
+  @Test
+  public void testUpdateHandlesNullOldStat() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    String testPath = PropertyPathBuilder.instanceCurrentState(clusterName, "localhost_8901");
+    ZkBaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_gZkClient);
+    List<String> cachePaths = Arrays.asList(testPath);
+    ZkCacheBaseDataAccessor<ZNRecord> accessor =
+        new ZkCacheBaseDataAccessor<>(baseAccessor, null, null, cachePaths);
+
+    TestListener listener = new TestListener();
+    accessor.subscribe(testPath, listener);
+    String nodePath = testPath + "/testNode";
+
+    // Case 1: Null oldStat should fire Delete + Create (not NPE)
+    ZNode znodeNullStat = new ZNode(nodePath, new ZNRecord("test"), null);
+    accessor._zkCache._cache.put(nodePath, znodeNullStat);
+    listener.reset();
+
+    Stat newStat = new Stat();
+    newStat.setCzxid(100L);
+    newStat.setVersion(1);
+    accessor._zkCache.update(nodePath, new ZNRecord("updated"), newStat);
+    Thread.sleep(100);
+
+    Assert.assertEquals(listener._deletePathQueue.size(), 1, "Null oldStat should fire onDelete");
+    Assert.assertEquals(listener._createPathQueue.size(), 1, "Null oldStat should fire onCreate");
+    Assert.assertNotNull(accessor._zkCache._cache.get(nodePath).getStat(), "Stat should be set");
+
+    // Case 2: Valid oldStat with version change -> DataChanged only
+    listener.reset();
+    Stat versionChange = new Stat();
+    versionChange.setCzxid(100L);
+    versionChange.setVersion(2);
+    accessor._zkCache.update(nodePath, new ZNRecord("v2"), versionChange);
+    Thread.sleep(100);
+
+    Assert.assertEquals(listener._changePathQueue.size(), 1, "Version change should fire onChange");
+    Assert.assertEquals(listener._deletePathQueue.size(), 0, "Version change should not fire onDelete");
+
+    // Case 3: Valid oldStat with czxid change -> Delete+Create
+    listener.reset();
+    Stat czxidChange = new Stat();
+    czxidChange.setCzxid(200L);
+    czxidChange.setVersion(0);
+    accessor._zkCache.update(nodePath, new ZNRecord("recreated"), czxidChange);
+    Thread.sleep(100);
+
+    Assert.assertEquals(listener._deletePathQueue.size(), 1, "Czxid change should fire onDelete");
+    Assert.assertEquals(listener._createPathQueue.size(), 1, "Czxid change should fire onCreate");
 
     deleteCluster(clusterName);
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
