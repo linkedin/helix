@@ -405,6 +405,11 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
         "Should return NOT_EVACUATING when instance is not in EVACUATE operation");
     Assert.assertEquals(statusBefore.getReason(),
         EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION.getMessage());
+    // When NOT_EVACUATING, counts should be null (won't be serialized in JSON)
+    Assert.assertNull(statusBefore.getRemainingPartitionCount(),
+        "remainingPartitionCount should be null when not evacuating");
+    Assert.assertNull(statusBefore.getPendingMessageCount(),
+        "pendingMessageCount should be null when not evacuating");
 
     // Set instance to EVACUATE
     _gSetupTool.getClusterManagementTool()
@@ -426,8 +431,8 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     EvacuationInfo statusAfter = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
     Assert.assertEquals(statusAfter.getState(), EvacuationInfo.EvacuationState.COMPLETED,
         "Should return COMPLETED after evacuation completes");
-    Assert.assertEquals(statusAfter.getRemainingPartitionCount(), 0, "remainingPartitionCount should be 0 after evacuation");
-    Assert.assertEquals(statusAfter.getPendingMessageCount(), 0, "pendingMessageCount should be 0 after evacuation");
+    Assert.assertEquals(statusAfter.getRemainingPartitionCount(), Integer.valueOf(0), "remainingPartitionCount should be 0 after evacuation");
+    Assert.assertEquals(statusAfter.getPendingMessageCount(), Integer.valueOf(0), "pendingMessageCount should be 0 after evacuation");
 
     System.out.println("After evacuation - state: " + statusAfter.getState()
         + ", remainingPartitionCount: " + statusAfter.getRemainingPartitionCount()
@@ -490,7 +495,7 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     EvacuationInfo statusNoExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
     Assert.assertEquals(statusNoExclusions.getState(), EvacuationInfo.EvacuationState.IN_PROGRESS,
         "Without exclusions, evacuation should be IN_PROGRESS (blocked by disabled resource)");
-    int remainingWithoutExclusions = statusNoExclusions.getRemainingPartitionCount();
+    Integer remainingWithoutExclusions = statusNoExclusions.getRemainingPartitionCount();
     Assert.assertTrue(remainingWithoutExclusions > 0, "Should have remaining partitions without exclusions");
     System.out.println("Without exclusions - state: " + statusNoExclusions.getState()
         + ", remainingPartitionCount: " + remainingWithoutExclusions);
@@ -502,8 +507,8 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     EvacuationInfo statusWithExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, exclusions);
     Assert.assertEquals(statusWithExclusions.getState(), EvacuationInfo.EvacuationState.COMPLETED,
         "With DISABLED_RESOURCE exclusion, evacuation should be COMPLETED");
-    int remainingWithExclusions = statusWithExclusions.getRemainingPartitionCount();
-    Assert.assertEquals(remainingWithExclusions, 0, "remainingPartitionCount should be 0 with exclusions");
+    Integer remainingWithExclusions = statusWithExclusions.getRemainingPartitionCount();
+    Assert.assertEquals(remainingWithExclusions, Integer.valueOf(0), "remainingPartitionCount should be 0 with exclusions");
     System.out.println("With DISABLED_RESOURCE exclusion - state: " + statusWithExclusions.getState()
         + ", remainingPartitionCount: " + remainingWithExclusions);
 

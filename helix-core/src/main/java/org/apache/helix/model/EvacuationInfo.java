@@ -57,23 +57,24 @@ public class EvacuationInfo {
   }
 
   private EvacuationState state;
-  private int remainingPartitionCount;
-  private int pendingMessageCount;
+  private Integer remainingPartitionCount;
+  private Integer pendingMessageCount;
   private String reason;
 
   /**
    * Default constructor for Jackson deserialization.
+   * Fields are left as null so they won't be serialized when not applicable.
    */
   public EvacuationInfo() {
     this.state = EvacuationState.NOT_EVACUATING;
-    this.remainingPartitionCount = 0;
-    this.pendingMessageCount = 0;
+    // remainingPartitionCount and pendingMessageCount are intentionally left null
+    // so they won't be serialized for NOT_EVACUATING state
   }
 
   /**
    * Constructor with all fields.
    */
-  public EvacuationInfo(EvacuationState state, int remainingPartitionCount, int pendingMessageCount, String reason) {
+  public EvacuationInfo(EvacuationState state, Integer remainingPartitionCount, Integer pendingMessageCount, String reason) {
     this.state = state;
     this.remainingPartitionCount = remainingPartitionCount;
     this.pendingMessageCount = pendingMessageCount;
@@ -88,19 +89,19 @@ public class EvacuationInfo {
     this.state = state;
   }
 
-  public int getRemainingPartitionCount() {
+  public Integer getRemainingPartitionCount() {
     return remainingPartitionCount;
   }
 
-  public void setRemainingPartitionCount(int remainingPartitionCount) {
+  public void setRemainingPartitionCount(Integer remainingPartitionCount) {
     this.remainingPartitionCount = remainingPartitionCount;
   }
 
-  public int getPendingMessageCount() {
+  public Integer getPendingMessageCount() {
     return pendingMessageCount;
   }
 
-  public void setPendingMessageCount(int pendingMessageCount) {
+  public void setPendingMessageCount(Integer pendingMessageCount) {
     this.pendingMessageCount = pendingMessageCount;
   }
 
