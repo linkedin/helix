@@ -29,11 +29,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -898,16 +900,12 @@ public class ZKHelixAdmin implements HelixAdmin {
       for (CurrentState cs : currentStates) {
         currentStateKeys.add(keyBuilder.currentState(instanceName, sessionId, cs.getResourceName()));
       }
-      List<HelixProperty.Stat> stats = accessor.getPropertyStats(currentStateKeys);
-      long maxMtime = 0;
-      for (HelixProperty.Stat stat : stats) {
-        if (stat != null && stat.getModifiedTime() > maxMtime) {
-          maxMtime = stat.getModifiedTime();
-        }
-      }
-      if (maxMtime > 0) {
-        evacuationInfo.setLastActivityTimestamp(maxMtime);
-      }
+      accessor.getPropertyStats(currentStateKeys).stream()
+          .filter(Objects::nonNull)
+          .max(Comparator.comparingLong(HelixProperty.Stat::getModifiedTime))
+          .map(HelixProperty.Stat::getModifiedTime)
+          .filter(maxMtime -> maxMtime > 0)
+          .ifPresent(evacuationInfo::setLastActivityTimestamp);
     }
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
