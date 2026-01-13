@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -103,7 +104,7 @@ public class InstanceMessagesCache {
       // get the cache
       Map<String, Message> cachedMap = _messageCache.get(instanceName);
       if (cachedMap == null) {
-        cachedMap = Maps.newHashMap();
+        cachedMap = new ConcurrentHashMap<>();
         _messageCache.put(instanceName, cachedMap);
       }
       msgMap.put(instanceName, cachedMap);
@@ -176,7 +177,7 @@ public class InstanceMessagesCache {
   }
 
   public void addStaleMessage(String instanceName, Message staleMessage) {
-    _staleMessageCache.putIfAbsent(instanceName, new HashMap<>());
+    _staleMessageCache.putIfAbsent(instanceName, new ConcurrentHashMap<>());
     _staleMessageCache.get(instanceName).putIfAbsent(staleMessage.getMsgId(), staleMessage);
   }
 
@@ -277,7 +278,7 @@ public class InstanceMessagesCache {
         }
 
         if (!relayMessageMap.containsKey(targetInstance)) {
-          relayMessageMap.put(targetInstance, Maps.<String, Message>newHashMap());
+          relayMessageMap.put(targetInstance, new ConcurrentHashMap<>());
         }
         relayMessageMap.get(targetInstance).put(relayMessage.getMsgId(), relayMessage);
 
@@ -308,7 +309,7 @@ public class InstanceMessagesCache {
     for (String instance : _relayMessageMap.keySet()) {
       Map<String, Message> relayMessages = _relayMessageMap.get(instance);
       if (!_messageMap.containsKey(instance)) {
-        _messageMap.put(instance, Maps.<String, Message>newHashMap());
+        _messageMap.put(instance, new ConcurrentHashMap<>());
       }
       _messageMap.get(instance).putAll(relayMessages);
       relayMessageCount += relayMessages.size();
@@ -519,7 +520,7 @@ public class InstanceMessagesCache {
     for (Message message : messages) {
       String instanceName = message.getTgtName();
       if (!_messageCache.containsKey(instanceName)) {
-        _messageCache.put(instanceName, Maps.<String, Message>newHashMap());
+        _messageCache.put(instanceName, new ConcurrentHashMap<>());
       }
       _messageCache.get(instanceName).put(message.getId(), message);
 
@@ -534,7 +535,7 @@ public class InstanceMessagesCache {
   private void cacheRelayMessage(Message relayMessage, Message hostMessage) {
     String instanceName = relayMessage.getTgtName();
     if (!_relayMessageCache.containsKey(instanceName)) {
-      _relayMessageCache.put(instanceName, Maps.<String, Message> newHashMap());
+      _relayMessageCache.put(instanceName, new ConcurrentHashMap<>());
     }
     if (!_relayMessageCache.get(instanceName).containsKey(relayMessage.getId())) {
       // Only log if the message doesn't already exist in the cache
