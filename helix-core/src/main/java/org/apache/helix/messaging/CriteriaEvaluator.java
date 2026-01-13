@@ -116,24 +116,24 @@ public class CriteriaEvaluator {
     String instanceName = recipientCriteria.getInstanceName();
 
     switch (dataSource) {
-    case EXTERNALVIEW:
-      properties = getProperty(accessor, resourceName, keyBuilder.externalViews(),
-          keyBuilder.externalView(resourceName), DataSource.EXTERNALVIEW.name());
-      break;
-    case IDEALSTATES:
-      properties = getProperty(accessor, resourceName, keyBuilder.idealStates(),
-          keyBuilder.idealStates(resourceName), DataSource.IDEALSTATES.name());
-      break;
-    case LIVEINSTANCES:
-      properties = getProperty(accessor, instanceName, keyBuilder.liveInstances(),
-          keyBuilder.liveInstance(instanceName), DataSource.LIVEINSTANCES.name());
-      break;
-    case INSTANCES:
-      properties = getProperty(accessor, instanceName, keyBuilder.instanceConfigs(),
-          keyBuilder.instanceConfig(instanceName), DataSource.INSTANCES.name());
-      break;
-    default:
-      return Lists.newArrayList();
+      case EXTERNALVIEW:
+        properties = getProperty(accessor, resourceName, keyBuilder.externalViews(),
+            keyBuilder.externalView(resourceName), DataSource.EXTERNALVIEW.name());
+        break;
+      case IDEALSTATES:
+        properties = getProperty(accessor, resourceName, keyBuilder.idealStates(),
+            keyBuilder.idealStates(resourceName), DataSource.IDEALSTATES.name());
+        break;
+      case LIVEINSTANCES:
+        properties = getProperty(accessor, instanceName, keyBuilder.liveInstances(),
+            keyBuilder.liveInstance(instanceName), DataSource.LIVEINSTANCES.name());
+        break;
+      case INSTANCES:
+        properties = getProperty(accessor, instanceName, keyBuilder.instanceConfigs(),
+            keyBuilder.instanceConfig(instanceName), DataSource.INSTANCES.name());
+        break;
+      default:
+        return Lists.newArrayList();
     }
     // flatten the data
     List<ZNRecordRow> allRows = ZNRecordRow.flatten(HelixProperty.convertToList(properties));
