@@ -40,6 +40,8 @@ import org.testng.AssertJUnit;
 import org.testng.annotations.Test;
 
 public class TestMessagingService extends ZkStandAloneCMTestBase {
+  // Nanoseconds to milliseconds conversion factor
+  private static final long NANOS_TO_MILLIS = 1_000_000;
   public static class TestMessagingHandlerFactory implements MultiTypeMessageHandlerFactory {
     public static HashSet<String> _processedMsgIds = new HashSet<String>();
 
@@ -70,7 +72,6 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
         HelixTaskResult result = new HelixTaskResult();
         result.setSuccess(true);
         Thread.sleep(1000);
-        //System.out.println("TestMessagingHandler " + _message.getMsgId());
         _processedMsgIds.add(_message.getRecord().getSimpleField("TestMessagingPara"));
         result.getTaskResultMap().put("ReplyMessage", "TestReplyMessage");
         return result;
@@ -129,7 +130,9 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
 
   }
 
-  @Test()
+  // Performance test - excluded from CI to reduce test execution time
+  // Enable test in local to fetch performance numbers before and after your change
+  @Test(enabled = false)
   public void TestMessageSendPerformance() throws Exception {
     String hostSrc = "localhost_" + START_PORT;
     String hostDest = "localhost_" + (START_PORT + 1);
@@ -158,8 +161,8 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
         totalTime += (endTime - startTime);
       }
 
-      long avgTimeMs = (totalTime / iterations) / 1_000_000;
-      long totalTimeMs = totalTime / 1_000_000;
+      long avgTimeMs = (totalTime / iterations) / NANOS_TO_MILLIS;
+      long totalTimeMs = totalTime / NANOS_TO_MILLIS;
       System.out.println("DataSource: " + dataSource);
       System.out.println("  Total time for " + iterations + " sends: " + totalTimeMs + " ms");
       System.out.println("  Average time per send: " + avgTimeMs + " ms\n");
