@@ -90,4 +90,8 @@ public class SystemPropertyKeys {
 
   public static final String TASK_CURRENT_STATE_PATH_DISABLED =
       "helix.taskCurrentStatePathDisabled";
+
+  // Constraint-based algorithm ForkJoinPool parallelism
+  public static final String CONSTRAINT_ALGORITHM_PARALLELISM =
+      "helix.constraint.algorithm.parallelism";
 }

@@ -23,6 +23,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
@@ -30,11 +32,20 @@ import org.apache.helix.HelixManagerProperties;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.util.HelixUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The factory class to create an instance of {@link ConstraintBasedAlgorithm}
  */
 public class ConstraintBasedAlgorithmFactory {
+  private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithmFactory.class);
+  private static final int DEFAULT_CONSTRAINT_ALGORITHM_PARALLELISM = 4;
+
+  // Shared ForkJoinPool reused across all ConstraintBasedAlgorithm instances
+  private static final AtomicReference<ForkJoinPool> SHARED_POOL_REF = new AtomicReference<>();
+
   private static final Map<String, Float> MODEL = new HashMap<String, Float>() {
     {
       // The default setting
@@ -96,7 +107,45 @@ public class ConstraintBasedAlgorithmFactory {
           : evennessPreference * weight;
     });
 
+    ForkJoinPool constraintEvaluationPool = getSharedConstraintEvaluationPool();
+    return new ConstraintBasedAlgorithm(hardConstraints, softConstraintsWithWeight, constraintEvaluationPool);
+  }
 
-    return new ConstraintBasedAlgorithm(hardConstraints, softConstraintsWithWeight);
+  /**
+   * Gets or creates a shared ForkJoinPool for constraint evaluation with controlled parallelism.
+   * The parallelism can be configured via system property {@link SystemPropertyKeys#CONSTRAINT_ALGORITHM_PARALLELISM}.
+   * Defaults to 8 threads to avoid contention on systems with many CPU cores.
+   * The pool is shared across all ConstraintBasedAlgorithm instances to avoid resource waste.
+   *
+   * @return Shared ForkJoinPool instance for constraint evaluation
+   */
+  private static ForkJoinPool getSharedConstraintEvaluationPool() {
+    ForkJoinPool existing = SHARED_POOL_REF.get();
+    if (existing != null && !existing.isShutdown()) {
+      return existing;
+    }
+
+    synchronized (ConstraintBasedAlgorithmFactory.class) {
+      // Double-check after acquiring lock
+      existing = SHARED_POOL_REF.get();
+      if (existing != null && !existing.isShutdown()) {
+        return existing;
+      }
+
+      int parallelism = HelixUtil.getSystemPropertyAsInt(
+          SystemPropertyKeys.CONSTRAINT_ALGORITHM_PARALLELISM,
+          DEFAULT_CONSTRAINT_ALGORITHM_PARALLELISM);
+
+      LOG.info("Creating shared constraint evaluation ForkJoinPool with parallelism: {}", parallelism);
+
+      ForkJoinPool pool = new ForkJoinPool(
+          parallelism,
+          ForkJoinPool.defaultForkJoinWorkerThreadFactory,
+          null,
+          true
+      );
+      SHARED_POOL_REF.set(pool);
+      return pool;
+    }
   }
 }
