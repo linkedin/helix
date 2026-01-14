@@ -61,6 +61,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   private static final Logger logger =
       LoggerFactory.getLogger(IntermediateStateCalcStage.class.getName());
 
+
   @Override
   public void process(ClusterEvent event) throws Exception {
     _eventId = event.getEventId();
@@ -230,19 +231,67 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
       BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
       ResourceControllerDataProvider dataCache) {
+
     IntermediateStateOutput output = new IntermediateStateOutput();
+    ClusterStatusMonitor clusterStatusMonitor =
+        event.getAttribute(AttributeName.clusterStatusMonitor.name());
+    List<String> failedResources = new ArrayList<>();
+
+    // TODO: Remove debugLogger after feature is stable
+    AvailabilityAwarePrioritizationDebugLogger debugLogger =
+        new AvailabilityAwarePrioritizationDebugLogger(_eventId);
 
     StateTransitionThrottleController throttleController =
         new StateTransitionThrottleController(resourceMap.keySet(), dataCache.getClusterConfig(),
             dataCache.getLiveInstances().keySet());
 
-    ClusterStatusMonitor clusterStatusMonitor =
-        event.getAttribute(AttributeName.clusterStatusMonitor.name());
-    List<String> failedResources = new ArrayList<>();
-
-    // Collect all messages across all resources with their metadata
+    // Step 1: Collect messages from all FULL_AUTO resources
     List<MessageWithContext> allMessages = new ArrayList<>();
     Map<String, Set<Partition>> partitionsWithErrorByResource = new HashMap<>();
+    collectMessagesFromResources(resourceMap, currentStateOutput, bestPossibleStateOutput,
+        messageOutput, dataCache, throttleController, output, allMessages,
+        partitionsWithErrorByResource, debugLogger);
+
+    debugLogger.logMessagesCollected(allMessages.size());
+
+    // Step 2: Sort messages by availability impact
+    AvailabilityAwareMessageComparator comparator =
+        new AvailabilityAwareMessageComparator(dataCache, currentStateOutput);
+    comparator.setEventId(_eventId);
+    sortMessagesByAvailabilityImpact(allMessages, comparator);
+
+    debugLogger.logMessagesSorted(
+        allMessages.stream().map(MessageWithContext::getMessage).collect(Collectors.toList()),
+        comparator);
+
+    // Step 3: Process messages with throttling
+    ThrottlingContext throttlingContext = new ThrottlingContext(resourceMap.keySet());
+    processMessagesWithThrottling(allMessages, currentStateOutput, dataCache, throttleController,
+        partitionsWithErrorByResource, throttlingContext, debugLogger, comparator);
+
+    debugLogger.logThrottlingSummary(throttlingContext.processedCount,
+        throttlingContext.throttledCount, allMessages.size());
+
+    // Step 4: Build intermediate state maps for each resource
+    buildIntermediateStateMaps(resourceMap, currentStateOutput, bestPossibleStateOutput,
+        messageOutput, dataCache, output, clusterStatusMonitor, failedResources,
+        throttlingContext, partitionsWithErrorByResource);
+
+    updateClusterStatusMonitor(clusterStatusMonitor, failedResources, output);
+
+    return output;
+  }
+
+  /**
+   * Collects messages from all FULL_AUTO resources for availability-aware processing.
+   */
+  private void collectMessagesFromResources(
+      Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
+      BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
+      ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
+      IntermediateStateOutput output, List<MessageWithContext> allMessages,
+      Map<String, Set<Partition>> partitionsWithErrorByResource,
+      AvailabilityAwarePrioritizationDebugLogger debugLogger) {
 
     for (String resourceName : resourceMap.keySet()) {
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
@@ -277,17 +326,17 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       // Track partitions with error state
       Set<Partition> partitionsWithError = new HashSet<>();
       for (Partition partition : currentStateOutput.getCurrentStateMap(resourceName).keySet()) {
-        Map<String, String> entry = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
-        if (entry.containsValue(HelixDefinedState.ERROR.name())) {
+        Map<String, String> stateMap = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
+        if (stateMap.containsValue(HelixDefinedState.ERROR.name())) {
           partitionsWithError.add(partition);
         }
       }
       partitionsWithErrorByResource.put(resourceName, partitionsWithError);
+      debugLogger.logPartitionsWithError(resourceName, partitionsWithError);
 
       StateModelDefinition stateModelDef = dataCache.getStateModelDef(idealState.getStateModelDefRef());
       Map<String, List<String>> preferenceLists = bestPossibleStateOutput.getPreferenceLists(resourceName);
 
-      // Charge pending transitions
       chargePendingTransition(resource, currentStateOutput, throttleController, dataCache,
           preferenceLists, stateModelDef);
 
@@ -302,253 +351,164 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
               stateModelDef, preferenceList, requiredStates));
         }
       }
+
+      debugLogger.logResourceProcessingStart(resourceName, resourceMessageMap.size(),
+          resourceMessageMap.values().stream().mapToInt(List::size).sum());
     }
+  }
 
-    // Log all messages BEFORE sorting
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "=== AVAILABILITY-AWARE PRIORITIZATION: Collected %d messages BEFORE sorting ===", allMessages.size()));
-    for (int i = 0; i < allMessages.size(); i++) {
-      MessageWithContext msgCtx = allMessages.get(i);
-      Message msg = msgCtx.getMessage();
-      Partition partition = msgCtx.getPartition();
-      Map<String, String> currentStateMap = currentStateOutput.getCurrentStateMap(msg.getResourceName(), partition);
-      int activeReplicas = countActiveReplicas(currentStateMap);
-      IdealState idealState = dataCache.getIdealState(msg.getResourceName());
-      int minActive = idealState != null ? idealState.getMinActiveReplicas() : -1;
-      int targetReplicas = idealState != null ? idealState.getReplicaCount(dataCache.getEnabledLiveInstances().size()) : -1;
-
-      LogUtil.logInfo(logger, _eventId, String.format(
-          "  [%d] BEFORE_SORT: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, " +
-          "CurrentActiveReplicas=%d, MinActive=%d, TargetReplicas=%d",
-          i, msg.getResourceName(), msg.getPartitionName(),
-          msg.getFromState(), msg.getToState(), msg.getTgtName(),
-          activeReplicas, minActive, targetReplicas));
-    }
-
-    // Log messages grouped by target instance BEFORE sorting
-    logMessagesByInstance(allMessages, "BEFORE_SORT", null);
-
-    // Sort all messages by availability impact
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(dataCache, currentStateOutput);
-    comparator.setEventId(_eventId); // Pass event ID for logging
-
-    // CRITICAL: Pre-sort messages in deterministic order BEFORE computing impact scores.
-    // This ensures that for multiple messages on the same partition, they get assigned
-    // consistent messageIndex values (0, 1, 2...) based on their deterministic order.
-    // Without this, the sorting algorithm would compute impact scores in unpredictable order,
-    // leading to non-deterministic messageIndex assignment.
+  /**
+   * Sorts messages by availability impact with deterministic pre-sorting.
+   */
+  private void sortMessagesByAvailabilityImpact(List<MessageWithContext> allMessages,
+      AvailabilityAwareMessageComparator comparator) {
+    // Pre-sort deterministically for consistent messageIndex assignment
     allMessages.sort((m1, m2) -> {
       Message msg1 = m1.getMessage();
       Message msg2 = m2.getMessage();
-      int resourceCmp = msg1.getResourceName().compareTo(msg2.getResourceName());
-      if (resourceCmp != 0) return resourceCmp;
-      int partitionCmp = msg1.getPartitionName().compareTo(msg2.getPartitionName());
-      if (partitionCmp != 0) return partitionCmp;
-      // For same partition, sort by target instance for deterministic ordering
+      int cmp = msg1.getResourceName().compareTo(msg2.getResourceName());
+      if (cmp != 0) return cmp;
+      cmp = msg1.getPartitionName().compareTo(msg2.getPartitionName());
+      if (cmp != 0) return cmp;
       return msg1.getTgtName().compareTo(msg2.getTgtName());
     });
 
-    // Pre-compute impact scores for ALL messages in this deterministic order.
-    // This populates the cache so that subsequent sorting uses consistent scores.
+    // Pre-compute impact scores to populate cache
     for (MessageWithContext msgCtx : allMessages) {
       comparator.getAvailabilityImpact(msgCtx.getMessage());
     }
-
-    // Reset message index tracker after pre-computation so it doesn't affect logging
     comparator.resetMessageIndexTracker();
 
-    // Now sort by actual impact scores (all scores are already cached)
+    // Sort by availability impact
     allMessages.sort((m1, m2) -> comparator.compare(m1.getMessage(), m2.getMessage()));
+  }
 
-    // Log all messages AFTER sorting with impact scores
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "=== AVAILABILITY-AWARE PRIORITIZATION: %d messages AFTER sorting ===", allMessages.size()));
-    for (int i = 0; i < allMessages.size(); i++) {
-      MessageWithContext msgCtx = allMessages.get(i);
-      Message msg = msgCtx.getMessage();
-      double impactScore = comparator.getAvailabilityImpactForLogging(msg);
-
-      LogUtil.logInfo(logger, _eventId, String.format(
-          "  [%d] AFTER_SORT: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, ImpactScore=%s",
-          i, msg.getResourceName(), msg.getPartitionName(),
-          msg.getFromState(), msg.getToState(), msg.getTgtName(), formatImpactScore(impactScore)));
-    }
-
-    // Log messages grouped by target instance AFTER sorting
-    logMessagesByInstance(allMessages, "AFTER_SORT", comparator);
-
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "Processing %d messages with availability-aware cross-resource prioritization", allMessages.size()));
-
-    // Track processed messages and throttled messages per resource
-    Map<String, Set<String>> messagesForRecoveryByResource = new HashMap<>();
-    Map<String, Set<String>> messagesForLoadByResource = new HashMap<>();
-    Map<String, Set<String>> messagesThrottledForRecoveryByResource = new HashMap<>();
-    Map<String, Set<String>> messagesThrottledForLoadByResource = new HashMap<>();
-    Map<String, Map<Partition, List<Message>>> updatedResourceMessageMaps = new HashMap<>();
-    Map<String, Map<String, String>> derivedCurrentStateMaps = new HashMap<>();
-
-    // Initialize tracking maps
-    for (String resourceName : resourceMap.keySet()) {
-      messagesForRecoveryByResource.put(resourceName, new HashSet<>());
-      messagesForLoadByResource.put(resourceName, new HashSet<>());
-      messagesThrottledForRecoveryByResource.put(resourceName, new HashSet<>());
-      messagesThrottledForLoadByResource.put(resourceName, new HashSet<>());
-      updatedResourceMessageMaps.put(resourceName, new HashMap<>());
-    }
-
-    // Process messages in sorted order
-    LogUtil.logInfo(logger, _eventId, "=== AVAILABILITY-AWARE PRIORITIZATION: Processing messages in priority order ===");
+  /**
+   * Context object to track throttling state across message processing.
+   */
+  private static class ThrottlingContext {
+    final Map<String, Set<String>> messagesForRecoveryByResource = new HashMap<>();
+    final Map<String, Set<String>> messagesForLoadByResource = new HashMap<>();
+    final Map<String, Set<String>> messagesThrottledForRecoveryByResource = new HashMap<>();
+    final Map<String, Set<String>> messagesThrottledForLoadByResource = new HashMap<>();
+    final Map<String, Map<Partition, List<Message>>> updatedResourceMessageMaps = new HashMap<>();
     int processedCount = 0;
     int throttledCount = 0;
 
-    for (int msgIndex = 0; msgIndex < allMessages.size(); msgIndex++) {
-      MessageWithContext msgCtx = allMessages.get(msgIndex);
+    ThrottlingContext(Set<String> resourceNames) {
+      for (String resourceName : resourceNames) {
+        messagesForRecoveryByResource.put(resourceName, new HashSet<>());
+        messagesForLoadByResource.put(resourceName, new HashSet<>());
+        messagesThrottledForRecoveryByResource.put(resourceName, new HashSet<>());
+        messagesThrottledForLoadByResource.put(resourceName, new HashSet<>());
+        updatedResourceMessageMaps.put(resourceName, new HashMap<>());
+      }
+    }
+  }
+
+  /**
+   * Processes messages in sorted order with throttling.
+   */
+  private void processMessagesWithThrottling(
+      List<MessageWithContext> allMessages, CurrentStateOutput currentStateOutput,
+      ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
+      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx,
+      AvailabilityAwarePrioritizationDebugLogger debugLogger,
+      AvailabilityAwareMessageComparator comparator) {
+
+    Map<String, Map<String, String>> derivedCurrentStateMaps = new HashMap<>();
+
+    for (MessageWithContext msgCtx : allMessages) {
       Message message = msgCtx.getMessage();
       String resourceName = message.getResourceName();
       Partition partition = msgCtx.getPartition();
-      Resource resource = msgCtx.getResource();
 
-      // Get or initialize derived current state map for this resource/partition
+      // Get or initialize derived current state map for this partition
       String partitionKey = resourceName + ":" + partition.getPartitionName();
-      if (!derivedCurrentStateMaps.containsKey(partitionKey)) {
-        derivedCurrentStateMaps.put(partitionKey,
-            new HashMap<>(currentStateOutput.getCurrentStateMap(resourceName, partition)));
-      }
-      Map<String, String> derivedCurrentStateMap = derivedCurrentStateMaps.get(partitionKey);
+      Map<String, String> derivedCurrentStateMap = derivedCurrentStateMaps.computeIfAbsent(
+          partitionKey, k -> new HashMap<>(currentStateOutput.getCurrentStateMap(resourceName, partition)));
 
-      // Determine rebalance type
+      // Determine rebalance type and process message
       RebalanceType rebalanceType = getRebalanceTypePerMessage(
           msgCtx.getRequiredStates(), message, derivedCurrentStateMap);
 
-      Set<String> messagesThrottled;
-      Set<String> messagesProcessed;
+      boolean wasThrottled = processMessage(msgCtx, message, resourceName, partition,
+          derivedCurrentStateMap, rebalanceType, throttleController, dataCache,
+          partitionsWithErrorByResource, ctx);
 
-      double impactScore = comparator.getAvailabilityImpactForLogging(message);
-
-      if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
-        message.setSTRebalanceType(Message.STRebalanceType.RECOVERY_REBALANCE);
-        messagesProcessed = messagesForRecoveryByResource.get(resourceName);
-        messagesThrottled = messagesThrottledForRecoveryByResource.get(resourceName);
-        messagesProcessed.add(message.getId());
-
-        // Apply recovery throttling
-        throttleStateTransitionsForReplica(throttleController, resourceName, partition,
-            message, messagesThrottled, RebalanceType.RECOVERY_BALANCE, dataCache,
-            updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
-            partition);
-      } else {
-        message.setSTRebalanceType(Message.STRebalanceType.LOAD_REBALANCE);
-        messagesProcessed = messagesForLoadByResource.get(resourceName);
-        messagesThrottled = messagesThrottledForLoadByResource.get(resourceName);
-        messagesProcessed.add(message.getId());
-
-        // Check for only downward load balance
-        ClusterConfig clusterConfig = dataCache.getClusterConfig();
-        int threshold = getErrorOrRecoveryThreshold(clusterConfig);
-        Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(resourceName, new HashSet<>());
-        boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
-
-        if (onlyDownwardLoadBalance && !isLoadBalanceDownwardStateTransition(message, msgCtx.getStateModelDef())) {
-          messagesThrottled.add(message.getId());
-        } else {
-          // Apply load balance throttling
-          throttleStateTransitionsForReplica(throttleController, resourceName, partition,
-              message, messagesThrottled, RebalanceType.LOAD_BALANCE, dataCache,
-              updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
-              partition);
-        }
-      }
-
-      // Update derived current state if message was not throttled
-      boolean wasThrottled = messagesThrottled.contains(message.getId());
+      // Update derived state if not throttled
       if (!wasThrottled) {
         derivedCurrentStateMap.put(message.getTgtName(), message.getToState());
-        // Add message to the updated resource message map
-        updatedResourceMessageMaps.get(resourceName)
+        ctx.updatedResourceMessageMaps.get(resourceName)
             .computeIfAbsent(partition, k -> new ArrayList<>())
             .add(message);
-        processedCount++;
+        ctx.processedCount++;
       } else {
-        throttledCount++;
+        ctx.throttledCount++;
       }
 
-      // Log the processing result for each message
-      LogUtil.logInfo(logger, _eventId, String.format(
-          "  [%d] %s: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, " +
-          "RebalanceType=%s, ImpactScore=%s, Status=%s",
-          msgIndex,
-          wasThrottled ? "THROTTLED" : "PROCESSED",
-          resourceName, message.getPartitionName(),
-          message.getFromState(), message.getToState(), message.getTgtName(),
-          rebalanceType.name(), formatImpactScore(impactScore),
-          wasThrottled ? "WILL_RETRY_NEXT_CYCLE" : "DISPATCHING"));
+      debugLogger.logMessageProcessed(message, wasThrottled, rebalanceType.name(),
+          comparator.getAvailabilityImpactForLogging(message));
     }
+  }
 
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "=== AVAILABILITY-AWARE PRIORITIZATION SUMMARY: Processed=%d, Throttled=%d, Total=%d ===",
-        processedCount, throttledCount, allMessages.size()));
+  /**
+   * Processes a single message and returns whether it was throttled.
+   */
+  private boolean processMessage(MessageWithContext msgCtx, Message message, String resourceName,
+      Partition partition, Map<String, String> derivedCurrentStateMap, RebalanceType rebalanceType,
+      StateTransitionThrottleController throttleController, ResourceControllerDataProvider dataCache,
+      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx) {
 
-    // Log the final sorted list AFTER throttling - showing what will be dispatched this cycle
-    LogUtil.logInfo(logger, _eventId, "=== FINAL SORTED LIST AFTER THROTTLING - MESSAGES TO DISPATCH THIS CYCLE ===");
-    int dispatchIndex = 0;
-    for (MessageWithContext msgCtx : allMessages) {
-      Message msg = msgCtx.getMessage();
-      String resName = msg.getResourceName();
-      Set<String> recoveryThrottled = messagesThrottledForRecoveryByResource.get(resName);
-      Set<String> loadThrottled = messagesThrottledForLoadByResource.get(resName);
-      boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
-          || (loadThrottled != null && loadThrottled.contains(msg.getId()));
+    Set<String> messagesThrottled;
+    Set<String> messagesProcessed;
 
-      if (!isThrottled) {
-        double impactScore = comparator.getAvailabilityImpactForLogging(msg);
-        LogUtil.logInfo(logger, _eventId, String.format(
-            "  DISPATCH[%d]: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, " +
-            "RebalanceType=%s, ImpactScore=%s",
-            dispatchIndex++, resName, msg.getPartitionName(),
-            msg.getFromState(), msg.getToState(), msg.getTgtName(),
-            msg.getSTRebalanceType(), formatImpactScore(impactScore)));
+    if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
+      message.setSTRebalanceType(Message.STRebalanceType.RECOVERY_REBALANCE);
+      messagesProcessed = ctx.messagesForRecoveryByResource.get(resourceName);
+      messagesThrottled = ctx.messagesThrottledForRecoveryByResource.get(resourceName);
+      messagesProcessed.add(message.getId());
+
+      throttleStateTransitionsForReplica(throttleController, resourceName, partition,
+          message, messagesThrottled, RebalanceType.RECOVERY_BALANCE, dataCache,
+          ctx.updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
+          partition);
+    } else {
+      message.setSTRebalanceType(Message.STRebalanceType.LOAD_REBALANCE);
+      messagesProcessed = ctx.messagesForLoadByResource.get(resourceName);
+      messagesThrottled = ctx.messagesThrottledForLoadByResource.get(resourceName);
+      messagesProcessed.add(message.getId());
+
+      ClusterConfig clusterConfig = dataCache.getClusterConfig();
+      int threshold = getErrorOrRecoveryThreshold(clusterConfig);
+      Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(
+          resourceName, new HashSet<>());
+      boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
+
+      if (onlyDownwardLoadBalance && !isLoadBalanceDownwardStateTransition(
+          message, msgCtx.getStateModelDef())) {
+        messagesThrottled.add(message.getId());
+      } else {
+        throttleStateTransitionsForReplica(throttleController, resourceName, partition,
+            message, messagesThrottled, RebalanceType.LOAD_BALANCE, dataCache,
+            ctx.updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
+            partition);
       }
     }
-    if (dispatchIndex == 0) {
-      LogUtil.logInfo(logger, _eventId, "  (No messages to dispatch - all throttled)");
-    }
 
-    // Log throttled messages that will retry next cycle
-    LogUtil.logInfo(logger, _eventId, "=== THROTTLED MESSAGES - WILL RETRY NEXT PIPELINE CYCLE ===");
-    int throttledIndex = 0;
-    for (MessageWithContext msgCtx : allMessages) {
-      Message msg = msgCtx.getMessage();
-      String resName = msg.getResourceName();
-      Set<String> recoveryThrottled = messagesThrottledForRecoveryByResource.get(resName);
-      Set<String> loadThrottled = messagesThrottledForLoadByResource.get(resName);
-      boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
-          || (loadThrottled != null && loadThrottled.contains(msg.getId()));
+    return messagesThrottled.contains(message.getId());
+  }
 
-      if (isThrottled) {
-        double impactScore = comparator.getAvailabilityImpactForLogging(msg);
-        String throttleReason = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
-            ? "RECOVERY_THROTTLED" : "LOAD_BALANCE_THROTTLED";
-        LogUtil.logInfo(logger, _eventId, String.format(
-            "  RETRY[%d]: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, " +
-            "RebalanceType=%s, ImpactScore=%s, Reason=%s",
-            throttledIndex++, resName, msg.getPartitionName(),
-            msg.getFromState(), msg.getToState(), msg.getTgtName(),
-            msg.getSTRebalanceType(), formatImpactScore(impactScore), throttleReason));
-      }
-    }
-    if (throttledIndex == 0) {
-      LogUtil.logInfo(logger, _eventId, "  (No messages throttled - all dispatched)");
-    }
+  /**
+   * Builds intermediate state maps for all resources.
+   */
+  private void buildIntermediateStateMaps(
+      Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
+      BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
+      ResourceControllerDataProvider dataCache, IntermediateStateOutput output,
+      ClusterStatusMonitor clusterStatusMonitor, List<String> failedResources,
+      ThrottlingContext ctx, Map<String, Set<Partition>> partitionsWithErrorByResource) {
 
-    // Log messages grouped by target instance AFTER throttling
-    logMessagesByInstanceAfterThrottling(allMessages, comparator,
-        messagesThrottledForRecoveryByResource, messagesThrottledForLoadByResource);
-
-    LogUtil.logInfo(logger, _eventId, "=== END AVAILABILITY-AWARE PRIORITIZATION ===");
-
-    // Compute intermediate state maps for each resource
     for (String resourceName : resourceMap.keySet()) {
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
         continue;
@@ -556,95 +516,144 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
 
       IdealState idealState = dataCache.getIdealState(resourceName);
       if (idealState != null && !IdealState.RebalanceMode.FULL_AUTO.equals(idealState.getRebalanceMode())) {
-        continue; // Already set above
+        continue;
       }
 
       Map<Partition, List<Message>> resourceMessageMap = messageOutput.getResourceMessageMap(resourceName);
       if (resourceMessageMap == null || resourceMessageMap.isEmpty()) {
-        continue; // Already set above
+        continue;
       }
 
       try {
         PartitionStateMap intermediatePartitionStateMap =
             new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
 
-        // Apply pending messages
-        Map<Partition, Map<String, Message>> pendingMessageMap =
-            currentStateOutput.getPendingMessageMap(resourceName);
-        if (pendingMessageMap != null) {
-          for (Map.Entry<Partition, Map<String, Message>> entry : pendingMessageMap.entrySet()) {
-            entry.getValue().forEach((key, value) -> {
-              if (!value.getToState().equals(HelixDefinedState.DROPPED.name())) {
-                intermediatePartitionStateMap.setState(entry.getKey(), value.getTgtName(), value.getToState());
-              } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
-                intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(value.getTgtName());
-              }
-            });
-          }
-        }
-
-        // Apply non-throttled messages
-        Map<Partition, List<Message>> updatedMessageMap = updatedResourceMessageMaps.get(resourceName);
-        if (updatedMessageMap != null) {
-          for (Map.Entry<Partition, List<Message>> entry : updatedMessageMap.entrySet()) {
-            entry.getValue().forEach(msg -> {
-              if (!msg.getToState().equals(HelixDefinedState.DROPPED.name())) {
-                intermediatePartitionStateMap.setState(entry.getKey(), msg.getTgtName(), msg.getToState());
-              } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
-                intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(msg.getTgtName());
-              }
-            });
-          }
-        }
+        applyPendingMessages(currentStateOutput, resourceName, intermediatePartitionStateMap);
+        applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
+            intermediatePartitionStateMap);
 
         output.setState(resourceName, intermediatePartitionStateMap);
 
-        // Update monitoring stats
-        if (clusterStatusMonitor != null) {
-          Set<String> recoveryMsgs = messagesForRecoveryByResource.get(resourceName);
-          Set<String> loadMsgs = messagesForLoadByResource.get(resourceName);
-          Set<String> recoveryThrottled = messagesThrottledForRecoveryByResource.get(resourceName);
-          Set<String> loadThrottled = messagesThrottledForLoadByResource.get(resourceName);
+        updateResourceMonitoringStats(clusterStatusMonitor, resourceName, dataCache, ctx,
+            partitionsWithErrorByResource);
 
-          ClusterConfig clusterConfig = dataCache.getClusterConfig();
-          int threshold = getErrorOrRecoveryThreshold(clusterConfig);
-          Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(resourceName, new HashSet<>());
-          boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
-
-          clusterStatusMonitor.updateRebalancerStats(resourceName,
-              recoveryMsgs != null ? recoveryMsgs.size() : 0,
-              loadMsgs != null ? loadMsgs.size() : 0,
-              recoveryThrottled != null ? recoveryThrottled.size() : 0,
-              loadThrottled != null ? loadThrottled.size() : 0,
-              onlyDownwardLoadBalance);
-        }
-
-        // Log debug info
-        if (!messagesForRecoveryByResource.get(resourceName).isEmpty()) {
-          LogUtil.logInfo(logger, _eventId, String.format(
-              "Recovery balance needed for %s with messages: %s", resourceName,
-              messagesForRecoveryByResource.get(resourceName)));
-        }
-        if (!messagesForLoadByResource.get(resourceName).isEmpty()) {
-          LogUtil.logInfo(logger, _eventId, String.format(
-              "Load balance needed for %s with messages: %s", resourceName,
-              messagesForLoadByResource.get(resourceName)));
-        }
       } catch (HelixException ex) {
         LogUtil.logInfo(logger, _eventId,
             "Failed to calculate intermediate partition states for resource " + resourceName, ex);
         failedResources.add(resourceName);
       }
     }
+  }
 
+  /**
+   * Applies pending messages to the intermediate partition state map.
+   */
+  private void applyPendingMessages(CurrentStateOutput currentStateOutput, String resourceName,
+      PartitionStateMap intermediatePartitionStateMap) {
+    Map<Partition, Map<String, Message>> pendingMessageMap =
+        currentStateOutput.getPendingMessageMap(resourceName);
+    if (pendingMessageMap != null) {
+      for (Map.Entry<Partition, Map<String, Message>> entry : pendingMessageMap.entrySet()) {
+        entry.getValue().forEach((key, value) -> {
+          if (!value.getToState().equals(HelixDefinedState.DROPPED.name())) {
+            intermediatePartitionStateMap.setState(entry.getKey(), value.getTgtName(), value.getToState());
+          } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
+            intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(value.getTgtName());
+          }
+        });
+      }
+    }
+  }
+
+  /**
+   * Applies non-throttled messages to the intermediate partition state map.
+   */
+  private void applyNonThrottledMessages(Map<Partition, List<Message>> updatedMessageMap,
+      PartitionStateMap intermediatePartitionStateMap) {
+    if (updatedMessageMap != null) {
+      for (Map.Entry<Partition, List<Message>> entry : updatedMessageMap.entrySet()) {
+        entry.getValue().forEach(msg -> {
+          if (!msg.getToState().equals(HelixDefinedState.DROPPED.name())) {
+            intermediatePartitionStateMap.setState(entry.getKey(), msg.getTgtName(), msg.getToState());
+          } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
+            intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(msg.getTgtName());
+          }
+        });
+      }
+    }
+  }
+
+  /**
+   * Updates monitoring stats for a resource.
+   */
+  private void updateResourceMonitoringStats(ClusterStatusMonitor clusterStatusMonitor,
+      String resourceName, ResourceControllerDataProvider dataCache, ThrottlingContext ctx,
+      Map<String, Set<Partition>> partitionsWithErrorByResource) {
+    if (clusterStatusMonitor != null) {
+      Set<String> recoveryMsgs = ctx.messagesForRecoveryByResource.get(resourceName);
+      Set<String> loadMsgs = ctx.messagesForLoadByResource.get(resourceName);
+      Set<String> recoveryThrottled = ctx.messagesThrottledForRecoveryByResource.get(resourceName);
+      Set<String> loadThrottled = ctx.messagesThrottledForLoadByResource.get(resourceName);
+
+      ClusterConfig clusterConfig = dataCache.getClusterConfig();
+      int threshold = getErrorOrRecoveryThreshold(clusterConfig);
+      Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(
+          resourceName, new HashSet<>());
+      boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
+
+      clusterStatusMonitor.updateRebalancerStats(resourceName,
+          recoveryMsgs != null ? recoveryMsgs.size() : 0,
+          loadMsgs != null ? loadMsgs.size() : 0,
+          recoveryThrottled != null ? recoveryThrottled.size() : 0,
+          loadThrottled != null ? loadThrottled.size() : 0,
+          onlyDownwardLoadBalance);
+    }
+  }
+
+  /**
+   * Updates cluster status monitor for failed resources.
+   */
+  private void updateClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor,
+      List<String> failedResources, IntermediateStateOutput output) {
     if (clusterStatusMonitor != null) {
       clusterStatusMonitor.setResourceRebalanceStates(failedResources,
           ResourceMonitor.RebalanceStatus.INTERMEDIATE_STATE_CAL_FAILED);
       clusterStatusMonitor.setResourceRebalanceStates(output.resourceSet(),
           ResourceMonitor.RebalanceStatus.NORMAL);
     }
+  }
 
-    return output;
+  /**
+   * POJO to hold message along with its context for availability-aware processing.
+   */
+  private static class MessageWithContext {
+    private final Message _message;
+    private final Resource _resource;
+    private final Partition _partition;
+    private final IdealState _idealState;
+    private final StateModelDefinition _stateModelDef;
+    private final List<String> _preferenceList;
+    private final Map<String, Integer> _requiredStates;
+
+    MessageWithContext(Message message, Resource resource, Partition partition,
+        IdealState idealState, StateModelDefinition stateModelDef,
+        List<String> preferenceList, Map<String, Integer> requiredStates) {
+      _message = message;
+      _resource = resource;
+      _partition = partition;
+      _idealState = idealState;
+      _stateModelDef = stateModelDef;
+      _preferenceList = preferenceList;
+      _requiredStates = requiredStates;
+    }
+
+    Message getMessage() { return _message; }
+    Resource getResource() { return _resource; }
+    Partition getPartition() { return _partition; }
+    IdealState getIdealState() { return _idealState; }
+    StateModelDefinition getStateModelDef() { return _stateModelDef; }
+    List<String> getPreferenceList() { return _preferenceList; }
+    Map<String, Integer> getRequiredStates() { return _requiredStates; }
   }
 
   /**
@@ -658,174 +667,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       return clusterConfig.getErrorPartitionThresholdForLoadBalance();
     }
     return 1; // Default threshold
-  }
-
-  /**
-   * Count the number of active replicas in a current state map.
-   * Active replicas are those not in ERROR, OFFLINE, DROPPED, or null states.
-   */
-  private int countActiveReplicas(Map<String, String> currentStateMap) {
-    if (currentStateMap == null || currentStateMap.isEmpty()) {
-      return 0;
-    }
-    int count = 0;
-    for (String state : currentStateMap.values()) {
-      if (state != null && !state.equalsIgnoreCase("ERROR")
-          && !state.equalsIgnoreCase("OFFLINE")
-          && !state.equalsIgnoreCase("DROPPED")
-          && !state.isEmpty()) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  /**
-   * Format impact score for human-readable logging.
-   * Handles special values like MAX_VALUE (top state missing) and MAX_VALUE-1000 (top state handoff).
-   */
-  private String formatImpactScore(double impact) {
-    // TOP_STATE_MISSING_IMPACT = Double.MAX_VALUE
-    if (impact >= Double.MAX_VALUE - 1) {
-      return "MAX(TOP_STATE_MISSING)";
-    }
-    // TOP_STATE_HANDOFF_IMPACT = Double.MAX_VALUE - 1000
-    if (impact >= Double.MAX_VALUE - 1001) {
-      return "MAX-1K(HANDOFF)";
-    }
-    // Normal impact score
-    return String.format("%.2f", impact);
-  }
-
-  /**
-   * Log messages grouped by target instance for debugging and analysis.
-   * Shows which messages are targeted to each instance at a given stage.
-   */
-  private void logMessagesByInstance(List<MessageWithContext> messages, String stage,
-      AvailabilityAwareMessageComparator comparator) {
-    // Group messages by target instance
-    Map<String, List<MessageWithContext>> messagesByInstance = new HashMap<>();
-    for (MessageWithContext msgCtx : messages) {
-      String target = msgCtx.getMessage().getTgtName();
-      messagesByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
-    }
-
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "=== MESSAGES BY INSTANCE [%s]: %d instances, %d total messages ===",
-        stage, messagesByInstance.size(), messages.size()));
-
-    // Sort instances for consistent output
-    List<String> sortedInstances = new ArrayList<>(messagesByInstance.keySet());
-    Collections.sort(sortedInstances);
-
-    for (String instance : sortedInstances) {
-      List<MessageWithContext> instanceMessages = messagesByInstance.get(instance);
-      StringBuilder sb = new StringBuilder();
-      sb.append(String.format("  Instance=%s, MessageCount=%d: ", instance, instanceMessages.size()));
-
-      // Build compact message list
-      List<String> msgSummaries = new ArrayList<>();
-      for (MessageWithContext msgCtx : instanceMessages) {
-        Message msg = msgCtx.getMessage();
-        String summary;
-        if (comparator != null) {
-          double impact = comparator.getAvailabilityImpactForLogging(msg);
-          summary = String.format("%s/%s(%s->%s,%s)",
-              msg.getResourceName(), msg.getPartitionName(),
-              msg.getFromState(), msg.getToState(), formatImpactScore(impact));
-        } else {
-          summary = String.format("%s/%s(%s->%s)",
-              msg.getResourceName(), msg.getPartitionName(),
-              msg.getFromState(), msg.getToState());
-        }
-        msgSummaries.add(summary);
-      }
-      sb.append(String.join(", ", msgSummaries));
-
-      LogUtil.logInfo(logger, _eventId, sb.toString());
-    }
-  }
-
-  /**
-   * Log messages grouped by target instance after throttling.
-   * Shows which messages will be dispatched vs throttled per instance.
-   */
-  private void logMessagesByInstanceAfterThrottling(List<MessageWithContext> messages,
-      AvailabilityAwareMessageComparator comparator,
-      Map<String, Set<String>> throttledForRecovery,
-      Map<String, Set<String>> throttledForLoad) {
-
-    // Group messages by target instance, separating dispatched and throttled
-    Map<String, List<MessageWithContext>> dispatchedByInstance = new HashMap<>();
-    Map<String, List<MessageWithContext>> throttledByInstance = new HashMap<>();
-
-    for (MessageWithContext msgCtx : messages) {
-      Message msg = msgCtx.getMessage();
-      String target = msg.getTgtName();
-      String resourceName = msg.getResourceName();
-
-      Set<String> recoveryThrottled = throttledForRecovery.get(resourceName);
-      Set<String> loadThrottled = throttledForLoad.get(resourceName);
-      boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
-          || (loadThrottled != null && loadThrottled.contains(msg.getId()));
-
-      if (isThrottled) {
-        throttledByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
-      } else {
-        dispatchedByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
-      }
-    }
-
-    // Get all unique instances
-    Set<String> allInstances = new HashSet<>();
-    allInstances.addAll(dispatchedByInstance.keySet());
-    allInstances.addAll(throttledByInstance.keySet());
-    List<String> sortedInstances = new ArrayList<>(allInstances);
-    Collections.sort(sortedInstances);
-
-    int totalDispatched = dispatchedByInstance.values().stream().mapToInt(List::size).sum();
-    int totalThrottled = throttledByInstance.values().stream().mapToInt(List::size).sum();
-
-    LogUtil.logInfo(logger, _eventId, String.format(
-        "=== MESSAGES BY INSTANCE [AFTER_THROTTLING]: %d instances, Dispatched=%d, Throttled=%d ===",
-        allInstances.size(), totalDispatched, totalThrottled));
-
-    for (String instance : sortedInstances) {
-      List<MessageWithContext> dispatched = dispatchedByInstance.getOrDefault(instance, Collections.emptyList());
-      List<MessageWithContext> throttled = throttledByInstance.getOrDefault(instance, Collections.emptyList());
-
-      StringBuilder sb = new StringBuilder();
-      sb.append(String.format("  Instance=%s: DISPATCH=%d, THROTTLED=%d",
-          instance, dispatched.size(), throttled.size()));
-
-      // Show dispatched messages
-      if (!dispatched.isEmpty()) {
-        sb.append(" | Dispatching: ");
-        List<String> dispatchSummaries = new ArrayList<>();
-        for (MessageWithContext msgCtx : dispatched) {
-          Message msg = msgCtx.getMessage();
-          double impact = comparator.getAvailabilityImpactForLogging(msg);
-          dispatchSummaries.add(String.format("%s/%s(%s)",
-              msg.getResourceName(), msg.getPartitionName(), formatImpactScore(impact)));
-        }
-        sb.append(String.join(", ", dispatchSummaries));
-      }
-
-      // Show throttled messages
-      if (!throttled.isEmpty()) {
-        sb.append(" | Throttled: ");
-        List<String> throttleSummaries = new ArrayList<>();
-        for (MessageWithContext msgCtx : throttled) {
-          Message msg = msgCtx.getMessage();
-          double impact = comparator.getAvailabilityImpactForLogging(msg);
-          throttleSummaries.add(String.format("%s/%s(%s)",
-              msg.getResourceName(), msg.getPartitionName(), formatImpactScore(impact)));
-        }
-        sb.append(String.join(", ", throttleSummaries));
-      }
-
-      LogUtil.logInfo(logger, _eventId, sb.toString());
-    }
   }
 
   /**
@@ -867,59 +708,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       throttleController.chargeInstance(rebalanceType, messageToThrottle.getTgtName());
     } else {
       messagesThrottled.add(messageToThrottle.getId());
-    }
-  }
-
-  /**
-   * POJO to hold message along with its context for availability-aware processing.
-   */
-  private static class MessageWithContext {
-    private final Message _message;
-    private final Resource _resource;
-    private final Partition _partition;
-    private final IdealState _idealState;
-    private final StateModelDefinition _stateModelDef;
-    private final List<String> _preferenceList;
-    private final Map<String, Integer> _requiredStates;
-
-    MessageWithContext(Message message, Resource resource, Partition partition,
-        IdealState idealState, StateModelDefinition stateModelDef,
-        List<String> preferenceList, Map<String, Integer> requiredStates) {
-      _message = message;
-      _resource = resource;
-      _partition = partition;
-      _idealState = idealState;
-      _stateModelDef = stateModelDef;
-      _preferenceList = preferenceList;
-      _requiredStates = requiredStates;
-    }
-
-    Message getMessage() {
-      return _message;
-    }
-
-    Resource getResource() {
-      return _resource;
-    }
-
-    Partition getPartition() {
-      return _partition;
-    }
-
-    IdealState getIdealState() {
-      return _idealState;
-    }
-
-    StateModelDefinition getStateModelDef() {
-      return _stateModelDef;
-    }
-
-    List<String> getPreferenceList() {
-      return _preferenceList;
-    }
-
-    Map<String, Integer> getRequiredStates() {
-      return _requiredStates;
     }
   }
 
