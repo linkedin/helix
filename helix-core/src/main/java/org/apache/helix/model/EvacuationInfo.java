@@ -90,6 +90,16 @@ public class EvacuationInfo {
     this.state = state;
   }
 
+  /**
+   * Returns whether evacuation is complete.
+   * This is a derived field for backward compatibility with clients expecting a boolean "successful" field.
+   *
+   * @return true if state is COMPLETED, false otherwise
+   */
+  public boolean isSuccessful() {
+    return state == EvacuationState.COMPLETED;
+  }
+
   public Integer getRemainingPartitionCount() {
     return remainingPartitionCount;
   }
@@ -136,7 +146,8 @@ public class EvacuationInfo {
   @Override
   public String toString() {
     return "EvacuationInfo{" +
-        "state=" + state +
+        "successful=" + isSuccessful() +
+        ", state=" + state +
         ", remainingPartitionCount=" + remainingPartitionCount +
         ", pendingMessageCount=" + pendingMessageCount +
         ", reason='" + reason + '\'' +
