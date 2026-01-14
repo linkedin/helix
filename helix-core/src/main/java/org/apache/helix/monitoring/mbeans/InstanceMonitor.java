@@ -59,8 +59,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE("InstanceOperationDuration_EVACUATE"),
     INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
     INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
-    PARTITION_COUNT_GAUGE("PartitionCount"),
-    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionCount");
+    PARTITION_COUNT_GAUGE("PartitionGauge"),
+    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge");
 
     private final String metricName;
 
