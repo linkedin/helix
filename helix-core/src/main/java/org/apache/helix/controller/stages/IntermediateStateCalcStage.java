@@ -240,8 +240,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         event.getAttribute(AttributeName.clusterStatusMonitor.name());
     List<String> failedResources = new ArrayList<>();
 
-    // Build resource priority map for the comparator
-    Map<String, Integer> resourcePriorityMap = buildResourcePriorityMap(dataCache, resourceMap.keySet());
+
+    Map<String, Integer> resourcePriorityMap = Collections.emptyMap();
 
     // Collect all messages across all resources with their metadata
     List<MessageWithContext> allMessages = new ArrayList<>();
@@ -648,40 +648,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     }
 
     return output;
-  }
-
-  /**
-   * Build a map of resource name to priority value.
-   */
-  private Map<String, Integer> buildResourcePriorityMap(ResourceControllerDataProvider dataCache,
-      Set<String> resourceNames) {
-    Map<String, Integer> priorityMap = new HashMap<>();
-    String priorityField = dataCache.getClusterConfig().getResourcePriorityField();
-
-    for (String resourceName : resourceNames) {
-      int priority = Integer.MIN_VALUE;
-
-      if (priorityField != null) {
-        String priorityStr = null;
-        if (dataCache.getResourceConfig(resourceName) != null
-            && dataCache.getResourceConfig(resourceName).getSimpleConfig(priorityField) != null) {
-          priorityStr = dataCache.getResourceConfig(resourceName).getSimpleConfig(priorityField);
-        } else if (dataCache.getIdealState(resourceName) != null
-            && dataCache.getIdealState(resourceName).getRecord().getSimpleField(priorityField) != null) {
-          priorityStr = dataCache.getIdealState(resourceName).getRecord().getSimpleField(priorityField);
-        }
-
-        if (priorityStr != null) {
-          try {
-            priority = Integer.parseInt(priorityStr);
-          } catch (NumberFormatException e) {
-            logger.warn(String.format("Invalid priority field %s for resource %s", priorityStr, resourceName));
-          }
-        }
-      }
-      priorityMap.put(resourceName, priority);
-    }
-    return priorityMap;
   }
 
   /**
