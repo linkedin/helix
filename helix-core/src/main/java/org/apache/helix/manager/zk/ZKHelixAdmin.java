@@ -29,11 +29,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -51,6 +53,7 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixProperty;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
@@ -77,6 +80,7 @@ import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.CustomizedStateConfig;
+import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -478,6 +482,36 @@ public class ZKHelixAdmin implements HelixAdmin {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes);
   }
 
+  /**
+   * Returns a detailed evacuation status for the given instance.
+   *
+   * This is used by the Helix REST {@code isEvacuateFinished} command to return an extendable JSON
+   * response (for example, remaining partition count) without changing the {@link HelixAdmin}
+   * public interface.
+   */
+  public EvacuationInfo getEvacuationStatus(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    EvacuationInfo result = new EvacuationInfo();
+
+    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+    if (config == null) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
+      result.setReason(EvacuationInfo.ReasonCode.INSTANCE_CONFIG_NOT_FOUND);
+      return result;
+    }
+    if (config.getInstanceOperation().getOperation() != InstanceConstants.InstanceOperation.EVACUATE) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
+      result.setReason(EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION);
+      return result;
+    }
+
+    boolean hasBlocking = instanceHasCurrentStateOrMessage(
+        clusterName, instanceName, exclusionTypes, result);
+    result.setState(hasBlocking ? EvacuationInfo.EvacuationState.IN_PROGRESS
+        : EvacuationInfo.EvacuationState.COMPLETED);
+    return result;
+  }
+
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
@@ -811,6 +845,15 @@ public class ZKHelixAdmin implements HelixAdmin {
    */
   private boolean instanceHasCurrentStateOrMessage(String clusterName,
       String instanceName, Set<InstanceDrainExclusionType> exclusionTypes) {
+    return instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes, null);
+  }
+
+  /**
+   * Same as {@link #instanceHasCurrentStateOrMessage(String, String, Set)} but optionally fills
+   * {@code evacuationInfo} with additional details for REST responses.
+   */
+  private boolean instanceHasCurrentStateOrMessage(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes, @Nullable EvacuationInfo evacuationInfo) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
@@ -825,11 +868,18 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (sessions.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any session. The instance can be removed.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return false;
     }
     if (sessions.size() > 1) {
       logger.info("Instance {} in cluster {} is carrying over from prev session.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setReason(EvacuationInfo.ReasonCode.MULTIPLE_SESSIONS);
+      }
       return true;
     }
 
@@ -839,7 +889,27 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (currentStates == null || currentStates.isEmpty()) {
       logger.info("Instance {} in cluster {} does not have any current state.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return false;
+    }
+
+    // Calculate max mtime across all CurrentState ZNodes for lastActivityTimestamp
+    // note: getChildValues() that is used above to fetch currentStates, doesn't populate stat data,
+    // so we need to fetch stats separately, this is not a expensive zk op, as its a batch call.
+    if (evacuationInfo != null) {
+      List<PropertyKey> currentStateKeys = new ArrayList<>();
+      for (CurrentState cs : currentStates) {
+        currentStateKeys.add(keyBuilder.currentState(instanceName, sessionId, cs.getResourceName()));
+      }
+      accessor.getPropertyStats(currentStateKeys).stream()
+          .filter(Objects::nonNull)
+          .max(Comparator.comparingLong(HelixProperty.Stat::getModifiedTime))
+          .map(HelixProperty.Stat::getModifiedTime)
+          .filter(maxMtime -> maxMtime > 0)
+          .ifPresent(evacuationInfo::setLastActivityTimestamp);
     }
 
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
@@ -856,41 +926,49 @@ public class ZKHelixAdmin implements HelixAdmin {
       List<PartitionInfo> partitionsStillOnInstance =
           PartitionExclusionHelper.getCustomizedPartitionsStillOnInstance(
               currentStates, idealStates, instanceName, allowedResources, filters);
-
       boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
       if (hasPartitionsStillOnInstance) {
         // Partitions are still blocking evacuation
         logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
             instanceName, clusterName, partitionsStillOnInstance.size());
       }
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(partitionsStillOnInstance.size());
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return hasPartitionsStillOnInstance;
     }
 
-    // Handle online instances - check for pending messages first
+    // Handle online instances - also report pending messages
     List<String> messages = accessor.getChildNames(keyBuilder.messages(instanceName));
-    if (messages != null && !messages.isEmpty()) {
+    int pendingMessageCount = messages != null ? messages.size() : 0;
+    if (evacuationInfo != null) {
+      evacuationInfo.setPendingMessageCount(pendingMessageCount);
+    }
+    if (pendingMessageCount > 0) {
       logger.info("Instance {} in cluster {} has {} pending messages.",
-          instanceName, clusterName, messages.size());
-      return true;
+          instanceName, clusterName, pendingMessageCount);
     }
 
-    // Step 4: Collect all partitions from current states
+    // Step 4: Collect all partitions from current states (after resource-level exclusions)
     List<PartitionInfo> allPartitions =
         PartitionExclusionHelper.collectPartitions(currentStates, allowedResources);
 
-    // Step 5: Apply exclusions to the collected partitions
+    // Step 5: Apply partition-level exclusions
     List<PartitionInfo> remainingPartitions =
         PartitionExclusionHelper.applyExclusions(allPartitions, filters);
 
-    // Step 6: Check if any partitions remain after exclusions
     boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
     if (hasRemainingPartitions) {
       // Partitions are still blocking evacuation
       logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
           instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
     }
+    if (evacuationInfo != null) {
+      evacuationInfo.setRemainingPartitionCount(remainingPartitions.size());
+    }
 
-    return hasRemainingPartitions;
+    return pendingMessageCount > 0 || hasRemainingPartitions;
   }
 
   /**

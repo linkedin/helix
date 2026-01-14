@@ -21,20 +21,18 @@ package org.apache.helix.integration.rebalancer;
 
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.TaskTestBase;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.testng.Assert;
@@ -378,6 +376,162 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     _gSetupTool.getClusterManagementTool()
         .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.ENABLE);
 
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+  }
+
+  /**
+   * Test getEvacuationStatus returns remainingPartitionCount and pendingMessageCount
+   */
+  @Test
+  public void testGetEvacuationStatusReturnsDetailedInfo() throws Exception {
+    System.out.println("START testGetEvacuationStatusReturnsDetailedInfo at " + new Date(System.currentTimeMillis()));
+
+    String db = "TestDB_EvacuationStatus";
+    _gSetupTool.addResourceToCluster(CLUSTER_NAME, db, _numPartitions,
+        BuiltInStateModelDefinitions.MasterSlave.name(), IdealState.RebalanceMode.FULL_AUTO.name());
+    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, db, _numReplicas);
+
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    String instanceToEvacuate = _participants[0].getInstanceName();
+
+    // Before setting EVACUATE, getEvacuationStatus should return NOT_EVACUATING state
+    ZKHelixAdmin zkAdmin = (ZKHelixAdmin) _admin;
+    EvacuationInfo statusBefore = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertEquals(statusBefore.getState(), EvacuationInfo.EvacuationState.NOT_EVACUATING,
+        "Should return NOT_EVACUATING when instance is not in EVACUATE operation");
+    Assert.assertEquals(statusBefore.getReason(),
+        EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION.getMessage());
+    // When NOT_EVACUATING, counts and timestamp should be null (won't be serialized in JSON)
+    Assert.assertNull(statusBefore.getRemainingPartitionCount(),
+        "remainingPartitionCount should be null when not evacuating");
+    Assert.assertNull(statusBefore.getPendingMessageCount(),
+        "pendingMessageCount should be null when not evacuating");
+    Assert.assertNull(statusBefore.getLastActivityTimestamp(),
+        "lastActivityTimestamp should be null when not evacuating");
+
+    // Set instance to EVACUATE
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.EVACUATE);
+
+    // Immediately check status - should have remainingPartitionCount > 0 (partitions still being evacuated)
+    EvacuationInfo statusDuring = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    System.out.println("During evacuation - state: " + statusDuring.getState()
+        + ", remainingPartitionCount: " + statusDuring.getRemainingPartitionCount()
+        + ", pendingMessageCount: " + statusDuring.getPendingMessageCount()
+        + ", lastActivityTimestamp: " + statusDuring.getLastActivityTimestamp());
+    // During evacuation, lastActivityTimestamp should be populated if there are current states
+    if (statusDuring.getState() == EvacuationInfo.EvacuationState.IN_PROGRESS
+        && statusDuring.getRemainingPartitionCount() != null
+        && statusDuring.getRemainingPartitionCount() > 0) {
+      Assert.assertNotNull(statusDuring.getLastActivityTimestamp(),
+          "lastActivityTimestamp should be populated during evacuation with partitions");
+      Assert.assertTrue(statusDuring.getLastActivityTimestamp() > 0,
+          "lastActivityTimestamp should be a positive Unix timestamp");
+    }
+
+    // Wait for evacuation to complete
+    boolean evacuated = TestHelper.verify(
+        () -> _admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate),
+        TestHelper.WAIT_DURATION);
+    Assert.assertTrue(evacuated, "Evacuation should complete");
+
+    // After evacuation completes, verify final status
+    EvacuationInfo statusAfter = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertEquals(statusAfter.getState(), EvacuationInfo.EvacuationState.COMPLETED,
+        "Should return COMPLETED after evacuation completes");
+    Assert.assertEquals(statusAfter.getRemainingPartitionCount(), Integer.valueOf(0), "remainingPartitionCount should be 0 after evacuation");
+    Assert.assertEquals(statusAfter.getPendingMessageCount(), Integer.valueOf(0), "pendingMessageCount should be 0 after evacuation");
+    // After evacuation, lastActivityTimestamp may or may not be set depending on whether CurrentState ZNodes exist
+    // If the instance still has a session with CurrentState ZNodes (even if empty), timestamp should be present
+    System.out.println("After evacuation - state: " + statusAfter.getState()
+        + ", remainingPartitionCount: " + statusAfter.getRemainingPartitionCount()
+        + ", pendingMessageCount: " + statusAfter.getPendingMessageCount()
+        + ", lastActivityTimestamp: " + statusAfter.getLastActivityTimestamp());
+
+    // Cleanup
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.ENABLE);
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, db);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+  }
+
+  /**
+   * Test getEvacuationStatus with exclusions
+   */
+  @Test
+  public void testGetEvacuationStatusWithExclusions() throws Exception {
+    System.out.println("START testGetEvacuationStatusWithExclusions at " + new Date(System.currentTimeMillis()));
+
+    String enabledDB = "TestDB_Status_Enabled";
+    String disabledDB = "TestDB_Status_Disabled";
+
+    // Create enabled FULL_AUTO resource
+    _gSetupTool.addResourceToCluster(CLUSTER_NAME, enabledDB, _numPartitions,
+        BuiltInStateModelDefinitions.MasterSlave.name(), IdealState.RebalanceMode.FULL_AUTO.name());
+    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, enabledDB, _numReplicas);
+
+    // Create CUSTOMIZED resource that will be disabled
+    IdealState customizedIS = new IdealState(disabledDB);
+    customizedIS.setStateModelDefRef(BuiltInStateModelDefinitions.MasterSlave.name());
+    customizedIS.setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
+    customizedIS.setReplicas(String.valueOf(_numReplicas));
+    customizedIS.setNumPartitions(2);
+
+    String instanceToEvacuate = _participants[0].getInstanceName();
+    String otherInstance = _participants[1].getInstanceName();
+
+    customizedIS.setPartitionState(disabledDB + "_0", instanceToEvacuate, "MASTER");
+    customizedIS.setPartitionState(disabledDB + "_0", otherInstance, "SLAVE");
+    customizedIS.setPartitionState(disabledDB + "_1", instanceToEvacuate, "SLAVE");
+    customizedIS.setPartitionState(disabledDB + "_1", otherInstance, "MASTER");
+
+    _gSetupTool.getClusterManagementTool().addResource(CLUSTER_NAME, disabledDB, customizedIS);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    // Disable the CUSTOMIZED resource
+    _gSetupTool.getClusterManagementTool().enableResource(CLUSTER_NAME, disabledDB, false);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    // Set instance to EVACUATE
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.EVACUATE);
+
+    // Wait for enabled resource to evacuate
+    Thread.sleep(5000);
+
+    ZKHelixAdmin zkAdmin = (ZKHelixAdmin) _admin;
+
+    // Without exclusions - should be IN_PROGRESS (disabled CUSTOMIZED resource blocks)
+    EvacuationInfo statusNoExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet());
+    Assert.assertEquals(statusNoExclusions.getState(), EvacuationInfo.EvacuationState.IN_PROGRESS,
+        "Without exclusions, evacuation should be IN_PROGRESS (blocked by disabled resource)");
+    Integer remainingWithoutExclusions = statusNoExclusions.getRemainingPartitionCount();
+    Assert.assertTrue(remainingWithoutExclusions > 0, "Should have remaining partitions without exclusions");
+    System.out.println("Without exclusions - state: " + statusNoExclusions.getState()
+        + ", remainingPartitionCount: " + remainingWithoutExclusions);
+
+    // With DISABLED_RESOURCE exclusion - SHOULD be COMPLETED
+    Set<InstanceDrainExclusionType> exclusions = new HashSet<>();
+    exclusions.add(InstanceDrainExclusionType.DISABLED_RESOURCE);
+
+    EvacuationInfo statusWithExclusions = zkAdmin.getEvacuationStatus(CLUSTER_NAME, instanceToEvacuate, exclusions);
+    Assert.assertEquals(statusWithExclusions.getState(), EvacuationInfo.EvacuationState.COMPLETED,
+        "With DISABLED_RESOURCE exclusion, evacuation should be COMPLETED");
+    Integer remainingWithExclusions = statusWithExclusions.getRemainingPartitionCount();
+    Assert.assertEquals(remainingWithExclusions, Integer.valueOf(0), "remainingPartitionCount should be 0 with exclusions");
+    System.out.println("With DISABLED_RESOURCE exclusion - state: " + statusWithExclusions.getState()
+        + ", remainingPartitionCount: " + remainingWithExclusions);
+
+    // Verify that remainingPartitionCount differs based on exclusions
+    Assert.assertTrue(remainingWithoutExclusions > remainingWithExclusions,
+        "remainingPartitionCount should be higher without exclusions than with exclusions");
+
+    // Cleanup
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate, InstanceConstants.InstanceOperation.ENABLE);
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, enabledDB);
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, disabledDB);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
   }
 

@@ -303,8 +303,8 @@ public class TestCanSwapCompleteAPI extends AbstractTestClass {
         .format(CLUSTER_NAME, instanceName).post(this, empty);
     Assert.assertEquals(evac.getStatus(), Response.Status.OK.getStatusCode());
 
-    Map<String, Boolean> evacMap = (Map<String, Boolean>) OBJECT_MAPPER.readValue(evac.readEntity(String.class), Map.class);
-    Assert.assertTrue(evacMap.get("successful"), "Evacuation should have finished successfully");
+    Map<String, Object> evacMap = (Map<String, Object>) OBJECT_MAPPER.readValue(evac.readEntity(String.class), Map.class);
+    Assert.assertEquals(evacMap.get("state"), "COMPLETED", "Evacuation should have finished successfully");
   }
 
   /**

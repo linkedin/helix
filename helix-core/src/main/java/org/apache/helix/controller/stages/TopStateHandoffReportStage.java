@@ -818,9 +818,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     }
 
     // Check for message being executed on this instance for this partition
-    Map<String, Message> messages = cache.getMessages(topStateInstance);
-
-    for (Message message : messages.values()) {
+    for (Message message : cache.getMessages(topStateInstance).values()) {
       if (!resourceName.equals(message.getResourceName())) {
         continue;
       }
