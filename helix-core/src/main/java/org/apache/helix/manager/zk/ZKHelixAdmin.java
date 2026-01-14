@@ -494,8 +494,12 @@ public class ZKHelixAdmin implements HelixAdmin {
     EvacuationInfo result = new EvacuationInfo();
 
     InstanceConfig config = getInstanceConfig(clusterName, instanceName);
-    if (config == null || config.getInstanceOperation().getOperation() !=
-        InstanceConstants.InstanceOperation.EVACUATE) {
+    if (config == null) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
+      result.setReason(EvacuationInfo.ReasonCode.INSTANCE_CONFIG_NOT_FOUND);
+      return result;
+    }
+    if (config.getInstanceOperation().getOperation() != InstanceConstants.InstanceOperation.EVACUATE) {
       result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
       result.setReason(EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION);
       return result;

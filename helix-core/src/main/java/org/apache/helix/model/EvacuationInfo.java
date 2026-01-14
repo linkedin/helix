@@ -42,6 +42,7 @@ public class EvacuationInfo {
    * Enum representing reasons why evacuation may be blocked or incomplete.
    */
   public enum ReasonCode {
+    INSTANCE_CONFIG_NOT_FOUND("Instance configuration not found"),
     NOT_IN_EVACUATE_OPERATION("Instance is not in EVACUATE operation"),
     MULTIPLE_SESSIONS("Instance has multiple sessions and is carrying over from previous session");
 
