@@ -858,8 +858,11 @@ public class ZKHelixAdmin implements HelixAdmin {
               currentStates, idealStates, instanceName, allowedResources, filters);
 
       boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
-      logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
-          instanceName, clusterName, partitionsStillOnInstance.size());
+      if (hasPartitionsStillOnInstance) {
+        // Partitions are still blocking evacuation
+        logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
+            instanceName, clusterName, partitionsStillOnInstance.size());
+      }
       return hasPartitionsStillOnInstance;
     }
 
@@ -881,8 +884,11 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     // Step 6: Check if any partitions remain after exclusions
     boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
-    logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
-        instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    if (hasRemainingPartitions) {
+      // Partitions are still blocking evacuation
+      logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
+          instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    }
 
     return hasRemainingPartitions;
   }
