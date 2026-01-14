@@ -50,7 +50,6 @@ import org.apache.helix.model.Resource;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.mbeans.ResourceMonitor;
-import org.apache.helix.util.IntermediateStateCalcUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -225,10 +224,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         event.getAttribute(AttributeName.clusterStatusMonitor.name());
     List<String> failedResources = new ArrayList<>();
 
-    // TODO: Remove debugLogger after feature is stable
-    AvailabilityAwarePrioritizationDebugLogger debugLogger =
-        new AvailabilityAwarePrioritizationDebugLogger(_eventId);
-
     StateTransitionThrottleController throttleController =
         new StateTransitionThrottleController(resourceMap.keySet(), dataCache.getClusterConfig(),
             dataCache.getLiveInstances().keySet());
@@ -238,9 +233,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     Map<String, Set<Partition>> partitionsWithErrorByResource = new HashMap<>();
     collectMessagesFromResources(resourceMap, currentStateOutput, bestPossibleStateOutput,
         messageOutput, dataCache, throttleController, output, allMessages,
-        partitionsWithErrorByResource, debugLogger);
-
-    debugLogger.logMessagesCollected(allMessages.size());
+        partitionsWithErrorByResource);
 
     // Step 2: Sort messages by availability impact
     AvailabilityAwareMessageComparator comparator =
@@ -248,17 +241,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     comparator.setEventId(_eventId);
     sortMessagesByAvailabilityImpact(allMessages, comparator);
 
-    debugLogger.logMessagesSorted(
-        allMessages.stream().map(MessageWithContext::getMessage).collect(Collectors.toList()),
-        comparator);
-
     // Step 3: Process messages with throttling
     ThrottlingContext throttlingContext = new ThrottlingContext(resourceMap.keySet());
     processMessagesWithThrottling(allMessages, currentStateOutput, dataCache, throttleController,
-        partitionsWithErrorByResource, throttlingContext, debugLogger, comparator);
-
-    debugLogger.logThrottlingSummary(throttlingContext.processedCount,
-        throttlingContext.throttledCount, allMessages.size());
+        partitionsWithErrorByResource, throttlingContext);
 
     // Step 4: Build intermediate state maps for each resource
     buildIntermediateStateMaps(resourceMap, currentStateOutput, bestPossibleStateOutput,
@@ -278,8 +264,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
       ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
       IntermediateStateOutput output, List<MessageWithContext> allMessages,
-      Map<String, Set<Partition>> partitionsWithErrorByResource,
-      AvailabilityAwarePrioritizationDebugLogger debugLogger) {
+      Map<String, Set<Partition>> partitionsWithErrorByResource) {
 
     for (String resourceName : resourceMap.keySet()) {
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
@@ -313,7 +298,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         }
       }
       partitionsWithErrorByResource.put(resourceName, partitionsWithError);
-      debugLogger.logPartitionsWithError(resourceName, partitionsWithError);
 
       StateModelDefinition stateModelDef = dataCache.getStateModelDef(idealState.getStateModelDefRef());
       Map<String, List<String>> preferenceLists = bestPossibleStateOutput.getPreferenceLists(resourceName);
@@ -332,9 +316,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
               stateModelDef, preferenceList, requiredStates));
         }
       }
-
-      debugLogger.logResourceProcessingStart(resourceName, resourceMessageMap.size(),
-          resourceMessageMap.values().stream().mapToInt(List::size).sum());
     }
   }
 
@@ -393,9 +374,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   private void processMessagesWithThrottling(
       List<MessageWithContext> allMessages, CurrentStateOutput currentStateOutput,
       ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
-      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx,
-      AvailabilityAwarePrioritizationDebugLogger debugLogger,
-      AvailabilityAwareMessageComparator comparator) {
+      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx) {
 
     Map<String, Map<String, String>> derivedCurrentStateMaps = new HashMap<>();
 
@@ -427,9 +406,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       } else {
         ctx.throttledCount++;
       }
-
-      debugLogger.logMessageProcessed(message, wasThrottled, rebalanceType.name(),
-          comparator.getAvailabilityImpactForLogging(message));
     }
   }
 
@@ -509,9 +485,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         PartitionStateMap intermediatePartitionStateMap =
             new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
 
-        IntermediateStateCalcUtil.applyPendingMessages(currentStateOutput, resourceName,
+        applyPendingMessages(currentStateOutput, resourceName,
             intermediatePartitionStateMap);
-        IntermediateStateCalcUtil.applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
+        applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
             intermediatePartitionStateMap);
 
         output.setState(resourceName, intermediatePartitionStateMap);
@@ -876,9 +852,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // TODO: We may need to optimize it to be async compute for intermediate state output.
     PartitionStateMap intermediatePartitionStateMap =
         new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
-    IntermediateStateCalcUtil.applyPendingMessages(currentStateOutput, resourceName,
+    applyPendingMessages(currentStateOutput, resourceName,
         intermediatePartitionStateMap);
-    IntermediateStateCalcUtil.applyNonThrottledMessages(resourceMessageMap,
+    applyNonThrottledMessages(resourceMessageMap,
         intermediatePartitionStateMap);
 
     if (!messagesForRecovery.isEmpty()) {
@@ -1337,6 +1313,52 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   }
 
   /**
-   * Generate the IntermediateStateMap from pending messages + message generated.
+   * Apply pending messages from CurrentStateOutput to the intermediate partition state map.
+   * @param currentStateOutput current state output containing pending messages
+   * @param resourceName resource name
+   * @param intermediatePartitionStateMap intermediate partition state map to update
    */
+  private void applyPendingMessages(CurrentStateOutput currentStateOutput, String resourceName,
+      PartitionStateMap intermediatePartitionStateMap) {
+    Map<Partition, Map<String, Message>> pendingMessageMap =
+        currentStateOutput.getPendingMessageMap(resourceName);
+    if (pendingMessageMap != null) {
+      for (Map.Entry<Partition, Map<String, Message>> partitionEntry : pendingMessageMap.entrySet()) {
+        Partition partition = partitionEntry.getKey();
+        Map<String, Message> instanceMessageMap = partitionEntry.getValue();
+        if (instanceMessageMap != null) {
+          for (Map.Entry<String, Message> instanceEntry : instanceMessageMap.entrySet()) {
+            String instance = instanceEntry.getKey();
+            Message message = instanceEntry.getValue();
+            if (message != null && message.getToState() != null) {
+              intermediatePartitionStateMap.setState(partition, instance, message.getToState());
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Apply non-throttled messages to the intermediate partition state map.
+   * @param resourceMessageMap map of partition to list of non-throttled messages
+   * @param intermediatePartitionStateMap intermediate partition state map to update
+   */
+  private void applyNonThrottledMessages(Map<Partition, List<Message>> resourceMessageMap,
+      PartitionStateMap intermediatePartitionStateMap) {
+    if (resourceMessageMap != null) {
+      for (Map.Entry<Partition, List<Message>> entry : resourceMessageMap.entrySet()) {
+        Partition partition = entry.getKey();
+        List<Message> messages = entry.getValue();
+        if (messages != null) {
+          for (Message message : messages) {
+            if (message != null && message.getTgtName() != null && message.getToState() != null) {
+              intermediatePartitionStateMap.setState(partition, message.getTgtName(),
+                  message.getToState());
+            }
+          }
+        }
+      }
+    }
+  }
 }
