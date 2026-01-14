@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
  */
 public class ConstraintBasedAlgorithmFactory {
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithmFactory.class);
-  private static final int DEFAULT_CONSTRAINT_ALGORITHM_PARALLELISM = 4;
+  private static final int DEFAULT_CONSTRAINT_ALGORITHM_PARALLELISM = 8;
 
   // Shared ForkJoinPool reused across all ConstraintBasedAlgorithm instances
   private static final AtomicReference<ForkJoinPool> SHARED_POOL_REF = new AtomicReference<>();
