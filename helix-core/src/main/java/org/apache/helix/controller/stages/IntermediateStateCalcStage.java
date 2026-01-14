@@ -50,6 +50,7 @@ import org.apache.helix.model.Resource;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.mbeans.ResourceMonitor;
+import org.apache.helix.util.IntermediateStateCalcUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -188,20 +189,12 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       }
 
       Resource resource = resourceMap.get(resourceName);
-      IdealState idealState = dataCache.getIdealState(resourceName);
-      if (idealState == null) {
-        // If IdealState is null, use an empty one
-        LogUtil.logInfo(logger, _eventId, String
-            .format("IdealState for resource %s does not exist; resource may not exist anymore",
-                resourceName));
-        idealState = new IdealState(resourceName);
-        idealState.setStateModelDefRef(resource.getStateModelDefRef());
-      }
+      IdealState idealState = getIdealStateOrDefault(resourceName, resource, dataCache);
 
       try {
         output.setState(resourceName,
             computeIntermediatePartitionState(dataCache, clusterStatusMonitor, idealState,
-                resourceMap.get(resourceName), currentStateOutput,
+                resource, currentStateOutput,
                 bestPossibleStateOutput.getPartitionStateMap(resourceName),
                 bestPossibleStateOutput.getPreferenceLists(resourceName), throttleController,
                 messageOutput.getResourceMessageMap(resourceName)));
@@ -212,12 +205,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       }
     }
 
-    if (clusterStatusMonitor != null) {
-      clusterStatusMonitor.setResourceRebalanceStates(failedResources,
-          ResourceMonitor.RebalanceStatus.INTERMEDIATE_STATE_CAL_FAILED);
-      clusterStatusMonitor
-          .setResourceRebalanceStates(output.resourceSet(), ResourceMonitor.RebalanceStatus.NORMAL);
-    }
+    updateClusterStatusMonitor(clusterStatusMonitor, failedResources, output);
 
     return output;
   }
@@ -302,14 +290,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       }
 
       Resource resource = resourceMap.get(resourceName);
-      IdealState idealState = dataCache.getIdealState(resourceName);
-      if (idealState == null) {
-        LogUtil.logInfo(logger, _eventId, String
-            .format("IdealState for resource %s does not exist; resource may not exist anymore",
-                resourceName));
-        idealState = new IdealState(resourceName);
-        idealState.setStateModelDefRef(resource.getStateModelDefRef());
-      }
+      IdealState idealState = getIdealStateOrDefault(resourceName, resource, dataCache);
 
       // Skip non-FULL_AUTO resources
       if (!IdealState.RebalanceMode.FULL_AUTO.equals(idealState.getRebalanceMode())) {
@@ -528,8 +509,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         PartitionStateMap intermediatePartitionStateMap =
             new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
 
-        applyPendingMessages(currentStateOutput, resourceName, intermediatePartitionStateMap);
-        applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
+        IntermediateStateCalcUtil.applyPendingMessages(currentStateOutput, resourceName,
+            intermediatePartitionStateMap);
+        IntermediateStateCalcUtil.applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
             intermediatePartitionStateMap);
 
         output.setState(resourceName, intermediatePartitionStateMap);
@@ -541,44 +523,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         LogUtil.logInfo(logger, _eventId,
             "Failed to calculate intermediate partition states for resource " + resourceName, ex);
         failedResources.add(resourceName);
-      }
-    }
-  }
-
-  /**
-   * Applies pending messages to the intermediate partition state map.
-   */
-  private void applyPendingMessages(CurrentStateOutput currentStateOutput, String resourceName,
-      PartitionStateMap intermediatePartitionStateMap) {
-    Map<Partition, Map<String, Message>> pendingMessageMap =
-        currentStateOutput.getPendingMessageMap(resourceName);
-    if (pendingMessageMap != null) {
-      for (Map.Entry<Partition, Map<String, Message>> entry : pendingMessageMap.entrySet()) {
-        entry.getValue().forEach((key, value) -> {
-          if (!value.getToState().equals(HelixDefinedState.DROPPED.name())) {
-            intermediatePartitionStateMap.setState(entry.getKey(), value.getTgtName(), value.getToState());
-          } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
-            intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(value.getTgtName());
-          }
-        });
-      }
-    }
-  }
-
-  /**
-   * Applies non-throttled messages to the intermediate partition state map.
-   */
-  private void applyNonThrottledMessages(Map<Partition, List<Message>> updatedMessageMap,
-      PartitionStateMap intermediatePartitionStateMap) {
-    if (updatedMessageMap != null) {
-      for (Map.Entry<Partition, List<Message>> entry : updatedMessageMap.entrySet()) {
-        entry.getValue().forEach(msg -> {
-          if (!msg.getToState().equals(HelixDefinedState.DROPPED.name())) {
-            intermediatePartitionStateMap.setState(entry.getKey(), msg.getTgtName(), msg.getToState());
-          } else if (intermediatePartitionStateMap.getStateMap().containsKey(entry.getKey())) {
-            intermediatePartitionStateMap.getStateMap().get(entry.getKey()).remove(msg.getTgtName());
-          }
-        });
       }
     }
   }
@@ -654,6 +598,28 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     StateModelDefinition getStateModelDef() { return _stateModelDef; }
     List<String> getPreferenceList() { return _preferenceList; }
     Map<String, Integer> getRequiredStates() { return _requiredStates; }
+  }
+
+  /**
+   * Gets the IdealState for a resource, creating a default one if it doesn't exist.
+   * This is a common pattern used by both resource-priority and availability-aware computation.
+   *
+   * @param resourceName the resource name
+   * @param resource the resource object
+   * @param dataCache the data cache
+   * @return the IdealState for the resource (never null)
+   */
+  private IdealState getIdealStateOrDefault(String resourceName, Resource resource,
+      ResourceControllerDataProvider dataCache) {
+    IdealState idealState = dataCache.getIdealState(resourceName);
+    if (idealState == null) {
+      LogUtil.logInfo(logger, _eventId, String
+          .format("IdealState for resource %s does not exist; resource may not exist anymore",
+              resourceName));
+      idealState = new IdealState(resourceName);
+      idealState.setStateModelDefRef(resource.getStateModelDefRef());
+    }
+    return idealState;
   }
 
   /**
@@ -910,8 +876,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // TODO: We may need to optimize it to be async compute for intermediate state output.
     PartitionStateMap intermediatePartitionStateMap =
         new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
-    computeIntermediateMap(intermediatePartitionStateMap,
-        currentStateOutput.getPendingMessageMap(resourceName), resourceMessageMap);
+    IntermediateStateCalcUtil.applyPendingMessages(currentStateOutput, resourceName,
+        intermediatePartitionStateMap);
+    IntermediateStateCalcUtil.applyNonThrottledMessages(resourceMessageMap,
+        intermediatePartitionStateMap);
 
     if (!messagesForRecovery.isEmpty()) {
       LogUtil.logInfo(logger, _eventId, String
@@ -1371,27 +1339,4 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   /**
    * Generate the IntermediateStateMap from pending messages + message generated.
    */
-  private void computeIntermediateMap(PartitionStateMap intermediateStateMap,
-      Map<Partition, Map<String, Message>> pendingMessageMap,
-      Map<Partition, List<Message>> resourceMessageMap) {
-    for (Map.Entry<Partition, Map<String, Message>> entry : pendingMessageMap.entrySet()) {
-      entry.getValue().forEach((key, value) -> {
-        if (!value.getToState().equals(HelixDefinedState.DROPPED.name())) {
-          intermediateStateMap.setState(entry.getKey(), value.getTgtName(), value.getToState());
-        } else if (intermediateStateMap.getStateMap().containsKey(entry.getKey())) {
-          intermediateStateMap.getStateMap().get(entry.getKey()).remove(value.getTgtName());
-        }
-      });
-    }
-
-    for (Map.Entry<Partition, List<Message>> entry : resourceMessageMap.entrySet()) {
-      entry.getValue().forEach(e -> {
-        if (!e.getToState().equals(HelixDefinedState.DROPPED.name())) {
-          intermediateStateMap.setState(entry.getKey(), e.getTgtName(), e.getToState());
-        } else {
-          intermediateStateMap.getStateMap().get(entry.getKey()).remove(e.getTgtName());
-        }
-      });
-    }
-  }
 }
