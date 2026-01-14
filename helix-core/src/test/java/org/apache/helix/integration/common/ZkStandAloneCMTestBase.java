@@ -40,11 +40,11 @@ import org.testng.annotations.BeforeClass;
  */
 
 public class ZkStandAloneCMTestBase extends ZkTestBase {
-  protected static final int NODE_NR = 5;
+  protected static final int NODE_NR = 1000;
   protected static final int START_PORT = 12918;
   protected static final String STATE_MODEL = "MasterSlave";
   protected static final String TEST_DB = "TestDB";
-  protected static final int _PARTITIONS = 20;
+  protected static final int _PARTITIONS = 1000;
 
   protected HelixManager _manager;
   protected final String CLASS_NAME = getShortClassName();
