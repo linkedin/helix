@@ -240,9 +240,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         event.getAttribute(AttributeName.clusterStatusMonitor.name());
     List<String> failedResources = new ArrayList<>();
 
-
-    Map<String, Integer> resourcePriorityMap = Collections.emptyMap();
-
     // Collect all messages across all resources with their metadata
     List<MessageWithContext> allMessages = new ArrayList<>();
     Map<String, Set<Partition>> partitionsWithErrorByResource = new HashMap<>();
@@ -319,23 +316,23 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       IdealState idealState = dataCache.getIdealState(msg.getResourceName());
       int minActive = idealState != null ? idealState.getMinActiveReplicas() : -1;
       int targetReplicas = idealState != null ? idealState.getReplicaCount(dataCache.getEnabledLiveInstances().size()) : -1;
-      
+
       LogUtil.logInfo(logger, _eventId, String.format(
           "  [%d] BEFORE_SORT: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, " +
           "CurrentActiveReplicas=%d, MinActive=%d, TargetReplicas=%d",
-          i, msg.getResourceName(), msg.getPartitionName(), 
+          i, msg.getResourceName(), msg.getPartitionName(),
           msg.getFromState(), msg.getToState(), msg.getTgtName(),
           activeReplicas, minActive, targetReplicas));
     }
-    
+
     // Log messages grouped by target instance BEFORE sorting
     logMessagesByInstance(allMessages, "BEFORE_SORT", null);
 
     // Sort all messages by availability impact
     AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(dataCache, currentStateOutput, resourcePriorityMap);
+        new AvailabilityAwareMessageComparator(dataCache, currentStateOutput);
     comparator.setEventId(_eventId); // Pass event ID for logging
-    
+
     // CRITICAL: Pre-sort messages in deterministic order BEFORE computing impact scores.
     // This ensures that for multiple messages on the same partition, they get assigned
     // consistent messageIndex values (0, 1, 2...) based on their deterministic order.
@@ -351,16 +348,16 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       // For same partition, sort by target instance for deterministic ordering
       return msg1.getTgtName().compareTo(msg2.getTgtName());
     });
-    
+
     // Pre-compute impact scores for ALL messages in this deterministic order.
     // This populates the cache so that subsequent sorting uses consistent scores.
     for (MessageWithContext msgCtx : allMessages) {
       comparator.getAvailabilityImpact(msgCtx.getMessage());
     }
-    
+
     // Reset message index tracker after pre-computation so it doesn't affect logging
     comparator.resetMessageIndexTracker();
-    
+
     // Now sort by actual impact scores (all scores are already cached)
     allMessages.sort((m1, m2) -> comparator.compare(m1.getMessage(), m2.getMessage()));
 
@@ -371,13 +368,13 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       MessageWithContext msgCtx = allMessages.get(i);
       Message msg = msgCtx.getMessage();
       double impactScore = comparator.getAvailabilityImpactForLogging(msg);
-      
+
       LogUtil.logInfo(logger, _eventId, String.format(
           "  [%d] AFTER_SORT: Resource=%s, Partition=%s, Transition=%s->%s, Target=%s, ImpactScore=%s",
           i, msg.getResourceName(), msg.getPartitionName(),
           msg.getFromState(), msg.getToState(), msg.getTgtName(), formatImpactScore(impactScore)));
     }
-    
+
     // Log messages grouped by target instance AFTER sorting
     logMessagesByInstance(allMessages, "AFTER_SORT", comparator);
 
@@ -405,7 +402,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     LogUtil.logInfo(logger, _eventId, "=== AVAILABILITY-AWARE PRIORITIZATION: Processing messages in priority order ===");
     int processedCount = 0;
     int throttledCount = 0;
-    
+
     for (int msgIndex = 0; msgIndex < allMessages.size(); msgIndex++) {
       MessageWithContext msgCtx = allMessages.get(msgIndex);
       Message message = msgCtx.getMessage();
@@ -503,7 +500,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       Set<String> loadThrottled = messagesThrottledForLoadByResource.get(resName);
       boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
           || (loadThrottled != null && loadThrottled.contains(msg.getId()));
-      
+
       if (!isThrottled) {
         double impactScore = comparator.getAvailabilityImpactForLogging(msg);
         LogUtil.logInfo(logger, _eventId, String.format(
@@ -528,7 +525,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       Set<String> loadThrottled = messagesThrottledForLoadByResource.get(resName);
       boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
           || (loadThrottled != null && loadThrottled.contains(msg.getId()));
-      
+
       if (isThrottled) {
         double impactScore = comparator.getAvailabilityImpactForLogging(msg);
         String throttleReason = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
@@ -544,7 +541,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     if (throttledIndex == 0) {
       LogUtil.logInfo(logger, _eventId, "  (No messages throttled - all dispatched)");
     }
-    
+
     // Log messages grouped by target instance AFTER throttling
     logMessagesByInstanceAfterThrottling(allMessages, comparator,
         messagesThrottledForRecoveryByResource, messagesThrottledForLoadByResource);
@@ -673,8 +670,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     }
     int count = 0;
     for (String state : currentStateMap.values()) {
-      if (state != null && !state.equalsIgnoreCase("ERROR") 
-          && !state.equalsIgnoreCase("OFFLINE") 
+      if (state != null && !state.equalsIgnoreCase("ERROR")
+          && !state.equalsIgnoreCase("OFFLINE")
           && !state.equalsIgnoreCase("DROPPED")
           && !state.isEmpty()) {
         count++;
@@ -712,20 +709,20 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       String target = msgCtx.getMessage().getTgtName();
       messagesByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
     }
-    
+
     LogUtil.logInfo(logger, _eventId, String.format(
         "=== MESSAGES BY INSTANCE [%s]: %d instances, %d total messages ===",
         stage, messagesByInstance.size(), messages.size()));
-    
+
     // Sort instances for consistent output
     List<String> sortedInstances = new ArrayList<>(messagesByInstance.keySet());
     Collections.sort(sortedInstances);
-    
+
     for (String instance : sortedInstances) {
       List<MessageWithContext> instanceMessages = messagesByInstance.get(instance);
       StringBuilder sb = new StringBuilder();
       sb.append(String.format("  Instance=%s, MessageCount=%d: ", instance, instanceMessages.size()));
-      
+
       // Build compact message list
       List<String> msgSummaries = new ArrayList<>();
       for (MessageWithContext msgCtx : instanceMessages) {
@@ -733,18 +730,18 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         String summary;
         if (comparator != null) {
           double impact = comparator.getAvailabilityImpactForLogging(msg);
-          summary = String.format("%s/%s(%s->%s,%s)", 
+          summary = String.format("%s/%s(%s->%s,%s)",
               msg.getResourceName(), msg.getPartitionName(),
               msg.getFromState(), msg.getToState(), formatImpactScore(impact));
         } else {
-          summary = String.format("%s/%s(%s->%s)", 
+          summary = String.format("%s/%s(%s->%s)",
               msg.getResourceName(), msg.getPartitionName(),
               msg.getFromState(), msg.getToState());
         }
         msgSummaries.add(summary);
       }
       sb.append(String.join(", ", msgSummaries));
-      
+
       LogUtil.logInfo(logger, _eventId, sb.toString());
     }
   }
@@ -757,50 +754,50 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       AvailabilityAwareMessageComparator comparator,
       Map<String, Set<String>> throttledForRecovery,
       Map<String, Set<String>> throttledForLoad) {
-    
+
     // Group messages by target instance, separating dispatched and throttled
     Map<String, List<MessageWithContext>> dispatchedByInstance = new HashMap<>();
     Map<String, List<MessageWithContext>> throttledByInstance = new HashMap<>();
-    
+
     for (MessageWithContext msgCtx : messages) {
       Message msg = msgCtx.getMessage();
       String target = msg.getTgtName();
       String resourceName = msg.getResourceName();
-      
+
       Set<String> recoveryThrottled = throttledForRecovery.get(resourceName);
       Set<String> loadThrottled = throttledForLoad.get(resourceName);
       boolean isThrottled = (recoveryThrottled != null && recoveryThrottled.contains(msg.getId()))
           || (loadThrottled != null && loadThrottled.contains(msg.getId()));
-      
+
       if (isThrottled) {
         throttledByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
       } else {
         dispatchedByInstance.computeIfAbsent(target, k -> new ArrayList<>()).add(msgCtx);
       }
     }
-    
+
     // Get all unique instances
     Set<String> allInstances = new HashSet<>();
     allInstances.addAll(dispatchedByInstance.keySet());
     allInstances.addAll(throttledByInstance.keySet());
     List<String> sortedInstances = new ArrayList<>(allInstances);
     Collections.sort(sortedInstances);
-    
+
     int totalDispatched = dispatchedByInstance.values().stream().mapToInt(List::size).sum();
     int totalThrottled = throttledByInstance.values().stream().mapToInt(List::size).sum();
-    
+
     LogUtil.logInfo(logger, _eventId, String.format(
         "=== MESSAGES BY INSTANCE [AFTER_THROTTLING]: %d instances, Dispatched=%d, Throttled=%d ===",
         allInstances.size(), totalDispatched, totalThrottled));
-    
+
     for (String instance : sortedInstances) {
       List<MessageWithContext> dispatched = dispatchedByInstance.getOrDefault(instance, Collections.emptyList());
       List<MessageWithContext> throttled = throttledByInstance.getOrDefault(instance, Collections.emptyList());
-      
+
       StringBuilder sb = new StringBuilder();
-      sb.append(String.format("  Instance=%s: DISPATCH=%d, THROTTLED=%d", 
+      sb.append(String.format("  Instance=%s: DISPATCH=%d, THROTTLED=%d",
           instance, dispatched.size(), throttled.size()));
-      
+
       // Show dispatched messages
       if (!dispatched.isEmpty()) {
         sb.append(" | Dispatching: ");
@@ -808,12 +805,12 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         for (MessageWithContext msgCtx : dispatched) {
           Message msg = msgCtx.getMessage();
           double impact = comparator.getAvailabilityImpactForLogging(msg);
-          dispatchSummaries.add(String.format("%s/%s(%s)", 
+          dispatchSummaries.add(String.format("%s/%s(%s)",
               msg.getResourceName(), msg.getPartitionName(), formatImpactScore(impact)));
         }
         sb.append(String.join(", ", dispatchSummaries));
       }
-      
+
       // Show throttled messages
       if (!throttled.isEmpty()) {
         sb.append(" | Throttled: ");
@@ -821,12 +818,12 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         for (MessageWithContext msgCtx : throttled) {
           Message msg = msgCtx.getMessage();
           double impact = comparator.getAvailabilityImpactForLogging(msg);
-          throttleSummaries.add(String.format("%s/%s(%s)", 
+          throttleSummaries.add(String.format("%s/%s(%s)",
               msg.getResourceName(), msg.getPartitionName(), formatImpactScore(impact)));
         }
         sb.append(String.join(", ", throttleSummaries));
       }
-      
+
       LogUtil.logInfo(logger, _eventId, sb.toString());
     }
   }

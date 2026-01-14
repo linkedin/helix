@@ -43,7 +43,6 @@ import org.slf4j.LoggerFactory;
  *   <li>Messages for partitions missing top state (highest priority)</li>
  *   <li>Top state handoff downward transitions (MASTER → SLAVE) - high priority to prevent starvation</li>
  *   <li>Higher availability impact score (calculated based on minActiveReplicas/effectiveReplicaCount)</li>
- *   <li>Resource priority (higher priority resources first)</li>
  *   <li>Deterministic ordering (resource name, partition name) for consistent behavior</li>
  * </ol>
  */
@@ -58,7 +57,6 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
 
   private final ResourceControllerDataProvider _cache;
   private final CurrentStateOutput _currentStateOutput;
-  private final Map<String, Integer> _resourcePriorityMap;
   // Cache for computed availability impact scores to avoid recomputation
   private final Map<String, Double> _availabilityImpactCache;
   // Cache for partition's current active replica count
@@ -73,19 +71,17 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
   private boolean _detailedLoggingEnabled = false;
 
   /**
-   * Creates a new AvailabilityAwareMessageComparator.
+   * Creates a new AvailabilityAwareMessageComparator for availability-aware prioritization.
+   * Messages are sorted purely by their availability impact score.
    *
    * @param cache the resource controller data provider containing cluster metadata
    * @param currentStateOutput the current state output containing current states and pending messages
-   * @param resourcePriorityMap map of resource name to priority value (higher value = higher priority)
    */
   public AvailabilityAwareMessageComparator(
       ResourceControllerDataProvider cache,
-      CurrentStateOutput currentStateOutput,
-      Map<String, Integer> resourcePriorityMap) {
+      CurrentStateOutput currentStateOutput) {
     _cache = cache;
     _currentStateOutput = currentStateOutput;
-    _resourcePriorityMap = resourcePriorityMap;
     _availabilityImpactCache = new HashMap<>();
     _currentActiveReplicasCache = new HashMap<>();
     _pendingMessageCountCache = new HashMap<>();
@@ -124,21 +120,13 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
       return impactComparison;
     }
 
-    // 2. Resource priority as tiebreaker (higher priority = higher value, sort descending)
-    int priority1 = _resourcePriorityMap.getOrDefault(m1.getResourceName(), Integer.MIN_VALUE);
-    int priority2 = _resourcePriorityMap.getOrDefault(m2.getResourceName(), Integer.MIN_VALUE);
-    int resourcePriorityComparison = Integer.compare(priority2, priority1);
-    if (resourcePriorityComparison != 0) {
-      return resourcePriorityComparison;
-    }
-
-    // 3. Deterministic ordering by resource name
+    // 2. Deterministic ordering by resource name
     int resourceComparison = m1.getResourceName().compareTo(m2.getResourceName());
     if (resourceComparison != 0) {
       return resourceComparison;
     }
 
-    // 4. Deterministic ordering by partition name
+    // 3. Deterministic ordering by partition name
     return m1.getPartitionName().compareTo(m2.getPartitionName());
   }
 
