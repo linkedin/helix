@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.IdealState;
@@ -211,15 +212,17 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
     int count = 0;
     Map<String, Message> pendingMsgs =
         _currentStateOutput.getPendingMessageMap(resource, new Partition(partition));
-    if (pendingMsgs != null) {
-      pendingMsgs.values().stream()
-          .filter(msg -> isUpwardTransition(msg.getFromState(), msg.getToState(),
-              _cache.getStateModelDef(_cache.getIdealState(resource).getStateModelDefRef())))
-          .forEach(msg -> {});
-      count = (int) pendingMsgs.values().stream()
-          .filter(msg -> isUpwardTransition(msg.getFromState(), msg.getToState(),
-              _cache.getStateModelDef(_cache.getIdealState(resource).getStateModelDefRef())))
-          .count();
+
+    if (pendingMsgs != null && !pendingMsgs.isEmpty()) {
+      IdealState idealState = _cache.getIdealState(resource);
+      if (idealState != null) {
+        StateModelDefinition stateModelDef = _cache.getStateModelDef(idealState.getStateModelDefRef());
+        if (stateModelDef != null) {
+          count = (int) pendingMsgs.values().stream()
+              .filter(msg -> isUpwardTransition(msg.getFromState(), msg.getToState(), stateModelDef))
+              .count();
+        }
+      }
     }
 
     _pendingMessageCountCache.put(key, count);
@@ -255,10 +258,10 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
 
   private boolean isActiveState(String state) {
     return state != null
-        && !state.equalsIgnoreCase("ERROR")
-        && !state.equalsIgnoreCase("OFFLINE")
-        && !state.equalsIgnoreCase("DROPPED")
-        && !state.isEmpty();
+        && !state.isEmpty()
+        && !state.equalsIgnoreCase(HelixDefinedState.ERROR.name())
+        && !state.equalsIgnoreCase(HelixDefinedState.DROPPED.name())
+        && !state.equalsIgnoreCase("OFFLINE");
   }
 
   private void logDebug(Message msg, String reason, double impact, String detail) {
@@ -286,5 +289,13 @@ public class AvailabilityAwareMessageComparator implements Comparator<Message> {
         message.getFromState(),
         message.getToState(),
         message.getTgtName());
+  }
+
+  public double getAvailabilityImpact(Message message) {
+    return computeAvailabilityImpact(message);
+  }
+
+  public void resetMessageIndexTracker() {
+    _messageIndexTracker.clear();
   }
 }
