@@ -142,7 +142,7 @@ public class ConstraintBasedAlgorithmFactory {
           parallelism,
           ForkJoinPool.defaultForkJoinWorkerThreadFactory,
           null,
-          true
+          false
       );
       SHARED_POOL_REF.set(pool);
       return pool;

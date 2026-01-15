@@ -27,6 +27,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
@@ -127,7 +129,7 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,
       List<AssignableNode> assignableNodes, ClusterContext clusterContext, Set<String> busyInstances,
-      OptimalAssignment optimalAssignment) {
+      OptimalAssignment optimalAssignment) throws HelixRebalanceException {
     Map<AssignableNode, List<HardConstraint>> hardConstraintFailures = new ConcurrentHashMap<>(assignableNodes.size());
     
     // Execute first parallelStream within custom ForkJoinPool context
@@ -147,7 +149,16 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
           return isValid;
         }).collect(Collectors.toList())
     );
-    List<AssignableNode> candidateNodes = filterTask.join();
+    
+    List<AssignableNode> candidateNodes;
+    try {
+      candidateNodes = filterTask.join();
+    } catch (CancellationException | CompletionException e) {
+      throw new HelixRebalanceException(
+          String.format("Failed to evaluate hard constraints for replica %s: %s",
+              replica.getPartitionName(), e.getMessage()),
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+    }
 
     if (candidateNodes.isEmpty()) {
       LOG.info("Found no eligible candidate nodes. Enabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
@@ -180,7 +191,15 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
               }
             }).map(Map.Entry::getKey)
     );
-    return scoreTask.join();
+    
+    try {
+      return scoreTask.join();
+    } catch (CancellationException | CompletionException e) {
+      throw new HelixRebalanceException(
+          String.format("Failed to evaluate soft constraints for replica %s: %s",
+              replica.getPartitionName(), e.getMessage()),
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+    }
   }
 
   private double getAssignmentNormalizedScore(AssignableNode node, AssignableReplica replica,
