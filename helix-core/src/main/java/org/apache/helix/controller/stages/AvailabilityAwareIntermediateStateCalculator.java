@@ -45,564 +45,480 @@ import org.slf4j.LoggerFactory;
 
 
 /**
- * Availability-aware cross-resource intermediate state calculator.
+ * Availability-aware intermediate state calculator that prioritizes messages across all resources
+ * based on their availability impact.
  *
- * <p>This implementation collects all messages across all resources and sorts them
- * by availability impact, then processes them in priority order with throttling
- * applied globally. This ensures that partitions with the highest availability need
- * get priority over partitions that are closer to their target replica count.
- *
- * <p>Key characteristics:
+ * <p>Unlike the traditional resource-priority approach, this calculator:
  * <ul>
- *   <li>Messages are sorted by availability impact score across all resources</li>
- *   <li>Partitions missing top state get highest priority</li>
- *   <li>Top state handoff (downward transitions from top state) get high priority</li>
- *   <li>Global throttling is applied across all messages regardless of resource</li>
+ *   <li>Collects ALL messages from ALL FULL_AUTO resources first</li>
+ *   <li>Sorts them globally by availability impact (partitions missing top state get priority)</li>
+ *   <li>Applies throttling in sorted order, so high-impact transitions get quota first</li>
  * </ul>
  *
- * <p>This strategy is enabled by setting the cluster config flag
- * {@code isAvailabilityAwarePrioritizationEnabled} to true.
+ * <p>Enabled via cluster config: {@code isAvailabilityAwarePrioritizationEnabled = true}
  */
 public class AvailabilityAwareIntermediateStateCalculator implements IntermediateStateComputationStrategy {
-  private static final Logger LOG =
-      LoggerFactory.getLogger(AvailabilityAwareIntermediateStateCalculator.class.getName());
 
+  private static final Logger LOG = LoggerFactory.getLogger(AvailabilityAwareIntermediateStateCalculator.class);
+
+  // Instance variables to reduce parameter passing
   private String _eventId;
+  private ResourceControllerDataProvider _dataCache;
+  private CurrentStateOutput _currentStateOutput;
+  private StateTransitionThrottleController _throttleController;
+
+  // Tracking maps for throttling and monitoring
+  private Map<String, Set<Partition>> _partitionsWithErrorByResource;
+  private Map<String, Set<String>> _recoveryMessagesByResource;
+  private Map<String, Set<String>> _loadMessagesByResource;
+  private Map<String, Set<String>> _throttledRecoveryByResource;
+  private Map<String, Set<String>> _throttledLoadByResource;
+  private Map<String, Map<Partition, List<Message>>> _approvedMessagesByResource;
 
   @Override
   public IntermediateStateOutput compute(ClusterEvent event, Map<String, Resource> resourceMap,
       CurrentStateOutput currentStateOutput, BestPossibleStateOutput bestPossibleStateOutput,
       MessageOutput messageOutput, ResourceControllerDataProvider dataCache) {
 
+    // Initialize instance state
     _eventId = event.getEventId();
+    _dataCache = dataCache;
+    _currentStateOutput = currentStateOutput;
+    _throttleController = new StateTransitionThrottleController(
+        resourceMap.keySet(), dataCache.getClusterConfig(), dataCache.getLiveInstances().keySet());
+
+    initializeTrackingMaps(resourceMap.keySet());
+
     IntermediateStateOutput output = new IntermediateStateOutput();
-    ClusterStatusMonitor clusterStatusMonitor =
-        event.getAttribute(AttributeName.clusterStatusMonitor.name());
     List<String> failedResources = new ArrayList<>();
 
-    StateTransitionThrottleController throttleController =
-        new StateTransitionThrottleController(resourceMap.keySet(), dataCache.getClusterConfig(),
-            dataCache.getLiveInstances().keySet());
+    // ========== STEP 1: Collect all messages ==========
+    List<MessageContext> allMessages = collectMessages(resourceMap, bestPossibleStateOutput, messageOutput, output);
 
-    // Step 1: Collect messages from all FULL_AUTO resources
-    List<MessageWithContext> allMessages = new ArrayList<>();
-    Map<String, Set<Partition>> partitionsWithErrorByResource = new HashMap<>();
-    collectMessagesFromResources(resourceMap, currentStateOutput, bestPossibleStateOutput,
-        messageOutput, dataCache, throttleController, output, allMessages,
-        partitionsWithErrorByResource);
+    // ========== STEP 2: Sort by availability impact ==========
+    sortByAvailabilityImpact(allMessages);
 
-    // Step 2: Sort messages by availability impact
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(dataCache, currentStateOutput);
+    // ========== STEP 3: Process with throttling ==========
+    processWithThrottling(allMessages);
 
-    sortMessagesByAvailabilityImpact(allMessages, comparator);
+    // ========== STEP 4: Build intermediate state ==========
+    buildIntermediateState(resourceMap, bestPossibleStateOutput, messageOutput, output, failedResources);
 
-    // Step 3: Process messages with throttling
-    ThrottlingContext throttlingContext = new ThrottlingContext(resourceMap.keySet());
-    processMessagesWithThrottling(allMessages, currentStateOutput, dataCache, throttleController,
-        partitionsWithErrorByResource, throttlingContext);
-
-    // Step 4: Build intermediate state maps for each resource
-    buildIntermediateStateMaps(resourceMap, currentStateOutput, bestPossibleStateOutput,
-        messageOutput, dataCache, output, clusterStatusMonitor, failedResources,
-        throttlingContext, partitionsWithErrorByResource);
-
-    if (clusterStatusMonitor != null) {
-      clusterStatusMonitor.setResourceRebalanceStates(failedResources,
-          ResourceMonitor.RebalanceStatus.INTERMEDIATE_STATE_CAL_FAILED);
-      clusterStatusMonitor.setResourceRebalanceStates(output.resourceSet(),
-          ResourceMonitor.RebalanceStatus.NORMAL);
-    }
+    // Update monitoring
+    updateMonitoring(event, failedResources, output);
 
     return output;
   }
 
-  /**
-   * Collects messages from all FULL_AUTO resources for availability-aware processing.
-   */
-  private void collectMessagesFromResources(
-      Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
-      BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
-      ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
-      IntermediateStateOutput output, List<MessageWithContext> allMessages,
-      Map<String, Set<Partition>> partitionsWithErrorByResource) {
+  // ===================================================================================
+  // STEP 1: Message Collection
+  // ===================================================================================
 
-    for (String resourceName : resourceMap.keySet()) {
+  private List<MessageContext> collectMessages(Map<String, Resource> resourceMap,
+      BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
+      IntermediateStateOutput output) {
+
+    List<MessageContext> allMessages = new ArrayList<>();
+
+    for (Map.Entry<String, Resource> entry : resourceMap.entrySet()) {
+      String resourceName = entry.getKey();
+      Resource resource = entry.getValue();
+
+      // Skip if no best possible state available
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
-        LogUtil.logInfo(LOG, _eventId, String.format(
-            "Skip calculating intermediate state for resource %s because the best possible state is not available.",
-            resourceName));
+        LogUtil.logInfo(LOG, _eventId, "Skipping resource " + resourceName + ": no best possible state");
         continue;
       }
 
-      Resource resource = resourceMap.get(resourceName);
-      IdealState idealState = getIdealStateOrDefault(resourceName, resource, dataCache);
+      IdealState idealState = _dataCache.getIdealState(resourceName);
+      if (idealState == null) {
+        idealState = createDefaultIdealState(resourceName, resource);
+      }
 
-      // Skip non-FULL_AUTO resources
+      // Non-FULL_AUTO resources: use best possible state directly
       if (!IdealState.RebalanceMode.FULL_AUTO.equals(idealState.getRebalanceMode())) {
         output.setState(resourceName, bestPossibleStateOutput.getPartitionStateMap(resourceName));
         continue;
       }
 
-      Map<Partition, List<Message>> resourceMessageMap = messageOutput.getResourceMessageMap(resourceName);
-      if (resourceMessageMap == null || resourceMessageMap.isEmpty()) {
+      Map<Partition, List<Message>> resourceMessages = messageOutput.getResourceMessageMap(resourceName);
+      if (resourceMessages == null || resourceMessages.isEmpty()) {
         output.setState(resourceName, bestPossibleStateOutput.getPartitionStateMap(resourceName));
         continue;
       }
 
-      // Track partitions with error state
-      Set<Partition> partitionsWithError = new HashSet<>();
-      for (Partition partition : currentStateOutput.getCurrentStateMap(resourceName).keySet()) {
-        Map<String, String> stateMap = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
-        if (stateMap.containsValue(HelixDefinedState.ERROR.name())) {
-          partitionsWithError.add(partition);
-        }
-      }
-      partitionsWithErrorByResource.put(resourceName, partitionsWithError);
+      // Track error partitions for this resource
+      trackErrorPartitions(resourceName);
 
-      StateModelDefinition stateModelDef = dataCache.getStateModelDef(idealState.getStateModelDefRef());
+      // Charge pending transitions to throttle controller
+      StateModelDefinition stateModelDef = _dataCache.getStateModelDef(idealState.getStateModelDefRef());
       Map<String, List<String>> preferenceLists = bestPossibleStateOutput.getPreferenceLists(resourceName);
+      chargePendingTransitions(resource, preferenceLists, stateModelDef);
 
-      chargePendingTransition(resource, currentStateOutput, throttleController, dataCache,
-          preferenceLists, stateModelDef);
-
-      // Collect messages from this resource
-      for (Map.Entry<Partition, List<Message>> entry : resourceMessageMap.entrySet()) {
-        Partition partition = entry.getKey();
+      // Collect messages with context
+      for (Map.Entry<Partition, List<Message>> partitionEntry : resourceMessages.entrySet()) {
+        Partition partition = partitionEntry.getKey();
         List<String> preferenceList = preferenceLists.get(partition.getPartitionName());
-        Map<String, Integer> requiredStates = getRequiredStates(resourceName, dataCache, preferenceList);
+        Map<String, Integer> requiredStates = computeRequiredStates(resourceName, preferenceList);
 
-        for (Message message : entry.getValue()) {
-          allMessages.add(new MessageWithContext(message, resource, partition, idealState,
-              stateModelDef, preferenceList, requiredStates));
+        for (Message message : partitionEntry.getValue()) {
+          allMessages.add(new MessageContext(message, partition, stateModelDef, requiredStates));
         }
       }
     }
+
+    return allMessages;
   }
 
-  /**
-   * Sorts messages by availability impact with deterministic pre-sorting.
-   */
-  private void sortMessagesByAvailabilityImpact(List<MessageWithContext> allMessages,
-      AvailabilityAwareMessageComparator comparator) {
-    // Pre-sort deterministically for consistent messageIndex assignment
+  private void trackErrorPartitions(String resourceName) {
+    Set<Partition> errorPartitions = new HashSet<>();
+    Map<Partition, Map<String, String>> currentStateMap = _currentStateOutput.getCurrentStateMap(resourceName);
+
+    for (Map.Entry<Partition, Map<String, String>> entry : currentStateMap.entrySet()) {
+      if (entry.getValue().containsValue(HelixDefinedState.ERROR.name())) {
+        errorPartitions.add(entry.getKey());
+      }
+    }
+    _partitionsWithErrorByResource.put(resourceName, errorPartitions);
+  }
+
+  // ===================================================================================
+  // STEP 2: Availability-Aware Sorting
+  // ===================================================================================
+
+  private void sortByAvailabilityImpact(List<MessageContext> allMessages) {
+    // First: deterministic sort for consistent index assignment
     allMessages.sort((m1, m2) -> {
-      Message msg1 = m1.getMessage();
-      Message msg2 = m2.getMessage();
-      int cmp = msg1.getResourceName().compareTo(msg2.getResourceName());
+      int cmp = m1.message.getResourceName().compareTo(m2.message.getResourceName());
       if (cmp != 0) return cmp;
-      cmp = msg1.getPartitionName().compareTo(msg2.getPartitionName());
+      cmp = m1.message.getPartitionName().compareTo(m2.message.getPartitionName());
       if (cmp != 0) return cmp;
-      return msg1.getTgtName().compareTo(msg2.getTgtName());
+      return m1.message.getTgtName().compareTo(m2.message.getTgtName());
     });
 
-    // Pre-compute impact scores to populate cache
-    for (MessageWithContext msgCtx : allMessages) {
-      comparator.getAvailabilityImpact(msgCtx.getMessage());
+    // Create comparator and pre-compute scores
+    AvailabilityAwareMessageComparator comparator =
+        new AvailabilityAwareMessageComparator(_dataCache, _currentStateOutput);
+    comparator.setEventId(_eventId);
+
+    for (MessageContext ctx : allMessages) {
+      comparator.getAvailabilityImpact(ctx.message);
     }
     comparator.resetMessageIndexTracker();
 
-    // Sort by availability impact
-    allMessages.sort((m1, m2) -> comparator.compare(m1.getMessage(), m2.getMessage()));
+    // Sort by availability impact (highest impact first)
+    allMessages.sort((m1, m2) -> comparator.compare(m1.message, m2.message));
   }
 
-  /**
-   * Processes messages in sorted order with throttling.
-   */
-  private void processMessagesWithThrottling(
-      List<MessageWithContext> allMessages, CurrentStateOutput currentStateOutput,
-      ResourceControllerDataProvider dataCache, StateTransitionThrottleController throttleController,
-      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx) {
+  // ===================================================================================
+  // STEP 3: Throttled Message Processing
+  // ===================================================================================
 
-    Map<String, Map<String, String>> derivedCurrentStateMaps = new HashMap<>();
+  private void processWithThrottling(List<MessageContext> allMessages) {
+    // Track derived state per partition (as messages are approved, state changes)
+    Map<String, Map<String, String>> derivedStates = new HashMap<>();
 
-    for (MessageWithContext msgCtx : allMessages) {
-      Message message = msgCtx.getMessage();
+    for (MessageContext ctx : allMessages) {
+      Message message = ctx.message;
       String resourceName = message.getResourceName();
-      Partition partition = msgCtx.getPartition();
+      Partition partition = ctx.partition;
 
-      // Get or initialize derived current state map for this partition
+      // Get current derived state for this partition
       String partitionKey = resourceName + ":" + partition.getPartitionName();
-      Map<String, String> derivedCurrentStateMap = derivedCurrentStateMaps.computeIfAbsent(
-          partitionKey, k -> new HashMap<>(currentStateOutput.getCurrentStateMap(resourceName, partition)));
+      Map<String, String> derivedState = derivedStates.computeIfAbsent(partitionKey,
+          k -> new HashMap<>(_currentStateOutput.getCurrentStateMap(resourceName, partition)));
 
-      // Determine rebalance type and process message
-      RebalanceType rebalanceType = getRebalanceTypePerMessage(
-          msgCtx.getRequiredStates(), message, derivedCurrentStateMap);
+      // Classify message type
+      RebalanceType rebalanceType = classifyMessage(ctx.requiredStates, message, derivedState);
+      boolean isRecovery = rebalanceType == RebalanceType.RECOVERY_BALANCE;
 
-      boolean wasThrottled = processMessage(msgCtx, message, resourceName, partition,
-          derivedCurrentStateMap, rebalanceType, throttleController, dataCache,
-          partitionsWithErrorByResource, ctx);
+      // Track message
+      message.setSTRebalanceType(isRecovery
+          ? Message.STRebalanceType.RECOVERY_REBALANCE
+          : Message.STRebalanceType.LOAD_REBALANCE);
 
-      // Update derived state if not throttled
-      if (!wasThrottled) {
-        derivedCurrentStateMap.put(message.getTgtName(), message.getToState());
-        ctx.updatedResourceMessageMaps.get(resourceName)
+      (isRecovery ? _recoveryMessagesByResource : _loadMessagesByResource)
+          .get(resourceName).add(message.getId());
+
+      // Check if should be throttled
+      boolean throttled = shouldThrottle(message, resourceName, partition, rebalanceType, ctx.stateModelDef);
+
+      if (throttled) {
+        (isRecovery ? _throttledRecoveryByResource : _throttledLoadByResource)
+            .get(resourceName).add(message.getId());
+      } else {
+        // Approve message: update derived state and track
+        derivedState.put(message.getTgtName(), message.getToState());
+        _approvedMessagesByResource.get(resourceName)
             .computeIfAbsent(partition, k -> new ArrayList<>())
             .add(message);
-        ctx.processedCount++;
-      } else {
-        ctx.throttledCount++;
       }
     }
   }
 
-  /**
-   * Processes a single message and returns whether it was throttled.
-   */
-  private boolean processMessage(MessageWithContext msgCtx, Message message, String resourceName,
-      Partition partition, Map<String, String> derivedCurrentStateMap, RebalanceType rebalanceType,
-      StateTransitionThrottleController throttleController, ResourceControllerDataProvider dataCache,
-      Map<String, Set<Partition>> partitionsWithErrorByResource, ThrottlingContext ctx) {
+  private boolean shouldThrottle(Message message, String resourceName, Partition partition,
+      RebalanceType rebalanceType, StateModelDefinition stateModelDef) {
 
-    Set<String> messagesThrottled;
-    Set<String> messagesProcessed;
+    // For load balance: check if only downward transitions allowed
+    if (rebalanceType == RebalanceType.LOAD_BALANCE) {
+      int errorThreshold = getErrorThreshold();
+      Set<Partition> errorPartitions = _partitionsWithErrorByResource.getOrDefault(resourceName, new HashSet<>());
 
-    if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
-      message.setSTRebalanceType(Message.STRebalanceType.RECOVERY_REBALANCE);
-      messagesProcessed = ctx.messagesForRecoveryByResource.get(resourceName);
-      messagesThrottled = ctx.messagesThrottledForRecoveryByResource.get(resourceName);
-      messagesProcessed.add(message.getId());
-
-      throttleStateTransitionsForReplica(throttleController, resourceName, partition,
-          message, messagesThrottled, RebalanceType.RECOVERY_BALANCE, dataCache,
-          ctx.updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
-          partition);
-    } else {
-      message.setSTRebalanceType(Message.STRebalanceType.LOAD_REBALANCE);
-      messagesProcessed = ctx.messagesForLoadByResource.get(resourceName);
-      messagesThrottled = ctx.messagesThrottledForLoadByResource.get(resourceName);
-      messagesProcessed.add(message.getId());
-
-      ClusterConfig clusterConfig = dataCache.getClusterConfig();
-      int threshold = getErrorOrRecoveryThreshold(clusterConfig);
-      Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(
-          resourceName, new HashSet<>());
-      boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
-
-      if (onlyDownwardLoadBalance && !isLoadBalanceDownwardStateTransition(
-          message, msgCtx.getStateModelDef())) {
-        messagesThrottled.add(message.getId());
-      } else {
-        throttleStateTransitionsForReplica(throttleController, resourceName, partition,
-            message, messagesThrottled, RebalanceType.LOAD_BALANCE, dataCache,
-            ctx.updatedResourceMessageMaps.computeIfAbsent(resourceName, k -> new HashMap<>()),
-            partition);
+      if (errorPartitions.size() > errorThreshold && !isDownwardTransition(message, stateModelDef)) {
+        return true;  // Throttle non-downward load balance when too many errors
       }
     }
 
-    return messagesThrottled.contains(message.getId());
+    // Check throttle limits
+    if (_throttleController.shouldThrottleForResource(rebalanceType, resourceName)) {
+      logThrottled(message, partition, resourceName, "resource quota full");
+      return true;
+    }
+
+    String instance = message.getTgtName();
+    if (!_dataCache.getDisabledInstancesForPartition(resourceName, partition.getPartitionName()).contains(instance)) {
+      if (_throttleController.shouldThrottleForInstance(rebalanceType, instance)) {
+        logThrottled(message, partition, resourceName, "instance quota full for " + instance);
+        return true;
+      }
+    }
+
+    // Charge quotas
+    _throttleController.chargeCluster(rebalanceType);
+    _throttleController.chargeResource(rebalanceType, resourceName);
+    _throttleController.chargeInstance(rebalanceType, instance);
+
+    return false;
   }
 
-  /**
-   * Builds intermediate state maps for all resources.
-   */
-  private void buildIntermediateStateMaps(
-      Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
+  // ===================================================================================
+  // STEP 4: Build Intermediate State
+  // ===================================================================================
+
+  private void buildIntermediateState(Map<String, Resource> resourceMap,
       BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
-      ResourceControllerDataProvider dataCache, IntermediateStateOutput output,
-      ClusterStatusMonitor clusterStatusMonitor, List<String> failedResources,
-      ThrottlingContext ctx, Map<String, Set<Partition>> partitionsWithErrorByResource) {
+      IntermediateStateOutput output, List<String> failedResources) {
 
     for (String resourceName : resourceMap.keySet()) {
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
         continue;
       }
 
-      IdealState idealState = dataCache.getIdealState(resourceName);
+      IdealState idealState = _dataCache.getIdealState(resourceName);
       if (idealState != null && !IdealState.RebalanceMode.FULL_AUTO.equals(idealState.getRebalanceMode())) {
         continue;
       }
 
-      Map<Partition, List<Message>> resourceMessageMap = messageOutput.getResourceMessageMap(resourceName);
-      if (resourceMessageMap == null || resourceMessageMap.isEmpty()) {
+      Map<Partition, List<Message>> resourceMessages = messageOutput.getResourceMessageMap(resourceName);
+      if (resourceMessages == null || resourceMessages.isEmpty()) {
         continue;
       }
 
       try {
-        PartitionStateMap intermediatePartitionStateMap =
-            new PartitionStateMap(resourceName, currentStateOutput.getCurrentStateMap(resourceName));
+        // Start with current state
+        PartitionStateMap intermediateState = new PartitionStateMap(resourceName,
+            _currentStateOutput.getCurrentStateMap(resourceName));
 
-        applyPendingMessages(currentStateOutput, resourceName,
-            intermediatePartitionStateMap);
-        applyNonThrottledMessages(ctx.updatedResourceMessageMaps.get(resourceName),
-            intermediatePartitionStateMap);
+        // Apply pending messages (already in-flight)
+        applyPendingMessages(resourceName, intermediateState);
 
-        output.setState(resourceName, intermediatePartitionStateMap);
+        // Apply approved messages from this round
+        applyApprovedMessages(resourceName, intermediateState);
 
-        updateResourceMonitoringStats(clusterStatusMonitor, resourceName, dataCache, ctx,
-            partitionsWithErrorByResource);
+        output.setState(resourceName, intermediateState);
 
       } catch (HelixException ex) {
-        LogUtil.logInfo(LOG, _eventId,
-            "Failed to calculate intermediate partition states for resource " + resourceName, ex);
+        LogUtil.logInfo(LOG, _eventId, "Failed to compute intermediate state for " + resourceName, ex);
         failedResources.add(resourceName);
       }
     }
   }
 
-  /**
-   * Updates monitoring stats for a resource.
-   */
-  private void updateResourceMonitoringStats(ClusterStatusMonitor clusterStatusMonitor,
-      String resourceName, ResourceControllerDataProvider dataCache, ThrottlingContext ctx,
-      Map<String, Set<Partition>> partitionsWithErrorByResource) {
-    if (clusterStatusMonitor != null) {
-      Set<String> recoveryMsgs = ctx.messagesForRecoveryByResource.get(resourceName);
-      Set<String> loadMsgs = ctx.messagesForLoadByResource.get(resourceName);
-      Set<String> recoveryThrottled = ctx.messagesThrottledForRecoveryByResource.get(resourceName);
-      Set<String> loadThrottled = ctx.messagesThrottledForLoadByResource.get(resourceName);
+  private void applyPendingMessages(String resourceName, PartitionStateMap stateMap) {
+    Map<Partition, Map<String, Message>> pendingMap = _currentStateOutput.getPendingMessageMap(resourceName);
+    if (pendingMap == null) return;
 
-      ClusterConfig clusterConfig = dataCache.getClusterConfig();
-      int threshold = getErrorOrRecoveryThreshold(clusterConfig);
-      Set<Partition> partitionsWithError = partitionsWithErrorByResource.getOrDefault(
-          resourceName, new HashSet<>());
-      boolean onlyDownwardLoadBalance = partitionsWithError.size() > threshold;
-
-      clusterStatusMonitor.updateRebalancerStats(resourceName,
-          recoveryMsgs != null ? recoveryMsgs.size() : 0,
-          loadMsgs != null ? loadMsgs.size() : 0,
-          recoveryThrottled != null ? recoveryThrottled.size() : 0,
-          loadThrottled != null ? loadThrottled.size() : 0,
-          onlyDownwardLoadBalance);
+    for (Map.Entry<Partition, Map<String, Message>> entry : pendingMap.entrySet()) {
+      Partition partition = entry.getKey();
+      for (Map.Entry<String, Message> instanceEntry : entry.getValue().entrySet()) {
+        Message msg = instanceEntry.getValue();
+        if (msg != null && msg.getToState() != null) {
+          stateMap.setState(partition, instanceEntry.getKey(), msg.getToState());
+        }
+      }
     }
   }
 
-  /**
-   * Gets the IdealState for a resource, creating a default one if it doesn't exist.
-   */
-  private IdealState getIdealStateOrDefault(String resourceName, Resource resource,
-      ResourceControllerDataProvider dataCache) {
-    IdealState idealState = dataCache.getIdealState(resourceName);
-    if (idealState == null) {
-      LogUtil.logInfo(LOG, _eventId, String
-          .format("IdealState for resource %s does not exist; resource may not exist anymore",
-              resourceName));
-      idealState = new IdealState(resourceName);
-      idealState.setStateModelDefRef(resource.getStateModelDefRef());
+  private void applyApprovedMessages(String resourceName, PartitionStateMap stateMap) {
+    Map<Partition, List<Message>> approved = _approvedMessagesByResource.get(resourceName);
+    if (approved == null) return;
+
+    for (Map.Entry<Partition, List<Message>> entry : approved.entrySet()) {
+      for (Message msg : entry.getValue()) {
+        if (msg != null && msg.getTgtName() != null && msg.getToState() != null) {
+          stateMap.setState(entry.getKey(), msg.getTgtName(), msg.getToState());
+        }
+      }
     }
+  }
+
+  // ===================================================================================
+  // Helper Methods
+  // ===================================================================================
+
+  private void initializeTrackingMaps(Set<String> resourceNames) {
+    _partitionsWithErrorByResource = new HashMap<>();
+    _recoveryMessagesByResource = new HashMap<>();
+    _loadMessagesByResource = new HashMap<>();
+    _throttledRecoveryByResource = new HashMap<>();
+    _throttledLoadByResource = new HashMap<>();
+    _approvedMessagesByResource = new HashMap<>();
+
+    for (String resourceName : resourceNames) {
+      _recoveryMessagesByResource.put(resourceName, new HashSet<>());
+      _loadMessagesByResource.put(resourceName, new HashSet<>());
+      _throttledRecoveryByResource.put(resourceName, new HashSet<>());
+      _throttledLoadByResource.put(resourceName, new HashSet<>());
+      _approvedMessagesByResource.put(resourceName, new HashMap<>());
+    }
+  }
+
+  private IdealState createDefaultIdealState(String resourceName, Resource resource) {
+    LogUtil.logInfo(LOG, _eventId, "IdealState not found for " + resourceName + ", creating default");
+    IdealState idealState = new IdealState(resourceName);
+    idealState.setStateModelDefRef(resource.getStateModelDefRef());
     return idealState;
   }
 
-  private int getErrorOrRecoveryThreshold(ClusterConfig clusterConfig) {
-    if (clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
-      return clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance();
+  private void chargePendingTransitions(Resource resource, Map<String, List<String>> preferenceLists,
+      StateModelDefinition stateModelDef) {
+    String resourceName = resource.getResourceName();
+
+    for (Partition partition : resource.getPartitions()) {
+      Map<String, Integer> requiredStates = computeRequiredStates(resourceName,
+          preferenceLists.get(partition.getPartitionName()));
+      Map<String, String> currentState = _currentStateOutput.getCurrentStateMap(resourceName, partition);
+
+      for (Message msg : _currentStateOutput.getPendingMessageMap(resourceName, partition).values()) {
+        RebalanceType type = classifyMessage(requiredStates, msg, currentState);
+        String instance = msg.getTgtName();
+        String currState = currentState.getOrDefault(instance, stateModelDef.getInitialState());
+
+        if (!msg.getToState().equals(currState) && msg.getFromState().equals(currState)
+            && !_dataCache.getDisabledInstancesForPartition(resourceName, partition.getPartitionName())
+                .contains(instance)) {
+          _throttleController.chargeInstance(type, instance);
+          _throttleController.chargeResource(type, resourceName);
+          _throttleController.chargeCluster(type);
+        }
+      }
     }
-    if (clusterConfig.getErrorPartitionThresholdForLoadBalance() != 0) {
-      return clusterConfig.getErrorPartitionThresholdForLoadBalance();
+  }
+
+  private RebalanceType classifyMessage(Map<String, Integer> requiredStates, Message message,
+      Map<String, String> currentStates) {
+    // Check if message helps satisfy required state counts
+    Map<String, Integer> remaining = new HashMap<>(requiredStates);
+
+    for (String state : currentStates.values()) {
+      if (remaining.containsKey(state)) {
+        int count = remaining.get(state);
+        if (count <= 1) {
+          remaining.remove(state);
+        } else {
+          remaining.put(state, count - 1);
+        }
+      }
+    }
+
+    return remaining.containsKey(message.getToState())
+        ? RebalanceType.RECOVERY_BALANCE
+        : RebalanceType.LOAD_BALANCE;
+  }
+
+  private Map<String, Integer> computeRequiredStates(String resourceName, List<String> preferenceList) {
+    IdealState idealState = _dataCache.getIdealState(resourceName);
+    StateModelDefinition stateModelDef = _dataCache.getStateModelDef(idealState.getStateModelDefRef());
+
+    int requiredReplicas = idealState.getMinActiveReplicas() == -1
+        ? idealState.getReplicaCount(preferenceList == null ? 0 : preferenceList.size())
+        : idealState.getMinActiveReplicas();
+
+    int liveCount = preferenceList != null
+        ? (int) preferenceList.stream().filter(_dataCache.getEnabledLiveInstances()::contains).count()
+        : _dataCache.getEnabledLiveInstances().size();
+
+    return stateModelDef.getStateCountMap(liveCount, requiredReplicas);
+  }
+
+  private boolean isDownwardTransition(Message message, StateModelDefinition stateModelDef) {
+    if (stateModelDef == null) return false;
+
+    Map<String, Integer> priorities = stateModelDef.getStatePriorityMap();
+    String from = message.getFromState();
+    String to = message.getToState();
+
+    return priorities.containsKey(from) && priorities.containsKey(to)
+        && priorities.get(from) < priorities.get(to);  // Lower number = higher priority
+  }
+
+  private int getErrorThreshold() {
+    ClusterConfig config = _dataCache.getClusterConfig();
+    if (config.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
+      return config.getErrorOrRecoveryPartitionThresholdForLoadBalance();
+    }
+    if (config.getErrorPartitionThresholdForLoadBalance() != 0) {
+      return config.getErrorPartitionThresholdForLoadBalance();
     }
     return 1;
   }
 
-  private void chargePendingTransition(Resource resource, CurrentStateOutput currentStateOutput,
-      StateTransitionThrottleController throttleController, ResourceControllerDataProvider cache,
-      Map<String, List<String>> preferenceLists, StateModelDefinition stateModelDefinition) {
-    String resourceName = resource.getResourceName();
-    for (Partition partition : resource.getPartitions()) {
-      Map<String, Integer> requiredStates =
-          getRequiredStates(resourceName, cache, preferenceLists.get(partition.getPartitionName()));
-      Map<String, String> currentStateMap =
-          currentStateOutput.getCurrentStateMap(resourceName, partition);
-      List<Message> pendingMessages = new ArrayList<>(
-          currentStateOutput.getPendingMessageMap(resourceName, partition).values());
-
-      for (Message message : pendingMessages) {
-        RebalanceType rebalanceType =
-            getRebalanceTypePerMessage(requiredStates, message, currentStateMap);
-        String currentState = currentStateMap.get(message.getTgtName());
-        if (currentState == null) {
-          currentState = stateModelDefinition.getInitialState();
-        }
-        if (!message.getToState().equals(currentState) && message.getFromState()
-            .equals(currentState) && !cache
-            .getDisabledInstancesForPartition(resourceName, partition.getPartitionName())
-            .contains(message.getTgtName())) {
-          throttleController.chargeInstance(rebalanceType, message.getTgtName());
-          throttleController.chargeResource(rebalanceType, resourceName);
-          throttleController.chargeCluster(rebalanceType);
-        }
-      }
+  private void logThrottled(Message message, Partition partition, String resource, String reason) {
+    if (LOG.isDebugEnabled()) {
+      LogUtil.logDebug(LOG, _eventId, String.format(
+          "Throttled message %s for %s/%s: %s", message.getId(), resource, partition.getPartitionName(), reason));
     }
   }
 
-  private void throttleStateTransitionsForReplica(
-      StateTransitionThrottleController throttleController, String resourceName,
-      Partition partition, Message messageToThrottle, Set<String> messagesThrottled,
-      RebalanceType rebalanceType, ResourceControllerDataProvider cache,
-      Map<Partition, List<Message>> resourceMessageMap, Partition partitionKey) {
-    boolean hasReachedThrottlingLimit = false;
+  private void updateMonitoring(ClusterEvent event, List<String> failedResources, IntermediateStateOutput output) {
+    ClusterStatusMonitor monitor = event.getAttribute(AttributeName.clusterStatusMonitor.name());
+    if (monitor == null) return;
 
-    if (throttleController.shouldThrottleForResource(rebalanceType, resourceName)) {
-      hasReachedThrottlingLimit = true;
-      if (LOG.isDebugEnabled()) {
-        LogUtil.logDebug(LOG, _eventId, String.format(
-            "Throttled because of cluster/resource quota is full for message {%s} on partition {%s} in resource {%s}",
-            messageToThrottle.getId(), partition.getPartitionName(), resourceName));
-      }
-    } else {
-      if (!cache.getDisabledInstancesForPartition(resourceName, partition.getPartitionName())
-          .contains(messageToThrottle.getTgtName())) {
-        if (throttleController.shouldThrottleForInstance(rebalanceType, messageToThrottle.getTgtName())) {
-          hasReachedThrottlingLimit = true;
-          if (LOG.isDebugEnabled()) {
-            LogUtil.logDebug(LOG, _eventId, String.format(
-                "Throttled because of instance level quota is full on instance {%s} for message {%s} of partition {%s} in resource {%s}",
-                messageToThrottle.getTgtName(), messageToThrottle.getId(),
-                partition.getPartitionName(), resourceName));
-          }
-        }
-      }
-    }
+    monitor.setResourceRebalanceStates(failedResources, ResourceMonitor.RebalanceStatus.INTERMEDIATE_STATE_CAL_FAILED);
+    monitor.setResourceRebalanceStates(output.resourceSet(), ResourceMonitor.RebalanceStatus.NORMAL);
 
-    if (!hasReachedThrottlingLimit) {
-      throttleController.chargeCluster(rebalanceType);
-      throttleController.chargeResource(rebalanceType, resourceName);
-      throttleController.chargeInstance(rebalanceType, messageToThrottle.getTgtName());
-    } else {
-      messagesThrottled.add(messageToThrottle.getId());
+    int errorThreshold = getErrorThreshold();
+    for (String resourceName : _recoveryMessagesByResource.keySet()) {
+      Set<Partition> errors = _partitionsWithErrorByResource.getOrDefault(resourceName, new HashSet<>());
+
+      monitor.updateRebalancerStats(resourceName,
+          _recoveryMessagesByResource.get(resourceName).size(),
+          _loadMessagesByResource.get(resourceName).size(),
+          _throttledRecoveryByResource.get(resourceName).size(),
+          _throttledLoadByResource.get(resourceName).size(),
+          errors.size() > errorThreshold);
     }
   }
 
-  private boolean isLoadBalanceDownwardStateTransition(Message message,
-      StateModelDefinition stateModelDefinition) {
-    if (stateModelDefinition == null) {
-      return false;
-    }
-    Map<String, Integer> statePriorityMap = stateModelDefinition.getStatePriorityMap();
-    return statePriorityMap.containsKey(message.getFromState())
-        && statePriorityMap.containsKey(message.getToState())
-        && statePriorityMap.get(message.getFromState()) < statePriorityMap.get(message.getToState());
-  }
-
-  private RebalanceType getRebalanceTypePerMessage(Map<String, Integer> desiredStates,
-      Message message, Map<String, String> derivedCurrentStates) {
-    Map<String, Integer> desiredStatesSnapshot = new HashMap<>(desiredStates);
-    for (String state : derivedCurrentStates.values()) {
-      if (desiredStatesSnapshot.containsKey(state)) {
-        if (desiredStatesSnapshot.get(state) == 1) {
-          desiredStatesSnapshot.remove(state);
-        } else {
-          desiredStatesSnapshot.put(state, desiredStatesSnapshot.get(state) - 1);
-        }
-      }
-    }
-    return desiredStatesSnapshot.containsKey(message.getToState()) ? RebalanceType.RECOVERY_BALANCE
-        : RebalanceType.LOAD_BALANCE;
-  }
-
-  private Map<String, Integer> getRequiredStates(String resourceName,
-      ResourceControllerDataProvider resourceControllerDataProvider, List<String> preferenceList) {
-    IdealState idealState = resourceControllerDataProvider.getIdealState(resourceName);
-    StateModelDefinition stateModelDefinition =
-        resourceControllerDataProvider.getStateModelDef(idealState.getStateModelDefRef());
-    int requiredNumReplica =
-        idealState.getMinActiveReplicas() == -1 ?
-            idealState.getReplicaCount(preferenceList == null ? 0 : preferenceList.size())
-            : idealState.getMinActiveReplicas();
-
-    if (preferenceList != null) {
-      return stateModelDefinition.getStateCountMap((int) preferenceList.stream().filter(
-              i -> resourceControllerDataProvider.getEnabledLiveInstances().contains(i))
-          .count(), requiredNumReplica);
-    }
-    return stateModelDefinition.getStateCountMap(
-        resourceControllerDataProvider.getEnabledLiveInstances().size(),
-        requiredNumReplica);
-  }
-
-  private void applyPendingMessages(CurrentStateOutput currentStateOutput, String resourceName,
-      PartitionStateMap intermediatePartitionStateMap) {
-    Map<Partition, Map<String, Message>> pendingMessageMap =
-        currentStateOutput.getPendingMessageMap(resourceName);
-    if (pendingMessageMap != null) {
-      for (Map.Entry<Partition, Map<String, Message>> partitionEntry : pendingMessageMap.entrySet()) {
-        Partition partition = partitionEntry.getKey();
-        Map<String, Message> instanceMessageMap = partitionEntry.getValue();
-        if (instanceMessageMap != null) {
-          for (Map.Entry<String, Message> instanceEntry : instanceMessageMap.entrySet()) {
-            String instance = instanceEntry.getKey();
-            Message message = instanceEntry.getValue();
-            if (message != null && message.getToState() != null) {
-              intermediatePartitionStateMap.setState(partition, instance, message.getToState());
-            }
-          }
-        }
-      }
-    }
-  }
-
-  private void applyNonThrottledMessages(Map<Partition, List<Message>> resourceMessageMap,
-      PartitionStateMap intermediatePartitionStateMap) {
-    if (resourceMessageMap != null) {
-      for (Map.Entry<Partition, List<Message>> entry : resourceMessageMap.entrySet()) {
-        Partition partition = entry.getKey();
-        List<Message> messages = entry.getValue();
-        if (messages != null) {
-          for (Message message : messages) {
-            if (message != null && message.getTgtName() != null && message.getToState() != null) {
-              intermediatePartitionStateMap.setState(partition, message.getTgtName(),
-                  message.getToState());
-            }
-          }
-        }
-      }
-    }
-  }
+  // ===================================================================================
+  // Simple Context Holder (only what's needed for processing)
+  // ===================================================================================
 
   /**
-   * Context object to track throttling state across message processing.
+   * Holds a message with its processing context. Kept minimal - only fields actually used.
    */
-  private static class ThrottlingContext {
-    final Map<String, Set<String>> messagesForRecoveryByResource = new HashMap<>();
-    final Map<String, Set<String>> messagesForLoadByResource = new HashMap<>();
-    final Map<String, Set<String>> messagesThrottledForRecoveryByResource = new HashMap<>();
-    final Map<String, Set<String>> messagesThrottledForLoadByResource = new HashMap<>();
-    final Map<String, Map<Partition, List<Message>>> updatedResourceMessageMaps = new HashMap<>();
-    int processedCount = 0;
-    int throttledCount = 0;
+  private static class MessageContext {
+    final Message message;
+    final Partition partition;
+    final StateModelDefinition stateModelDef;
+    final Map<String, Integer> requiredStates;
 
-    ThrottlingContext(Set<String> resourceNames) {
-      for (String resourceName : resourceNames) {
-        messagesForRecoveryByResource.put(resourceName, new HashSet<>());
-        messagesForLoadByResource.put(resourceName, new HashSet<>());
-        messagesThrottledForRecoveryByResource.put(resourceName, new HashSet<>());
-        messagesThrottledForLoadByResource.put(resourceName, new HashSet<>());
-        updatedResourceMessageMaps.put(resourceName, new HashMap<>());
-      }
+    MessageContext(Message message, Partition partition, StateModelDefinition stateModelDef,
+        Map<String, Integer> requiredStates) {
+      this.message = message;
+      this.partition = partition;
+      this.stateModelDef = stateModelDef;
+      this.requiredStates = requiredStates;
     }
-  }
-
-  /**
-   * POJO to hold message along with its context for availability-aware processing.
-   */
-  private static class MessageWithContext {
-    private final Message _message;
-    private final Resource _resource;
-    private final Partition _partition;
-    private final IdealState _idealState;
-    private final StateModelDefinition _stateModelDef;
-    private final List<String> _preferenceList;
-    private final Map<String, Integer> _requiredStates;
-
-    MessageWithContext(Message message, Resource resource, Partition partition,
-        IdealState idealState, StateModelDefinition stateModelDef,
-        List<String> preferenceList, Map<String, Integer> requiredStates) {
-      _message = message;
-      _resource = resource;
-      _partition = partition;
-      _idealState = idealState;
-      _stateModelDef = stateModelDef;
-      _preferenceList = preferenceList;
-      _requiredStates = requiredStates;
-    }
-
-    Message getMessage() { return _message; }
-    Resource getResource() { return _resource; }
-    Partition getPartition() { return _partition; }
-    IdealState getIdealState() { return _idealState; }
-    StateModelDefinition getStateModelDef() { return _stateModelDef; }
-    List<String> getPreferenceList() { return _preferenceList; }
-    Map<String, Integer> getRequiredStates() { return _requiredStates; }
   }
 }
-
