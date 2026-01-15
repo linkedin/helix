@@ -75,6 +75,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   private Map<String, Set<String>> _throttledLoadByResource;
   private Map<String, Map<Partition, List<Message>>> _approvedMessagesByResource;
 
+  /**
+   * Main entry point: computes intermediate state using availability-aware prioritization.
+   * Executes a 4-step pipeline: collect messages, sort by impact, apply throttling, build state.
+   */
   @Override
   public IntermediateStateOutput compute(ClusterEvent event, Map<String, Resource> resourceMap,
       CurrentStateOutput currentStateOutput, BestPossibleStateOutput bestPossibleStateOutput,
@@ -114,6 +118,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   // STEP 1: Message Collection
   // ===================================================================================
 
+  /**
+   * Collects all messages from FULL_AUTO resources. Non-FULL_AUTO resources use best possible
+   * state directly. Also tracks error partitions and charges pending transitions.
+   */
   private List<MessageContext> collectMessages(Map<String, Resource> resourceMap,
       BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
       IntermediateStateOutput output) {
@@ -170,6 +178,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     return allMessages;
   }
 
+  /**
+   * Identifies partitions with ERROR state replicas for a resource.
+   */
   private void trackErrorPartitions(String resourceName) {
     Set<Partition> errorPartitions = new HashSet<>();
     Map<Partition, Map<String, String>> currentStateMap = _currentStateOutput.getCurrentStateMap(resourceName);
@@ -186,6 +197,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   // STEP 2: Availability-Aware Sorting
   // ===================================================================================
 
+  /**
+   * Sorts messages by availability impact. First applies deterministic sort for consistency,
+   * then sorts by availability impact score (highest impact first).
+   */
   private void sortByAvailabilityImpact(List<MessageContext> allMessages) {
     // First: deterministic sort for consistent index assignment
     allMessages.sort((m1, m2) -> {
@@ -214,6 +229,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   // STEP 3: Throttled Message Processing
   // ===================================================================================
 
+  /**
+   * Processes messages in sorted order, applying throttling. Approved messages update derived
+   * state; throttled messages are tracked for monitoring.
+   */
   private void processWithThrottling(List<MessageContext> allMessages) {
     // Track derived state per partition (as messages are approved, state changes)
     Map<String, Map<String, String>> derivedStates = new HashMap<>();
@@ -256,6 +275,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Determines if a message should be throttled based on error thresholds and quota limits.
+   * If not throttled, charges the throttle controller quotas.
+   */
   private boolean shouldThrottle(Message message, String resourceName, Partition partition,
       RebalanceType rebalanceType, StateModelDefinition stateModelDef) {
 
@@ -295,6 +318,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   // STEP 4: Build Intermediate State
   // ===================================================================================
 
+  /**
+   * Constructs intermediate state maps for each resource by applying pending and approved
+   * messages to current state.
+   */
   private void buildIntermediateState(Map<String, Resource> resourceMap,
       BestPossibleStateOutput bestPossibleStateOutput, MessageOutput messageOutput,
       IntermediateStateOutput output, List<String> failedResources) {
@@ -334,6 +361,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Applies already in-flight pending messages to the intermediate state map.
+   */
   private void applyPendingMessages(String resourceName, PartitionStateMap stateMap) {
     Map<Partition, Map<String, Message>> pendingMap = _currentStateOutput.getPendingMessageMap(resourceName);
     if (pendingMap == null) return;
@@ -349,6 +379,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Applies non-throttled approved messages from this round to the intermediate state map.
+   */
   private void applyApprovedMessages(String resourceName, PartitionStateMap stateMap) {
     Map<Partition, List<Message>> approved = _approvedMessagesByResource.get(resourceName);
     if (approved == null) return;
@@ -366,6 +399,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
   // Helper Methods
   // ===================================================================================
 
+  /**
+   * Initializes all tracking maps for the given resources.
+   */
   private void initializeTrackingMaps(Set<String> resourceNames) {
     _partitionsWithErrorByResource = new HashMap<>();
     _recoveryMessagesByResource = new HashMap<>();
@@ -383,6 +419,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Creates a default IdealState when one doesn't exist (resource may have been deleted).
+   */
   private IdealState createDefaultIdealState(String resourceName, Resource resource) {
     LogUtil.logInfo(LOG, _eventId, "IdealState not found for " + resourceName + ", creating default");
     IdealState idealState = new IdealState(resourceName);
@@ -390,6 +429,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     return idealState;
   }
 
+  /**
+   * Charges throttle controller for already pending (in-flight) transitions to account
+   * for their quota usage before processing new messages.
+   */
   private void chargePendingTransitions(Resource resource, Map<String, List<String>> preferenceLists,
       StateModelDefinition stateModelDef) {
     String resourceName = resource.getResourceName();
@@ -415,6 +458,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Classifies a message as RECOVERY_BALANCE (needed to meet minActiveReplicas) or
+   * LOAD_BALANCE (optimization beyond minimum requirements).
+   */
   private RebalanceType classifyMessage(Map<String, Integer> requiredStates, Message message,
       Map<String, String> currentStates) {
     // Check if message helps satisfy required state counts
@@ -436,6 +483,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
         : RebalanceType.LOAD_BALANCE;
   }
 
+  /**
+   * Computes the required state counts based on minActiveReplicas and live instances.
+   */
   private Map<String, Integer> computeRequiredStates(String resourceName, List<String> preferenceList) {
     IdealState idealState = _dataCache.getIdealState(resourceName);
     StateModelDefinition stateModelDef = _dataCache.getStateModelDef(idealState.getStateModelDefRef());
@@ -451,6 +501,10 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     return stateModelDef.getStateCountMap(liveCount, requiredReplicas);
   }
 
+  /**
+   * Checks if a state transition is downward (e.g., MASTER to SLAVE).
+   * Lower priority number means higher priority state.
+   */
   private boolean isDownwardTransition(Message message, StateModelDefinition stateModelDef) {
     if (stateModelDef == null) return false;
 
@@ -462,6 +516,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
         && priorities.get(from) < priorities.get(to);  // Lower number = higher priority
   }
 
+  /**
+   * Gets the error partition threshold from cluster config for load balance decisions.
+   */
   private int getErrorThreshold() {
     ClusterConfig config = _dataCache.getClusterConfig();
     if (config.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
@@ -473,6 +530,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     return 1;
   }
 
+  /**
+   * Logs throttling decision at debug level.
+   */
   private void logThrottled(Message message, Partition partition, String resource, String reason) {
     if (LOG.isDebugEnabled()) {
       LogUtil.logDebug(LOG, _eventId, String.format(
@@ -480,6 +540,9 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
+  /**
+   * Updates ClusterStatusMonitor with rebalancer statistics for all processed resources.
+   */
   private void updateMonitoring(ClusterEvent event, List<String> failedResources, IntermediateStateOutput output) {
     ClusterStatusMonitor monitor = event.getAttribute(AttributeName.clusterStatusMonitor.name());
     if (monitor == null) return;
@@ -500,12 +563,8 @@ public class AvailabilityAwareIntermediateStateCalculator implements Intermediat
     }
   }
 
-  // ===================================================================================
-  // Simple Context Holder (only what's needed for processing)
-  // ===================================================================================
-
   /**
-   * Holds a message with its processing context. Kept minimal - only fields actually used.
+   * Holds a message with its processing context.
    */
   private static class MessageContext {
     final Message message;
