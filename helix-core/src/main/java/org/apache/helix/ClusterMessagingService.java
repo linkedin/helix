@@ -161,4 +161,31 @@ public interface ClusterMessagingService {
   public Map<InstanceType, List<Message>> generateMessage(final Criteria recipientCriteria,
       final Message messageTemplate);
 
+  /**
+   * Optimized API to send message to a specific live participant instance in a target cluster.
+   * Overloads include optional callback, timeout, and retry.
+   */
+  int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded);
+
+  int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut);
+
+  int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut,
+      int retryCount);
+
+  /**
+   * Optimized API to send message to all live participant instances in a target cluster.
+   * Overloads include optional callback, timeout, and retry.
+   */
+  int sendToAllParticipantInstances(String clusterName, Message message, boolean sessionSpecific,
+      boolean selfExcluded);
+
+  int sendToAllParticipantInstances(String clusterName, Message message, boolean sessionSpecific,
+      boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut);
+
+  int sendToAllParticipantInstances(String clusterName, Message message, boolean sessionSpecific,
+      boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut, int retryCount);
+
 }

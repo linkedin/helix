@@ -82,4 +82,48 @@ public class MockClusterMessagingService implements ClusterMessagingService {
     return null;
   }
 
+  @Override
+  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut,
+      int retryCount) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToAllParticipantInstances(String clusterName, Message message,
+      boolean sessionSpecific, boolean selfExcluded) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToAllParticipantInstances(String clusterName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToAllParticipantInstances(String clusterName, Message message,
+      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut,
+      int retryCount) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
 }
