@@ -27,7 +27,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.Maps;
@@ -57,11 +61,13 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithm.class);
   private final List<HardConstraint> _hardConstraints;
   private final Map<SoftConstraint, Float> _softConstraints;
+  private final ForkJoinPool _constraintEvaluationPool;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
-      Map<SoftConstraint, Float> softConstraints) {
+      Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
     _hardConstraints = hardConstraints;
     _softConstraints = softConstraints;
+    _constraintEvaluationPool = constraintEvaluationPool;
   }
 
   @Override
@@ -123,22 +129,29 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,
       List<AssignableNode> assignableNodes, ClusterContext clusterContext, Set<String> busyInstances,
-      OptimalAssignment optimalAssignment) {
+      OptimalAssignment optimalAssignment) throws HelixRebalanceException {
     Map<AssignableNode, List<HardConstraint>> hardConstraintFailures = new ConcurrentHashMap<>(assignableNodes.size());
-    List<AssignableNode> candidateNodes = assignableNodes.parallelStream().filter(candidateNode -> {
-      boolean isValid = true;
-      for (HardConstraint hardConstraint : _hardConstraints) {
-        if (!hardConstraint.isAssignmentValid(candidateNode, replica, clusterContext)) {
-          if (!hardConstraintFailures.containsKey(candidateNode)) {
-            hardConstraintFailures.put(candidateNode, new ArrayList<>());
-          }
-          hardConstraintFailures.get(candidateNode).add(hardConstraint);
-          isValid = false;
-          break;
-        }
-      }
-      return isValid;
-    }).collect(Collectors.toList());
+
+    // Execute first parallelStream within custom ForkJoinPool context
+    List<AssignableNode> candidateNodes = executeInPool(
+        () -> assignableNodes.parallelStream()
+            .filter(candidateNode -> {
+              boolean isValid = true;
+              for (HardConstraint hardConstraint : _hardConstraints) {
+                if (!hardConstraint.isAssignmentValid(candidateNode, replica, clusterContext)) {
+                  if (!hardConstraintFailures.containsKey(candidateNode)) {
+                    hardConstraintFailures.put(candidateNode, new ArrayList<>());
+                  }
+                  hardConstraintFailures.get(candidateNode).add(hardConstraint);
+                  isValid = false;
+                  break;
+                }
+              }
+              return isValid;
+            })
+            .collect(Collectors.toList()),
+        "hard constraint filtering"
+    );
 
     if (candidateNodes.isEmpty()) {
       LOG.info("Found no eligible candidate nodes. Enabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
@@ -151,23 +164,27 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     LOG.debug("Disabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
     removeFullLoggingForCluster();
 
-    return candidateNodes.parallelStream().map(node -> new HashMap.SimpleEntry<>(node,
-        getAssignmentNormalizedScore(node, replica, clusterContext)))
-        .max((nodeEntry1, nodeEntry2) -> {
-          int scoreCompareResult = nodeEntry1.getValue().compareTo(nodeEntry2.getValue());
-          if (scoreCompareResult == 0) {
-            // If the evaluation scores of 2 nodes are the same, the algorithm assigns the replica
-            // to the idle node first.
-            String logicalId1 = nodeEntry1.getKey().getLogicalId();
-            String logicalId2 = nodeEntry2.getKey().getLogicalId();
-            int idleScore1 = busyInstances.contains(logicalId1) ? 0 : 1;
-            int idleScore2 = busyInstances.contains(logicalId2) ? 0 : 1;
-            return idleScore1 != idleScore2 ? (idleScore1 - idleScore2)
-                : -nodeEntry1.getKey().compareTo(nodeEntry2.getKey());
-          } else {
-            return scoreCompareResult;
-          }
-        }).map(Map.Entry::getKey);
+    // Execute second parallelStream within custom ForkJoinPool context
+    return executeInPool(
+        () -> candidateNodes.parallelStream()
+            .map(node -> new HashMap.SimpleEntry<>(node,
+                getAssignmentNormalizedScore(node, replica, clusterContext)))
+            .max((nodeEntry1, nodeEntry2) -> {
+              int scoreCompareResult = nodeEntry1.getValue().compareTo(nodeEntry2.getValue());
+              if (scoreCompareResult == 0) {
+                String logicalId1 = nodeEntry1.getKey().getLogicalId();
+                String logicalId2 = nodeEntry2.getKey().getLogicalId();
+                int idleScore1 = busyInstances.contains(logicalId1) ? 0 : 1;
+                int idleScore2 = busyInstances.contains(logicalId2) ? 0 : 1;
+                return idleScore1 != idleScore2 ? (idleScore1 - idleScore2)
+                    : -nodeEntry1.getKey().compareTo(nodeEntry2.getKey());
+              } else {
+                return scoreCompareResult;
+              }
+            })
+            .map(Map.Entry::getKey),
+        "node scoring and selection"
+    );
   }
 
   private double getAssignmentNormalizedScore(AssignableNode node, AssignableReplica replica,
@@ -312,5 +329,27 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         resourceAssignment -> resourceAssignment.getRecord().getMapFields().values().stream()
             .flatMap(instanceStateMap -> instanceStateMap.keySet().stream())
             .collect(Collectors.toSet()).stream()).collect(Collectors.toSet());
+  }
+
+  /**
+   * Executes the given operation in the constraint evaluation pool, handling exceptions and
+   * wrapping them in HelixRebalanceException.
+   *
+   * @param operation The operation to execute.
+   * @param errorContext A description of the context for error reporting.
+   * @param <T> The return type of the operation.
+   * @return The result of the operation.
+   * @throws HelixRebalanceException If the operation fails.
+   */
+  private <T> T executeInPool(Supplier<T> operation, String errorContext)
+      throws HelixRebalanceException {
+    try {
+      return _constraintEvaluationPool.submit(operation::get).join();
+    } catch (CancellationException | CompletionException e) {
+      LOG.error("Constraint evaluation failed during {}: {}", errorContext, e.getMessage(), e);
+      throw new HelixRebalanceException(
+          String.format("Failed during %s: %s", errorContext, e.getMessage()),
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+    }
   }
 }
