@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -106,6 +107,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // WAGED specific capacity / weight provider
   WagedInstanceCapacity _wagedInstanceCapacity;
   WagedResourceWeightsProvider _wagedPartitionWeightProvider;
+
+  // Tracks capacity rejections per resource per instance during mapping calculation.
+  // Outer map key: resource name, Inner map key: instance name, Value: rejection count
+  private final Map<String, Map<String, AtomicLong>> _capacityRejectionMap = new ConcurrentHashMap<>();
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -594,5 +599,56 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     Set<String> disabledInstances = super.getDisabledInstancesForPartition(resource, partition);
     disabledInstances.addAll(_disabledInstancesForAllPartitionsSet);
     return disabledInstances;
+  }
+
+  /**
+   * Records a capacity rejection for a resource on a specific instance.
+   * This is called when the mapping calculator cannot assign a partition to an instance
+   * due to insufficient capacity.
+   *
+   * @param resourceName The resource whose partition was rejected
+   * @param instanceName The instance that rejected the partition
+   */
+  public void recordCapacityRejection(String resourceName, String instanceName) {
+    _capacityRejectionMap
+        .computeIfAbsent(resourceName, k -> new ConcurrentHashMap<>())
+        .computeIfAbsent(instanceName, k -> new AtomicLong(0))
+        .incrementAndGet();
+  }
+
+  /**
+   * Gets the capacity rejection map for all resources.
+   * Outer map key: resource name, Inner map key: instance name, Value: rejection count
+   *
+   * @return The capacity rejection map
+   */
+  public Map<String, Map<String, AtomicLong>> getCapacityRejectionMap() {
+    return _capacityRejectionMap;
+  }
+
+  /**
+   * Gets the capacity rejection counts for a specific resource.
+   *
+   * @param resourceName The resource name
+   * @return Map of instance name to rejection count, or empty map if no rejections
+   */
+  public Map<String, Long> getCapacityRejectionsForResource(String resourceName) {
+    Map<String, AtomicLong> resourceRejections = _capacityRejectionMap.get(resourceName);
+    if (resourceRejections == null) {
+      return Collections.emptyMap();
+    }
+    Map<String, Long> result = new HashMap<>();
+    for (Map.Entry<String, AtomicLong> entry : resourceRejections.entrySet()) {
+      result.put(entry.getKey(), entry.getValue().get());
+    }
+    return result;
+  }
+
+  /**
+   * Clears all capacity rejection tracking data.
+   * Should be called at the start of each pipeline run.
+   */
+  public void clearCapacityRejections() {
+    _capacityRejectionMap.clear();
   }
 }

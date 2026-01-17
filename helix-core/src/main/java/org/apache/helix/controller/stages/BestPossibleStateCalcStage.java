@@ -107,6 +107,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
+    // Capture capacity rejection data before clearing
+    final Map<String, Map<String, Long>> capacityRejectionSnapshot = new HashMap<>();
+    for (Map.Entry<String, Map<String, java.util.concurrent.atomic.AtomicLong>> entry
+        : cache.getCapacityRejectionMap().entrySet()) {
+      capacityRejectionSnapshot.put(entry.getKey(), cache.getCapacityRejectionsForResource(entry.getKey()));
+    }
+    // Clear rejection data for the next pipeline run
+    cache.clearCapacityRejections();
+
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
         if (clusterStatusMonitor != null) {
@@ -126,6 +135,16 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
             IdealState is = idealStateMap.get(resourceName);
             reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
                 externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
+          }
+
+          // Report capacity rejection metrics for each resource
+          for (Map.Entry<String, Map<String, Long>> entry : capacityRejectionSnapshot.entrySet()) {
+            String resourceName = entry.getKey();
+            if (resourceConfigMap.containsKey(resourceName) && resourceConfigMap.get(resourceName)
+                .isMonitoringDisabled()) {
+              continue;
+            }
+            clusterStatusMonitor.updateMappingCapacityRejectionStats(resourceName, entry.getValue());
           }
         }
       } catch (Exception e) {
