@@ -283,6 +283,9 @@ public class ResourceConfig extends HelixProperty {
   /**
    * Get the list of states that should be considered as "active" for min active replica check.
    * If not configured, the default behavior applies (all states except DROPPED, ERROR, and initial state).
+   * 
+   * Note: The configured states should be valid states from the resource's state model definition.
+   * Any state NOT in this list will NOT count as active (including top states like LEADER).
    *
    * @return List of state names to be considered active, or null if not configured
    */
@@ -293,6 +296,12 @@ public class ResourceConfig extends HelixProperty {
   /**
    * Set the list of states that should be considered as "active" for min active replica check.
    * When configured, only replicas in these states will count toward the min active replica constraint.
+   * 
+   * IMPORTANT:
+   * - The configured states should be valid states from the resource's state model definition.
+   * - If a state is NOT in this list, it will NOT be counted as active, even if it's a top state like LEADER.
+   *   For example, if you configure ["STANDBY"] only, then LEADER replicas will NOT count as active.
+   * - State names are matched case-insensitively.
    * 
    * Example: For a state model with states [LEADER, STANDBY, BOOTSTRAP, OFFLINE],
    * setting this to ["LEADER", "STANDBY"] will only count replicas in LEADER or STANDBY states.
