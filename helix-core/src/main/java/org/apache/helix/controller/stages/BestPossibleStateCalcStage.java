@@ -278,6 +278,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     ClusterStatusMonitor clusterStatusMonitor =
         event.getAttribute(AttributeName.clusterStatusMonitor.name());
     WagedRebalancer wagedRebalancer = event.getAttribute(AttributeName.STATEFUL_REBALANCER.name());
+    StageThreadPoolHelper stageThreadPoolHelper =
+        event.getAttribute(AttributeName.STAGE_THREAD_POOL_HELPER.name());
 
     // Check whether the offline/disabled instance count in the cluster exceeds the set limit,
     // if yes, put the cluster into maintenance mode.
@@ -319,12 +321,24 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     }
 
     // Run all remaining resource computations in parallel and wait for completion.
-    try {
-      StageThreadPoolHelper.executeAndWait(STAGE_NAME, computeBestPossibleStateTasks);
-    } catch (InterruptedException e) {
-      LogUtil.logError(logger, _eventId,
-          "Interrupted during parallel execution", e);
-      Thread.currentThread().interrupt();
+    if (stageThreadPoolHelper != null) {
+      try {
+        stageThreadPoolHelper.executeAndWait(STAGE_NAME, computeBestPossibleStateTasks);
+      } catch (InterruptedException e) {
+        LogUtil.logError(logger, _eventId,
+            "Interrupted during parallel execution", e);
+        Thread.currentThread().interrupt();
+      }
+    } else {
+      // Fallback: execute tasks sequentially if no thread pool helper is available
+      for (Callable<Void> task : computeBestPossibleStateTasks) {
+        try {
+          task.call();
+        } catch (Exception e) {
+          LogUtil.logError(logger, _eventId,
+              "Exception during sequential task execution", e);
+        }
+      }
     }
 
     // Check and report if resource rebalance has failure

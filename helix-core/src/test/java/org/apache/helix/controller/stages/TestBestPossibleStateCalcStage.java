@@ -32,14 +32,24 @@ import org.apache.helix.model.Resource;
 import org.apache.helix.util.StageThreadPoolHelper;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class TestBestPossibleStateCalcStage extends BaseStageTest {
 
+  private StageThreadPoolHelper _stageThreadPoolHelper;
+
+  @BeforeMethod
+  public void beforeMethod() {
+    _stageThreadPoolHelper = new StageThreadPoolHelper("TestCluster");
+  }
+
   @AfterMethod
   public void afterMethod() {
     // Clean up thread pool after each test
-    StageThreadPoolHelper.shutdown();
+    if (_stageThreadPoolHelper != null) {
+      _stageThreadPoolHelper.shutdown();
+    }
   }
 
   @Test
@@ -69,6 +79,7 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
     event.addAttribute(AttributeName.ControllerDataProvider.name(), new ResourceControllerDataProvider());
+    event.addAttribute(AttributeName.STAGE_THREAD_POOL_HELPER.name(), _stageThreadPoolHelper);
 
     ReadClusterDataStage stage1 = new ReadClusterDataStage();
     runStage(event, stage1);
@@ -130,6 +141,7 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
     event.addAttribute(AttributeName.ControllerDataProvider.name(),
         new ResourceControllerDataProvider());
+    event.addAttribute(AttributeName.STAGE_THREAD_POOL_HELPER.name(), _stageThreadPoolHelper);
 
     runStage(event, new ReadClusterDataStage());
     runStage(event, new BestPossibleStateCalcStage());
@@ -187,6 +199,7 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
     event.addAttribute(AttributeName.ControllerDataProvider.name(),
         new ResourceControllerDataProvider());
+    event.addAttribute(AttributeName.STAGE_THREAD_POOL_HELPER.name(), _stageThreadPoolHelper);
 
     ReadClusterDataStage stage1 = new ReadClusterDataStage();
     runStage(event, stage1);

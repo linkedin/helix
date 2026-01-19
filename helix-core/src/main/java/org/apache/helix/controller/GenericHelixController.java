@@ -213,6 +213,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   private HelixManager _helixManager;
 
+  /** Per-controller thread pool helper for parallel execution in pipeline stages */
+  private final StageThreadPoolHelper _stageThreadPoolHelper;
+
   // Since the stateful rebalancer needs to be lazily constructed when the HelixManager instance is
   // ready, the GenericHelixController is not constructed with a stateful rebalancer. This wrapper
   // is to avoid the complexity of handling a nullable value in the event handling process.
@@ -696,6 +699,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     _clusterName = clusterName;
     _lastPipelineEndTimestamp = TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED;
     _clusterStatusMonitor = new ClusterStatusMonitor(_clusterName);
+    _stageThreadPoolHelper = new StageThreadPoolHelper(_clusterName);
 
     _asyncTasksThreadPool =
         Executors.newScheduledThreadPool(ASYNC_TASKS_THREADPOOL_SIZE, new ThreadFactory() {
@@ -761,9 +765,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
 
     int configuredPoolSize = clusterConfig.getStageParallelThreadPoolSize();
-    if (configuredPoolSize > 0) {
-      StageThreadPoolHelper.setPoolSize(configuredPoolSize);
-    }
+    _stageThreadPoolHelper.setPoolSize(configuredPoolSize);
   }
 
   private void initializeAsyncFIFOWorkers() {
@@ -907,8 +909,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     event.addAttribute(AttributeName.LastRebalanceFinishTimeStamp.name(), _lastPipelineEndTimestamp);
     event.addAttribute(AttributeName.ControllerDataProvider.name(), dataProvider);
 
-    // Update stage thread pool size from ClusterConfig if configured
+    // Update stage thread pool size from ClusterConfig if configured and add helper to event
     updateStageThreadPoolSize(dataProvider.getClusterConfig());
+    event.addAttribute(AttributeName.STAGE_THREAD_POOL_HELPER.name(), _stageThreadPoolHelper);
 
     logger.info("START: Invoking {} controller pipeline for cluster: {}. Event type: {}, ID: {}. "
             + "Event session ID: {}", dataProvider.getPipelineName(), manager.getClusterName(),
@@ -1492,8 +1495,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
 
-    // shutdown shared stage thread pool
-    StageThreadPoolHelper.shutdown();
+    // shutdown this controller's stage thread pool
+    _stageThreadPoolHelper.shutdown();
 
     enableClusterStatusMonitor(false);
 

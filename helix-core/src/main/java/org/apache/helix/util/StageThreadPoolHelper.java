@@ -29,7 +29,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.slf4j.Logger;
@@ -38,14 +37,14 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Helper class for parallel execution in Helix controller pipeline stages.
- * Uses a shared static thread pool with configurable size.
+ * Each controller instance owns its own thread pool with configurable size.
  * <p>
  * The pool size can be configured via {@link #setPoolSize(int)} which is typically
  * called by the controller based on ClusterConfig.STAGE_PARALLEL_THREAD_POOL_SIZE.
  * <p>
  * Features:
  * <ul>
- *   <li>Single shared thread pool reused by all Helix controller stages</li>
+ *   <li>Per-controller thread pool for isolation between controllers on same node</li>
  *   <li>Configurable pool size via cluster configuration</li>
  *   <li>Per-stage thread name prefixes for better debugging</li>
  *   <li>Ensures all stage tasks complete before returning</li>
@@ -63,12 +62,27 @@ public class StageThreadPoolHelper {
   private static final long SHUTDOWN_TIMEOUT_SECONDS = 30;
   private static final String THREAD_NAME_PREFIX = "HelixStageWorker";
 
-  // Shared executor reused across all stages
-  private static final AtomicReference<ThreadPoolExecutor> EXECUTOR_REF = new AtomicReference<>();
-  private static volatile int _configuredPoolSize = DEFAULT_POOL_SIZE;
+  /**
+   * Queue capacity multiplier relative to pool size.
+   * With CallerRunsPolicy, when queue is full, tasks execute in the caller thread,
+   * providing natural backpressure instead of unbounded queue growth.
+   */
+  private static final int QUEUE_CAPACITY_MULTIPLIER = 2;
 
-  private StageThreadPoolHelper() {
-    // Utility class - prevent instantiation
+  private final String _clusterName;
+  private volatile ThreadPoolExecutor _executor;
+  private volatile int _configuredPoolSize;
+  private final Object _lock = new Object();
+
+  /**
+   * Creates a new StageThreadPoolHelper for a specific controller/cluster.
+   *
+   * @param clusterName the name of the cluster this helper is associated with (may be null for legacy controllers)
+   */
+  public StageThreadPoolHelper(String clusterName) {
+    _clusterName = clusterName != null ? clusterName : "unknown";
+    _configuredPoolSize = DEFAULT_POOL_SIZE;
+    LOG.info("Created StageThreadPoolHelper for cluster {}", _clusterName);
   }
 
   /**
@@ -77,21 +91,25 @@ public class StageThreadPoolHelper {
    *
    * @param poolSize the desired pool size (must be positive, otherwise default is used)
    */
-  public static synchronized void setPoolSize(int poolSize) {
+  public void setPoolSize(int poolSize) {
     if (poolSize <= 0) {
       LOG.warn("Invalid pool size {}, using default {}", poolSize, DEFAULT_POOL_SIZE);
       poolSize = DEFAULT_POOL_SIZE;
     }
 
-    if (poolSize != _configuredPoolSize) {
-      LOG.info("Updating stage thread pool size from {} to {}", _configuredPoolSize, poolSize);
-      _configuredPoolSize = poolSize;
+    synchronized (_lock) {
+      if (poolSize != _configuredPoolSize) {
+        int oldPoolSize = _configuredPoolSize;
+        _configuredPoolSize = poolSize;
 
-      // Shutdown existing pool so it gets recreated with new size on next use
-      ThreadPoolExecutor existing = EXECUTOR_REF.get();
-      if (existing != null && !existing.isShutdown()) {
-        existing.shutdown();
-        EXECUTOR_REF.set(null);
+        // Shutdown existing pool so it gets recreated with new size on next use
+        if (_executor != null && !_executor.isShutdown()) {
+          LOG.info("Shutting down current executor with thread pool size {} for cluster {}, "
+              + "next executor will be started with thread pool size {}",
+              oldPoolSize, _clusterName, poolSize);
+          _executor.shutdown();
+          _executor = null;
+        }
       }
     }
   }
@@ -101,7 +119,7 @@ public class StageThreadPoolHelper {
    *
    * @return the configured pool size
    */
-  public static int getPoolSize() {
+  public int getPoolSize() {
     return _configuredPoolSize;
   }
 
@@ -112,7 +130,7 @@ public class StageThreadPoolHelper {
    * @param tasks collection of tasks to execute in parallel
    * @throws InterruptedException if the current thread is interrupted while waiting
    */
-  public static void executeAndWait(String stageName, Collection<? extends Callable<?>> tasks)
+  public void executeAndWait(String stageName, Collection<? extends Callable<?>> tasks)
       throws InterruptedException {
     if (tasks == null || tasks.isEmpty()) {
       return;
@@ -129,77 +147,87 @@ public class StageThreadPoolHelper {
       try {
         future.get();
       } catch (ExecutionException e) {
-        LOG.warn("Task in stage {} failed: {}", stageName, e.getCause().getMessage(), e);
+        LOG.warn("Task in stage {} failed for cluster {}: {}",
+            stageName, _clusterName, e.getCause().getMessage(), e);
       }
     }
 
-    LOG.debug("Completed parallel execution for stage {}", stageName);
+    LOG.debug("Completed parallel execution for stage {} in cluster {}", stageName, _clusterName);
   }
 
   /**
-   * Gracefully shutdown the shared executor.
-   * <p>
-   * Note: This should only be called for testing cleanup. In production, the pool
-   * uses daemon threads and will be automatically cleaned up when the JVM exits.
-   * Controllers should NOT call this on shutdown since the pool is shared.
+   * Gracefully shutdown the executor for this controller.
+   * This should be called when the controller is shutting down.
    */
-  public static synchronized void shutdown() {
-    ThreadPoolExecutor executor = EXECUTOR_REF.get();
-    if (executor == null || executor.isShutdown()) {
-      return;
-    }
-
-    LOG.info("Shutting down shared stage parallel executor");
-    executor.shutdown();
-    try {
-      if (!executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-        LOG.warn("Executor did not terminate gracefully, forcing shutdown");
-        executor.shutdownNow();
+  public void shutdown() {
+    synchronized (_lock) {
+      if (_executor == null || _executor.isShutdown()) {
+        return;
       }
-    } catch (InterruptedException e) {
-      LOG.warn("Interrupted during shutdown", e);
-      executor.shutdownNow();
-      Thread.currentThread().interrupt();
+
+      LOG.info("Shutting down stage parallel executor for cluster {}", _clusterName);
+      _executor.shutdown();
+      try {
+        if (!_executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+          LOG.warn("Executor for cluster {} did not terminate gracefully, forcing shutdown",
+              _clusterName);
+          _executor.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        LOG.warn("Interrupted during shutdown for cluster {}", _clusterName, e);
+        _executor.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+      _executor = null;
     }
-    EXECUTOR_REF.set(null);
   }
 
   /**
-   * Lazily initialize the shared thread pool.
+   * Lazily initialize the thread pool for this controller.
    */
-  private static synchronized ThreadPoolExecutor getOrCreateExecutor() {
-    ThreadPoolExecutor existing = EXECUTOR_REF.get();
-    if (existing != null && !existing.isShutdown()) {
-      return existing;
+  private ThreadPoolExecutor getOrCreateExecutor() {
+    if (_executor != null && !_executor.isShutdown()) {
+      return _executor;
     }
 
-    ThreadFactory threadFactory = new ThreadFactoryBuilder()
-        .setNameFormat(THREAD_NAME_PREFIX + "-%d")
-        .setDaemon(true)
-        .setUncaughtExceptionHandler((t, e) ->
-            LOG.error("Uncaught exception in stage thread {}", t.getName(), e))
-        .build();
+    synchronized (_lock) {
+      if (_executor != null && !_executor.isShutdown()) {
+        return _executor;
+      }
 
-    ThreadPoolExecutor executor = new ThreadPoolExecutor(
-        _configuredPoolSize,
-        _configuredPoolSize,
-        THREAD_KEEP_ALIVE_MINUTES,
-        TimeUnit.MINUTES,
-        new LinkedBlockingQueue<>(),
-        threadFactory,
-        new ThreadPoolExecutor.CallerRunsPolicy());
+      ThreadFactory threadFactory = new ThreadFactoryBuilder()
+          .setNameFormat(THREAD_NAME_PREFIX + "-" + _clusterName + "-%d")
+          .setDaemon(true)
+          .setUncaughtExceptionHandler((t, e) ->
+              LOG.error("Uncaught exception in stage thread {} for cluster {}",
+                  t.getName(), _clusterName, e))
+          .build();
 
-    executor.allowCoreThreadTimeOut(true);
-    EXECUTOR_REF.set(executor);
-    LOG.info("Initialized shared stage parallel executor with {} threads", _configuredPoolSize);
-    return executor;
+      // Use bounded queue to prevent unbounded memory growth if tasks pile up.
+      // With CallerRunsPolicy, when queue is full, tasks execute in the caller thread,
+      // providing natural backpressure.
+      int queueCapacity = _configuredPoolSize * QUEUE_CAPACITY_MULTIPLIER;
+      _executor = new ThreadPoolExecutor(
+          _configuredPoolSize,
+          _configuredPoolSize,
+          THREAD_KEEP_ALIVE_MINUTES,
+          TimeUnit.MINUTES,
+          new LinkedBlockingQueue<>(queueCapacity),
+          threadFactory,
+          new ThreadPoolExecutor.CallerRunsPolicy());
+
+      _executor.allowCoreThreadTimeOut(true);
+      LOG.info("Initialized stage parallel executor with {} threads and queue capacity {} for cluster {}",
+          _configuredPoolSize, queueCapacity, _clusterName);
+      return _executor;
+    }
   }
 
   /**
    * Wraps the callable to temporarily rename the current thread
    * with stage-specific prefix during execution (for debugging).
    */
-  private static Callable<?> wrapWithStageContext(Callable<?> task, String stageName) {
+  private Callable<?> wrapWithStageContext(Callable<?> task, String stageName) {
     return () -> {
       Thread current = Thread.currentThread();
       String originalName = current.getName();

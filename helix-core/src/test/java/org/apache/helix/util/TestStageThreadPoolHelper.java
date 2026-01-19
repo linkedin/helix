@@ -29,15 +29,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class TestStageThreadPoolHelper {
 
+  private StageThreadPoolHelper _helper;
+
+  @BeforeMethod
+  public void beforeMethod() {
+    _helper = new StageThreadPoolHelper("TestCluster");
+  }
+
   @AfterMethod
   public void afterMethod() {
-    // Clean up after each test and reset to default pool size
-    StageThreadPoolHelper.shutdown();
-    StageThreadPoolHelper.setPoolSize(StageThreadPoolHelper.DEFAULT_POOL_SIZE);
+    // Clean up after each test
+    if (_helper != null) {
+      _helper.shutdown();
+    }
   }
 
   @Test
@@ -53,7 +62,7 @@ public class TestStageThreadPoolHelper {
       });
     }
 
-    StageThreadPoolHelper.executeAndWait("TestStage", tasks);
+    _helper.executeAndWait("TestStage", tasks);
 
     // Verify all tasks were executed
     Assert.assertEquals(counter.get(), 5, "All tasks should be executed");
@@ -63,13 +72,13 @@ public class TestStageThreadPoolHelper {
   public void testExecuteAndWaitWithEmptyTasks() throws InterruptedException {
     // Test with empty task collection - should not throw exception
     List<Callable<Void>> emptyTasks = new ArrayList<>();
-    StageThreadPoolHelper.executeAndWait("EmptyStage", emptyTasks);
+    _helper.executeAndWait("EmptyStage", emptyTasks);
   }
 
   @Test
   public void testExecuteAndWaitWithNullTasks() throws InterruptedException {
     // Test with null task collection - should not throw exception
-    StageThreadPoolHelper.executeAndWait("NullStage", null);
+    _helper.executeAndWait("NullStage", null);
   }
 
   @Test
@@ -93,7 +102,7 @@ public class TestStageThreadPoolHelper {
     }
 
     // Should not throw exception even if tasks fail
-    StageThreadPoolHelper.executeAndWait("FailingStage", tasks);
+    _helper.executeAndWait("FailingStage", tasks);
 
     // Verify that tasks were executed (some succeeded, some failed)
     Assert.assertEquals(successCounter.get(), 1, "Successful tasks should complete");
@@ -102,7 +111,7 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testParallelExecution() throws InterruptedException {
-    StageThreadPoolHelper.setPoolSize(4);
+    _helper.setPoolSize(4);
 
     // Test that tasks are actually executed in parallel
     int numTasks = 4;
@@ -122,7 +131,7 @@ public class TestStageThreadPoolHelper {
     }
 
     long startTime = System.currentTimeMillis();
-    StageThreadPoolHelper.executeAndWait("ParallelStage", tasks);
+    _helper.executeAndWait("ParallelStage", tasks);
     long duration = System.currentTimeMillis() - startTime;
 
     // Verify all tasks completed
@@ -136,7 +145,7 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testThreadNaming() throws InterruptedException {
-    // Test that thread names include stage context
+    // Test that thread names include stage context and cluster name
     String stageName = "ThreadNamingStage";
     List<String> threadNames = Collections.synchronizedList(new ArrayList<>());
     List<Callable<Void>> tasks = new ArrayList<>();
@@ -148,13 +157,15 @@ public class TestStageThreadPoolHelper {
       });
     }
 
-    StageThreadPoolHelper.executeAndWait(stageName, tasks);
+    _helper.executeAndWait(stageName, tasks);
 
     // Verify thread names contain the stage name
     Assert.assertEquals(threadNames.size(), 3, "Should capture all thread names");
     for (String threadName : threadNames) {
       Assert.assertTrue(threadName.startsWith(stageName + "-"),
           "Thread name should start with stage name: " + threadName);
+      Assert.assertTrue(threadName.contains("TestCluster"),
+          "Thread name should contain cluster name: " + threadName);
     }
   }
 
@@ -168,15 +179,15 @@ public class TestStageThreadPoolHelper {
       return null;
     });
 
-    StageThreadPoolHelper.executeAndWait("PreShutdownStage", tasks);
+    _helper.executeAndWait("PreShutdownStage", tasks);
     Assert.assertEquals(counter.get(), 1, "Task should execute before shutdown");
 
     // Shutdown the executor
-    StageThreadPoolHelper.shutdown();
+    _helper.shutdown();
 
     // Multiple shutdowns should be safe
-    StageThreadPoolHelper.shutdown();
-    StageThreadPoolHelper.shutdown();
+    _helper.shutdown();
+    _helper.shutdown();
   }
 
   @Test
@@ -190,15 +201,15 @@ public class TestStageThreadPoolHelper {
     });
 
     // Execute before shutdown
-    StageThreadPoolHelper.executeAndWait("BeforeShutdown", tasks);
+    _helper.executeAndWait("BeforeShutdown", tasks);
     Assert.assertEquals(counter.get(), 1);
 
     // Shutdown
-    StageThreadPoolHelper.shutdown();
+    _helper.shutdown();
 
     // Execute after shutdown - should create a new executor
     counter.set(0);
-    StageThreadPoolHelper.executeAndWait("AfterShutdown", tasks);
+    _helper.executeAndWait("AfterShutdown", tasks);
     Assert.assertEquals(counter.get(), 1, "Should work after shutdown with new executor");
   }
 
@@ -213,7 +224,7 @@ public class TestStageThreadPoolHelper {
     }
 
     // executeAndWait should handle tasks with return values
-    StageThreadPoolHelper.executeAndWait("ReturnValueStage", tasks);
+    _helper.executeAndWait("ReturnValueStage", tasks);
   }
 
   @Test
@@ -231,7 +242,7 @@ public class TestStageThreadPoolHelper {
       });
     }
 
-    StageThreadPoolHelper.executeAndWait("LargeStage", tasks);
+    _helper.executeAndWait("LargeStage", tasks);
     Assert.assertEquals(counter.get(), numTasks, "All tasks should complete");
   }
 
@@ -255,7 +266,7 @@ public class TestStageThreadPoolHelper {
       }
     }).start();
 
-    StageThreadPoolHelper.executeAndWait("InterruptedStage", tasks);
+    _helper.executeAndWait("InterruptedStage", tasks);
   }
 
   @Test
@@ -282,7 +293,7 @@ public class TestStageThreadPoolHelper {
       });
     }
 
-    StageThreadPoolHelper.executeAndWait("MixedStage", tasks);
+    _helper.executeAndWait("MixedStage", tasks);
 
     Assert.assertEquals(shortTaskCount.get(), 5, "All short tasks should complete");
     Assert.assertEquals(longTaskCount.get(), 3, "All long tasks should complete");
@@ -291,8 +302,8 @@ public class TestStageThreadPoolHelper {
   @Test
   public void testConfigurablePoolSize() throws InterruptedException {
     // Test that the pool size can be configured
-    StageThreadPoolHelper.setPoolSize(2);
-    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), 2, "Pool size should be 2");
+    _helper.setPoolSize(2);
+    Assert.assertEquals(_helper.getPoolSize(), 2, "Pool size should be 2");
 
     // Test with tasks that require parallel execution
     int numTasks = 4;
@@ -315,7 +326,7 @@ public class TestStageThreadPoolHelper {
       });
     }
 
-    StageThreadPoolHelper.executeAndWait("ConfiguredPoolStage", tasks);
+    _helper.executeAndWait("ConfiguredPoolStage", tasks);
 
     // With pool size of 2, max concurrent should be 2
     Assert.assertTrue(maxConcurrent.get() <= 2,
@@ -324,19 +335,141 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testDefaultPoolSize() {
-    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+    Assert.assertEquals(_helper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
         "Pool size should be the default");
   }
 
   @Test
   public void testInvalidPoolSizeFallsBackToDefault() {
     // Test that invalid pool sizes fall back to default
-    StageThreadPoolHelper.setPoolSize(0);
-    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+    _helper.setPoolSize(0);
+    Assert.assertEquals(_helper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
         "Pool size 0 should fall back to default");
 
-    StageThreadPoolHelper.setPoolSize(-1);
-    Assert.assertEquals(StageThreadPoolHelper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
+    _helper.setPoolSize(-1);
+    Assert.assertEquals(_helper.getPoolSize(), StageThreadPoolHelper.DEFAULT_POOL_SIZE,
         "Negative pool size should fall back to default");
+  }
+
+  @Test
+  public void testMultipleControllersHaveSeparatePools() throws InterruptedException {
+    // Test that each controller instance has its own separate pool
+    StageThreadPoolHelper helper1 = new StageThreadPoolHelper("Cluster1");
+    StageThreadPoolHelper helper2 = new StageThreadPoolHelper("Cluster2");
+
+    try {
+      // Configure different pool sizes
+      helper1.setPoolSize(2);
+      helper2.setPoolSize(4);
+
+      Assert.assertEquals(helper1.getPoolSize(), 2, "Cluster1 pool size should be 2");
+      Assert.assertEquals(helper2.getPoolSize(), 4, "Cluster2 pool size should be 4");
+
+      // Track concurrent executions for each helper
+      AtomicInteger concurrentCount1 = new AtomicInteger(0);
+      AtomicInteger maxConcurrent1 = new AtomicInteger(0);
+      AtomicInteger concurrentCount2 = new AtomicInteger(0);
+      AtomicInteger maxConcurrent2 = new AtomicInteger(0);
+
+      List<Callable<Void>> tasks1 = new ArrayList<>();
+      List<Callable<Void>> tasks2 = new ArrayList<>();
+
+      for (int i = 0; i < 4; i++) {
+        tasks1.add(() -> {
+          int current = concurrentCount1.incrementAndGet();
+          synchronized (maxConcurrent1) {
+            if (current > maxConcurrent1.get()) {
+              maxConcurrent1.set(current);
+            }
+          }
+          TimeUnit.MILLISECONDS.sleep(100);
+          concurrentCount1.decrementAndGet();
+          return null;
+        });
+        tasks2.add(() -> {
+          int current = concurrentCount2.incrementAndGet();
+          synchronized (maxConcurrent2) {
+            if (current > maxConcurrent2.get()) {
+              maxConcurrent2.set(current);
+            }
+          }
+          TimeUnit.MILLISECONDS.sleep(100);
+          concurrentCount2.decrementAndGet();
+          return null;
+        });
+      }
+
+      // Execute on both helpers
+      Thread t1 = new Thread(() -> {
+        try {
+          helper1.executeAndWait("Stage1", tasks1);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      Thread t2 = new Thread(() -> {
+        try {
+          helper2.executeAndWait("Stage2", tasks2);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+
+      t1.start();
+      t2.start();
+      t1.join();
+      t2.join();
+
+      // Verify each pool respected its own size limit
+      Assert.assertTrue(maxConcurrent1.get() <= 2,
+          "Cluster1 max concurrent should be <= 2, but was: " + maxConcurrent1.get());
+      Assert.assertTrue(maxConcurrent2.get() <= 4,
+          "Cluster2 max concurrent should be <= 4, but was: " + maxConcurrent2.get());
+    } finally {
+      helper1.shutdown();
+      helper2.shutdown();
+    }
+  }
+
+  @Test
+  public void testShutdownDoesNotAffectOtherInstances() throws InterruptedException {
+    // Test that shutting down one helper doesn't affect another
+    StageThreadPoolHelper helper1 = new StageThreadPoolHelper("Cluster1");
+    StageThreadPoolHelper helper2 = new StageThreadPoolHelper("Cluster2");
+
+    try {
+      AtomicInteger counter1 = new AtomicInteger(0);
+      AtomicInteger counter2 = new AtomicInteger(0);
+
+      List<Callable<Void>> tasks1 = new ArrayList<>();
+      tasks1.add(() -> {
+        counter1.incrementAndGet();
+        return null;
+      });
+
+      List<Callable<Void>> tasks2 = new ArrayList<>();
+      tasks2.add(() -> {
+        counter2.incrementAndGet();
+        return null;
+      });
+
+      // Execute on both
+      helper1.executeAndWait("Stage1", tasks1);
+      helper2.executeAndWait("Stage2", tasks2);
+
+      Assert.assertEquals(counter1.get(), 1);
+      Assert.assertEquals(counter2.get(), 1);
+
+      // Shutdown helper1
+      helper1.shutdown();
+
+      // helper2 should still work
+      counter2.set(0);
+      helper2.executeAndWait("Stage2AfterShutdown", tasks2);
+      Assert.assertEquals(counter2.get(), 1, "helper2 should still work after helper1 shutdown");
+    } finally {
+      helper1.shutdown();
+      helper2.shutdown();
+    }
   }
 }
