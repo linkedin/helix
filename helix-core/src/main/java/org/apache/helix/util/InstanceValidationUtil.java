@@ -461,13 +461,10 @@ public class InstanceValidationUtil {
             resourceName);
         continue;
       }
-      String stateModeDef = externalView.getStateModelDefRef();
-      StateModelDefinition stateModelDefinition =
-          dataAccessor.getProperty(propertyKeyBuilder.stateModelDef(stateModeDef));
-      Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
-      if (stateModelDefinition != null) {
-        unhealthyStates.add(stateModelDefinition.getInitialState());
-      }
+      // Determine which states should be considered "unhealthy" (not active)
+      Set<String> unhealthyStates = getUnhealthyStates(dataAccessor, propertyKeyBuilder,
+          resourceName, idealState.getStateModelDefRef());
+
       for (String partition : externalView.getPartitionSet()) {
         Map<String, String> stateByInstanceMap = externalView.getStateMap(partition);
         // found the resource hosted on the instance
@@ -497,5 +494,58 @@ public class InstanceValidationUtil {
     }
 
     return MinActiveReplicaCheckResult.passed();
+  }
+
+  /**
+   * Get the set of states that should be considered "unhealthy" (not active) for min active replica checks.
+   *
+   * The logic is as follows:
+   * 1. If the resource has ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK configured in ResourceConfig,
+   *    use that list and consider all other states as unhealthy.
+   * 2. Otherwise, use the default behavior: DROPPED, ERROR, and the initial state are unhealthy.
+   *
+   * Note: If an empty list is configured for ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK,
+   * the default behavior is used (empty list does NOT mean "no states are active").
+   *
+   * @param dataAccessor The data accessor
+   * @param propertyKeyBuilder The property key builder
+   * @param resourceName The resource name
+   * @param stateModelDefRef The state model definition reference name
+   * @return Set of state names considered unhealthy
+   */
+  private static Set<String> getUnhealthyStates(HelixDataAccessor dataAccessor,
+      PropertyKey.Builder propertyKeyBuilder, String resourceName,
+      String stateModelDefRef) {
+
+    StateModelDefinition stateModelDefinition = stateModelDefRef != null
+        ? dataAccessor.getProperty(propertyKeyBuilder.stateModelDef(stateModelDefRef))
+        : null;
+
+    Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
+
+    // Try to get resource config to check for custom active states configuration
+    ResourceConfig resourceConfig = dataAccessor.getProperty(propertyKeyBuilder.resourceConfig(resourceName));
+
+    if (resourceConfig != null) {
+      List<String> customActiveStates = resourceConfig.getActiveStatesForMinActiveReplicaCheck();
+      // Note: Empty list falls back to default behavior (empty list does NOT mean "no states are active")
+      if (customActiveStates != null && !customActiveStates.isEmpty()) {
+        if (stateModelDefinition != null && stateModelDefinition.getStatesPriorityList() != null) {
+          unhealthyStates.addAll(stateModelDefinition.getStatesPriorityList());
+        }
+        // Remove custom active states (case-insensitive) - what remains are unhealthy
+        unhealthyStates.removeIf(state ->
+            customActiveStates.stream().anyMatch(active -> active.equalsIgnoreCase(state)));
+        _logger.debug("Resource {} using custom active states for min active replica check: {}. Unhealthy states: {}",
+            resourceName, customActiveStates, unhealthyStates);
+        return unhealthyStates;
+      }
+    }
+
+    // Default behavior: DROPPED, ERROR, and initial state are unhealthy
+    if (stateModelDefinition != null) {
+      unhealthyStates.add(stateModelDefinition.getInitialState());
+    }
+    return unhealthyStates;
   }
 }
