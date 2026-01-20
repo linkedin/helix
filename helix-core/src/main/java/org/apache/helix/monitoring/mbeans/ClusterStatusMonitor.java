@@ -748,23 +748,21 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Updates the mapping capacity rejection stats for a resource.
+   * Increments the mapping capacity rejection counters for a resource.
    * This tracks how many times partitions of a resource were rejected by each instance
    * due to insufficient capacity during the mapping calculation phase.
+   * Counters are cumulative and always increase.
    *
    * @param resourceName The resource name
-   * @param instanceRejections Map of instance name to rejection count
+   * @param instanceRejections Map of instance name to rejection count to add
    */
-  public void updateMappingCapacityRejectionStats(String resourceName,
+  public void incrementMappingCapacityRejectionCounters(String resourceName,
       Map<String, Long> instanceRejections) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      // Reset the stats first to clear old data
-      resourceMonitor.resetCapacityRejectionStats();
-      // Update with new rejection counts
       for (Map.Entry<String, Long> entry : instanceRejections.entrySet()) {
-        resourceMonitor.updateCapacityRejectionStats(entry.getKey(), entry.getValue());
+        resourceMonitor.incrementCapacityRejectionCounter(entry.getKey(), entry.getValue());
       }
     }
   }

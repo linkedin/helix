@@ -51,7 +51,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   }
 
   private static final String GAUGE_METRIC_SUFFIX = "Gauge";
-  private static final String CAPACITY_REJECTION_METRIC_SUFFIX = "_MappingCapacityRejectionGauge";
+  private static final String CAPACITY_REJECTION_METRIC_SUFFIX = "_MappingCapacityRejectionCounter";
 
   // Gauges
   private SimpleDynamicMetric<Long> _numOfPartitions;
@@ -450,14 +450,18 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Updates the capacity rejection count for a specific instance.
+   * Increments the capacity rejection counter for a specific instance.
    * This tracks how many times partitions of this resource were rejected
    * by the specified instance due to insufficient capacity during mapping calculation.
+   * This is a cumulative counter that always increases.
    *
    * @param instanceName The instance that rejected the partition
-   * @param rejectionCount The number of rejections to record
+   * @param rejectionCount The number of rejections to add to the counter
    */
-  public void updateCapacityRejectionStats(String instanceName, long rejectionCount) {
+  public void incrementCapacityRejectionCounter(String instanceName, long rejectionCount) {
+    if (rejectionCount <= 0) {
+      return;
+    }
     synchronized (_instanceCapacityRejectionMap) {
       SimpleDynamicMetric<Long> metric = _instanceCapacityRejectionMap.get(instanceName);
       if (metric == null) {
@@ -467,19 +471,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         updateAttributesInfo(buildAttributeList(),
             "Resource monitor for resource: " + getResourceName());
       } else {
-        metric.updateValue(rejectionCount);
-      }
-    }
-  }
-
-  /**
-   * Resets all capacity rejection stats for this resource.
-   * Called at the start of each pipeline run to reset counters.
-   */
-  public void resetCapacityRejectionStats() {
-    synchronized (_instanceCapacityRejectionMap) {
-      for (SimpleDynamicMetric<Long> metric : _instanceCapacityRejectionMap.values()) {
-        metric.updateValue(0L);
+        // Increment the counter
+        metric.updateValue(metric.getValue() + rejectionCount);
       }
     }
   }

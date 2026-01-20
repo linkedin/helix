@@ -617,38 +617,22 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   }
 
   /**
-   * Gets the capacity rejection map for all resources.
-   * Outer map key: resource name, Inner map key: instance name, Value: rejection count
+   * Gets and clears all capacity rejection data atomically.
+   * This returns the rejections from the current pipeline run and clears the tracking data
+   * for the next run. The returned data is used to increment the cumulative JMX counters.
    *
-   * @return The capacity rejection map
+   * @return Map of resource name to (instance name to rejection count)
    */
-  public Map<String, Map<String, AtomicLong>> getCapacityRejectionMap() {
-    return _capacityRejectionMap;
-  }
-
-  /**
-   * Gets the capacity rejection counts for a specific resource.
-   *
-   * @param resourceName The resource name
-   * @return Map of instance name to rejection count, or empty map if no rejections
-   */
-  public Map<String, Long> getCapacityRejectionsForResource(String resourceName) {
-    Map<String, AtomicLong> resourceRejections = _capacityRejectionMap.get(resourceName);
-    if (resourceRejections == null) {
-      return Collections.emptyMap();
+  public Map<String, Map<String, Long>> getAndClearCapacityRejections() {
+    Map<String, Map<String, Long>> snapshot = new HashMap<>();
+    for (Map.Entry<String, Map<String, AtomicLong>> resourceEntry : _capacityRejectionMap.entrySet()) {
+      Map<String, Long> instanceRejections = new HashMap<>();
+      for (Map.Entry<String, AtomicLong> instanceEntry : resourceEntry.getValue().entrySet()) {
+        instanceRejections.put(instanceEntry.getKey(), instanceEntry.getValue().get());
+      }
+      snapshot.put(resourceEntry.getKey(), instanceRejections);
     }
-    Map<String, Long> result = new HashMap<>();
-    for (Map.Entry<String, AtomicLong> entry : resourceRejections.entrySet()) {
-      result.put(entry.getKey(), entry.getValue().get());
-    }
-    return result;
-  }
-
-  /**
-   * Clears all capacity rejection tracking data.
-   * Should be called at the start of each pipeline run.
-   */
-  public void clearCapacityRejections() {
     _capacityRejectionMap.clear();
+    return snapshot;
   }
 }

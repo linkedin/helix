@@ -27,7 +27,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.atomic.AtomicLong
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
@@ -108,14 +107,9 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
-    // Capture capacity rejection data before clearing
-    final Map<String, Map<String, Long>> capacityRejectionSnapshot = new HashMap<>();
-    for (Map.Entry<String, Map<String, AtomicLong>> entry
-        : cache.getCapacityRejectionMap().entrySet()) {
-      capacityRejectionSnapshot.put(entry.getKey(), cache.getCapacityRejectionsForResource(entry.getKey()));
-    }
-    // Clear rejection data for the next pipeline run
-    cache.clearCapacityRejections();
+    // Capture capacity rejection data from this pipeline run and clear for next run
+    final Map<String, Map<String, Long>> capacityRejectionSnapshot =
+        cache.getAndClearCapacityRejections();
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
@@ -138,14 +132,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
                 externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
           }
 
-          // Report capacity rejection metrics for each resource
+          // Increment capacity rejection counters for each resource
           for (Map.Entry<String, Map<String, Long>> entry : capacityRejectionSnapshot.entrySet()) {
             String resourceName = entry.getKey();
             if (resourceConfigMap.containsKey(resourceName) && resourceConfigMap.get(resourceName)
                 .isMonitoringDisabled()) {
               continue;
             }
-            clusterStatusMonitor.updateMappingCapacityRejectionStats(resourceName, entry.getValue());
+            clusterStatusMonitor.incrementMappingCapacityRejectionCounters(resourceName, entry.getValue());
           }
         }
       } catch (Exception e) {
