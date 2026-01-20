@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
@@ -109,7 +110,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
     // Capture capacity rejection data before clearing
     final Map<String, Map<String, Long>> capacityRejectionSnapshot = new HashMap<>();
-    for (Map.Entry<String, Map<String, java.util.concurrent.atomic.AtomicLong>> entry
+    for (Map.Entry<String, Map<String, AtomicLong>> entry
         : cache.getCapacityRejectionMap().entrySet()) {
       capacityRejectionSnapshot.put(entry.getKey(), cache.getCapacityRejectionsForResource(entry.getKey()));
     }
