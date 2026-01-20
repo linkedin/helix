@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -110,7 +111,8 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
 
   // Tracks capacity rejections per resource per instance during mapping calculation.
   // Outer map key: resource name, Inner map key: instance name, Value: rejection count
-  private final Map<String, Map<String, AtomicLong>> _capacityRejectionMap = new ConcurrentHashMap<>();
+  private final AtomicReference<Map<String, Map<String, AtomicLong>>> _capacityRejectionMapRef =
+      new AtomicReference<>(new ConcurrentHashMap<>());
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -610,7 +612,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
    * @param instanceName The instance that rejected the partition
    */
   public void recordCapacityRejection(String resourceName, String instanceName) {
-    _capacityRejectionMap
+    _capacityRejectionMapRef.get()
         .computeIfAbsent(resourceName, k -> new ConcurrentHashMap<>())
         .computeIfAbsent(instanceName, k -> new AtomicLong(0))
         .incrementAndGet();
@@ -623,16 +625,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
    *
    * @return Map of resource name to (instance name to rejection count)
    */
-  public Map<String, Map<String, Long>> getAndClearCapacityRejections() {
-    Map<String, Map<String, Long>> snapshot = new HashMap<>();
-    for (Map.Entry<String, Map<String, AtomicLong>> resourceEntry : _capacityRejectionMap.entrySet()) {
-      Map<String, Long> instanceRejections = new HashMap<>();
-      for (Map.Entry<String, AtomicLong> instanceEntry : resourceEntry.getValue().entrySet()) {
-        instanceRejections.put(instanceEntry.getKey(), instanceEntry.getValue().get());
-      }
-      snapshot.put(resourceEntry.getKey(), instanceRejections);
-    }
-    _capacityRejectionMap.clear();
-    return snapshot;
+  public Map<String, Map<String, AtomicLong>> getAndClearCapacityRejections() {
+    return _capacityRejectionMapRef.getAndSet(new ConcurrentHashMap<>());
   }
 }

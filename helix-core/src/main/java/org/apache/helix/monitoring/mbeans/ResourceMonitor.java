@@ -471,7 +471,6 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         updateAttributesInfo(buildAttributeList(),
             "Resource monitor for resource: " + getResourceName());
       } else {
-        // Increment the counter
         metric.updateValue(metric.getValue() + rejectionCount);
       }
     }

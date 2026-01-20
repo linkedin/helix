@@ -25,6 +25,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.model.IdealState;
@@ -87,5 +88,27 @@ public class TestResourceControllerDataProvider {
     // Now, since the cache has been cleaned, the get will return different order.
     Assert.assertTrue(
         dataProvider.getStablePartitionList(resourceName) == null);
+  }
+
+  @Test
+  public void testCapacityRejectionTracking() {
+    ResourceControllerDataProvider dataProvider = new ResourceControllerDataProvider();
+
+    dataProvider.recordCapacityRejection("ResourceA", "Instance1");
+    dataProvider.recordCapacityRejection("ResourceA", "Instance1");
+    dataProvider.recordCapacityRejection("ResourceA", "Instance2");
+    dataProvider.recordCapacityRejection("ResourceB", "Instance1");
+
+    Map<String, Map<String, AtomicLong>> snapshot = dataProvider.getAndClearCapacityRejections();
+    Assert.assertEquals(snapshot.get("ResourceA").get("Instance1").get(), 2L);
+    Assert.assertEquals(snapshot.get("ResourceA").get("Instance2").get(), 1L);
+    Assert.assertEquals(snapshot.get("ResourceB").get("Instance1").get(), 1L);
+
+    // After clear, new rejections should not affect the previous snapshot.
+    dataProvider.recordCapacityRejection("ResourceA", "Instance1");
+    Assert.assertEquals(snapshot.get("ResourceA").get("Instance1").get(), 2L);
+
+    Map<String, Map<String, AtomicLong>> nextSnapshot = dataProvider.getAndClearCapacityRejections();
+    Assert.assertEquals(nextSnapshot.get("ResourceA").get("Instance1").get(), 1L);
   }
 }

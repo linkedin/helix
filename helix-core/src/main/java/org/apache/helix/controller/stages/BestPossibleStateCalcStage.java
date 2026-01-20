@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
@@ -108,7 +109,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
     // Capture capacity rejection data from this pipeline run and clear for next run
-    final Map<String, Map<String, Long>> capacityRejectionSnapshot =
+    final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
         cache.getAndClearCapacityRejections();
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
@@ -133,7 +134,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
           }
 
           // Increment capacity rejection counters for each resource
-          for (Map.Entry<String, Map<String, Long>> entry : capacityRejectionSnapshot.entrySet()) {
+          for (Map.Entry<String, Map<String, AtomicLong>> entry
+              : capacityRejectionSnapshot.entrySet()) {
             String resourceName = entry.getKey();
             if (resourceConfigMap.containsKey(resourceName) && resourceConfigMap.get(resourceName)
                 .isMonitoringDisabled()) {

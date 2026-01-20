@@ -757,12 +757,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param instanceRejections Map of instance name to rejection count to add
    */
   public void incrementMappingCapacityRejectionCounters(String resourceName,
-      Map<String, Long> instanceRejections) {
+      Map<String, AtomicLong> instanceRejections) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      for (Map.Entry<String, Long> entry : instanceRejections.entrySet()) {
-        resourceMonitor.incrementCapacityRejectionCounter(entry.getKey(), entry.getValue());
+      for (Map.Entry<String, AtomicLong> entry : instanceRejections.entrySet()) {
+        resourceMonitor.incrementCapacityRejectionCounter(entry.getKey(), entry.getValue().get());
       }
     }
   }
