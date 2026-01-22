@@ -337,22 +337,14 @@ public class DefaultMessagingService implements ClusterMessagingService {
 
   @Override
   public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
-      boolean sessionSpecific, boolean selfExcluded) {
-    return sendToParticipantInstance(clusterName, instanceName, message, sessionSpecific, selfExcluded, null,
-        -1, 0);
-  }
-
-  @Override
-  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
-      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut) {
-    return sendToParticipantInstance(clusterName, instanceName, message, sessionSpecific, selfExcluded,
-        callbackOnReply, timeOut, 0);
-  }
-
-  @Override
-  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
-      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut,
-      int retryCount) {
+      ParticipantMessageOptions options) {
+    ParticipantMessageOptions opts =
+        options == null ? ParticipantMessageOptions.defaults() : options;
+    boolean sessionSpecific = opts.isSessionSpecific();
+    boolean selfExcluded = opts.isSelfExcluded();
+    AsyncCallback callbackOnReply = opts.getCallbackOnReply();
+    int timeOut = opts.getTimeoutMs();
+    int retryCount = opts.getRetryCount();
     if (instanceName == null || instanceName.isEmpty()) {
       _logger.warn("Instance name is null or empty. No message sent.");
       return 0;
@@ -394,22 +386,14 @@ public class DefaultMessagingService implements ClusterMessagingService {
 
   @Override
   public int sendToAllParticipantInstances(String clusterName, Message message,
-      boolean sessionSpecific, boolean selfExcluded) {
-    return sendToAllParticipantInstances(clusterName, message, sessionSpecific, selfExcluded, null,
-        -1, 0);
-  }
-
-  @Override
-  public int sendToAllParticipantInstances(String clusterName, Message message,
-      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut) {
-    return sendToAllParticipantInstances(clusterName, message, sessionSpecific, selfExcluded,
-        callbackOnReply, timeOut, 0);
-  }
-
-  @Override
-  public int sendToAllParticipantInstances(String clusterName, Message message,
-      boolean sessionSpecific, boolean selfExcluded, AsyncCallback callbackOnReply, int timeOut,
-      int retryCount) {
+      ParticipantMessageOptions options) {
+    ParticipantMessageOptions opts =
+        options == null ? ParticipantMessageOptions.defaults() : options;
+    boolean sessionSpecific = opts.isSessionSpecific();
+    boolean selfExcluded = opts.isSelfExcluded();
+    AsyncCallback callbackOnReply = opts.getCallbackOnReply();
+    int timeOut = opts.getTimeoutMs();
+    int retryCount = opts.getRetryCount();
     HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
     Builder keyBuilder = dataAccessor.keyBuilder();
 
