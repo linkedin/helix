@@ -338,55 +338,33 @@ public class DefaultMessagingService implements ClusterMessagingService {
   @Override
   public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
       ParticipantMessageOptions options) {
-    ParticipantMessageOptions opts =
-        options == null ? ParticipantMessageOptions.defaults() : options;
-    boolean sessionSpecific = opts.isSessionSpecific();
-    boolean selfExcluded = opts.isSelfExcluded();
-    AsyncCallback callbackOnReply = opts.getCallbackOnReply();
-    int timeOut = opts.getTimeoutMs();
-    int retryCount = opts.getRetryCount();
     if (instanceName == null || instanceName.isEmpty()) {
       _logger.warn("Instance name is null or empty. No message sent.");
       return 0;
     }
 
-    // Check if we should exclude self
-    if (selfExcluded && instanceName.equalsIgnoreCase(_manager.getInstanceName())) {
-      _logger.info("Message to self excluded for instance: " + instanceName);
-      return 0;
-    }
-
-    HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
-    Builder keyBuilder = dataAccessor.keyBuilder();
-
-    // Optimization: Check if instance is live using exists() - O(1) operation
-    boolean isLive = dataAccessor.getBaseDataAccessor()
-        .exists(keyBuilder.liveInstance(instanceName).getPath(), 0);
-
-    if (!isLive) {
-      _logger.info("Instance " + instanceName + " is not live. No message sent.");
-      return 0;
-    }
-
-    // Generate single message for single instance
-    Message newMessage = generateMessageForSingleInstance(instanceName, message, sessionSpecific,
-        dataAccessor, keyBuilder);
-
-    if (newMessage == null) {
-      _logger.warn("Failed to generate message for instance: " + instanceName);
-      return 0;
-    }
-
-    Map<InstanceType, List<Message>> messagesByType = new HashMap<>();
-    messagesByType.put(InstanceType.PARTICIPANT, Collections.singletonList(newMessage));
-
-    return sendMessagesInternalWithInstanceType(messagesByType, callbackOnReply, timeOut,
-        retryCount, dataAccessor);
+    return sendToParticipantInstances(clusterName, message, options,
+        Collections.singletonList(instanceName));
   }
 
   @Override
   public int sendToAllParticipantInstances(String clusterName, Message message,
       ParticipantMessageOptions options) {
+    return sendToParticipantInstances(clusterName, message, options, null);
+  }
+
+  /**
+   * Shared helper to send messages to participant instances, either to a provided list
+   * or to all live participants in the cluster.
+   *
+   * @param clusterName the target cluster name
+   * @param message message template
+   * @param options participant message options (defaults applied when null)
+   * @param targetInstances list of target instance names, or null to target all live instances
+   * @return number of messages sent
+   */
+  private int sendToParticipantInstances(String clusterName, Message message,
+      ParticipantMessageOptions options, List<String> targetInstances) {
     ParticipantMessageOptions opts =
         options == null ? ParticipantMessageOptions.defaults() : options;
     boolean sessionSpecific = opts.isSessionSpecific();
@@ -394,24 +372,57 @@ public class DefaultMessagingService implements ClusterMessagingService {
     AsyncCallback callbackOnReply = opts.getCallbackOnReply();
     int timeOut = opts.getTimeoutMs();
     int retryCount = opts.getRetryCount();
+    boolean singleTarget = targetInstances != null && targetInstances.size() == 1;
+
     HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
     Builder keyBuilder = dataAccessor.keyBuilder();
 
-    List<String> liveInstanceNames = dataAccessor.getChildNames(keyBuilder.liveInstances());
-    if (liveInstanceNames == null || liveInstanceNames.isEmpty()) {
-      _logger.info("No live participant instances found in cluster: " + clusterName);
-      return 0;
+    List<String> liveInstanceNames;
+    if (targetInstances == null) {
+      liveInstanceNames = dataAccessor.getChildNames(keyBuilder.liveInstances());
+      if (liveInstanceNames == null || liveInstanceNames.isEmpty()) {
+        _logger.info("No live participant instances found in cluster: " + clusterName);
+        return 0;
+      }
+    } else {
+      liveInstanceNames = new ArrayList<>();
+      for (String instanceName : targetInstances) {
+        boolean isLive = dataAccessor.getBaseDataAccessor()
+            .exists(keyBuilder.liveInstance(instanceName).getPath(), 0);
+        if (!isLive) {
+          _logger.info("Instance " + instanceName + " is not live. No message sent.");
+          if (singleTarget) {
+            return 0;
+          } else {
+            continue;
+          }
+        }
+        liveInstanceNames.add(instanceName);
+      }
+
+      if (liveInstanceNames.isEmpty()) {
+        _logger.info("No live participant instances found in cluster: " + clusterName);
+        return 0;
+      }
     }
 
     List<Message> participantMessages = new ArrayList<>();
     for (String instanceName : liveInstanceNames) {
       if (selfExcluded && instanceName.equalsIgnoreCase(_manager.getInstanceName())) {
+        if (singleTarget) {
+          _logger.info("Message to self excluded for instance: " + instanceName);
+          return 0;
+        }
         continue;
       }
+
       Message msg = generateMessageForSingleInstance(instanceName, message, sessionSpecific,
           dataAccessor, keyBuilder);
       if (msg != null) {
         participantMessages.add(msg);
+      } else if (singleTarget) {
+        _logger.warn("Failed to generate message for instance: " + instanceName);
+        return 0;
       }
     }
 
