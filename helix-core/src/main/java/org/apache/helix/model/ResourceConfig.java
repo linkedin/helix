@@ -20,6 +20,7 @@ package org.apache.helix.model;
  */
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -280,6 +281,9 @@ public class ResourceConfig extends HelixProperty {
     return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
   }
 
+  // Delimiter used for storing active states as a comma-separated string in simpleField
+  private static final String ACTIVE_STATES_DELIMITER = ",";
+
   /**
    * Get the list of states that should be considered as "active" for min active replica check.
    * If not configured, the default behavior applies (all states except DROPPED, ERROR, and initial state).
@@ -290,7 +294,12 @@ public class ResourceConfig extends HelixProperty {
    * @return List of state names to be considered active, or null if not configured
    */
   public List<String> getActiveStatesForMinActiveReplicaCheck() {
-    return _record.getListField(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    String statesStr = _record.getSimpleField(
+        ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    if (statesStr == null || statesStr.isEmpty()) {
+      return null;
+    }
+    return Arrays.asList(statesStr.split(ACTIVE_STATES_DELIMITER));
   }
 
   /**
@@ -309,10 +318,13 @@ public class ResourceConfig extends HelixProperty {
    * @param activeStates List of state names to be considered active, or null to use default behavior
    */
   public void setActiveStatesForMinActiveReplicaCheck(List<String> activeStates) {
-    if (activeStates == null) {
-      _record.getListFields().remove(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    if (activeStates == null || activeStates.isEmpty()) {
+      _record.getSimpleFields().remove(
+          ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
     } else {
-      _record.setListField(ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(), activeStates);
+      _record.setSimpleField(
+          ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(),
+          String.join(ACTIVE_STATES_DELIMITER, activeStates));
     }
   }
 
