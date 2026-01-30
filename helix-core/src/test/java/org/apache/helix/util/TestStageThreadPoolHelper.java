@@ -21,7 +21,9 @@ package org.apache.helix.util;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Collection;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -285,5 +287,135 @@ public class TestStageThreadPoolHelper {
 
     Assert.assertEquals(shortTaskCount.get(), 5, "All short tasks should complete");
     Assert.assertEquals(longTaskCount.get(), 3, "All long tasks should complete");
+  }
+
+  @Test(timeOut = 10000)
+  public void testShutdownRacingWithSubmissionDoesNotHang() throws Exception {
+    // Regression for a subtle behavior with ThreadPoolExecutor.CallerRunsPolicy + submit():
+    // if shutdown races with submit(), the rejected FutureTask can be silently dropped leaving a
+    // Future that never completes, and Future.get() can hang forever.
+    //
+    // StageThreadPoolHelper should never hang here; rejected tasks should be cancelled.
+    int numTasks = 200;
+    List<Callable<Void>> tasks = new ArrayList<>(numTasks);
+    for (int i = 0; i < numTasks; i++) {
+      tasks.add(() -> null);
+    }
+
+    Collection<Callable<Void>> slowSubmittingTasks = new SlowIteratingCollection<>(tasks, 2);
+
+    AtomicInteger failures = new AtomicInteger(0);
+    Thread runner = new Thread(() -> {
+      try {
+        StageThreadPoolHelper.executeAndWait("ShutdownRaceStage", slowSubmittingTasks);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        failures.incrementAndGet();
+      } catch (RuntimeException e) {
+        failures.incrementAndGet();
+      }
+    }, "testShutdownRacingWithSubmissionDoesNotHang-runner");
+
+    runner.start();
+    // Try to cut into the submit loop.
+    TimeUnit.MILLISECONDS.sleep(25);
+    StageThreadPoolHelper.shutdown();
+
+    runner.join(TimeUnit.SECONDS.toMillis(5));
+    Assert.assertFalse(runner.isAlive(), "executeAndWait should not hang even if shutdown races");
+    Assert.assertEquals(failures.get(), 0, "executeAndWait should not throw");
+  }
+
+  private static final class SlowIteratingCollection<T> implements Collection<T> {
+    private final Collection<T> _delegate;
+    private final long _delayPerNextMs;
+
+    private SlowIteratingCollection(Collection<T> delegate, long delayPerNextMs) {
+      _delegate = delegate;
+      _delayPerNextMs = delayPerNextMs;
+    }
+
+    @Override
+    public int size() {
+      return _delegate.size();
+    }
+
+    @Override
+    public boolean isEmpty() {
+      return _delegate.isEmpty();
+    }
+
+    @Override
+    public boolean contains(Object o) {
+      return _delegate.contains(o);
+    }
+
+    @Override
+    public Iterator<T> iterator() {
+      Iterator<T> it = _delegate.iterator();
+      return new Iterator<T>() {
+        @Override
+        public boolean hasNext() {
+          return it.hasNext();
+        }
+
+        @Override
+        public T next() {
+          if (_delayPerNextMs > 0) {
+            try {
+              TimeUnit.MILLISECONDS.sleep(_delayPerNextMs);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+          }
+          return it.next();
+        }
+      };
+    }
+
+    @Override
+    public Object[] toArray() {
+      return _delegate.toArray();
+    }
+
+    @Override
+    public <E> E[] toArray(E[] a) {
+      return _delegate.toArray(a);
+    }
+
+    @Override
+    public boolean add(T t) {
+      return _delegate.add(t);
+    }
+
+    @Override
+    public boolean remove(Object o) {
+      return _delegate.remove(o);
+    }
+
+    @Override
+    public boolean containsAll(Collection<?> c) {
+      return _delegate.containsAll(c);
+    }
+
+    @Override
+    public boolean addAll(Collection<? extends T> c) {
+      return _delegate.addAll(c);
+    }
+
+    @Override
+    public boolean removeAll(Collection<?> c) {
+      return _delegate.removeAll(c);
+    }
+
+    @Override
+    public boolean retainAll(Collection<?> c) {
+      return _delegate.retainAll(c);
+    }
+
+    @Override
+    public void clear() {
+      _delegate.clear();
+    }
   }
 }
