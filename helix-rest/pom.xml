@@ -43,7 +43,7 @@
   </organization>
 
   <properties>
-    <revision>1.4.4-SNAPSHOT</revision>
+    <revision>1.5.0-SNAPSHOT</revision>
     <osgi.import>
       org.apache.helix*,
       org.apache.commons.cli*,

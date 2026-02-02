@@ -51,7 +51,7 @@
   </modules>
 
   <properties>
-    <revision>1.4.4-SNAPSHOT</revision>
+    <revision>1.5.0-SNAPSHOT</revision>
     <!-- for svnpubsub site deployment -->
     <!-- you can use javasvn too -->
     <svnImpl>svn</svnImpl>
