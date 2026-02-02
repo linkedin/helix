@@ -1,7 +1,7 @@
 name: Helix PR CI
 on:
   pull_request:
-    branches: [ master, metaclient, dev]
+    branches: [ master, metaclient, dev, ApplicationClusterManager, helix-gateway-service]
     paths-ignore:
       - '.github/**'
       - 'helix-front/**'
