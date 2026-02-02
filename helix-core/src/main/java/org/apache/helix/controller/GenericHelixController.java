@@ -111,7 +111,6 @@ import org.apache.helix.model.Message;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.monitoring.mbeans.ClusterEventMonitor;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
-import org.apache.helix.util.StageThreadPoolHelper;
 import org.apache.helix.zookeeper.zkclient.exception.ZkInterruptedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1475,8 +1474,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
 
-    // shutdown shared stage thread pool
-    StageThreadPoolHelper.shutdown();
+    // NOTE: StageThreadPoolHelper is a JVM-wide shared pool. Do not shutdown here to avoid
+    // cross-cluster interference when a single controller shuts down.
 
     enableClusterStatusMonitor(false);
 
