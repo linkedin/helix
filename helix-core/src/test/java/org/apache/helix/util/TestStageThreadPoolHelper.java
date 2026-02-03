@@ -22,10 +22,13 @@ package org.apache.helix.util;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.helix.SystemPropertyKeys;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
@@ -285,6 +288,63 @@ public class TestStageThreadPoolHelper {
 
     Assert.assertEquals(shortTaskCount.get(), 5, "All short tasks should complete");
     Assert.assertEquals(longTaskCount.get(), 3, "All long tasks should complete");
+  }
+
+  @Test
+  public void testConfigurablePoolSize() throws InterruptedException {
+    // First ensure any existing pool is shut down
+    StageThreadPoolHelper.shutdown();
+
+    // Configure a custom pool size via system property
+    int configuredPoolSize = 2;
+    System.setProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, String.valueOf(configuredPoolSize));
+
+    try {
+      // Track unique thread names to verify pool size
+      Set<String> uniqueThreadNames = ConcurrentHashMap.newKeySet();
+      CountDownLatch allTasksStarted = new CountDownLatch(configuredPoolSize + 2);
+      CountDownLatch releaseTasksLatch = new CountDownLatch(1);
+      List<Callable<Void>> tasks = new ArrayList<>();
+
+      // Create more tasks than pool size to test that pool size limits concurrent execution
+      for (int i = 0; i < configuredPoolSize + 2; i++) {
+        tasks.add(() -> {
+          uniqueThreadNames.add(Thread.currentThread().getName());
+          allTasksStarted.countDown();
+          // Hold the thread to observe concurrency
+          releaseTasksLatch.await(5, TimeUnit.SECONDS);
+          return null;
+        });
+      }
+
+      // Execute in a separate thread so we can check concurrency
+      Thread executorThread = new Thread(() -> {
+        try {
+          StageThreadPoolHelper.executeAndWait("ConfigPoolTest", tasks);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      executorThread.start();
+
+      // Wait a bit for tasks to start
+      TimeUnit.MILLISECONDS.sleep(200);
+
+      // With pool size of 2, at most 2 threads should be executing concurrently
+      // The remaining tasks should be queued
+      // Release all tasks
+      releaseTasksLatch.countDown();
+      executorThread.join(5000);
+
+      // Verify that the configured pool size was used
+      // The number of unique threads should be at most the configured pool size
+      Assert.assertTrue(uniqueThreadNames.size() <= configuredPoolSize,
+          "Should use at most " + configuredPoolSize + " threads, but used " + uniqueThreadNames.size());
+    } finally {
+      // Clean up the system property
+      System.clearProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE);
+      StageThreadPoolHelper.shutdown();
+    }
   }
 
 }

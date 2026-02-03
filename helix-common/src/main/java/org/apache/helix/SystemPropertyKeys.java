@@ -94,4 +94,7 @@ public class SystemPropertyKeys {
   // Constraint-based algorithm ForkJoinPool parallelism
   public static final String CONSTRAINT_ALGORITHM_PARALLELISM =
       "helix.constraint.algorithm.parallelism";
+
+  // Stage thread pool size for parallel stage execution
+  public static final String STAGE_THREAD_POOL_SIZE = "helix.stage.threadpool.size";
 }

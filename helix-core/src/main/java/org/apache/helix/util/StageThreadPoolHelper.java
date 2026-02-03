@@ -4,6 +4,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.helix.SystemPropertyKeys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,6 +22,15 @@ public class StageThreadPoolHelper {
   private static final long THREAD_KEEP_ALIVE_MIN = 3;
   private static final String THREAD_NAME_PREFIX = "HelixStageWorker";
 
+  /**
+   * Get the configured pool size from system property, or fall back to default.
+   * @return the pool size to use for the shared stage thread pool
+   */
+  private static int getPoolSize() {
+    return HelixUtil.getSystemPropertyAsInt(
+        SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, DEFAULT_POOL_SIZE);
+  }
+
   // Shared executor reused across all stages
   private static final AtomicReference<ThreadPoolExecutor> EXECUTOR_REF = new AtomicReference<>();
 
@@ -36,6 +46,8 @@ public class StageThreadPoolHelper {
       return existing;
     }
 
+    int poolSize = getPoolSize();
+
     ThreadFactory threadFactory = new ThreadFactoryBuilder()
         .setNameFormat(THREAD_NAME_PREFIX + "-%d")
         .setDaemon(true)
@@ -44,8 +56,8 @@ public class StageThreadPoolHelper {
         .build();
 
     ThreadPoolExecutor executor = new ThreadPoolExecutor(
-        DEFAULT_POOL_SIZE,
-        DEFAULT_POOL_SIZE,
+        poolSize,
+        poolSize,
         THREAD_KEEP_ALIVE_MIN,
         TimeUnit.MINUTES,
         new LinkedBlockingQueue<>(),
@@ -54,7 +66,7 @@ public class StageThreadPoolHelper {
 
     executor.allowCoreThreadTimeOut(true);
     EXECUTOR_REF.set(executor);
-    LOG.info("Initialized shared stage parallel executor with {} threads", DEFAULT_POOL_SIZE);
+    LOG.info("Initialized shared stage parallel executor with {} threads", poolSize);
     return executor;
   }
 
