@@ -292,7 +292,6 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testConfigurablePoolSize() throws InterruptedException {
-    // First ensure any existing pool is shut down
     StageThreadPoolHelper.shutdown();
 
     // Configure a custom pool size via system property
@@ -342,6 +341,47 @@ public class TestStageThreadPoolHelper {
           "Should use at most " + configuredPoolSize + " threads, but used " + uniqueThreadNames.size());
     } finally {
       // Clean up the system property
+      System.clearProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE);
+      StageThreadPoolHelper.shutdown();
+    }
+  }
+
+  @Test
+  public void testPoolSizeBounds() throws InterruptedException {
+    StageThreadPoolHelper.shutdown();
+
+    int availableProcessors = Runtime.getRuntime().availableProcessors();
+
+    // Test 1: Excessive pool size should be capped
+    System.setProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, String.valueOf(availableProcessors + 100));
+    try {
+      AtomicInteger counter = new AtomicInteger(0);
+      List<Callable<Void>> tasks = new ArrayList<>();
+      for (int i = 0; i < 5; i++) {
+        tasks.add(() -> {
+          counter.incrementAndGet();
+          return null;
+        });
+      }
+      StageThreadPoolHelper.executeAndWait("MaxBoundTest", tasks);
+      Assert.assertEquals(counter.get(), 5, "All tasks should execute even with excessive pool size config");
+    } finally {
+      System.clearProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE);
+      StageThreadPoolHelper.shutdown();
+    }
+
+    // Test 2: Zero pool size should fall back to default
+    System.setProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, "0");
+    try {
+      AtomicInteger counter = new AtomicInteger(0);
+      List<Callable<Void>> tasks = new ArrayList<>();
+      tasks.add(() -> {
+        counter.incrementAndGet();
+        return null;
+      });
+      StageThreadPoolHelper.executeAndWait("MinBoundTest", tasks);
+      Assert.assertEquals(counter.get(), 1, "Task should execute even with zero pool size config");
+    } finally {
       System.clearProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE);
       StageThreadPoolHelper.shutdown();
     }

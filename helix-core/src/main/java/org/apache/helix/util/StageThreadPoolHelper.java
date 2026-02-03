@@ -17,18 +17,30 @@ import org.slf4j.LoggerFactory;
 public class StageThreadPoolHelper {
   private static final Logger LOG = LoggerFactory.getLogger(StageThreadPoolHelper.class);
 
+  private static final int MIN_POOL_SIZE = 1;
   private static final int DEFAULT_POOL_SIZE =
       Math.min(4, Runtime.getRuntime().availableProcessors());
   private static final long THREAD_KEEP_ALIVE_MIN = 3;
   private static final String THREAD_NAME_PREFIX = "HelixStageWorker";
 
   /**
-   * Get the configured pool size from system property, or fall back to default.
+   * Get the configured pool size from system property, bounded between MIN_POOL_SIZE
+   * and availableProcessors().
    * @return the pool size to use for the shared stage thread pool
    */
   private static int getPoolSize() {
-    return HelixUtil.getSystemPropertyAsInt(
+    int maxPoolSize = Runtime.getRuntime().availableProcessors();
+    int configuredSize = HelixUtil.getSystemPropertyAsInt(
         SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, DEFAULT_POOL_SIZE);
+
+    int boundedSize = Math.max(MIN_POOL_SIZE, Math.min(maxPoolSize, configuredSize));
+
+    if (boundedSize != configuredSize) {
+      LOG.warn("Configured pool size {} is out of bounds [{}, {}], using {}",
+          configuredSize, MIN_POOL_SIZE, maxPoolSize, boundedSize);
+    }
+
+    return boundedSize;
   }
 
   // Shared executor reused across all stages
