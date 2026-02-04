@@ -292,8 +292,6 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testConfigurablePoolSize() throws InterruptedException {
-    StageThreadPoolHelper.shutdown();
-
     // Configure a custom pool size via system property
     int configuredPoolSize = 2;
     System.setProperty(SystemPropertyKeys.STAGE_THREAD_POOL_SIZE, String.valueOf(configuredPoolSize));
@@ -348,8 +346,6 @@ public class TestStageThreadPoolHelper {
 
   @Test
   public void testPoolSizeBounds() throws InterruptedException {
-    StageThreadPoolHelper.shutdown();
-
     int availableProcessors = Runtime.getRuntime().availableProcessors();
 
     // Test 1: Excessive pool size should be capped
