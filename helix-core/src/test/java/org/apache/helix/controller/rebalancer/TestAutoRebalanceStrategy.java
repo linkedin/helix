@@ -1224,4 +1224,151 @@ public class TestAutoRebalanceStrategy {
     // The number of non-empty preference list should be 25 because we set the MAX_PARTITION_PER_NODE = 25
     Assert.assertEquals(countOfNonEmptyPreferenceList, 25);
   }
+
+  /**
+   * Test that when ALL instances are disabled (liveNodes is empty), the AutoRebalanceStrategy
+   * preserves the current mapping instead of returning an empty mapping.
+   * This ensures partitions don't become orphans and can properly transition to OFFLINE state.
+   *
+   * Issue: When all instances are disabled, previously the strategy would return an empty ZNRecord,
+   * causing partitions to become orphans and stay in their current state (e.g., STANDBY) instead
+   * of transitioning to OFFLINE.
+   */
+  @Test
+  public void testAllInstancesDisabled_ShouldPreserveCurrentMapping() {
+    final String RESOURCE_NAME = "PARTICIPANT_LEADER_BackupManager";
+    final String[] PARTITIONS = {"PARTICIPANT_LEADER_BackupManager_0"};
+    final StateModelDefinition STATE_MODEL = LeaderStandbySMD.build();
+    final String[] NODES = {"instance1", "instance2", "instance3", "instance4"};
+
+    ResourceControllerDataProvider dataCache = TestHelper.buildMockDataCache(RESOURCE_NAME,
+        ResourceConfig.ResourceConfigConstants.ANY_LIVEINSTANCE.toString(), "LeaderStandby",
+        STATE_MODEL, Collections.emptySet());
+
+    // Setup: 4 nodes with existing assignments (simulating before disable)
+    List<String> allNodes = Lists.newArrayList(NODES);
+    List<String> partitions = ImmutableList.copyOf(PARTITIONS);
+
+    // Create current mapping with all 4 instances having STANDBY state
+    Map<String, Map<String, String>> currentMapping = Maps.newHashMap();
+    Map<String, String> partitionMapping = new HashMap<>();
+    for (String node : NODES) {
+      partitionMapping.put(node, "STANDBY");
+    }
+    currentMapping.put(PARTITIONS[0], partitionMapping);
+
+    // All instances are disabled - liveNodes is EMPTY
+    List<String> liveNodes = Collections.emptyList();
+
+    LinkedHashMap<String, Integer> stateCount =
+        STATE_MODEL.getStateCountMap(NODES.length, NODES.length);
+
+    // Execute the strategy with empty liveNodes (all disabled scenario)
+    ZNRecord znRecord =
+        new AutoRebalanceStrategy(RESOURCE_NAME, partitions, stateCount)
+            .computePartitionAssignment(allNodes, liveNodes, currentMapping, dataCache);
+
+    // Verify: The current mapping should be preserved, not empty
+    Map<String, List<String>> preferenceLists = znRecord.getListFields();
+
+    Assert.assertNotNull(preferenceLists.get(PARTITIONS[0]),
+        "Preference list should not be null when all instances are disabled");
+    Assert.assertFalse(preferenceLists.get(PARTITIONS[0]).isEmpty(),
+        "Preference list should not be empty when all instances are disabled - "
+            + "current mapping should be preserved");
+
+    // Verify all instances from currentMapping are in the preference list
+    List<String> preferenceList = preferenceLists.get(PARTITIONS[0]);
+    for (String node : NODES) {
+      Assert.assertTrue(preferenceList.contains(node),
+          "Instance " + node + " should be in the preference list to allow OFFLINE transition");
+    }
+
+    // Verify the map fields are also preserved
+    Map<String, String> mapField = znRecord.getMapField(PARTITIONS[0]);
+    Assert.assertNotNull(mapField, "Map field should not be null");
+    Assert.assertFalse(mapField.isEmpty(), "Map field should not be empty");
+    for (String node : NODES) {
+      Assert.assertTrue(mapField.containsKey(node),
+          "Instance " + node + " should be in the map field");
+    }
+  }
+
+  /**
+   * Test that the fix works correctly with the full rebalancer flow.
+   * When all instances are disabled, partitions should transition to OFFLINE state.
+   */
+  @Test
+  public void testAllInstancesDisabled_FullRebalancerFlow() {
+    final String RESOURCE_NAME = "PARTICIPANT_LEADER_BackupManager";
+    final String[] PARTITIONS = {"PARTICIPANT_LEADER_BackupManager_0"};
+    final StateModelDefinition STATE_MODEL = LeaderStandbySMD.build();
+    final String[] NODES = {"instance1", "instance2"};
+
+    // Setup dataCache with all instances as disabled
+    ResourceControllerDataProvider dataCache = TestHelper.buildMockDataCache(RESOURCE_NAME,
+        ResourceConfig.ResourceConfigConstants.ANY_LIVEINSTANCE.toString(), "LeaderStandby",
+        STATE_MODEL, Sets.newHashSet(NODES));  // All nodes disabled
+
+    // Mock live instances (they are live but disabled)
+    Map<String, LiveInstance> liveInstances = new HashMap<>();
+    liveInstances.put(NODES[0], new LiveInstance(NODES[0]));
+    liveInstances.put(NODES[1], new LiveInstance(NODES[1]));
+    when(dataCache.getLiveInstances()).thenReturn(liveInstances);
+
+    List<String> allNodes = Lists.newArrayList(NODES);
+    List<String> partitions = ImmutableList.copyOf(PARTITIONS);
+
+    // Create current mapping with STANDBY state (before disable)
+    Map<String, Map<String, String>> currentMapping = Maps.newHashMap();
+    Map<String, String> partitionMapping = new HashMap<>();
+    partitionMapping.put(NODES[0], "LEADER");
+    partitionMapping.put(NODES[1], "STANDBY");
+    currentMapping.put(PARTITIONS[0], partitionMapping);
+
+    // All instances are disabled - liveNodes is EMPTY
+    List<String> liveNodes = Collections.emptyList();
+
+    LinkedHashMap<String, Integer> stateCount =
+        STATE_MODEL.getStateCountMap(NODES.length, NODES.length);
+
+    // Execute the strategy
+    ZNRecord znRecord =
+        new AutoRebalanceStrategy(RESOURCE_NAME, partitions, stateCount)
+            .computePartitionAssignment(allNodes, liveNodes, currentMapping, dataCache);
+
+    // Generate IdealState from the ZNRecord
+    IdealState currentIdealState = dataCache.getIdealState(RESOURCE_NAME);
+    IdealState newIdealState = new IdealState(RESOURCE_NAME);
+    newIdealState.getRecord().setSimpleFields(currentIdealState.getRecord().getSimpleFields());
+    newIdealState.setRebalanceMode(currentIdealState.getRebalanceMode());
+    newIdealState.getRecord().setListFields(znRecord.getListFields());
+
+    // Setup resource and current state output
+    Resource resource = new Resource(RESOURCE_NAME);
+    for (String partition : PARTITIONS) {
+      resource.addPartition(partition);
+    }
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    currentStateOutput.setCurrentState(RESOURCE_NAME, resource.getPartition(PARTITIONS[0]),
+        NODES[0], "LEADER");
+    currentStateOutput.setCurrentState(RESOURCE_NAME, resource.getPartition(PARTITIONS[0]),
+        NODES[1], "STANDBY");
+
+    // Use the rebalancer to compute best possible state
+    DelayedAutoRebalancer autoRebalancer = new DelayedAutoRebalancer();
+    ResourceAssignment assignment = autoRebalancer.computeBestPossiblePartitionState(
+        dataCache, newIdealState, resource, currentStateOutput);
+
+    // Verify: Both disabled instances should be assigned OFFLINE state
+    Map<String, String> replicaMap = assignment.getReplicaMap(resource.getPartition(PARTITIONS[0]));
+    Assert.assertNotNull(replicaMap, "Replica map should not be null");
+
+    for (String node : NODES) {
+      String state = replicaMap.get(node);
+      Assert.assertNotNull(state, "State for " + node + " should not be null");
+      Assert.assertEquals(state, "OFFLINE",
+          "Disabled instance " + node + " should be in OFFLINE state, not " + state);
+    }
+  }
 }

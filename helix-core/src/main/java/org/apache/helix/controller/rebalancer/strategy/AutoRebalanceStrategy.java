@@ -86,6 +86,23 @@ public class AutoRebalanceStrategy implements RebalanceStrategy<ResourceControll
       final Map<String, Map<String, String>> currentMapping, ResourceControllerDataProvider clusterData) {
     ZNRecord znRecord = new ZNRecord(_resourceName);
     if (liveNodes.size() == 0) {
+      // When no live enabled nodes are available (e.g., all instances are disabled),
+      // preserve the current mapping so that partitions don't become orphans.
+      // The BestPossibleState calculation will correctly set disabled instances to OFFLINE.
+      if (currentMapping != null && !currentMapping.isEmpty()) {
+        logger.info("No live enabled nodes available for resource {}. "
+            + "Preserving current mapping to allow proper state transitions for disabled instances.",
+            _resourceName);
+        for (Map.Entry<String, Map<String, String>> entry : currentMapping.entrySet()) {
+          String partition = entry.getKey();
+          Map<String, String> instanceStateMap = entry.getValue();
+          if (instanceStateMap != null && !instanceStateMap.isEmpty()) {
+            List<String> preferenceList = new ArrayList<>(instanceStateMap.keySet());
+            znRecord.setListField(partition, preferenceList);
+            znRecord.setMapField(partition, new TreeMap<>(instanceStateMap));
+          }
+        }
+      }
       return znRecord;
     }
 
