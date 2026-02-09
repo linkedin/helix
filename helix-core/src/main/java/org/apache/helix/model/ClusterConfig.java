@@ -172,6 +172,11 @@ public class ClusterConfig extends HelixProperty {
 
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
+
+    // Enable availability-aware cross-resource prioritization for state transitions.
+    // When enabled, messages are prioritized based on availability impact score across all resources,
+    // rather than processing resources in priority order.
+    AVAILABILITY_AWARE_PRIORITIZATION_ENABLED,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -774,6 +779,28 @@ public class ClusterConfig extends HelixProperty {
   public void setMaxConcurrentTaskPerInstance(int maxConcurrentTaskPerInstance) {
     _record.setIntField(ClusterConfigProperty.MAX_CONCURRENT_TASK_PER_INSTANCE.name(),
         maxConcurrentTaskPerInstance);
+  }
+
+  /**
+   * Enable or disable availability-aware cross-resource prioritization for state transitions.
+   * When enabled, messages are prioritized based on availability impact score across all resources,
+   * rather than processing resources in priority order. This ensures that partitions with fewer
+   * active replicas get prioritized over partitions that are closer to their target replica count.
+   * By default, this is DISABLED if not set.
+   * @param enabled true to enable availability-aware prioritization
+   */
+  public void setAvailabilityAwarePrioritizationEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), enabled);
+  }
+
+
+  /**
+   * Check whether availability-aware cross-resource prioritization is enabled for state transitions.
+   * By default, it is DISABLED.
+   * @return true if availability-aware prioritization is enabled
+   */
+  public boolean isAvailabilityAwarePrioritizationEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), false);
   }
 
   /**
