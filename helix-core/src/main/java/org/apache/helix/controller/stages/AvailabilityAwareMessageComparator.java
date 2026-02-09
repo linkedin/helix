@@ -35,7 +35,7 @@ import org.apache.helix.model.StateModelDefinition;
  * Sorts messages based on their availability impact score to prioritize partitions
  * with fewer active replicas over those closer to their target replica count.
  */
-class AvailabilityAwareMessageComparator implements Comparator<Message> {
+public class AvailabilityAwareMessageComparator implements Comparator<Message> {
   private static final double TOP_STATE_MISSING_IMPACT = Double.MAX_VALUE;
   private static final double TOP_STATE_HANDOFF_IMPACT = Double.MAX_VALUE - 1;
 
@@ -47,12 +47,12 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
   private final Map<String, Integer> _messageIndexTracker = new HashMap<>();
   private String _eventId;
 
-  AvailabilityAwareMessageComparator(ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput) {
+  public AvailabilityAwareMessageComparator(ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput) {
     _cache = cache;
     _currentStateOutput = currentStateOutput;
   }
 
-  void setEventId(String eventId) {
+  public void setEventId(String eventId) {
     _eventId = eventId;
   }
 
@@ -88,18 +88,18 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
     }
 
     String topState = stateModelDef.getTopState();
-    boolean missingTopState =
-        isPartitionMissingTopState(message.getResourceName(), message.getPartitionName(), topState);
+    boolean missingTopState = StateTransitionHelper.isPartitionMissingTopState(
+        message.getResourceName(), message.getPartitionName(), topState, _currentStateOutput);
 
     if (missingTopState && message.getToState().equals(topState)) {
       return cacheImpact(key, TOP_STATE_MISSING_IMPACT);
     }
 
-    if (isTopStateHandoff(message.getFromState(), message.getToState(), topState, stateModelDef)) {
+    if (StateTransitionHelper.isTopStateHandoff(message.getFromState(), message.getToState(), topState, stateModelDef)) {
       return cacheImpact(key, TOP_STATE_HANDOFF_IMPACT);
     }
 
-    if (!isUpwardTransition(message.getFromState(), message.getToState(), stateModelDef)) {
+    if (!StateTransitionHelper.isUpwardTransition(message.getFromState(), message.getToState(), stateModelDef)) {
       return cacheImpact(key, 0.0);
     }
 
@@ -113,8 +113,6 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
     String partitionKey = resource + ":" + partition;
 
     int minActive = idealState.getMinActiveReplicas();
-    int targetReplicas = getTargetReplicas(resource, partition, idealState);
-    int effectiveMinActive = (minActive <= 0) ? targetReplicas : minActive;
 
     int currentActive = getCurrentActiveReplicas(resource, partition);
     int pending = getPendingMessages(resource, partition);
@@ -122,15 +120,14 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
     _messageIndexTracker.put(partitionKey, index + 1);
 
     int effectiveCount = currentActive + pending + index;
-    return (double) effectiveMinActive / (effectiveCount + 1);
-  }
 
-  private int getTargetReplicas(String resource, String partition, IdealState idealState) {
-    Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition);
-    if (instanceStateMap != null && !instanceStateMap.isEmpty()) {
-      return instanceStateMap.size();
+    // When minActiveReplicas is not configured, use a base impact of 1.0 scaled
+    // by current active count. 
+    if (minActive == 0) {
+      return 1.0 / (effectiveCount + 1);
     }
-    return Math.max(idealState.getReplicaCount(_cache.getEnabledLiveInstances().size()), 1);
+
+    return (double) minActive / (effectiveCount + 1);
   }
 
   private int getCurrentActiveReplicas(String resource, String partition) {
@@ -142,7 +139,7 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
     Map<String, String> currentStates =
         _currentStateOutput.getCurrentStateMap(resource, new Partition(partition));
     int count = (currentStates == null) ? 0 :
-        (int) currentStates.values().stream().filter(this::isActiveState).count();
+        (int) currentStates.values().stream().filter(StateTransitionHelper::isActiveState).count();
     _activeReplicasCache.put(key, count);
     return count;
   }
@@ -163,7 +160,7 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
         StateModelDefinition stateModelDef = _cache.getStateModelDef(idealState.getStateModelDefRef());
         if (stateModelDef != null) {
           count = (int) pendingMsgs.values().stream()
-              .filter(msg -> isUpwardTransition(msg.getFromState(), msg.getToState(), stateModelDef))
+              .filter(msg -> StateTransitionHelper.isUpwardTransition(msg.getFromState(), msg.getToState(), stateModelDef))
               .count();
         }
       }
@@ -171,23 +168,6 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
 
     _pendingMessageCountCache.put(key, count);
     return count;
-  }
-
-  private boolean isUpwardTransition(String from, String to, StateModelDefinition def) {
-    return StateTransitionHelper.isUpwardTransition(from, to, def);
-  }
-
-  private boolean isTopStateHandoff(String from, String to, String topState,
-      StateModelDefinition def) {
-    return StateTransitionHelper.isTopStateHandoff(from, to, topState, def);
-  }
-
-  private boolean isPartitionMissingTopState(String resource, String partition, String topState) {
-    return StateTransitionHelper.isPartitionMissingTopState(resource, partition, topState, _currentStateOutput);
-  }
-
-  private boolean isActiveState(String state) {
-    return StateTransitionHelper.isActiveState(state);
   }
 
   private double cacheImpact(String key, double impact) {
