@@ -174,33 +174,20 @@ class AvailabilityAwareMessageComparator implements Comparator<Message> {
   }
 
   private boolean isUpwardTransition(String from, String to, StateModelDefinition def) {
-    Map<String, Integer> priority = def.getStatePriorityMap();
-    return priority.containsKey(from) && priority.containsKey(to)
-        && priority.get(from) > priority.get(to);
+    return StateTransitionHelper.isUpwardTransition(from, to, def);
   }
 
   private boolean isTopStateHandoff(String from, String to, String topState,
       StateModelDefinition def) {
-    if (!from.equals(topState)) {
-      return false;
-    }
-    Map<String, Integer> priority = def.getStatePriorityMap();
-    return priority.containsKey(from) && priority.containsKey(to)
-        && priority.get(from) < priority.get(to);
+    return StateTransitionHelper.isTopStateHandoff(from, to, topState, def);
   }
 
   private boolean isPartitionMissingTopState(String resource, String partition, String topState) {
-    Map<String, String> stateMap =
-        _currentStateOutput.getCurrentStateMap(resource, new Partition(partition));
-    return stateMap == null || !stateMap.containsValue(topState);
+    return StateTransitionHelper.isPartitionMissingTopState(resource, partition, topState, _currentStateOutput);
   }
 
   private boolean isActiveState(String state) {
-    return state != null
-        && !state.isEmpty()
-        && !state.equalsIgnoreCase(HelixDefinedState.ERROR.name())
-        && !state.equalsIgnoreCase(HelixDefinedState.DROPPED.name())
-        && !state.equalsIgnoreCase("OFFLINE");
+    return StateTransitionHelper.isActiveState(state);
   }
 
   private double cacheImpact(String key, double impact) {

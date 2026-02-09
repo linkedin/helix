@@ -686,13 +686,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     }
 
     private static boolean isDownwardTransition(Message message, StateModelDefinition stateModelDef) {
-      if (stateModelDef == null) {
-        return false;
-      }
-      Map<String, Integer> priorities = stateModelDef.getStatePriorityMap();
-      return priorities.containsKey(message.getFromState())
-          && priorities.containsKey(message.getToState())
-          && priorities.get(message.getFromState()) < priorities.get(message.getToState());
+      return StateTransitionHelper.isDownwardTransition(
+          message.getFromState(), message.getToState(), stateModelDef);
     }
   }
 
