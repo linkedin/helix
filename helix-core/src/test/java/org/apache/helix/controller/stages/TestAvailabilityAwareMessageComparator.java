@@ -62,380 +62,268 @@ public class TestAvailabilityAwareMessageComparator {
     _cache = mock(ResourceControllerDataProvider.class);
     _currentStateOutput = new CurrentStateOutput();
 
-    // Setup default ideal state for RESOURCE_A
-    IdealState idealStateA = new IdealState(RESOURCE_A);
-    idealStateA.setStateModelDefRef("MasterSlave");
-    idealStateA.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealStateA.setReplicas("3");
-    idealStateA.setNumPartitions(2);
-    idealStateA.setMinActiveReplicas(2);
-
-    // Setup default ideal state for RESOURCE_B
-    IdealState idealStateB = new IdealState(RESOURCE_B);
-    idealStateB.setStateModelDefRef("MasterSlave");
-    idealStateB.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealStateB.setReplicas("3");
-    idealStateB.setNumPartitions(2);
-    idealStateB.setMinActiveReplicas(2);
+    IdealState idealStateA = createIdealState(RESOURCE_A, 2);
+    IdealState idealStateB = createIdealState(RESOURCE_B, 2);
 
     when(_cache.getIdealState(RESOURCE_A)).thenReturn(idealStateA);
     when(_cache.getIdealState(RESOURCE_B)).thenReturn(idealStateB);
     when(_cache.getStateModelDef("MasterSlave")).thenReturn(_masterSlaveSMD);
 
-    Set<String> enabledLiveInstances = new HashSet<>(Arrays.asList(INSTANCE_0, INSTANCE_1, INSTANCE_2));
+    Set<String> enabledLiveInstances =
+        new HashSet<>(Arrays.asList(INSTANCE_0, INSTANCE_1, INSTANCE_2));
     when(_cache.getEnabledLiveInstances()).thenReturn(enabledLiveInstances);
   }
 
   // ========================================
-  // Tests for null/missing metadata
+  // Null / missing metadata
   // ========================================
 
   @Test
-  public void testCompare_NullIdealState_ReturnsZeroImpact() {
+  public void testCompare_NullIdealState_FallsBackToTiebreaker() {
     when(_cache.getIdealState(RESOURCE_A)).thenReturn(null);
-
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message m1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message m2 = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    // Both have 0.0 impact, should fall back to tiebreakers
-    int result = comparator.compare(m1, m2);
-    // Same resource, so compare by partition name
-    Assert.assertTrue(result < 0, "Should sort by partition name when impact is equal");
+    // Both 0.0 impact -> tiebreak by partition name
+    Assert.assertTrue(comparator.compare(m1, m2) < 0,
+        "Should sort by partition name when impact is equal");
   }
 
   @Test
-  public void testCompare_NullStateModelDef_ReturnsZeroImpact() {
+  public void testCompare_NullStateModelDef_FallsBackToTiebreaker() {
     when(_cache.getStateModelDef("MasterSlave")).thenReturn(null);
-
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message m1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message m2 = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    int result = comparator.compare(m1, m2);
-    Assert.assertTrue(result < 0, "Should sort by partition name when impact is equal");
+    Assert.assertTrue(comparator.compare(m1, m2) < 0,
+        "Should sort by partition name when impact is equal");
   }
 
   // ========================================
-  // Tests for top state missing prioritization
+  // Top state missing prioritization
   // ========================================
 
   @Test
   public void testCompare_TopStateMissing_HighestPriority() {
-    // Partition_0 is missing MASTER and the message is transitioning to MASTER
-    // Partition_1 has a normal upward transition (OFFLINE -> SLAVE)
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "SLAVE");
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_1, "MASTER");
+    // Partition_0: missing MASTER, message transitions to MASTER
+    // Partition_1: has MASTER, message is a normal upward transition
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "SLAVE");
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_1, "MASTER");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message topStateMissing = createMessage(RESOURCE_A, PARTITION_0, "SLAVE", "MASTER", INSTANCE_0);
     Message normalUpward = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
 
-    int result = comparator.compare(topStateMissing, normalUpward);
-    Assert.assertTrue(result < 0, "Top state missing message should have higher priority");
+    Assert.assertTrue(comparator.compare(topStateMissing, normalUpward) < 0,
+        "Top state missing message should have higher priority");
   }
 
   @Test
   public void testCompare_TopStateMissing_ButNotTransitioningToTopState() {
-    // Partition_0 is missing MASTER but message is OFFLINE -> SLAVE (not to MASTER)
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "OFFLINE");
+    // Partition_0: missing MASTER but message is OFFLINE->SLAVE (not to MASTER)
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "OFFLINE");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message offlineToSlave = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
-
-    // This should NOT get TOP_STATE_MISSING_IMPACT because it's not transitioning to MASTER
-    // It should be treated as a normal upward transition
     Message anotherUpward = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    // Both are normal upward transitions, should be comparable
-    int result = comparator.compare(offlineToSlave, anotherUpward);
-    // They may differ by partition active count, but should NOT be MAX_VALUE
-    Assert.assertTrue(result != 0, "Different partitions should have different impact or tiebreak");
-  }
-
-  // ========================================
-  // Tests for top state handoff prioritization
-  // ========================================
-
-  @Test
-  public void testCompare_TopStateHandoff_SecondHighestPriority() {
-    // MASTER -> SLAVE is a top state handoff (needs to happen fast)
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "MASTER");
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_1, "SLAVE");
-
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
-
-    Message handoff = createMessage(RESOURCE_A, PARTITION_0, "MASTER", "SLAVE", INSTANCE_0);
-    Message normalUpward = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
-
-    int result = comparator.compare(handoff, normalUpward);
-    Assert.assertTrue(result < 0, "Top state handoff should have higher priority than normal upward");
+    // Should NOT get MAX_VALUE impact — treated as normal upward
+    Assert.assertTrue(comparator.compare(offlineToSlave, anotherUpward) != 0,
+        "Different partitions should have different impact or tiebreak");
   }
 
   @Test
   public void testCompare_TopStateMissing_HigherThanHandoff() {
-    // Top state missing should beat top state handoff
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "SLAVE"); // no MASTER for partition_0
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_1, "MASTER");
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "SLAVE"); // no MASTER
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_1, "MASTER");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message missingTopState = createMessage(RESOURCE_A, PARTITION_0, "SLAVE", "MASTER", INSTANCE_0);
     Message handoff = createMessage(RESOURCE_A, PARTITION_1, "MASTER", "SLAVE", INSTANCE_1);
 
-    int result = comparator.compare(missingTopState, handoff);
-    Assert.assertTrue(result < 0, "Missing top state should rank higher than handoff");
+    Assert.assertTrue(comparator.compare(missingTopState, handoff) < 0,
+        "Missing top state should rank higher than handoff");
   }
 
   // ========================================
-  // Tests for downward transitions
+  // Top state handoff prioritization
   // ========================================
 
   @Test
-  public void testCompare_DownwardTransition_ZeroImpact() {
-    // SLAVE -> OFFLINE is a downward transition, should get 0.0 impact
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "MASTER");
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_1, "SLAVE");
+  public void testCompare_TopStateHandoff_HigherThanNormalUpward() {
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "MASTER");
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_1, "SLAVE");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
+
+    Message handoff = createMessage(RESOURCE_A, PARTITION_0, "MASTER", "SLAVE", INSTANCE_0);
+    Message normalUpward = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
+
+    Assert.assertTrue(comparator.compare(handoff, normalUpward) < 0,
+        "Top state handoff should have higher priority than normal upward");
+  }
+
+  // ========================================
+  // Downward transitions
+  // ========================================
+
+  @Test
+  public void testCompare_DownwardTransition_LowerPriorityThanUpward() {
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "MASTER");
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_1, "SLAVE");
+
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message downward = createMessage(RESOURCE_A, PARTITION_0, "SLAVE", "OFFLINE", INSTANCE_1);
     Message upward = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
 
-    int result = comparator.compare(downward, upward);
-    Assert.assertTrue(result > 0, "Downward transition should have lower priority than upward");
+    Assert.assertTrue(comparator.compare(downward, upward) > 0,
+        "Downward transition should have lower priority than upward");
   }
 
   // ========================================
-  // Tests for upward transition impact scoring
+  // Upward transition impact scoring
   // ========================================
 
   @Test
-  public void testCompare_PartitionWithFewerActiveReplicas_HigherPriority() {
-    // Partition_0: 0 active replicas (no current state)
+  public void testCompare_FewerActiveReplicas_HigherPriority() {
+    // Partition_0: 0 active replicas
     // Partition_1: 1 active replica
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_1, "SLAVE");
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_1, "SLAVE");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
-    Message toPartitionWithNoActive =
-        createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
-    Message toPartitionWithOneActive =
-        createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
+    Message toNoActive = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
+    Message toOneActive = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
 
-    int result = comparator.compare(toPartitionWithNoActive, toPartitionWithOneActive);
-    Assert.assertTrue(result < 0,
+    Assert.assertTrue(comparator.compare(toNoActive, toOneActive) < 0,
         "Partition with fewer active replicas should have higher priority");
   }
 
   @Test
-  public void testCompare_MinActiveNotConfigured_UsesBaseImpact() {
-    // Set minActiveReplicas to 0 (not configured / no minimum constraint)
-    IdealState idealState = new IdealState(RESOURCE_A);
-    idealState.setStateModelDefRef("MasterSlave");
-    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealState.setReplicas("3");
-    idealState.setMinActiveReplicas(0);
-    when(_cache.getIdealState(RESOURCE_A)).thenReturn(idealState);
+  public void testCompare_MinActiveZero_UsesBaseImpact() {
+    when(_cache.getIdealState(RESOURCE_A)).thenReturn(createIdealState(RESOURCE_A, 0));
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message m1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message m2 = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    // Both should use base impact (1.0 / (effectiveCount + 1))
-    // With 0 active and 0 pending, impact = 1.0 / 1 = 1.0 for both (before index tracking)
-    int result = comparator.compare(m1, m2);
-    // Same impact initially, should fall back to partition name
-    Assert.assertTrue(result < 0, "Should tiebreak by partition name");
+    // Both use base impact 1.0/(effectiveCount+1), same conditions -> tiebreak by partition
+    Assert.assertTrue(comparator.compare(m1, m2) < 0, "Should tiebreak by partition name");
   }
 
   @Test
   public void testCompare_HigherMinActive_HigherImpact() {
-    // ResourceA: minActive=2, ResourceB: minActive=1
-    // Both partitions have 0 active replicas
-    IdealState idealStateA = new IdealState(RESOURCE_A);
-    idealStateA.setStateModelDefRef("MasterSlave");
-    idealStateA.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealStateA.setReplicas("3");
-    idealStateA.setMinActiveReplicas(2);
+    // ResourceA: minActive=2, ResourceB: minActive=1  — both have 0 active replicas
+    when(_cache.getIdealState(RESOURCE_A)).thenReturn(createIdealState(RESOURCE_A, 2));
+    when(_cache.getIdealState(RESOURCE_B)).thenReturn(createIdealState(RESOURCE_B, 1));
 
-    String resourceBPartition = "ResourceB_0";
-    IdealState idealStateB = new IdealState(RESOURCE_B);
-    idealStateB.setStateModelDefRef("MasterSlave");
-    idealStateB.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
-    idealStateB.setReplicas("3");
-    idealStateB.setMinActiveReplicas(1);
-
-    when(_cache.getIdealState(RESOURCE_A)).thenReturn(idealStateA);
-    when(_cache.getIdealState(RESOURCE_B)).thenReturn(idealStateB);
-
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message msgA = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
-    Message msgB = createMessage(RESOURCE_B, resourceBPartition, "OFFLINE", "SLAVE", INSTANCE_1);
+    Message msgB = createMessage(RESOURCE_B, "ResourceB_0", "OFFLINE", "SLAVE", INSTANCE_1);
 
-    int result = comparator.compare(msgA, msgB);
-    // ResourceA impact = 2.0 / (0 + 1) = 2.0
-    // ResourceB impact = 1.0 / (0 + 1) = 1.0
-    Assert.assertTrue(result < 0,
+    // ResourceA impact = 2.0/1 = 2.0, ResourceB impact = 1.0/1 = 1.0
+    Assert.assertTrue(comparator.compare(msgA, msgB) < 0,
         "Resource with higher minActive should have higher priority when both have 0 active");
   }
 
   // ========================================
-  // Tests for cross-resource prioritization
+  // Cross-resource prioritization
   // ========================================
 
   @Test
   public void testCompare_CrossResourcePrioritization() {
-    // ResourceA partition has 0 active replicas
-    // ResourceB partition has 2 active replicas
-    String resourceBPartition = "ResourceB_0";
-    _currentStateOutput.setCurrentState(RESOURCE_B, new Partition(resourceBPartition),
-        INSTANCE_0, "MASTER");
-    _currentStateOutput.setCurrentState(RESOURCE_B, new Partition(resourceBPartition),
-        INSTANCE_1, "SLAVE");
+    // ResourceA: 0 active,  ResourceB: 2 active
+    setCurrentState(RESOURCE_B, "ResourceB_0", INSTANCE_0, "MASTER");
+    setCurrentState(RESOURCE_B, "ResourceB_0", INSTANCE_1, "SLAVE");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message msgA = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_2);
-    Message msgB = createMessage(RESOURCE_B, resourceBPartition, "OFFLINE", "SLAVE", INSTANCE_2);
+    Message msgB = createMessage(RESOURCE_B, "ResourceB_0", "OFFLINE", "SLAVE", INSTANCE_2);
 
-    int result = comparator.compare(msgA, msgB);
-    Assert.assertTrue(result < 0,
+    Assert.assertTrue(comparator.compare(msgA, msgB) < 0,
         "Resource with fewer active replicas should be prioritized across resources");
   }
 
   // ========================================
-  // Tests for tiebreaking
+  // Tiebreaking
   // ========================================
 
   @Test
-  public void testCompare_SameImpact_TiebreaksByResourceName() {
-    String resourceBPartition = "ResourceB_0";
-    // Same active replica counts -> same impact -> tiebreak by resource name
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+  public void testCompare_TiebreaksByResourceNameThenPartitionName() {
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
+    // Different resources, same impact -> tiebreak by resource name
     Message msgA = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
-    Message msgB = createMessage(RESOURCE_B, resourceBPartition, "OFFLINE", "SLAVE", INSTANCE_1);
+    Message msgB = createMessage(RESOURCE_B, "ResourceB_0", "OFFLINE", "SLAVE", INSTANCE_1);
+    Assert.assertTrue(comparator.compare(msgA, msgB) < 0, "Should tiebreak by resource name");
 
-    int result = comparator.compare(msgA, msgB);
-    // ResourceA < ResourceB alphabetically, and with same score,
-    // tiebreak is by resource name (ascending)
-    Assert.assertTrue(result < 0, "Should tiebreak by resource name");
-  }
-
-  @Test
-  public void testCompare_SameResourceSameImpact_TiebreaksByPartitionName() {
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
-
+    // Same resource, same impact -> tiebreak by partition name
+    comparator = newComparator(); // fresh comparator to reset index tracker
     Message m1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message m2 = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_1);
-
-    int result = comparator.compare(m1, m2);
-    Assert.assertTrue(result < 0, "Should tiebreak by partition name");
+    Assert.assertTrue(comparator.compare(m1, m2) < 0, "Should tiebreak by partition name");
   }
 
   // ========================================
-  // Tests for impact caching
+  // Caching & pending messages
   // ========================================
 
   @Test
-  public void testCompare_ImpactIsCachedForSameMessage() {
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "SLAVE");
-
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+  public void testCompare_SameMessageComparesAsEqual() {
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "SLAVE");
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message m1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    // Compare the same message against itself - should be 0
-    int result = comparator.compare(m1, m1);
-    Assert.assertEquals(result, 0, "Same message should compare as equal");
+    Assert.assertEquals(comparator.compare(m1, m1), 0, "Same message should compare as equal");
   }
-
-  // ========================================
-  // Tests for pending messages counting
-  // ========================================
 
   @Test
   public void testCompare_PendingMessagesReduceImpact() {
-    // Partition_0 has 0 active but 1 pending upward transition
-    // Partition_1 has 0 active and no pending
+    // Partition_0: 0 active, 1 pending upward
+    // Partition_1: 0 active, no pending
     Message pendingMsg = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
-    Map<String, Message> pendingMap = new HashMap<>();
-    pendingMap.put(INSTANCE_0, pendingMsg);
     _currentStateOutput.setPendingMessage(RESOURCE_A, new Partition(PARTITION_0),
         INSTANCE_0, pendingMsg);
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message toPartitionWithPending =
         createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_1);
     Message toPartitionWithNoPending =
         createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "SLAVE", INSTANCE_2);
 
-    int result = comparator.compare(toPartitionWithPending, toPartitionWithNoPending);
-    Assert.assertTrue(result > 0,
+    Assert.assertTrue(comparator.compare(toPartitionWithPending, toPartitionWithNoPending) > 0,
         "Partition with pending upward messages should have lower impact (higher effective count)");
   }
 
   // ========================================
-  // Tests for sorting a list of messages
+  // End-to-end sorting
   // ========================================
 
   @Test
   public void testSort_MultipleMessages_CorrectOrder() {
-    // Setup:
-    // Partition_0: missing top state, message to MASTER -> highest priority
-    // ResourceB_0: 0 active replicas, OFFLINE -> SLAVE -> high priority
-    // Partition_1: 2 active replicas, OFFLINE -> SLAVE -> lower priority
-    // ResourceB_1: downward transition SLAVE -> OFFLINE -> lowest priority
     String resourceBP0 = "ResourceB_0";
     String resourceBP1 = "ResourceB_1";
 
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_0),
-        INSTANCE_0, "SLAVE"); // missing MASTER
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_0, "MASTER");
-    _currentStateOutput.setCurrentState(RESOURCE_A, new Partition(PARTITION_1),
-        INSTANCE_1, "SLAVE");
-    _currentStateOutput.setCurrentState(RESOURCE_B, new Partition(resourceBP1),
-        INSTANCE_1, "MASTER");
-    _currentStateOutput.setCurrentState(RESOURCE_B, new Partition(resourceBP1),
-        INSTANCE_2, "SLAVE");
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "SLAVE"); // missing MASTER
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_0, "MASTER");
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_1, "SLAVE");
+    setCurrentState(RESOURCE_B, resourceBP1, INSTANCE_1, "MASTER");
+    setCurrentState(RESOURCE_B, resourceBP1, INSTANCE_2, "SLAVE");
 
-    AvailabilityAwareMessageComparator comparator =
-        new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+    AvailabilityAwareMessageComparator comparator = newComparator();
 
     Message topStateMissingMsg =
         createMessage(RESOURCE_A, PARTITION_0, "SLAVE", "MASTER", INSTANCE_0);
@@ -450,7 +338,6 @@ public class TestAvailabilityAwareMessageComparator {
         Arrays.asList(downwardMsg, lowImpactUpward, topStateMissingMsg, highImpactUpward));
     messages.sort(comparator);
 
-    // Expected order: topStateMissing, highImpactUpward, lowImpactUpward, downward
     Assert.assertEquals(messages.get(0), topStateMissingMsg,
         "Top state missing should be first");
     Assert.assertEquals(messages.get(1), highImpactUpward,
@@ -462,12 +349,31 @@ public class TestAvailabilityAwareMessageComparator {
   }
 
   // ========================================
-  // Helper Methods
+  // Helper methods
   // ========================================
+
+  private AvailabilityAwareMessageComparator newComparator() {
+    return new AvailabilityAwareMessageComparator(_cache, _currentStateOutput);
+  }
+
+  private IdealState createIdealState(String resource, int minActiveReplicas) {
+    IdealState idealState = new IdealState(resource);
+    idealState.setStateModelDefRef("MasterSlave");
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setReplicas("3");
+    idealState.setNumPartitions(2);
+    idealState.setMinActiveReplicas(minActiveReplicas);
+    return idealState;
+  }
+
+  private void setCurrentState(String resource, String partition, String instance, String state) {
+    _currentStateOutput.setCurrentState(resource, new Partition(partition), instance, state);
+  }
 
   private Message createMessage(String resource, String partition, String fromState,
       String toState, String tgtName) {
-    Message message = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
+    Message message =
+        new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
     message.setResourceName(resource);
     message.setPartitionName(partition);
     message.setFromState(fromState);
@@ -480,4 +386,3 @@ public class TestAvailabilityAwareMessageComparator {
     return message;
   }
 }
-
