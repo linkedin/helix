@@ -62,6 +62,13 @@ public class DefaultMessagingService implements ClusterMessagingService {
   private final int _taskThreadpoolResetTimeout;
 
   private static Logger _logger = LoggerFactory.getLogger(DefaultMessagingService.class);
+
+  // Constants for map keys and default values
+  private static final String INSTANCE_NAME_KEY = "instanceName";
+  private static final String RESOURCE_NAME_KEY = "resourceName";
+  private static final String PARTITION_NAME_KEY = "partitionName";
+  private static final String EMPTY_STRING = "";
+
   ConcurrentHashMap<String, MessageHandlerFactory> _messageHandlerFactoriestobeAdded =
       new ConcurrentHashMap<>();
 
@@ -168,14 +175,14 @@ public class DefaultMessagingService implements ClusterMessagingService {
         }
       }
       for (Map<String, String> map : matchedList) {
-        String tgtInstanceName = map.get("instanceName");
+        String tgtInstanceName = map.get(INSTANCE_NAME_KEY);
         // Don't send message to self
         if (recipientCriteria.isSelfExcluded() && _manager.getInstanceName().equalsIgnoreCase(tgtInstanceName)) {
           continue;
         }
         String sessionId = recipientCriteria.isSessionSpecific() ? sessionIdMap.get(tgtInstanceName) : null;
-        Message newMessage = createMessage(tgtInstanceName, message, map.get("resourceName"),
-            map.get("partitionName"), sessionId);
+        Message newMessage = createMessage(tgtInstanceName, message, map.get(RESOURCE_NAME_KEY),
+            map.get(PARTITION_NAME_KEY), sessionId);
         messages.add(newMessage);
       }
     }
@@ -344,15 +351,13 @@ public class DefaultMessagingService implements ClusterMessagingService {
 
     HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
     Builder keyBuilder = dataAccessor.keyBuilder();
-    boolean isLive = dataAccessor.getBaseDataAccessor()
-        .exists(keyBuilder.liveInstance(instanceName).getPath(), 0);
+    boolean isLive = dataAccessor.getBaseDataAccessor().exists(keyBuilder.liveInstance(instanceName).getPath(), 0);
     if (!isLive) {
       _logger.info("Instance " + instanceName + " is not live. No message sent.");
       return 0;
     }
 
-    return sendToParticipantInstances(clusterName, message, options,
-        Collections.singletonList(instanceName));
+    return sendToParticipantInstances(clusterName, message, options, Collections.singletonList(instanceName));
   }
 
   @Override
@@ -379,8 +384,7 @@ public class DefaultMessagingService implements ClusterMessagingService {
    */
   private int sendToParticipantInstances(String clusterName, Message message,
       ParticipantMessageOptions options, List<String> liveInstanceNames) {
-    ParticipantMessageOptions opts =
-        options == null ? ParticipantMessageOptions.defaults() : options;
+    ParticipantMessageOptions opts = options == null ? ParticipantMessageOptions.defaults() : options;
 
     HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
     Builder keyBuilder = dataAccessor.keyBuilder();
@@ -392,8 +396,7 @@ public class DefaultMessagingService implements ClusterMessagingService {
         continue;
       }
 
-      Optional<Message> msg = generateMessageForSingleInstance(instanceName, message, opts,
-          dataAccessor, keyBuilder);
+      Optional<Message> msg = generateMessageForSingleInstance(instanceName, message, opts, dataAccessor, keyBuilder);
       if (msg.isPresent()) {
         participantMessages.add(msg.get());
       } else {
@@ -461,7 +464,7 @@ public class DefaultMessagingService implements ClusterMessagingService {
       }
     }
 
-    return Optional.of(createMessage(instanceName, message, "", "", sessionId));
+    return Optional.of(createMessage(instanceName, message, EMPTY_STRING, EMPTY_STRING, sessionId));
   }
 
 
@@ -558,12 +561,9 @@ public class DefaultMessagingService implements ClusterMessagingService {
 
       // Send to appropriate ZK path based on receiver type
       if (receiverType == InstanceType.CONTROLLER) {
-        targetDataAccessor
-            .setProperty(keyBuilder.controllerMessage(tempMessage.getId()), tempMessage);
+        targetDataAccessor.setProperty(keyBuilder.controllerMessage(tempMessage.getId()), tempMessage);
       } else if (receiverType == InstanceType.PARTICIPANT) {
-        targetDataAccessor
-            .setProperty(keyBuilder.message(tempMessage.getTgtName(), tempMessage.getId()),
-                tempMessage);
+        targetDataAccessor.setProperty(keyBuilder.message(tempMessage.getTgtName(), tempMessage.getId()), tempMessage);
       }
     }
   }

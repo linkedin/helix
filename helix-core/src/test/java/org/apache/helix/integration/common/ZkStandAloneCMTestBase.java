@@ -43,8 +43,7 @@ public class ZkStandAloneCMTestBase extends ZkTestBase {
   protected static final int NODE_NR = 5;
   protected static final int START_PORT = 12918;
   protected static final String STATE_MODEL = "MasterSlave";
-  protected static final String TEST_DB_PREFIX = "TestDb_";
-  protected static final String TEST_DB = TEST_DB_PREFIX + "0";
+  protected static final String TEST_DB = "TestDB";
   protected static final int _PARTITIONS = 20;
 
   protected HelixManager _manager;
@@ -56,8 +55,6 @@ public class ZkStandAloneCMTestBase extends ZkTestBase {
   protected MockParticipantManager[] _participants = new MockParticipantManager[NODE_NR];
   protected ClusterControllerManager _controller;
   protected int _replica = 3;
-  protected int _resourceCount = 1;
-  protected String[] _resourceNames;
 
   @BeforeClass
   public void beforeClass() throws Exception {
@@ -66,19 +63,12 @@ public class ZkStandAloneCMTestBase extends ZkTestBase {
 
     // setup storage cluster
     _gSetupTool.addCluster(CLUSTER_NAME, true);
-    _resourceNames = new String[_resourceCount];
-    for (int i = 0; i < _resourceCount; i++) {
-      String resourceName = TEST_DB_PREFIX + i;
-      _resourceNames[i] = resourceName;
-      _gSetupTool.addResourceToCluster(CLUSTER_NAME, resourceName, _PARTITIONS, STATE_MODEL);
-    }
+    _gSetupTool.addResourceToCluster(CLUSTER_NAME, TEST_DB, _PARTITIONS, STATE_MODEL);
     for (int i = 0; i < NODE_NR; i++) {
       String storageNodeName = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
       _gSetupTool.addInstanceToCluster(CLUSTER_NAME, storageNodeName);
     }
-    for (String resourceName : _resourceNames) {
-      _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, resourceName, _replica);
-    }
+    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, TEST_DB, _replica);
 
     // start dummy participants
     for (int i = 0; i < NODE_NR; i++) {
