@@ -19,7 +19,6 @@ package org.apache.helix.common;
  * under the License.
  */
 
-import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Method;
@@ -34,6 +33,7 @@ import java.util.stream.Collectors;
 import javax.management.MBeanServerConnection;
 import javax.management.ObjectName;
 
+import com.google.common.base.Preconditions;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
@@ -52,6 +52,7 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.controller.pipeline.Stage;
 import org.apache.helix.controller.pipeline.StageContext;
+import org.apache.helix.controller.rebalancer.ConditionBasedRebalancer;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.strategy.AutoRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -386,6 +387,13 @@ public class ZkTestBase {
       String stateModel, int numPartition, int replica, int minActiveReplica) {
     return createResource(clusterName, db, stateModel, numPartition, replica, minActiveReplica,
         -1, WagedRebalancer.class.getName(), null);
+  }
+
+  protected IdealState createResourceWithConditionBasedRebalance(String clusterName, String db,
+      String stateModel, int numPartition, int replica, int minActiveReplica,
+      String rebalanceStrategy) {
+    return createResource(clusterName, db, stateModel, numPartition, replica, minActiveReplica, -1,
+        ConditionBasedRebalancer.class.getName(), rebalanceStrategy);
   }
 
   private IdealState createResource(String clusterName, String db, String stateModel,
