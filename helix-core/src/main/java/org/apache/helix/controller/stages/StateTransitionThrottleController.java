@@ -34,7 +34,7 @@ import org.slf4j.LoggerFactory;
  * transition counts to see if any state transitions depending on the rebalance type must be held
  * off.
  */
-class StateTransitionThrottleController {
+public class StateTransitionThrottleController {
   private static final Logger logger = LoggerFactory.getLogger(StateTransitionThrottleController.class);
 
   // pending allowed transition counts in the cluster level for recovery and load balance
@@ -46,7 +46,7 @@ class StateTransitionThrottleController {
 
   private boolean _throttleEnabled = false;
 
-  StateTransitionThrottleController(Set<String> resources, ClusterConfig clusterConfig,
+  public StateTransitionThrottleController(Set<String> resources, ClusterConfig clusterConfig,
       Set<String> liveInstances) {
     super();
     _pendingTransitionAllowedInCluster = new HashMap<>();
@@ -122,7 +122,7 @@ class StateTransitionThrottleController {
    * reached 0 or below.
    * @return true if it should be throttled, otherwise, false
    */
-  protected boolean shouldThrottleForResource(
+  public boolean shouldThrottleForResource(
       StateTransitionThrottleConfig.RebalanceType rebalanceType, String resourceName) {
     return shouldThrottleForGivenMap(rebalanceType, resourceName, _pendingTransitionAllowedPerResource);
   }
@@ -134,7 +134,7 @@ class StateTransitionThrottleController {
    * reached 0 or below.
    * @return true if it should be throttled, otherwise, false
    */
-  protected boolean shouldThrottleForInstance(
+  public boolean shouldThrottleForInstance(
       StateTransitionThrottleConfig.RebalanceType rebalanceType, String instanceName) {
     return shouldThrottleForGivenMap(rebalanceType, instanceName, _pendingTransitionAllowedPerInstance);
   }
@@ -159,7 +159,7 @@ class StateTransitionThrottleController {
    * from number of total pending states allowed (set by user application).
    * @param rebalanceType
    */
-  protected void chargeCluster(StateTransitionThrottleConfig.RebalanceType rebalanceType) {
+  public void chargeCluster(StateTransitionThrottleConfig.RebalanceType rebalanceType) {
     charge(rebalanceType, _pendingTransitionAllowedInCluster);
   }
 
@@ -168,7 +168,7 @@ class StateTransitionThrottleController {
    * from number of total pending states allowed (set by user application).
    * @param rebalanceType
    */
-  protected void chargeResource(StateTransitionThrottleConfig.RebalanceType rebalanceType,
+  public void chargeResource(StateTransitionThrottleConfig.RebalanceType rebalanceType,
       String resource) {
     charge(rebalanceType, _pendingTransitionAllowedPerResource.getOrDefault(resource, new HashMap<>()));
   }
@@ -178,7 +178,7 @@ class StateTransitionThrottleController {
    * from number of total pending states allowed (set by user application).
    * @param rebalanceType
    */
-  protected void chargeInstance(StateTransitionThrottleConfig.RebalanceType rebalanceType,
+  public void chargeInstance(StateTransitionThrottleConfig.RebalanceType rebalanceType,
       String instance) {
     charge(rebalanceType, _pendingTransitionAllowedPerInstance.getOrDefault(instance, new HashMap<>()));
   }
