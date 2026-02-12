@@ -1,0 +1,82 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::staticFieldBase has been called by com.google.inject.internal.aop.HiddenClassDefiner (file:/opt/homebrew/Cellar/maven/3.9.11/libexec/lib/guice-5.1.0-classes.jar)
+WARNING: Please consider reporting this to the maintainers of class com.google.inject.internal.aop.HiddenClassDefiner
+WARNING: sun.misc.Unsafe::staticFieldBase will be removed in a future release
+[INFO] Scanning for projects...
+[WARNING] 
+[WARNING] Some problems were encountered while building the effective model for org.apache.helix:metrics-common:bundle:1.4.4-SNAPSHOT
+[WARNING] 'build.pluginManagement.plugins.plugin.(groupId:artifactId)' must be unique but found duplicate declaration of plugin org.apache.maven.plugins:maven-javadoc-plugin @ org.apache.helix:helix:1.4.4-SNAPSHOT, /Users/palgarg/Repos/Linkedin-helix/helix/pom.xml, line 681, column 17
+[WARNING] 
+[WARNING] Some problems were encountered while building the effective model for org.apache.helix:helix:pom:1.4.4-SNAPSHOT
+[WARNING] 'build.pluginManagement.plugins.plugin.(groupId:artifactId)' must be unique but found duplicate declaration of plugin org.apache.maven.plugins:maven-javadoc-plugin @ line 681, column 17
+[WARNING] 
+[WARNING] It is highly recommended to fix these problems because they threaten the stability of your build.
+[WARNING] 
+[WARNING] For this reason, future Maven versions might no longer support building such malformed projects.
+[WARNING] 
+[INFO] 
+[INFO] --------------------< org.apache.helix:helix-core >---------------------
+[INFO] Building Apache Helix :: Core 1.4.4-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] -------------------------------[ bundle ]-------------------------------
+[WARNING] 2 problems were encountered while building the effective model for org.apache.yetus:audience-annotations:jar:0.5.0 during dependency collection step for project (use -X to see details)
+[INFO] 
+[INFO] --- enforcer:1.4.1:enforce (enforce-maven-version) @ helix-core ---
+[INFO] Skipping Rule Enforcement.
+[INFO] 
+[INFO] --- enforcer:1.4.1:enforce (enforce-java-version) @ helix-core ---
+[INFO] Skipping Rule Enforcement.
+[INFO] 
+[INFO] --- enforcer:1.4.1:enforce (enforce-output-timestamp-property) @ helix-core ---
+[INFO] Skipping Rule Enforcement.
+[INFO] 
+[INFO] --- jacoco:0.8.6:prepare-agent (default) @ helix-core ---
+[INFO] argLine set to -javaagent:/Users/palgarg/.m2/repository/org/jacoco/org.jacoco.agent/0.8.6/org.jacoco.agent-0.8.6-runtime.jar=destfile=/Users/palgarg/Repos/Linkedin-helix/helix/helix-core/target/jacoco.exec
+[INFO] 
+[INFO] --- remote-resources:1.7.0:process (process-resource-bundles) @ helix-core ---
+[INFO] Preparing remote bundle org.apache:apache-jar-resource-bundle:1.4
+[INFO] Copying 3 resources from 1 bundle.
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ helix-core ---
+[INFO] Copying 4 resources from src/main/resources to target/classes
+[INFO] Copying 0 resource from  to target/classes
+[INFO] Copying 3 resources from target/maven-shared-archive-resources to target/classes
+[INFO] The encoding used to copy filtered properties files have not been set. This means that the same encoding will be used to copy filtered properties files as when copying other filtered resources. This might not be what you want! Run your build with --debug to see which files might be affected. Read more at https://maven.apache.org/plugins/maven-resources-plugin/examples/filtering-properties-files.html
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-process-resources-jdk8) @ helix-core ---
+[INFO] Copying 4 resources from src/main/resources to target/classes_jdk8
+[INFO] Copying 0 resource from  to target/classes_jdk8
+[INFO] Copying 3 resources from target/maven-shared-archive-resources to target/classes_jdk8
+[INFO] The encoding used to copy filtered properties files have not been set. This means that the same encoding will be used to copy filtered properties files as when copying other filtered resources. This might not be what you want! Run your build with --debug to see which files might be affected. Read more at https://maven.apache.org/plugins/maven-resources-plugin/examples/filtering-properties-files.html
+[INFO] 
+[INFO] --- compiler:3.12.1:compile (default-compile) @ helix-core ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- compiler:3.12.1:compile (JDK 8) @ helix-core ---
+[INFO] Nothing to compile - all classes are up to date.
+[WARNING] Overwriting artifact's file from /Users/palgarg/Repos/Linkedin-helix/helix/helix-core/target/classes to /Users/palgarg/Repos/Linkedin-helix/helix/helix-core/target/classes_jdk8
+[INFO] 
+[INFO] --- compiler:3.12.1:compile (JDK 11) @ helix-core ---
+[INFO] Nothing to compile - all classes are up to date.
+[WARNING] Overwriting artifact's file from /Users/palgarg/Repos/Linkedin-helix/helix/helix-core/target/classes_jdk8 to /Users/palgarg/Repos/Linkedin-helix/helix/helix-core/target/classes
+[INFO] 
+[INFO] --- bundle:5.1.4:manifest (bundle-manifest) @ helix-core ---
+[WARNING] Manifest org.apache.helix:helix-core:bundle:1.4.4-SNAPSHOT : Unused Import-Package instructions: [org.apache.logging.log4j*, org.apache.logging.slf4j*] 
+[ERROR] Manifest org.apache.helix:helix-core:bundle:1.4.4-SNAPSHOT : The default package '.' is not permitted by the Import-Package syntax.
+ This can be caused by compile errors in Eclipse because Eclipse creates
+valid class files regardless of compile errors.
+The following package(s) import from the default package [org.apache.helix.monitoring.mbeans, org.apache.helix.monitoring.metrics, org.apache.helix.monitoring.metrics.model]
+[ERROR] Error(s) found in manifest configuration
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  1.708 s
+[INFO] Finished at: 2026-02-11T10:30:11+05:30
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.felix:maven-bundle-plugin:5.1.4:manifest (bundle-manifest) on project helix-core: Error(s) found in manifest configuration -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException
