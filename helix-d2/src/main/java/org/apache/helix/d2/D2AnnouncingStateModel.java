@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
  * {@code OFFLINE↔STANDBY}, {@code STANDBY↔LEADER}, and {@code OFFLINE→DROPPED}.</p>
  */
 @StateModelInfo(initialState = "OFFLINE", states = {"LEADER", "STANDBY"})
-class D2AnnouncingStateModel extends StateModel {
+public class D2AnnouncingStateModel extends StateModel {
 
   private static final Logger LOG = LoggerFactory.getLogger(D2AnnouncingStateModel.class);
 
