@@ -19,10 +19,15 @@ package org.apache.helix.sharding;
  * under the License.
  */
 
+import java.util.Collections;
+
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
+import org.apache.helix.manager.zk.ZKHelixManager;
+import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.tools.StateModelConfigGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,7 +62,7 @@ public class HelixShardingAdmin implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(HelixShardingAdmin.class);
 
   /** Default resource name when using single-resource-per-cluster pattern. */
-  static final String DEFAULT_RESOURCE_NAME = "shardingResource";
+  public static final String DEFAULT_RESOURCE_NAME = "shardingResource";
 
   /** Default state model for sharding (LeaderStandby). */
   static final String DEFAULT_STATE_MODEL = "LeaderStandby";
@@ -111,6 +116,12 @@ public class HelixShardingAdmin implements AutoCloseable {
 
     // 1. Create cluster
     helixAdmin.addCluster(clusterName, false);
+
+    // 1b. Enable participant auto-join so nodes can self-register on connect
+    HelixConfigScope scope = new HelixConfigScopeBuilder(
+        HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(clusterName).build();
+    helixAdmin.setConfig(scope, Collections.singletonMap(
+        ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, "true"));
 
     // 2. Add LeaderStandby state model
     StateModelDefinition leaderStandby =
