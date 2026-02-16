@@ -23,7 +23,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState.RebalanceMode;
@@ -154,6 +156,115 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     Assert.assertNull(
         output.getInstanceStateMap("testResourceName", new Partition("testResourceName_1"))
             .get("localhost_2"));
+  }
+
+  /**
+   * Tests that when all instances are disabled, the pipeline continues and computes DROPPED
+   * transitions for existing replicas. This verifies the fix for the bug where the last instance
+   * would stay stuck as LEADER when all nodes are disabled.
+   */
+  @Test
+  public void testAllNodesDisabledComputesDroppedForExistingReplicas() {
+    String[] resources = new String[]{"resource_1"};
+    int numInstances = 3;
+    int numPartitions = 1;
+
+    setupIdealState(numInstances, resources, numPartitions, 1, RebalanceMode.FULL_AUTO,
+        BuiltInStateModelDefinitions.LeaderStandby.name(),
+        DelayedAutoRebalancer.class.getName());
+    setupInstances(numInstances);
+    List<String> liveInstances = setupLiveInstances(numInstances);
+    setupStateModel();
+
+    // Short delay so disabled instances are immediately inactive (no delay window)
+    ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    clusterConfig.setRebalanceDelayTime(0);
+    clusterConfig.setDelayRebalaceEnabled(true);
+    setClusterConfig(clusterConfig);
+
+    Map<String, Resource> resourceMap =
+        getResourceMap(resources, numPartitions, BuiltInStateModelDefinitions.LeaderStandby.name());
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+
+    // Simulate existing replica: localhost_2 holds LEADER for resource_1_0
+    Partition partition = new Partition("resource_1_0");
+    currentStateOutput.setCurrentState("resource_1", partition, "localhost_2", "LEADER");
+
+    // Disable ALL instances
+    for (String instance : liveInstances) {
+      admin.enableInstance(_clusterName, instance, false);
+    }
+
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
+
+    // Pipeline should continue and compute DROPPED for the instance that had LEADER
+    Assert.assertTrue(output.containsResource("resource_1"),
+        "Resource should be in output when all nodes disabled but replicas exist");
+    Assert.assertEquals(
+        output.getInstanceStateMap("resource_1", partition).get("localhost_2"),
+        HelixDefinedState.DROPPED.name(),
+        "Instance with LEADER should transition to DROPPED when all nodes are disabled");
+  }
+
+  /**
+   * Tests that when all instances are disabled AND no current state exists (resource not
+   * initialized), the pipeline correctly rejects and does not add the resource to output.
+   */
+  @Test
+  public void testAllNodesDisabledRejectsWhenNoCurrentState() {
+    String[] resources = new String[]{"resource_1"};
+    int numInstances = 3;
+    int numPartitions = 1;
+
+    setupIdealState(numInstances, resources, numPartitions, 1, RebalanceMode.FULL_AUTO,
+        BuiltInStateModelDefinitions.LeaderStandby.name(),
+        DelayedAutoRebalancer.class.getName());
+    setupInstances(numInstances);
+    List<String> liveInstances = setupLiveInstances(numInstances);
+    setupStateModel();
+
+    ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    clusterConfig.setRebalanceDelayTime(0);
+    clusterConfig.setDelayRebalaceEnabled(true);
+    setClusterConfig(clusterConfig);
+
+    Map<String, Resource> resourceMap =
+        getResourceMap(resources, numPartitions, BuiltInStateModelDefinitions.LeaderStandby.name());
+    // No current state - resource not initialized
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+
+    // Disable ALL instances
+    for (String instance : liveInstances) {
+      admin.enableInstance(_clusterName, instance, false);
+    }
+
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
+
+    // Resource should NOT be in output when no current state exists (not initialized)
+    Assert.assertFalse(output.containsResource("resource_1"),
+        "Resource should not be in output when all nodes disabled and no replicas exist");
   }
 
   /**

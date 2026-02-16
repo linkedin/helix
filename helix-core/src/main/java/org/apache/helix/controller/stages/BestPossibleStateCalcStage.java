@@ -471,7 +471,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     for (Resource resource : wagedRebalancedResourceMap.values()) {
       IdealState is = newIdealStates.get(resource.getResourceName());
       // Check if the WAGED rebalancer has calculated the result for this resource or not.
-      if (is != null && checkBestPossibleStateCalculation(is)) {
+      if (is != null && checkBestPossibleStateCalculation(is, resource, currentStateOutput)) {
         // The WAGED rebalancer calculates a valid result, record in the output
         updateBestPossibleStateOutput(output, resource, is);
       } else {
@@ -540,7 +540,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
             rebalancer.computeNewIdealState(resourceName, idealState, currentStateOutput, cache);
 
         // Check if calculation is done successfully
-        if (!checkBestPossibleStateCalculation(idealState)) {
+        if (!checkBestPossibleStateCalculation(idealState, resource, currentStateOutput)) {
           LogUtil.logWarn(logger, _eventId,
               "The calculated idealState is not valid, resource: " + resourceName);
           return false;
@@ -577,13 +577,16 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     return false;
   }
 
-  private boolean checkBestPossibleStateCalculation(IdealState idealState) {
+  private boolean checkBestPossibleStateCalculation(IdealState idealState, Resource resource,
+      CurrentStateOutput currentStateOutput) {
     // If replicas is 0, indicate the resource is not fully initialized or ready to be rebalanced
     if (idealState.getRebalanceMode() == IdealState.RebalanceMode.FULL_AUTO && !idealState
         .getReplicas().equals("0")) {
       Map<String, List<String>> preferenceLists = idealState.getPreferenceLists();
       if (preferenceLists == null || preferenceLists.isEmpty()) {
-        return false;
+        // Empty preference lists: allow only when there are existing replicas to clean up
+        // (e.g., all nodes disabled). Reject when resource is not initialized (no current state).
+        return hasCurrentStateForResource(resource, currentStateOutput);
       }
       int emptyListCount = 0;
       for (List<String> preferenceList : preferenceLists.values()) {
@@ -591,12 +594,37 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
           emptyListCount++;
         }
       }
-      // If all lists are empty, rebalance fails completely
-      return emptyListCount != preferenceLists.values().size();
+      if (emptyListCount == preferenceLists.values().size()) {
+        // All lists empty: allow only when there are replicas to clean up (all nodes disabled).
+        return hasCurrentStateForResource(resource, currentStateOutput);
+      }
+      // Some but not all lists empty: inconsistent state, reject.
+      return emptyListCount == 0;
     } else {
       // For non FULL_AUTO RebalanceMode, rebalancing is not controlled by Helix
       return true;
     }
+  }
+
+  /**
+   * Returns true if the resource has at least one partition with existing replicas in current state.
+   * Used to distinguish "all nodes disabled" (replicas exist, need cleanup) from "resource not
+   * initialized" (no replicas, should skip).
+   */
+private boolean hasCurrentStateForResource(Resource resource,
+      CurrentStateOutput currentStateOutput) {
+    if (currentStateOutput == null) {
+      return false;
+    }
+    String resourceName = resource.getResourceName();
+    for (Partition partition : resource.getPartitions()) {
+      Map<String, String> currentStateMap =
+          currentStateOutput.getCurrentStateMap(resourceName, partition);
+      if (currentStateMap != null && !currentStateMap.isEmpty()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private Rebalancer<ResourceControllerDataProvider> getCustomizedRebalancer(
