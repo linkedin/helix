@@ -38,9 +38,8 @@ public class TestStageThreadPoolHelper {
 
   @BeforeMethod
   public void beforeMethod() {
-    // Shutdown any existing pool so each test starts with a clean slate.
-    // Needed when tests from other classes (e.g. TestBestPossibleStateCalcStage) create the
-    // shared pool first; without this, testConfigurablePoolSize would see the wrong pool size.
+    // Needed when tests from other classes create the
+    // shared pool first
     StageThreadPoolHelper.shutdown();
   }
 
