@@ -611,9 +611,9 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
    * Used to distinguish "all nodes disabled" (replicas exist, need cleanup) from "resource not
    * initialized" (no replicas, should skip).
    */
-private boolean hasCurrentStateForResource(Resource resource,
+  private boolean hasCurrentStateForResource(Resource resource,
       CurrentStateOutput currentStateOutput) {
-    if (currentStateOutput == null) {
+    if (resource == null || currentStateOutput == null) {
       return false;
     }
     String resourceName = resource.getResourceName();

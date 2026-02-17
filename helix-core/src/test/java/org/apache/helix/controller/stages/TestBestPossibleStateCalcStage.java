@@ -268,6 +268,41 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
   }
 
   /**
+   * Tests that SEMI_AUTO mode is unaffected - empty preference lists are allowed
+   * (rebalancing is not controlled by Helix) and the pipeline continues.
+   */
+  @Test
+  public void testSemiAutoModeUnaffectedByEmptyPreferenceList() {
+    String[] resources = new String[]{"resource_1"};
+    int numInstances = 3;
+    int numPartitions = 1;
+
+    setupIdealState(numInstances, resources, numPartitions, 1, RebalanceMode.SEMI_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    setupInstances(numInstances);
+    setupLiveInstances(numInstances);
+    setupStateModel();
+
+    Map<String, Resource> resourceMap =
+        getResourceMap(resources, numPartitions, BuiltInStateModelDefinitions.MasterSlave.name());
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
+    // SEMI_AUTO uses preference list from IdealState; pipeline should complete
+    Assert.assertNotNull(output, "Output should not be null");
+  }
+
+  /**
    * Test parallel computation with multiple FULL_AUTO resources.
    * Verifies that parallel computation using StageThreadPoolHelper produces correct results.
    */
