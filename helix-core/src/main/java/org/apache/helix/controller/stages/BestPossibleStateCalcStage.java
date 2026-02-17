@@ -598,7 +598,13 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         // All lists empty: allow only when there are replicas to clean up (all nodes disabled).
         return hasCurrentStateForResource(resource, currentStateOutput);
       }
-      // Some but not all lists empty: inconsistent state, reject.
+      // Some but not all lists empty: this is valid when maxPartitionsPerInstance limits capacity.
+      // Only reject when maxPartitionsPerInstance is NOT set and we have inconsistent empty lists.
+      if (emptyListCount > 0 && idealState.getMaxPartitionsPerInstance() > 0) {
+        // Empty lists are expected when capacity is limited by maxPartitionsPerInstance
+        return true;
+      }
+      // No maxPartitionsPerInstance configured: empty lists indicate inconsistent state, reject.
       return emptyListCount == 0;
     } else {
       // For non FULL_AUTO RebalanceMode, rebalancing is not controlled by Helix
