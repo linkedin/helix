@@ -167,7 +167,7 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   public static String buildEndpointFromLeaderElectionNode(ZNRecord znRecord) {
     // Read protocol from ZNRecord, default to HTTP for backward compatibility
     String protocol = znRecord.getSimpleField(SIMPLE_FIELD_KEY_PROTOCOL);
-    if (protocol == null || protocol.isEmpty()) {
+    if (!HttpConstants.HTTPS_PROTOCOL_PREFIX.equals(protocol)) {
       protocol = HttpConstants.HTTP_PROTOCOL_PREFIX;
     }
     List<String> urlComponents = new ArrayList<>(Collections.singletonList(protocol));

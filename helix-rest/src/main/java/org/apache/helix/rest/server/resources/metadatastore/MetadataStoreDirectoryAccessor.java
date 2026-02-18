@@ -372,6 +372,12 @@ public class MetadataStoreDirectoryAccessor extends AbstractResource {
     try {
       // Use the SSL context registered with HelixRestServer for secure internal communication
       // When SSL context is set, HTTPS will be used for forwarding requests to the leader
+      if (HelixRestServer.REST_SERVER_SSL_CONTEXT == null) {
+        LOG.warn(
+            "SSL context is not set on HelixRestServer; leader forwarding will use HTTP (not HTTPS). "
+                + "Ensure registerServerSSLContext() is called before buildMetadataStoreDirectory() "
+                + "if secure forwarding is required. Namespace: {}", namespace);
+      }
       _metadataStoreDirectory = ZkMetadataStoreDirectory.getInstance(namespace, address,
           HelixRestServer.REST_SERVER_SSL_CONTEXT);
     } catch (InvalidRoutingDataException ex) {
