@@ -31,9 +31,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.helix.SystemPropertyKeys;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class TestStageThreadPoolHelper {
+
+  @BeforeMethod
+  public void beforeMethod() {
+    // Needed when tests from other classes create the
+    // shared pool first
+    StageThreadPoolHelper.shutdown();
+  }
 
   @AfterMethod
   public void afterMethod() {
