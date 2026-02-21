@@ -1129,6 +1129,178 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
   }
 
+  /**
+   * Test that updating DOMAIN and SWAP_IN operation in a single request succeeds.
+   * This verifies that the merge of the new config happens before validation so that
+   * the updated DOMAIN (with a matching logical ID) is used for the transition check.
+   */
+  @Test
+  public void testSwapInWithDomainUpdateInSingleRequest() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out instance with ENABLE and a specific logical ID in the DOMAIN
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in instance with UNKNOWN and a DIFFERENT logical ID in the DOMAIN
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=DifferentId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that updates BOTH the DOMAIN (to match swap-out) AND sets SWAP_IN.
+    // This simulates what ACM does in setSwapInOperationAndEditConfigIfNeeded.
+    InstanceConfig updatedSwapInConfig = new InstanceConfig(swapInConfig.getRecord());
+    updatedSwapInConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapInInstance);
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(updatedSwapInConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should succeed because the merged config has the correct DOMAIN for matching
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Verify the config was updated in ZK
+    InstanceConfig resultConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    Assert.assertEquals(resultConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.SWAP_IN);
+    Assert.assertTrue(resultConfig.getDomainAsString().contains("instance=LogicalId_A"));
+
+    // Clean up: reset both instances to ENABLE with original domains
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    // Reset topology
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that SWAP_IN without updating DOMAIN to match fails when logical IDs differ.
+   */
+  @Test
+  public void testSwapInWithoutMatchingDomainFails() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out with ENABLE and a specific logical ID
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_B,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in with UNKNOWN and a DIFFERENT logical ID
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=MismatchedId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that sets SWAP_IN but does NOT update the DOMAIN to match.
+    InstanceConfig badConfig = new InstanceConfig(swapInConfig.getRecord());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(badConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should fail because even after merging, the DOMAIN still doesn't match
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Clean up
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
   public void testGetResourcesOnInstance() throws JsonProcessingException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
