@@ -309,7 +309,9 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
   }
 
   /**
-   * Test offline instance with CUSTOMIZED resources
+   * Test offline instance with CUSTOMIZED resources uses union semantics.
+   * Evacuation remains in-progress if partitions still exist in CurrentState,
+   * even after the instance is removed from IdealState.
    */
   @Test
   public void testOfflineInstanceWithCustomizedResource() throws Exception {
@@ -362,9 +364,10 @@ public class TestEvacuateWithExclusions extends TaskTestBase {
     _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, customDB, newIdealState);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
-    // Now evacuation SHOULD be finished
-    Assert.assertTrue(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet()),
-        "Evacuation should be finished after removing instance from CUSTOMIZED IdealState");
+    // With union semantics, evacuation is still NOT finished because the offline instance
+    // still has CurrentState entries for this resource.
+    Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate, Collections.emptySet()),
+        "Evacuation should remain in progress while CurrentState still has partitions, even if IdealState no longer assigns the instance");
 
     // Cleanup
     _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, customDB);

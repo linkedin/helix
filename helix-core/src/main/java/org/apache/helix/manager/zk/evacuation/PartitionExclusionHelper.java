@@ -22,6 +22,7 @@ package org.apache.helix.manager.zk.evacuation;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -159,16 +160,18 @@ public class PartitionExclusionHelper {
   }
 
   /**
-   * Gets partitions from current states for customized resources that are still assigned 
-   * to the instance (i.e., not yet reassigned to other instances).
-   * This is used for offline instances.
+   * Gets partitions that block evacuation for an offline instance with customized resources.
+   * Uses union semantics: a partition blocks evacuation if it exists in CurrentState (data still
+   * on the instance) OR if it is assigned to this instance in IdealState (assignment not moved).
+   * This prevents premature evacuation completion when partition names rotate in IdealState
+   * (e.g., segment generation changes) while the instance still holds data.
    *
    * @param currentStates List of current states
    * @param idealStates List of ideal states
    * @param instanceName The instance being checked
    * @param allowedResources Set of allowed resources (already filtered)
    * @param filters Exclusion filters to apply
-   * @return List of partitions that are still assigned to the instance (after exclusions)
+   * @return List of partitions blocking evacuation (union of CurrentState and IdealState)
    */
   public static List<PartitionInfo> getCustomizedPartitionsStillOnInstance(
       List<CurrentState> currentStates, List<IdealState> idealStates, String instanceName,
@@ -178,44 +181,59 @@ public class PartitionExclusionHelper {
       return Collections.emptyList();
     }
 
-    // Create a map of resourceName -> CurrentState
     Map<String, CurrentState> currentStateMap = currentStates.stream()
         .collect(Collectors.toMap(CurrentState::getResourceName, cs -> cs));
 
-    // Create a map of resourceName -> IdealState for CUSTOMIZED resources
     Map<String, IdealState> customizedIdealStateMap = idealStates.stream()
-        .filter(is -> is.getRebalanceMode() == IdealState.RebalanceMode.CUSTOMIZED &&
-            currentStateMap.containsKey(is.getResourceName()) &&
-            allowedResources.contains(is.getResourceName()))
+        .filter(is -> is.getRebalanceMode() == IdealState.RebalanceMode.CUSTOMIZED
+            && allowedResources.contains(is.getResourceName()))
         .collect(Collectors.toMap(IdealState::getResourceName, is -> is));
 
     List<PartitionInfo> partitionsStillOnInstance = new ArrayList<>();
 
-    // For each customized resource, check which partitions are still assigned to the instance
     for (Map.Entry<String, IdealState> entry : customizedIdealStateMap.entrySet()) {
       String resourceName = entry.getKey();
       IdealState idealState = entry.getValue();
       CurrentState cs = currentStateMap.get(resourceName);
+      Set<String> seenPartitions = new HashSet<>();
 
-      if (cs == null || cs.getPartitionStateMap() == null) {
-        continue;
+      // Any non-excluded partition in CurrentState blocks evacuation, regardless of whether
+      // it appears in IdealState. This handles partition name rotation (e.g., segment
+      // generation changes) where old-gen partitions in CS no longer match new-gen IS names.
+      if (cs != null && cs.getPartitionStateMap() != null) {
+        for (Map.Entry<String, String> partitionEntry : cs.getPartitionStateMap().entrySet()) {
+          String partition = partitionEntry.getKey();
+          String state = partitionEntry.getValue();
+
+          PartitionInfo partitionInfo = new PartitionInfo(partition, state, resourceName);
+
+          if (shouldExcludePartition(partitionInfo, filters)) {
+            continue;
+          }
+
+          if (seenPartitions.add(partition)) {
+            partitionsStillOnInstance.add(partitionInfo);
+          }
+        }
       }
 
-      for (Map.Entry<String, String> partitionEntry : cs.getPartitionStateMap().entrySet()) {
-        String partition = partitionEntry.getKey();
-        String state = partitionEntry.getValue();
-
-        PartitionInfo partitionInfo = new PartitionInfo(partition, state, resourceName);
-
-        // Apply exclusion filters
-        if (shouldExcludePartition(partitionInfo, filters)) {
-          continue; // Skip excluded partitions
-        }
-
-        // Check if this partition is still assigned to the instance in IdealState
-        Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition);
-        if (instanceStateMap != null && instanceStateMap.containsKey(instanceName)) {
-          partitionsStillOnInstance.add(partitionInfo);
+      // Any partition assigned to this instance in IdealState also blocks evacuation, even if
+      // not present in CurrentState (e.g., new assignment the offline instance hasn't picked up).
+      Map<String, Map<String, String>> mapFields = idealState.getRecord().getMapFields();
+      if (mapFields != null) {
+        for (Map.Entry<String, Map<String, String>> isEntry : mapFields.entrySet()) {
+          String partition = isEntry.getKey();
+          if (seenPartitions.contains(partition)) {
+            continue;
+          }
+          Map<String, String> instanceStateMap = isEntry.getValue();
+          if (instanceStateMap != null && instanceStateMap.containsKey(instanceName)) {
+            String desiredState = instanceStateMap.get(instanceName);
+            if (seenPartitions.add(partition)) {
+              partitionsStillOnInstance.add(
+                  new PartitionInfo(partition, desiredState, resourceName));
+            }
+          }
         }
       }
     }
