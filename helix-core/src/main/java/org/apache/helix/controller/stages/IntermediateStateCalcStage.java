@@ -148,6 +148,29 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       Collections.sort(prioritizedResourceList);
     }
 
+    // Charge all pending transitions for all FULL_AUTO resources upfront before processing any
+    // resource. This ensures the throttle controller has an accurate picture of all in-flight
+    // transitions regardless of resource processing order. Only FULL_AUTO resources are charged
+    // because throttling is only applied to FULL_AUTO resources in computeIntermediatePartitionState.
+    for (String resourceName : resourceMap.keySet()) {
+      Resource resource = resourceMap.get(resourceName);
+      IdealState is = dataCache.getIdealState(resourceName);
+      if (is == null || !IdealState.RebalanceMode.FULL_AUTO.equals(is.getRebalanceMode())) {
+        continue;
+      }
+      StateModelDefinition stateModelDef = dataCache.getStateModelDef(is.getStateModelDefRef());
+      if (stateModelDef == null) {
+        continue;
+      }
+      Map<String, List<String>> preferenceLists =
+          bestPossibleStateOutput.getPreferenceLists(resourceName);
+      if (preferenceLists == null) {
+        preferenceLists = Collections.emptyMap();
+      }
+      chargePendingTransition(resource, currentStateOutput, throttleController, dataCache,
+          preferenceLists, stateModelDef);
+    }
+
     ClusterStatusMonitor clusterStatusMonitor =
         event.getAttribute(AttributeName.clusterStatusMonitor.name());
     List<String> failedResources = new ArrayList<>();
@@ -348,9 +371,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // Perform regular load balance only if the number of partitions in recovery and in error is
     // less than the threshold. Otherwise, only allow downward-transition load balance
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
-
-    chargePendingTransition(resource, currentStateOutput, throttleController, cache,
-        preferenceLists, stateModelDef);
 
     // Sort partitions in case of urgent partition need to take the quota first.
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
