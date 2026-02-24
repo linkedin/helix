@@ -37,10 +37,12 @@ Mailing list: http://helix.apache.org/mail-lists.html
 
 ```bash
 mvn clean install -Dmaven.test.skip.exec=true
+
 ```
 
 ## WHAT IS HELIX
 
+Apache Helix is an open-source cluster management framework used to automatically manage distributed systems.
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
 
 1. Automatic assignment of resource/partition to nodes
