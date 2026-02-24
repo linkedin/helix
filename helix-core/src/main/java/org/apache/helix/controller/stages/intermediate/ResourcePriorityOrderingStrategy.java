@@ -89,6 +89,10 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
   /**
    * Builds resource priority map: resource -> [priority, insertionOrder].
    * insertionOrder preserves the original iteration order for stable tiebreaking.
+   *
+   * <p>TODO: Delegate priority lookup to {@link ResourceControllerDataProvider} — it should
+   * encapsulate the "check ResourceConfig first, then IdealState" fallback, hiding that logic
+   * from this strategy.
    */
   private Map<String, int[]> buildResourcePriorityMap(List<MessageContext> messages) {
     Map<String, int[]> priorityMap = new HashMap<>();
