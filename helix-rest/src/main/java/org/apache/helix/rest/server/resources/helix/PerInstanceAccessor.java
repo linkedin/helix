@@ -901,15 +901,13 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       Command command) {
     InstanceConfig originalInstanceConfigCopy =
         configAccessor.getInstanceConfig(clusterName, instanceName);
+    // Capture current operation before merging, since the merge will overwrite it.
     InstanceConstants.InstanceOperation currentOperation = originalInstanceConfigCopy.getInstanceOperation().getOperation();
     InstanceConstants.InstanceOperation targetOperation = newInstanceConfig.getInstanceOperation().getOperation();
-    try {
-      InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName, originalInstanceConfigCopy,
-          currentOperation, targetOperation);
-    } catch (HelixException e) {
-      throw new IllegalArgumentException(String.format(
-          "Failed topology setting update in instance %s, got exception %s", instanceName, e));
-    }
+
+    // Merge first so that DOMAIN and other fields are up-to-date before validating the
+    // operation transition. This is critical for swap-in where the caller updates the DOMAIN
+    // (to match the swap-out instance's logical ID) and sets SWAP_IN in a single request.
     if (command == Command.delete) {
       for (Map.Entry<String, String> entry : newInstanceConfig.getRecord().getSimpleFields()
           .entrySet()) {
@@ -917,6 +915,14 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       }
     } else {
       originalInstanceConfigCopy.getRecord().update(newInstanceConfig.getRecord());
+    }
+
+    try {
+      InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName, originalInstanceConfigCopy,
+          currentOperation, targetOperation);
+    } catch (HelixException e) {
+      throw new IllegalArgumentException(String.format(
+          "Failed topology setting update in instance %s, got exception %s", instanceName, e));
     }
     return originalInstanceConfigCopy
         .validateTopologySettingInInstanceConfig(configAccessor.getClusterConfig(clusterName),
