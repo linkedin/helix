@@ -21,7 +21,6 @@ package org.apache.helix.controller.stages;
 
 import java.util.Map;
 
-import org.apache.helix.HelixDefinedState;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
 
@@ -29,17 +28,6 @@ import org.apache.helix.model.StateModelDefinition;
  * Utility class for common state transition logic used across the pipeline stages.
  */
 public class StateTransitionHelper {
-
-  /**
-   * Checks if a state is considered "active" (not ERROR, DROPPED, or OFFLINE).
-   */
-  public static boolean isActiveState(String state) {
-    return state != null
-        && !state.isEmpty()
-        && !state.equalsIgnoreCase(HelixDefinedState.ERROR.name())
-        && !state.equalsIgnoreCase(HelixDefinedState.DROPPED.name())
-        && !state.equalsIgnoreCase("OFFLINE");
-  }
 
   /**
    * Checks if a state transition is upward (moving to higher priority state).
