@@ -20,17 +20,16 @@ package org.apache.helix.controller.stages.intermediate;
  */
 
 import java.util.List;
-import java.util.Map;
 
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
-import org.apache.helix.model.StateModelDefinition;
 
 /**
  * Strategy interface for ordering messages before throttling.
  * Different implementations can provide different prioritization schemes
  * (e.g., availability-aware vs. resource-priority based).
  */
+@FunctionalInterface
 public interface MessageOrderingStrategy {
   /**
    * Sort the given list of message contexts in-place according to the strategy's
@@ -47,34 +46,25 @@ public interface MessageOrderingStrategy {
     public final Message message;
     public final Partition partition;
     public final String resourceName;
-    public final StateModelDefinition stateModelDef;
-
-    /**
-     * The target state counts required for this partition as defined by the best-possible state.
-     * Maps state name (e.g., "MASTER", "SLAVE") to the number of replicas required in that state.
-     * Used by ordering strategies to determine how many replicas are still needed for each state,
-     * enabling smarter prioritization (e.g., prefer transitions that fill more critical gaps).
-     */
-    public final Map<String, Integer> requiredStates;
 
     /**
      * The ordered preference list for this partition (instance names in preferred assignment order).
      * When two messages target the same state, the one targeting the instance that appears earlier
-     * in this list is processed first. May be {@code null} if the strategy does not use it.
+     * in this list is processed first.
+     * <p>Used by: {@link ResourcePriorityOrderingStrategy} (preference-list ordering within a
+     * partition).
+     * <p>Not used by: {@link AvailabilityAwareOrderingStrategy}.
+     * May be {@code null} if the strategy does not use it.
      */
     public final List<String> preferenceList;
 
     public MessageContext(Message message,
         Partition partition,
         String resourceName,
-        StateModelDefinition stateModelDef,
-        Map<String, Integer> requiredStates,
         List<String> preferenceList) {
       this.message = message;
       this.partition = partition;
       this.resourceName = resourceName;
-      this.stateModelDef = stateModelDef;
-      this.requiredStates = requiredStates;
       this.preferenceList = preferenceList;
     }
   }

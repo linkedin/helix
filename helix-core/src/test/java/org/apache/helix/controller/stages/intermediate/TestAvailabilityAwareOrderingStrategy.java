@@ -332,6 +332,82 @@ public class TestAvailabilityAwareOrderingStrategy {
   }
 
   // ========================================
+  // messageIndexTracker diminishing scores
+  // ========================================
+
+  @Test
+  public void testMessageIndexTracker_DiminishingScoresForSamePartition() {
+    // Three messages all targeting PARTITION_0 with no pending and no active replicas.
+    // messageIndexTracker increments per message encountered for a given partition key,
+    // making each successive message's effective count higher and its score lower.
+    //   msg_index0: effectiveCount = 0 + 0 + 0 = 0  -> score = 2.0 / (0+1) = 2.0
+    //   msg_index1: effectiveCount = 0 + 0 + 1 = 1  -> score = 2.0 / (1+1) = 1.0
+    //   msg_index2: effectiveCount = 0 + 0 + 2 = 2  -> score = 2.0 / (2+1) = 0.67
+    // The sort must assign scores in encounter order; since equal-resource/partition messages
+    // share a cacheKey only when the full (resource, partition, from, to, tgt) tuple is
+    // identical, give each message a distinct tgtName to avoid cacheKey collisions.
+    Message msg0 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_0);
+    Message msg1 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_1);
+    Message msg2 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "SLAVE", INSTANCE_2);
+
+    // Present in insertion order [msg0, msg1, msg2]; the sort should preserve this because
+    // msg0 gets the highest index=0 score and msg2 the lowest index=2 score.
+    List<MessageOrderingStrategy.MessageContext> msgs = new ArrayList<>(
+        Arrays.asList(toContext(msg0), toContext(msg1), toContext(msg2)));
+    newStrategy().sortMessages(msgs);
+
+    Assert.assertEquals(msgs.get(0).message, msg0, "First-encountered message should have highest score");
+    Assert.assertEquals(msgs.get(1).message, msg1, "Second-encountered message should be middle");
+    Assert.assertEquals(msgs.get(2).message, msg2, "Third-encountered message should have lowest score");
+  }
+
+  // ========================================
+  // Configured active states — absolute count verification
+  // ========================================
+
+  @Test
+  public void testConfiguredActiveStates_AbsoluteReplicaCountDrivesScore() {
+    // Verifies that getUnhealthyStates integration produces the correct *absolute* active
+    // replica count, not just a relative ordering.
+    //
+    // Configuration: only MASTER counts as active (not SLAVE).
+    // PARTITION_0: 1 MASTER + 1 SLAVE  -> configured-active count = 1
+    //              score = 2.0 / (1 + 0 pending + 0 index + 1) = 2.0 / 2 = 1.0
+    // PARTITION_1: 1 SLAVE only        -> configured-active count = 0
+    //              score = 2.0 / (0 + 0 pending + 0 index + 1) = 2.0 / 1 = 2.0
+    //
+    // A ResourceB partition with minActive=2 and 0 active also scores 2.0/(0+1) = 2.0,
+    // tying with PARTITION_1 and confirming PARTITION_1's absolute score is 2.0 (not lower).
+    ResourceConfig resourceConfig = new ResourceConfig(RESOURCE_A);
+    resourceConfig.setActiveStatesForMinActiveReplicaCheck(Arrays.asList("MASTER"));
+    when(_cache.getResourceConfig(RESOURCE_A)).thenReturn(resourceConfig);
+
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_0, "MASTER");
+    setCurrentState(RESOURCE_A, PARTITION_0, INSTANCE_1, "SLAVE");
+    setCurrentState(RESOURCE_A, PARTITION_1, INSTANCE_2, "SLAVE");
+
+    Message toP0 = createMessage(RESOURCE_A, PARTITION_0, "OFFLINE", "MASTER", INSTANCE_2);
+    Message toP1 = createMessage(RESOURCE_A, PARTITION_1, "OFFLINE", "MASTER", INSTANCE_0);
+
+    // Primary assertion: PARTITION_1 (0 configured-active) outranks PARTITION_0 (1 configured-active)
+    assertComesBefore(toP1, toP0);
+
+    // Absolute-score pin: a ResourceB partition with 0 active and minActive=2 also has
+    // score 2.0/1 = 2.0, so it should tie with toP1 and tiebreak by resource name
+    // ("ResourceA" < "ResourceB" means toP1 still comes first).
+    when(_cache.getResourceConfig(RESOURCE_B)).thenReturn(null);
+    Message toBp0 = createMessage(RESOURCE_B, "ResourceB_0", "OFFLINE", "SLAVE", INSTANCE_0);
+    List<MessageOrderingStrategy.MessageContext> threeWay = new ArrayList<>(
+        Arrays.asList(toContext(toP0), toContext(toBp0), toContext(toP1)));
+    newStrategy().sortMessages(threeWay);
+
+    // toP1 and toBp0 tie on score 2.0; tiebreak by resource name: "ResourceA" < "ResourceB"
+    Assert.assertEquals(threeWay.get(0).message, toP1, "PARTITION_1 (ResourceA) ties on score but wins tiebreak");
+    Assert.assertEquals(threeWay.get(1).message, toBp0, "ResourceB ties on score, loses tiebreak to ResourceA");
+    Assert.assertEquals(threeWay.get(2).message, toP0, "PARTITION_0 has lower score (1 active)");
+  }
+
+  // ========================================
   // End-to-end sorting
   // ========================================
 
@@ -380,16 +456,13 @@ public class TestAvailabilityAwareOrderingStrategy {
 
   /**
    * Wraps a message in a MessageContext for use with sortMessages().
-   * AvailabilityAwareOrderingStrategy resolves stateModelDef from the cache internally,
-   * so the context fields stateModelDef and requiredStates are not used by this strategy.
+   * AvailabilityAwareOrderingStrategy resolves stateModelDef from the cache internally.
    */
   private MessageOrderingStrategy.MessageContext toContext(Message msg) {
     return new MessageOrderingStrategy.MessageContext(
         msg,
         new Partition(msg.getPartitionName()),
         msg.getResourceName(),
-        null,
-        Collections.emptyMap(),
         null);
   }
 

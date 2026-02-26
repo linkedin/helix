@@ -71,10 +71,10 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
     Map<String, Integer> messageIndexTracker = new HashMap<>();
 
     messages.sort((m1, m2) -> {
-      double score1 = computeAvailabilityScore(m1.message, impactCache, activeReplicasCache,
-          pendingUpwardMsgCountCache, messageIndexTracker);
-      double score2 = computeAvailabilityScore(m2.message, impactCache, activeReplicasCache,
-          pendingUpwardMsgCountCache, messageIndexTracker);
+      double score1 = computeAvailabilityScore(m1.message, m1.partition, impactCache,
+          activeReplicasCache, pendingUpwardMsgCountCache, messageIndexTracker);
+      double score2 = computeAvailabilityScore(m2.message, m2.partition, impactCache,
+          activeReplicasCache, pendingUpwardMsgCountCache, messageIndexTracker);
 
       int delta = Double.compare(score2, score1);
       if (delta != 0) {
@@ -90,7 +90,7 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
     });
   }
 
-  private double computeAvailabilityScore(Message message,
+  private double computeAvailabilityScore(Message message, Partition partition,
       Map<String, Double> impactCache,
       Map<String, Integer> activeReplicasCache,
       Map<String, Integer> pendingUpwardMsgCountCache,
@@ -116,7 +116,7 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
     String topState = stateModelDef.getTopState();
 
     boolean missingTopState = StateTransitionHelper.isPartitionMissingTopState(
-        message.getResourceName(), message.getPartitionName(), topState, _currentStateOutput);
+        message.getResourceName(), partition, topState, _currentStateOutput);
     if (missingTopState && message.getToState().equals(topState)) {
       return cacheScore(key, TOP_STATE_MISSING_SCORE, impactCache);
     }
@@ -131,8 +131,8 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
       return cacheScore(key, 0.0, impactCache);
     }
 
-    double score = computeUpwardScore(message, idealState, activeReplicasCache,
-        pendingUpwardMsgCountCache, messageIndexTracker);
+    double score = computeUpwardScore(message, partition, idealState, stateModelDef,
+        activeReplicasCache, pendingUpwardMsgCountCache, messageIndexTracker);
     return cacheScore(key, score, impactCache);
   }
 
@@ -140,19 +140,22 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
    * Compute score for upward transitions.
    * Score is higher when current active count is further below the min active threshold.
    */
-  private double computeUpwardScore(Message message, IdealState idealState,
+  private double computeUpwardScore(Message message, Partition partition, IdealState idealState,
+      StateModelDefinition stateModelDef,
       Map<String, Integer> activeReplicasCache,
       Map<String, Integer> pendingUpwardMsgCountCache,
       Map<String, Integer> messageIndexTracker) {
 
     String resource = message.getResourceName();
-    String partition = message.getPartitionName();
-    String partitionKey = resource + ":" + partition;
+    String partitionKey = resource + "\0" + partition.getPartitionName();
 
     int minActive = idealState.getMinActiveReplicas();
 
-    int currentActive = getCurrentActiveReplicas(resource, partition, activeReplicasCache);
-    int pending = getPendingUpwardMessages(resource, partition, pendingUpwardMsgCountCache);
+    ResourceConfig resourceConfig = _cache.getResourceConfig(resource);
+    int currentActive = getCurrentActiveReplicas(resource, partition, stateModelDef,
+        resourceConfig, activeReplicasCache);
+    int pending = getPendingUpwardMessages(resource, partition, stateModelDef,
+        pendingUpwardMsgCountCache);
 
     int index = messageIndexTracker.getOrDefault(partitionKey, 0);
     messageIndexTracker.put(partitionKey, index + 1);
@@ -169,48 +172,38 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
 
   /**
    * Counts active replicas for a partition. A replica is active if its state is not in the
-   * resource's unhealthy state set, determined by {@link #getUnhealthyStates(String)}.
+   * resource's unhealthy state set.
+   *
+   * <p>Accepts already-resolved {@link StateModelDefinition} and {@link ResourceConfig} to avoid
+   * redundant cache lookups — callers in the upward-score path have already fetched these objects.
    *
    * <p>This method stays in the strategy (rather than moving to {@link ResourceControllerDataProvider})
    * because it depends on {@link CurrentStateOutput}, which is a live pipeline-stage result, not
    * cluster configuration state that the provider loads from ZooKeeper.
    */
-  private int getCurrentActiveReplicas(String resource, String partition,
+  private int getCurrentActiveReplicas(String resource, Partition partition,
+      StateModelDefinition stateModelDef, ResourceConfig resourceConfig,
       Map<String, Integer> activeReplicasCache) {
-    String key = resource + ":" + partition;
+    String key = resource + "\0" + partition.getPartitionName();
     if (activeReplicasCache.containsKey(key)) {
       return activeReplicasCache.get(key);
     }
 
     Map<String, String> currentStates =
-        _currentStateOutput.getCurrentStateMap(resource, new Partition(partition));
+        _currentStateOutput.getCurrentStateMap(resource, partition);
     if (currentStates == null) {
       activeReplicasCache.put(key, 0);
       return 0;
     }
 
-    Set<String> unhealthyStates = getUnhealthyStates(resource);
+    Set<String> unhealthyStates = InstanceValidationUtil.getUnhealthyStates(resourceConfig,
+        stateModelDef);
     int count = (int) currentStates.values().stream()
         .filter(s -> !unhealthyStates.contains(s))
         .count();
 
     activeReplicasCache.put(key, count);
     return count;
-  }
-
-  /**
-   * Returns the set of states considered unhealthy (not active) for a resource.
-   * Fetches {@link ResourceConfig} and {@link StateModelDefinition} from the pipeline cache and
-   * delegates to {@link InstanceValidationUtil#getUnhealthyStates(ResourceConfig, StateModelDefinition)},
-   * avoiding live ZooKeeper reads.
-   */
-  private Set<String> getUnhealthyStates(String resource) {
-    IdealState idealState = _cache.getIdealState(resource);
-    StateModelDefinition stateModelDef = idealState != null
-        ? _cache.getStateModelDef(idealState.getStateModelDefRef())
-        : null;
-    ResourceConfig resourceConfig = _cache.getResourceConfig(resource);
-    return InstanceValidationUtil.getUnhealthyStates(resourceConfig, stateModelDef);
   }
 
   /**
@@ -222,28 +215,24 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
    * for the same reason as {@link #getCurrentActiveReplicas}: it depends on
    * {@link CurrentStateOutput}, which is pipeline-stage output, not ZooKeeper-backed cluster state.
    */
-  private int getPendingUpwardMessages(String resource, String partition,
+  private int getPendingUpwardMessages(String resource, Partition partition,
+      StateModelDefinition stateModelDef,
       Map<String, Integer> pendingUpwardMsgCountCache) {
-    String key = resource + ":" + partition;
+    String key = resource + "\0" + partition.getPartitionName();
     if (pendingUpwardMsgCountCache.containsKey(key)) {
       return pendingUpwardMsgCountCache.get(key);
     }
 
     int count = 0;
     Map<String, Message> pendingMsgs =
-        _currentStateOutput.getPendingMessageMap(resource, new Partition(partition));
+        _currentStateOutput.getPendingMessageMap(resource, partition);
 
     if (pendingMsgs != null && !pendingMsgs.isEmpty()) {
-      IdealState idealState = _cache.getIdealState(resource);
-      if (idealState != null) {
-        StateModelDefinition stateModelDef =
-            _cache.getStateModelDef(idealState.getStateModelDefRef());
-        // isUpwardTransition already handles null stateModelDef (returns false).
-        count = (int) pendingMsgs.values().stream()
-            .filter(msg -> StateTransitionHelper.isUpwardTransition(msg.getFromState(),
-                msg.getToState(), stateModelDef))
-            .count();
-      }
+      // isUpwardTransition already handles null stateModelDef (returns false).
+      count = (int) pendingMsgs.values().stream()
+          .filter(msg -> StateTransitionHelper.isUpwardTransition(msg.getFromState(),
+              msg.getToState(), stateModelDef))
+          .count();
     }
 
     pendingUpwardMsgCountCache.put(key, count);
@@ -256,7 +245,7 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
   }
 
   private String cacheKey(Message message) {
-    return String.join(":",
+    return String.join("\0",
         message.getResourceName(),
         message.getPartitionName(),
         message.getFromState(),

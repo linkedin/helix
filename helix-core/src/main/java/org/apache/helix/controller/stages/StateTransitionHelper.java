@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.helix.model.Partition;
@@ -69,10 +70,63 @@ public class StateTransitionHelper {
   /**
    * Checks if a partition is missing the top state replica in its current state.
    */
+  public static boolean isPartitionMissingTopState(String resource, Partition partition,
+      String topState, CurrentStateOutput currentStateOutput) {
+    Map<String, String> stateMap = currentStateOutput.getCurrentStateMap(resource, partition);
+    return stateMap == null || !stateMap.containsValue(topState);
+  }
+
+  /**
+   * Overload that accepts a partition name string; wraps it in a {@link Partition} and delegates.
+   * Prefer the {@link Partition}-typed overload when a {@code Partition} instance is already available.
+   */
   public static boolean isPartitionMissingTopState(String resource, String partition,
       String topState, CurrentStateOutput currentStateOutput) {
-    Map<String, String> stateMap =
-        currentStateOutput.getCurrentStateMap(resource, new Partition(partition));
-    return stateMap == null || !stateMap.containsValue(topState);
+    return isPartitionMissingTopState(resource, new Partition(partition), topState,
+        currentStateOutput);
+  }
+
+  /**
+   * Counts how many replicas are currently in a state that is needed by the best-possible state,
+   * respecting multiplicity (e.g., if best-possible requires two SLAVE replicas, only two
+   * current SLAVE replicas count even if more exist).
+   *
+   * @param bestPossible map of instance → target state from the best-possible output
+   * @param currentState map of instance → current state
+   * @return number of replicas whose current state satisfies the best-possible requirement
+   */
+  public static int countActiveReplicas(Map<String, String> bestPossible,
+      Map<String, String> currentState) {
+    Map<String, Integer> stateCount = new HashMap<>();
+    for (String state : bestPossible.values()) {
+      stateCount.merge(state, 1, Integer::sum);
+    }
+    int count = 0;
+    for (String state : currentState.values()) {
+      if (stateCount.getOrDefault(state, 0) > 0) {
+        count++;
+        stateCount.put(state, stateCount.get(state) - 1);
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Counts how many instance→state assignments in the current state exactly match
+   * the best-possible state for the same instance.
+   *
+   * @param bestPossible map of instance → target state from the best-possible output
+   * @param currentState map of instance → current state
+   * @return number of instances whose current state exactly matches the best-possible assignment
+   */
+  public static int countIdealMatches(Map<String, String> bestPossible,
+      Map<String, String> currentState) {
+    int matches = 0;
+    for (Map.Entry<String, String> entry : bestPossible.entrySet()) {
+      if (entry.getValue().equals(currentState.get(entry.getKey()))) {
+        matches++;
+      }
+    }
+    return matches;
   }
 }

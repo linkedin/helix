@@ -532,11 +532,18 @@ public class InstanceValidationUtil {
       }
       unhealthyStates.removeIf(state ->
           customActiveStates.stream().anyMatch(active -> active.equalsIgnoreCase(state)));
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceConfig.getResourceName(), unhealthyStates);
       return unhealthyStates;
     }
 
     if (stateModelDef != null) {
       unhealthyStates.add(stateModelDef.getInitialState());
+    }
+    if (_logger.isDebugEnabled()) {
+      String resourceName = resourceConfig != null ? resourceConfig.getResourceName() : "unknown";
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceName, unhealthyStates);
     }
     return unhealthyStates;
   }

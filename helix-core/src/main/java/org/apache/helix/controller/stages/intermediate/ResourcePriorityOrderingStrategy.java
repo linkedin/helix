@@ -28,8 +28,10 @@ import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.CurrentStateOutput;
+import org.apache.helix.controller.stages.StateTransitionHelper;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Partition;
+import org.apache.helix.model.StateModelDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,10 +40,34 @@ import org.slf4j.LoggerFactory;
  * 1. Resource priority (from configuration)
  * 2. Partition priority (missing top state, active replicas, ideal matches)
  * 3. Message priority (state priority, preference order)
+ *
+ * <p><b>Relationship to {@code PartitionPriorityComparator}:</b> The partition-level scoring in
+ * this class (missing top state → fewer active replicas → fewer ideal matches) mirrors the logic
+ * in {@code IntermediateStateCalcStage.PartitionPriorityComparator}. That comparator operates
+ * per-resource within the existing per-resource throttle pipeline. This strategy extends the same
+ * logic to operate cross-resource and adds resource-level priority on top. The per-resource
+ * comparator is expected to be retired in favour of this strategy in Part 2 (see PR #119).
+ *
+ * <p><b>Thread safety:</b> Not thread-safe. Create a new instance per pipeline run.
  */
 public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy {
   private static final Logger logger =
       LoggerFactory.getLogger(ResourcePriorityOrderingStrategy.class.getName());
+
+  /**
+   * Fallback priority used when a resource has no configured priority value.
+   * {@code buildResourcePriorityMap} pre-populates entries for all resources seen in the message
+   * list, so this default is only reached if a resource appears in the comparator but was absent
+   * from the original list — an edge case that should not occur in normal operation.
+   */
+  private static final int[] DEFAULT_RESOURCE_PRIORITY = {Integer.MIN_VALUE, 0};
+
+  /**
+   * Fallback partition score used when a partition is absent from the pre-computed score map.
+   * Scores are {@code [missingTopState=0, activeReplicas=0, idealMatches=0]}, which places the
+   * partition at the same level as a fully-degraded partition — a safe conservative default.
+   */
+  private static final int[] DEFAULT_PARTITION_SCORE = {0, 0, 0};
 
   private final ResourceControllerDataProvider _cache;
   private final BestPossibleStateOutput _bestPossibleStateOutput;
@@ -62,8 +88,8 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
 
     messages.sort((m1, m2) -> {
       // 1. Resource priority (higher value = higher priority).
-      int[] rp1 = resourcePriorityMap.getOrDefault(m1.resourceName, new int[]{Integer.MIN_VALUE, 0});
-      int[] rp2 = resourcePriorityMap.getOrDefault(m2.resourceName, new int[]{Integer.MIN_VALUE, 0});
+      int[] rp1 = resourcePriorityMap.getOrDefault(m1.resourceName, DEFAULT_RESOURCE_PRIORITY);
+      int[] rp2 = resourcePriorityMap.getOrDefault(m2.resourceName, DEFAULT_RESOURCE_PRIORITY);
       if (rp1[0] != rp2[0]) {
         return Integer.compare(rp2[0], rp1[0]);
       }
@@ -148,7 +174,10 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
             _bestPossibleStateOutput.getPartitionStateMap(ctx.resourceName);
         Map<Partition, Map<String, String>> currentStates =
             _currentStateOutput.getCurrentStateMap(ctx.resourceName);
-        String topState = ctx.stateModelDef != null ? ctx.stateModelDef.getTopState() : null;
+        IdealState idealState = _cache.getIdealState(ctx.resourceName);
+        StateModelDefinition stateModelDef = idealState != null
+            ? _cache.getStateModelDef(idealState.getStateModelDefRef()) : null;
+        String topState = stateModelDef != null ? stateModelDef.getTopState() : null;
 
         if (bestPossibleState != null && currentStates != null && topState != null) {
           for (Map.Entry<Partition, Map<String, String>> e :
@@ -158,8 +187,8 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
             Map<String, String> csMap = currentStates.getOrDefault(p, Collections.emptyMap());
 
             int missingTop = csMap.containsValue(topState) ? 1 : 0;
-            int active = countActiveReplicas(bpMap, csMap);
-            int matched = countIdealMatches(bpMap, csMap);
+            int active = StateTransitionHelper.countActiveReplicas(bpMap, csMap);
+            int matched = StateTransitionHelper.countIdealMatches(bpMap, csMap);
             partScores.put(p.getPartitionName(), new int[]{missingTop, active, matched});
           }
         }
@@ -177,13 +206,18 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
         return score;
       }
     }
-    return new int[]{0, 0, 0};
+    return DEFAULT_PARTITION_SCORE;
   }
 
   private int compareMessagePriority(MessageContext m1, MessageContext m2) {
-    // 1. Same target state and both instances in preference list → preference list order.
-    if (m1.message.getToState().equals(m2.message.getToState())
+    // 1. Same partition, same target state, and both instances in the (shared) preference list
+    //    → order by preference list position.
+    //    The partition equality guard is critical: preference lists are per-partition, so
+    //    comparing across different partitions using m1's list would produce invalid ordering.
+    if (m1.partition.equals(m2.partition)
+        && m1.message.getToState().equals(m2.message.getToState())
         && m1.preferenceList != null
+        && m2.preferenceList != null
         && m1.preferenceList.contains(m1.message.getTgtName())
         && m1.preferenceList.contains(m2.message.getTgtName())) {
       return Integer.compare(
@@ -192,12 +226,20 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
     }
 
     // 2. Different target states → higher priority state first.
-    if (!m1.message.getToState().equals(m2.message.getToState()) && m1.stateModelDef != null) {
-      Map<String, Integer> statePriorityMap = m1.stateModelDef.getStatePriorityMap();
-      Integer p1 = statePriorityMap.get(m1.message.getToState());
-      Integer p2 = statePriorityMap.get(m2.message.getToState());
-      if (p1 != null && p2 != null && !p1.equals(p2)) {
-        return p1.compareTo(p2);
+    // compareMessagePriority is only reached when both resource-priority fields tie, which
+    // requires the same resource (insertion order is unique per resource). It is therefore
+    // safe to look up the state model def using m1's resource name.
+    if (!m1.message.getToState().equals(m2.message.getToState())) {
+      IdealState idealState = _cache.getIdealState(m1.resourceName);
+      StateModelDefinition stateModelDef = idealState != null
+          ? _cache.getStateModelDef(idealState.getStateModelDefRef()) : null;
+      if (stateModelDef != null) {
+        Map<String, Integer> statePriorityMap = stateModelDef.getStatePriorityMap();
+        Integer p1 = statePriorityMap.get(m1.message.getToState());
+        Integer p2 = statePriorityMap.get(m2.message.getToState());
+        if (p1 != null && p2 != null && !p1.equals(p2)) {
+          return p1.compareTo(p2);
+        }
       }
     }
 
@@ -209,31 +251,4 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
     return m1.message.getTgtName().compareTo(m2.message.getTgtName());
   }
 
-  private int countActiveReplicas(Map<String, String> bestPossible,
-      Map<String, String> currentState) {
-    Map<String, Integer> stateCount = new HashMap<>();
-    for (String state : bestPossible.values()) {
-      stateCount.merge(state, 1, Integer::sum);
-    }
-
-    int count = 0;
-    for (String state : currentState.values()) {
-      if (stateCount.containsKey(state) && stateCount.get(state) > 0) {
-        count++;
-        stateCount.put(state, stateCount.get(state) - 1);
-      }
-    }
-    return count;
-  }
-
-  private int countIdealMatches(Map<String, String> bestPossible,
-      Map<String, String> currentState) {
-    int matches = 0;
-    for (Map.Entry<String, String> entry : bestPossible.entrySet()) {
-      if (entry.getValue().equals(currentState.get(entry.getKey()))) {
-        matches++;
-      }
-    }
-    return matches;
-  }
 }
