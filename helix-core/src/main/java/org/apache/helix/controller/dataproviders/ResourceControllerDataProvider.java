@@ -145,8 +145,8 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
         return obj.getResourceName();
       }
     }, true);
-    _resourceAssignmentCache = new HashMap<>();
-    _idealMappingCache = new HashMap<>();
+    _resourceAssignmentCache = new ConcurrentHashMap<>();
+    _idealMappingCache = new ConcurrentHashMap<>();
     _missingTopStateMap = new HashMap<>();
     _inProgressHandoffMap = new HashMap<>();
     _postDispatchHandoffMap = new HashMap<>();
