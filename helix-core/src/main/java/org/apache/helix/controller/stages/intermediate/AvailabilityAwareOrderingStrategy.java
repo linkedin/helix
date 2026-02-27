@@ -173,13 +173,6 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
   /**
    * Counts active replicas for a partition. A replica is active if its state is not in the
    * resource's unhealthy state set.
-   *
-   * <p>Accepts already-resolved {@link StateModelDefinition} and {@link ResourceConfig} to avoid
-   * redundant cache lookups — callers in the upward-score path have already fetched these objects.
-   *
-   * <p>This method stays in the strategy (rather than moving to {@link ResourceControllerDataProvider})
-   * because it depends on {@link CurrentStateOutput}, which is a live pipeline-stage result, not
-   * cluster configuration state that the provider loads from ZooKeeper.
    */
   private int getCurrentActiveReplicas(String resource, Partition partition,
       StateModelDefinition stateModelDef, ResourceConfig resourceConfig,
@@ -210,10 +203,6 @@ public class AvailabilityAwareOrderingStrategy implements MessageOrderingStrateg
    * Counts pending upward-transition messages for a partition.
    * Only upward transitions are counted because pending downward transitions do not reduce
    * availability and should not inflate the effective replica count.
-   *
-   * <p>This method stays in the strategy (rather than moving to {@link ResourceControllerDataProvider})
-   * for the same reason as {@link #getCurrentActiveReplicas}: it depends on
-   * {@link CurrentStateOutput}, which is pipeline-stage output, not ZooKeeper-backed cluster state.
    */
   private int getPendingUpwardMessages(String resource, Partition partition,
       StateModelDefinition stateModelDef,

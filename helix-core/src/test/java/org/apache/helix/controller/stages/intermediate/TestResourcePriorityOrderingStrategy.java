@@ -121,19 +121,22 @@ public class TestResourcePriorityOrderingStrategy {
   }
 
   @Test
-  public void testResourcePriority_NoPriorityField_StableInsertionOrder() {
+  public void testResourcePriority_NoPriorityField_AlphabeticalTiebreak() {
     // No priority field configured -> all resources get Integer.MIN_VALUE, tiebreak by
-    // insertion order (RESOURCE_A appears first in the message list).
+    // alphabetical resource name. "ResourceA" < "ResourceB" so ResourceA always comes first,
+    // regardless of the order messages are presented to the sort.
     Message msgA = createMessage(RESOURCE_A, PARTITION_A0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message msgB = createMessage(RESOURCE_B, PARTITION_B0, "OFFLINE", "SLAVE", INSTANCE_1);
 
-    List<MessageOrderingStrategy.MessageContext> msgs = new ArrayList<>(
-        Arrays.asList(toContext(msgA), toContext(msgB)));
-    newStrategy().sortMessages(msgs);
+    // ResourceA first in input -> ResourceA first in output
+    assertComesBefore(msgA, msgB);
 
-    // RESOURCE_A was seen first -> insertion order 0 < 1 -> stays first
-    Assert.assertEquals(msgs.get(0).message, msgA);
-    Assert.assertEquals(msgs.get(1).message, msgB);
+    // ResourceB first in input -> ResourceA still first (alphabetical, not insertion order)
+    List<MessageOrderingStrategy.MessageContext> msgs = new ArrayList<>(
+        Arrays.asList(toContext(msgB), toContext(msgA)));
+    newStrategy().sortMessages(msgs);
+    Assert.assertEquals(msgs.get(0).message, msgA,
+        "ResourceA should sort before ResourceB alphabetically, regardless of input order");
   }
 
   @Test
@@ -239,21 +242,45 @@ public class TestResourcePriorityOrderingStrategy {
   }
 
   @Test
-  public void testMessagePriority_CrossPartition_PreferenceListNotUsed() {
-    // Messages from DIFFERENT partitions must not use m1's preference list for m2's target.
-    // This is the Issue 8 regression test.
+  public void testMessagePriority_CrossPartition_SameToState_PartitionNameTiebreak() {
+    // Messages from DIFFERENT partitions with the same toState and equal partition scores.
+    // Preference-list comparison must NOT apply across partitions.
+    // sortMessages applies the partition-name tiebreak before reaching compareMessagePriority:
+    // PARTITION_A0 < PARTITION_A1 alphabetically → A0 first.
     List<String> prefListA0 = Arrays.asList(INSTANCE_0, INSTANCE_1);
     List<String> prefListA1 = Arrays.asList(INSTANCE_2, INSTANCE_0); // different order
 
     Message msgA0 = createMessage(RESOURCE_A, PARTITION_A0, "OFFLINE", "SLAVE", INSTANCE_0);
     Message msgA1 = createMessage(RESOURCE_A, PARTITION_A1, "OFFLINE", "SLAVE", INSTANCE_2);
 
-    // Both messages: same resource, same state, different partitions.
-    // Preference-list comparison must NOT apply (cross-partition guard).
-    // Tiebreak should fall through to partition name: PARTITION_A0 < PARTITION_A1.
     assertComesBefore(
         toContext(msgA0, prefListA0),
         toContext(msgA1, prefListA1));
+  }
+
+  @Test
+  public void testMessagePriority_CrossPartition_DifferentToState_PartitionNameWinsOverStatePriority() {
+    // Key behavioral alignment with IntermediateStateCalcStage:
+    // When two messages are from different partitions with equal partition scores,
+    // partition name (alphabetical) is the tiebreak — NOT message state priority.
+    //
+    // Without the partition-name tiebreak in sortMessages, compareMessagePriority would
+    // apply state-priority first, causing Z_99/MASTER to beat A_0/SLAVE. The existing
+    // PartitionPriorityComparator always resolves cross-partition ties by partition name,
+    // so A_0 must come before Z_99 regardless of toState.
+    setBestPossibleState(RESOURCE_A, PARTITION_A0, INSTANCE_0, "SLAVE");
+    setBestPossibleState(RESOURCE_A, PARTITION_A1, INSTANCE_1, "MASTER");
+    // Give both partitions equal partition scores: both have a MASTER present, same active count.
+    setCurrentState(RESOURCE_A, PARTITION_A0, INSTANCE_2, "MASTER"); // MASTER present, 0 SLAVE active
+    setCurrentState(RESOURCE_A, PARTITION_A1, INSTANCE_2, "MASTER"); // MASTER present, 0 SLAVE active
+
+    // PARTITION_A0 toState=SLAVE, PARTITION_A1 toState=MASTER.
+    // State priority alone would put MASTER (A1) first, but partition name puts A0 first.
+    Message msgA0 = createMessage(RESOURCE_A, PARTITION_A0, "OFFLINE", "SLAVE", INSTANCE_0);
+    Message msgA1 = createMessage(RESOURCE_A, PARTITION_A1, "OFFLINE", "MASTER", INSTANCE_1);
+
+    // PARTITION_A0 ("ResourceA_0") < PARTITION_A1 ("ResourceA_1") → A0/SLAVE first.
+    assertComesBefore(msgA0, msgA1);
   }
 
   // ========================================

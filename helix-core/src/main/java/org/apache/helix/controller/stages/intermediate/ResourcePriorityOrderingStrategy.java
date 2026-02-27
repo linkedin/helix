@@ -60,7 +60,7 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
    * list, so this default is only reached if a resource appears in the comparator but was absent
    * from the original list — an edge case that should not occur in normal operation.
    */
-  private static final int[] DEFAULT_RESOURCE_PRIORITY = {Integer.MIN_VALUE, 0};
+  private static final int DEFAULT_RESOURCE_PRIORITY = Integer.MIN_VALUE;
 
   /**
    * Fallback partition score used when a partition is absent from the pre-computed score map.
@@ -83,19 +83,20 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
 
   @Override
   public void sortMessages(List<MessageContext> messages) {
-    Map<String, int[]> resourcePriorityMap = buildResourcePriorityMap(messages);
+    Map<String, Integer> resourcePriorityMap = buildResourcePriorityMap(messages);
     Map<String, Map<String, int[]>> partitionPriorityScores = buildPartitionPriorityScores(messages);
 
     messages.sort((m1, m2) -> {
       // 1. Resource priority (higher value = higher priority).
-      int[] rp1 = resourcePriorityMap.getOrDefault(m1.resourceName, DEFAULT_RESOURCE_PRIORITY);
-      int[] rp2 = resourcePriorityMap.getOrDefault(m2.resourceName, DEFAULT_RESOURCE_PRIORITY);
-      if (rp1[0] != rp2[0]) {
-        return Integer.compare(rp2[0], rp1[0]);
+      int p1 = resourcePriorityMap.getOrDefault(m1.resourceName, DEFAULT_RESOURCE_PRIORITY);
+      int p2 = resourcePriorityMap.getOrDefault(m2.resourceName, DEFAULT_RESOURCE_PRIORITY);
+      if (p1 != p2) {
+        return Integer.compare(p2, p1);
       }
-      // Stable tiebreak within equal resource priorities: preserve original iteration order.
-      if (rp1[1] != rp2[1]) {
-        return Integer.compare(rp1[1], rp2[1]);
+      // Tiebreak within equal resource priorities: alphabetical by resource name.
+      int nameCmp = m1.resourceName.compareTo(m2.resourceName);
+      if (nameCmp != 0) {
+        return nameCmp;
       }
 
       // 2. Within same resource: partition priority.
@@ -107,35 +108,41 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
         }
       }
 
-      // 3. Within same partition: message priority (state priority, preference order).
+      // 2a. Partition scores tie → tiebreak by partition name.
+      // Mirrors PartitionPriorityComparator in IntermediateStateCalcStage which also uses
+      // partition-name alphabetical as the final tiebreak after the three partition scores.
+      int partitionCmp = m1.partition.getPartitionName().compareTo(m2.partition.getPartitionName());
+      if (partitionCmp != 0) {
+        return partitionCmp;
+      }
+
+      // 3. Same partition: message priority (state priority, preference order).
       return compareMessagePriority(m1, m2);
     });
   }
 
   /**
-   * Builds resource priority map: resource -> [priority, insertionOrder].
-   * insertionOrder preserves the original iteration order for stable tiebreaking.
+   * Builds resource priority map: resource -> configuredPriority.
+   * Resources without a configured priority value default to {@link Integer#MIN_VALUE}.
+   * When two resources share the same priority, the caller tiebreaks alphabetically by name.
    *
    * <p>TODO: Delegate priority lookup to {@link ResourceControllerDataProvider} — it should
    * encapsulate the "check ResourceConfig first, then IdealState" fallback, hiding that logic
    * from this strategy.
    */
-  private Map<String, int[]> buildResourcePriorityMap(List<MessageContext> messages) {
-    Map<String, int[]> priorityMap = new HashMap<>();
+  private Map<String, Integer> buildResourcePriorityMap(List<MessageContext> messages) {
+    Map<String, Integer> priorityMap = new HashMap<>();
     String priorityField = _cache.getClusterConfig().getResourcePriorityField();
 
-    int index = 0;
     for (MessageContext ctx : messages) {
-      if (!priorityMap.containsKey(ctx.resourceName)) {
-        priorityMap.put(ctx.resourceName, new int[]{Integer.MIN_VALUE, index++});
-      }
+      priorityMap.putIfAbsent(ctx.resourceName, Integer.MIN_VALUE);
     }
 
     if (priorityField == null) {
       return priorityMap;
     }
 
-    for (Map.Entry<String, int[]> entry : priorityMap.entrySet()) {
+    for (Map.Entry<String, Integer> entry : priorityMap.entrySet()) {
       String resourceName = entry.getKey();
       String priority = null;
       if (_cache.getResourceConfig(resourceName) != null) {
@@ -149,7 +156,7 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
       }
       if (priority != null) {
         try {
-          entry.getValue()[0] = Integer.parseInt(priority);
+          entry.setValue(Integer.parseInt(priority));
         } catch (NumberFormatException e) {
           logger.warn("Invalid priority '{}' for resource {}", priority, resourceName);
         }
@@ -209,15 +216,22 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
     return DEFAULT_PARTITION_SCORE;
   }
 
+  /**
+   * Compares two messages from the <em>same</em> partition.
+   * Callers guarantee same-partition by applying the partition-name tiebreak in
+   * {@link #sortMessages} before reaching this method.
+   *
+   * <p>Mirrors {@code IntermediateStateCalcStage.MessagePriorityComparator}:
+   * <ol>
+   *   <li>Same target state + both instances in the preference list → preference-list order.</li>
+   *   <li>Different target states → higher-priority state (lower numeric value) first.</li>
+   *   <li>Tiebreak: instance name alphabetical.</li>
+   * </ol>
+   */
   private int compareMessagePriority(MessageContext m1, MessageContext m2) {
-    // 1. Same partition, same target state, and both instances in the (shared) preference list
-    //    → order by preference list position.
-    //    The partition equality guard is critical: preference lists are per-partition, so
-    //    comparing across different partitions using m1's list would produce invalid ordering.
-    if (m1.partition.equals(m2.partition)
-        && m1.message.getToState().equals(m2.message.getToState())
+    // 1. Same target state + both instances in preference list → preference-list position order.
+    if (m1.message.getToState().equals(m2.message.getToState())
         && m1.preferenceList != null
-        && m2.preferenceList != null
         && m1.preferenceList.contains(m1.message.getTgtName())
         && m1.preferenceList.contains(m2.message.getTgtName())) {
       return Integer.compare(
@@ -225,10 +239,7 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
           m1.preferenceList.indexOf(m2.message.getTgtName()));
     }
 
-    // 2. Different target states → higher priority state first.
-    // compareMessagePriority is only reached when both resource-priority fields tie, which
-    // requires the same resource (insertion order is unique per resource). It is therefore
-    // safe to look up the state model def using m1's resource name.
+    // 2. Different target states → higher priority state first (lower numeric value = higher priority).
     if (!m1.message.getToState().equals(m2.message.getToState())) {
       IdealState idealState = _cache.getIdealState(m1.resourceName);
       StateModelDefinition stateModelDef = idealState != null
@@ -243,11 +254,7 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
       }
     }
 
-    // 3. Tiebreak: partition name (cross-resource context), then instance name.
-    int partCmp = m1.partition.getPartitionName().compareTo(m2.partition.getPartitionName());
-    if (partCmp != 0) {
-      return partCmp;
-    }
+    // 3. Tiebreak: instance name alphabetical.
     return m1.message.getTgtName().compareTo(m2.message.getTgtName());
   }
 
