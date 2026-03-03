@@ -471,7 +471,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     for (Resource resource : wagedRebalancedResourceMap.values()) {
       IdealState is = newIdealStates.get(resource.getResourceName());
       // Check if the WAGED rebalancer has calculated the result for this resource or not.
-      if (is != null && checkBestPossibleStateCalculation(is, resource, currentStateOutput)) {
+      if (is != null && checkBestPossibleStateCalculation(is, resource, currentStateOutput, cache)) {
         // The WAGED rebalancer calculates a valid result, record in the output
         updateBestPossibleStateOutput(output, resource, is);
       } else {
@@ -540,7 +540,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
             rebalancer.computeNewIdealState(resourceName, idealState, currentStateOutput, cache);
 
         // Check if calculation is done successfully
-        if (!checkBestPossibleStateCalculation(idealState, resource, currentStateOutput)) {
+        if (!checkBestPossibleStateCalculation(idealState, resource, currentStateOutput, cache)) {
           LogUtil.logWarn(logger, _eventId,
               "The calculated idealState is not valid, resource: " + resourceName);
           return false;
@@ -578,15 +578,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   }
 
   private boolean checkBestPossibleStateCalculation(IdealState idealState, Resource resource,
-      CurrentStateOutput currentStateOutput) {
+      CurrentStateOutput currentStateOutput, ResourceControllerDataProvider cache) {
     // If replicas is 0, indicate the resource is not fully initialized or ready to be rebalanced
     if (idealState.getRebalanceMode() == IdealState.RebalanceMode.FULL_AUTO && !idealState
         .getReplicas().equals("0")) {
+      // getPreferenceLists() always returns an initialized map (never null) since ZNRecord
+      // initializes listFields as a TreeMap. A null result would indicate a programming error.
       Map<String, List<String>> preferenceLists = idealState.getPreferenceLists();
-      if (preferenceLists == null || preferenceLists.isEmpty()) {
-        // Empty preference lists: allow only when there are existing replicas to clean up
-        // (e.g., all nodes disabled). Reject when resource is not initialized (no current state).
-        return hasCurrentStateForResource(resource, currentStateOutput);
+      if (preferenceLists.isEmpty()) {
+        return checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
       }
       int emptyListCount = 0;
       for (List<String> preferenceList : preferenceLists.values()) {
@@ -595,21 +595,59 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         }
       }
       if (emptyListCount == preferenceLists.values().size()) {
-        // All lists empty: allow only when there are replicas to clean up (all nodes disabled).
-        return hasCurrentStateForResource(resource, currentStateOutput);
+        // All per-partition lists are empty — treat the same as map-level empty.
+        return checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
       }
-      // Some but not all lists empty: this is valid when maxPartitionsPerInstance limits capacity.
-      // Only reject when maxPartitionsPerInstance is NOT set and we have inconsistent empty lists.
-      if (emptyListCount > 0 && idealState.getMaxPartitionsPerInstance() > 0) {
-        // Empty lists are expected when capacity is limited by maxPartitionsPerInstance
+      // Some but not all per-partition lists are empty. This is expected when
+      // maxPartitionsPerInstance is explicitly configured and capacity is exhausted for some nodes.
+      // The default value of maxPartitionsPerInstance is Integer.MAX_VALUE (unconstrained), so we
+      // only treat partial empty lists as valid when it has been explicitly set to a finite value.
+      if (emptyListCount > 0 && idealState.getMaxPartitionsPerInstance() != Integer.MAX_VALUE) {
         return true;
       }
-      // No maxPartitionsPerInstance configured: empty lists indicate inconsistent state, reject.
+      // maxPartitionsPerInstance is not configured: partial empty lists indicate an inconsistent
+      // rebalance result, reject.
       return emptyListCount == 0;
     } else {
       // For non FULL_AUTO RebalanceMode, rebalancing is not controlled by Helix
       return true;
     }
+  }
+
+  /**
+   * Determines whether it is safe to proceed with rebalancing when the rebalancer produced an
+   * empty preference list. There are two distinct scenarios:
+   *
+   * <p><b>all nodes disabled:</b> No enabled live instances exist, so the rebalancer
+   * correctly returns an empty assignment. Rebalancing is allowed only if replicas already exist
+   * in the current state so they can be transitioned to OFFLINE/DROPPED cleanly.
+   *
+   * <p><b>Unsafe — rebalancer failure:</b> Enabled live instances exist but the rebalancer still
+   * returned an empty list. Proceeding would assign all existing replicas to DROPPED/OFFLINE,
+   * causing catastrophic data loss. Rebalancing is blocked to protect existing replicas.
+   */
+  private boolean checkEmptyPreferenceListAllowed(IdealState idealState, Resource resource,
+      CurrentStateOutput currentStateOutput, ResourceControllerDataProvider cache) {
+    if (!cache.getEnabledLiveInstances().isEmpty()) {
+      // Enabled live instances are available but the rebalancer returned empty preference lists.
+      // This indicates a silent rebalancer failure. Block rebalancing to prevent accidentally
+      // dropping all existing replicas.
+      LogUtil.logError(logger, _eventId,
+          "Preference list is empty for resource " + idealState.getResourceName()
+              + " but there are enabled live instances. This indicates a rebalancer failure."
+              + " Skipping rebalance to protect existing replicas.");
+      return false;
+    }
+    // No enabled live instances — all nodes are disabled. Allow rebalancing only if replicas
+    // exist in the current state so they can be transitioned to OFFLINE/DROPPED cleanly.
+    // If there is no current state, the resource was never assigned — nothing to clean up.
+    boolean hasCurrent = hasCurrentStateForResource(resource, currentStateOutput);
+    if (hasCurrent) {
+      LogUtil.logInfo(logger, _eventId,
+          "All nodes are disabled for resource " + idealState.getResourceName()
+              + " and replicas exist in current state. Allowing rebalance to clean up.");
+    }
+    return hasCurrent;
   }
 
   /**

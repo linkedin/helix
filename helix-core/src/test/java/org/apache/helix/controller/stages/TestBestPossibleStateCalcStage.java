@@ -28,6 +28,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
@@ -300,6 +301,79 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
     // SEMI_AUTO uses preference list from IdealState; pipeline should complete
     Assert.assertNotNull(output, "Output should not be null");
+  }
+
+  /**
+   * Tests that when the rebalancer silently returns empty preference lists while enabled live
+   * instances still exist, the pipeline blocks the rebalance entirely to protect existing replicas.
+   *
+   * <p>This distinguishes a rebalancer failure from the legitimate "all nodes disabled" scenario:
+   * <ul>
+   *   <li>All nodes disabled: {@code getEnabledLiveInstances()} is empty → allow cleanup</li>
+   *   <li>Rebalancer failure: {@code getEnabledLiveInstances()} is non-empty but rebalancer
+   *       returned empty lists → block to prevent accidentally dropping all replicas</li>
+   * </ul>
+   *
+   * <p>The failure is simulated by setting an instance group tag on the resource that no live
+   * instance has. The DelayedAutoRebalancer finds no eligible instances for the tag and returns
+   * an empty assignment, but {@code getEnabledLiveInstances()} still returns all untagged instances.
+   */
+  @Test
+  public void testSilentRebalancerFailureDoesNotDropExistingReplicas() {
+    String resourceName = "resource_1";
+    String[] resources = new String[]{resourceName};
+    int numInstances = 3;
+    int numPartitions = 1;
+
+    List<IdealState> idealStates = setupIdealState(numInstances, resources, numPartitions, 1,
+        RebalanceMode.FULL_AUTO, BuiltInStateModelDefinitions.LeaderStandby.name(),
+        DelayedAutoRebalancer.class.getName());
+    setupInstances(numInstances);
+    setupLiveInstances(numInstances);  // all instances are live and enabled (no tag)
+    setupStateModel();
+
+    // Set an instance group tag that NO instance has. This causes DelayedAutoRebalancer to find
+    // zero eligible instances and silently return empty preference lists — while
+    // getEnabledLiveInstances() still returns the full set of untagged live instances.
+    // This simulates a silent rebalancer failure (e.g., tag misconfiguration or a rebalancer bug
+    // that returns empty results without throwing).
+    IdealState idealState = idealStates.get(0);
+    idealState.setInstanceGroupTag("ghost-tag-no-instance-has-this");
+    accessor.setProperty(accessor.keyBuilder().idealStates(resourceName), idealState);
+
+    ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    clusterConfig.setRebalanceDelayTime(0);
+    clusterConfig.setDelayRebalaceEnabled(true);
+    setClusterConfig(clusterConfig);
+
+    Map<String, Resource> resourceMap =
+        getResourceMap(resources, numPartitions, BuiltInStateModelDefinitions.LeaderStandby.name());
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+
+    // Existing replica: localhost_2 holds LEADER — it must not be dropped due to a rebalancer bug.
+    Partition partition = new Partition(resourceName + "_0");
+    currentStateOutput.setCurrentState(resourceName, partition, "localhost_2", "LEADER");
+
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
+
+    // The pipeline must block the rebalance. If it proceeded with empty preference lists while
+    // enabled live instances exist, the downstream mapping calculator would assign all replicas
+    // to DROPPED/OFFLINE, causing catastrophic data loss.
+    Assert.assertFalse(output.containsResource(resourceName),
+        "Resource should NOT be in output when enabled live instances exist but the rebalancer "
+            + "returned empty preference lists — this indicates a silent rebalancer failure, not "
+            + "an all-nodes-disabled scenario.");
   }
 
   /**
