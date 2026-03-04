@@ -1104,6 +1104,120 @@ public class TestInstanceOperation extends ZkTestBase {
   }
 
   @Test(dependsOnMethods = "testNodeSwapWithSwapOutInstanceOffline")
+  public void testNodeSwapForceComplete() throws Exception {
+    System.out.println(
+        "START TestInstanceOperation.testNodeSwapForceComplete() at " + new Date(
+            System.currentTimeMillis()));
+
+    removeOfflineOrInactiveInstances();
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    String instanceToSwapOutName = _participants.get(0).getInstanceName();
+    InstanceConfig instanceToSwapOutInstanceConfig = _gSetupTool.getClusterManagementTool()
+        .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName);
+
+    // Add instance with InstanceOperation set to SWAP_IN
+    String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
+    addParticipant(instanceToSwapInName, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID),
+        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE),
+        InstanceConstants.InstanceOperation.SWAP_IN, -1);
+
+    // Wait for SWAP_IN to take effect and partitions to be assigned
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Assert canSwapBeCompleted is true (swap-in has correct states)
+    Assert.assertTrue(_gSetupTool.getClusterManagementTool()
+        .canCompleteSwap(CLUSTER_NAME, instanceToSwapOutName));
+
+    // Assert completeSwapIfPossible with forceComplete=true succeeds.
+    // Before the fix, forceComplete=true would cause the method to return false
+    // because the condition was: if (forceComplete || !canCompleteSwap(...)) return false;
+    // which evaluates to true when forceComplete=true, incorrectly blocking the swap.
+    Assert.assertTrue(_gSetupTool.getClusterManagementTool()
+        .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, true));
+
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    // Validate that the SWAP_IN instance is now in the routing tables.
+    validateRoutingTablesInstance(getEVs(), instanceToSwapInName, true);
+
+    // Assert that swap out instance has InstanceOperation set to UNKNOWN after completion.
+    Assert.assertEquals(_gSetupTool.getClusterManagementTool()
+            .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName).getInstanceOperation()
+            .getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+
+    // Validate that the SWAP_IN instance has partitions assigned after the swap.
+    // We check partition key sets rather than exact state maps because LEADER placement
+    // may differ after a force-completed swap (the rebalancer may assign LEADER to a
+    // different replica than the original swap-out had).
+    Map<String, ExternalView> currentEVs = getEVs();
+    Map<String, Map<String, String>> swapInPartitions =
+        getResourcePartitionStateOnInstance(currentEVs, instanceToSwapInName);
+    Assert.assertFalse(swapInPartitions.isEmpty(),
+        "SWAP_IN instance should have partitions assigned after swap completion");
+    // Verify swap-out instance no longer has partitions in the EVs.
+    Map<String, Map<String, String>> swapOutPartitions =
+        getResourcePartitionStateOnInstance(currentEVs, instanceToSwapOutName);
+    Assert.assertTrue(swapOutPartitions.isEmpty(),
+        "SWAP_OUT instance should have no partitions after swap completion");
+  }
+
+  @Test(dependsOnMethods = "testNodeSwapForceComplete")
+  public void testNodeSwapForceCompleteBypassesReadinessCheck() throws Exception {
+    System.out.println(
+        "START TestInstanceOperation.testNodeSwapForceCompleteBypassesReadinessCheck() at "
+            + new Date(System.currentTimeMillis()));
+
+    removeOfflineOrInactiveInstances();
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    String instanceToSwapOutName = _participants.get(0).getInstanceName();
+    InstanceConfig instanceToSwapOutInstanceConfig = _gSetupTool.getClusterManagementTool()
+        .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName);
+
+    // Add instance with InstanceOperation set to SWAP_IN
+    String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
+    addParticipant(instanceToSwapInName, instanceToSwapOutInstanceConfig.getLogicalId(LOGICAL_ID),
+        instanceToSwapOutInstanceConfig.getDomainAsMap().get(ZONE),
+        InstanceConstants.InstanceOperation.SWAP_IN, -1);
+
+    // Wait for SWAP_IN to be registered but do NOT wait for partition assignment to complete.
+    // Immediately stop the swap-in participant so it goes offline and canCompleteSwap would fail.
+    _participants.get(_participants.size() - 1).syncStop();
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // canCompleteSwap should return false since swap-in instance is offline.
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool()
+        .canCompleteSwap(CLUSTER_NAME, instanceToSwapOutName));
+
+    // completeSwapIfPossible with forceComplete=false should return false (not ready).
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool()
+        .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, false));
+
+    // completeSwapIfPossible with forceComplete=true should succeed despite readiness check
+    // failing. This is the core scenario the fix addresses.
+    Assert.assertTrue(_gSetupTool.getClusterManagementTool()
+        .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, true));
+
+    // Assert that swap out instance has InstanceOperation set to UNKNOWN after forced completion.
+    Assert.assertEquals(_gSetupTool.getClusterManagementTool()
+            .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName).getInstanceOperation()
+            .getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+
+    // Clean up: The force-completed swap left the cluster in a degraded state (swap-in offline,
+    // swap-out UNKNOWN). Stop the swap-out and drop both instances, then add fresh replacements
+    // to restore capacity for downstream tests.
+    _participants.get(0).syncStop();
+    removeOfflineOrInactiveInstances();
+    addParticipant(PARTICIPANT_PREFIX + "_" + _nextStartPort);
+    addParticipant(PARTICIPANT_PREFIX + "_" + _nextStartPort);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+  }
+
+  @Test(dependsOnMethods = "testNodeSwapForceCompleteBypassesReadinessCheck")
   public void testSwapEvacuateAdd() throws Exception {
     System.out.println("START TestInstanceOperation.testSwapEvacuateAdd() at " + new Date(
         System.currentTimeMillis()));

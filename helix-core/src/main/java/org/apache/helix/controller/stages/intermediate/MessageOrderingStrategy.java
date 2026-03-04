@@ -21,11 +21,15 @@ package org.apache.helix.controller.stages.intermediate;
 
 import java.util.List;
 
+import org.apache.helix.model.Message;
+import org.apache.helix.model.Partition;
+
 /**
  * Strategy interface for ordering messages before throttling.
  * Different implementations can provide different prioritization schemes
  * (e.g., availability-aware vs. resource-priority based).
  */
+@FunctionalInterface
 public interface MessageOrderingStrategy {
   /**
    * Sort the given list of message contexts in-place according to the strategy's
@@ -36,26 +40,32 @@ public interface MessageOrderingStrategy {
   void sortMessages(List<MessageContext> messages);
 
   /**
-   * Data class to encapsulate message with its context for ordering decisions.
+   * Data class to encapsulate a message with its context for ordering decisions.
    */
   class MessageContext {
-    public final org.apache.helix.model.Message message;
-    public final org.apache.helix.model.Partition partition;
+    public final Message message;
+    public final Partition partition;
     public final String resourceName;
-    public final org.apache.helix.model.StateModelDefinition stateModelDef;
-    public final java.util.Map<String, Integer> requiredStates;
 
-    public MessageContext(org.apache.helix.model.Message message,
-        org.apache.helix.model.Partition partition,
+    /**
+     * The ordered preference list for this partition (instance names in preferred assignment order).
+     * When two messages target the same state, the one targeting the instance that appears earlier
+     * in this list is processed first.
+     * <p>Used by: {@link ResourcePriorityOrderingStrategy} (preference-list ordering within a
+     * partition).
+     * <p>Not used by: {@link AvailabilityAwareOrderingStrategy}.
+     * May be {@code null} if the strategy does not use it.
+     */
+    public final List<String> preferenceList;
+
+    public MessageContext(Message message,
+        Partition partition,
         String resourceName,
-        org.apache.helix.model.StateModelDefinition stateModelDef,
-        java.util.Map<String, Integer> requiredStates) {
+        List<String> preferenceList) {
       this.message = message;
       this.partition = partition;
       this.resourceName = resourceName;
-      this.stateModelDef = stateModelDef;
-      this.requiredStates = requiredStates;
+      this.preferenceList = preferenceList;
     }
   }
 }
-

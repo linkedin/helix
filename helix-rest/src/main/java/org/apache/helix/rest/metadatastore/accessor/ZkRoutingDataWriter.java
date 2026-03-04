@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import javax.net.ssl.SSLContext;
 import javax.ws.rs.core.Response;
 
 import com.fasterxml.jackson.core.JsonGenerationException;
@@ -62,14 +63,36 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   private static final String SIMPLE_FIELD_KEY_HOSTNAME = "hostname";
   private static final String SIMPLE_FIELD_KEY_PORT = "port";
   private static final String SIMPLE_FIELD_KEY_CONTEXT_URL_PREFIX = "contextUrlPrefix";
+  private static final String SIMPLE_FIELD_KEY_PROTOCOL = "protocol";
 
   private final String _namespace;
   private final HelixZkClient _zkClient;
   private final ZkDistributedLeaderElection _leaderElection;
   private final CloseableHttpClient _forwardHttpClient;
   private final String _myHostName;
+  private final String _protocolPrefix;
 
+  /**
+   * Creates a ZkRoutingDataWriter with HTTP protocol (no SSL).
+   * This constructor is kept for backward compatibility.
+   *
+   * @param namespace the namespace
+   * @param zkAddress the ZooKeeper address
+   */
   public ZkRoutingDataWriter(String namespace, String zkAddress) {
+    this(namespace, zkAddress, null);
+  }
+
+  /**
+   * Creates a ZkRoutingDataWriter with optional SSL support.
+   * When sslContext is provided, HTTPS will be used for forwarding requests to the leader.
+   * When sslContext is null, HTTP will be used (backward compatible behavior).
+   *
+   * @param namespace the namespace
+   * @param zkAddress the ZooKeeper address
+   * @param sslContext the SSL context for HTTPS communication, or null for HTTP
+   */
+  public ZkRoutingDataWriter(String namespace, String zkAddress, SSLContext sslContext) {
     if (namespace == null || namespace.isEmpty()) {
       throw new IllegalArgumentException("namespace cannot be null or empty!");
     }
@@ -92,10 +115,19 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
       LOG.error(errMsg);
       throw new IllegalStateException(errMsg);
     }
-    _myHostName = HttpConstants.HTTP_PROTOCOL_PREFIX + hostName;
+
+    // Determine protocol based on whether SSL context is provided
+    if (sslContext != null) {
+      _protocolPrefix = HttpConstants.HTTPS_PROTOCOL_PREFIX;
+    } else {
+      _protocolPrefix = HttpConstants.HTTP_PROTOCOL_PREFIX;
+    }
+    _myHostName = _protocolPrefix + hostName;
 
     ZNRecord myServerInfo = new ZNRecord(hostName);
     myServerInfo.setSimpleField(SIMPLE_FIELD_KEY_HOSTNAME, hostName);
+    // Store the protocol so other servers know how to reach this server
+    myServerInfo.setSimpleField(SIMPLE_FIELD_KEY_PROTOCOL, _protocolPrefix);
 
     String port = System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_PORT_KEY);
     if (port != null && !port.isEmpty()) {
@@ -114,15 +146,31 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
     _leaderElection = new ZkDistributedLeaderElection(_zkClient,
         MetadataStoreRoutingConstants.LEADER_ELECTION_ZNODE, myServerInfo);
 
+    // Build HTTP client with or without SSL
     RequestConfig config = RequestConfig.custom().setConnectTimeout(HTTP_REQUEST_FORWARDING_TIMEOUT)
         .setConnectionRequestTimeout(HTTP_REQUEST_FORWARDING_TIMEOUT)
         .setSocketTimeout(HTTP_REQUEST_FORWARDING_TIMEOUT).build();
-    _forwardHttpClient = HttpClientBuilder.create().setDefaultRequestConfig(config).build();
+    if (sslContext != null) {
+      _forwardHttpClient = HttpClientBuilder.create()
+          .setDefaultRequestConfig(config)
+          .setSSLContext(sslContext)
+          .build();
+      LOG.info("ZkRoutingDataWriter initialized with SSL enabled for namespace: {}", namespace);
+    } else {
+      _forwardHttpClient = HttpClientBuilder.create()
+          .setDefaultRequestConfig(config)
+          .build();
+      LOG.info("ZkRoutingDataWriter initialized with HTTP (no SSL) for namespace: {}", namespace);
+    }
   }
 
   public static String buildEndpointFromLeaderElectionNode(ZNRecord znRecord) {
-    List<String> urlComponents =
-        new ArrayList<>(Collections.singletonList(HttpConstants.HTTP_PROTOCOL_PREFIX));
+    // Read protocol from ZNRecord, default to HTTP for backward compatibility
+    String protocol = znRecord.getSimpleField(SIMPLE_FIELD_KEY_PROTOCOL);
+    if (!HttpConstants.HTTPS_PROTOCOL_PREFIX.equals(protocol)) {
+      protocol = HttpConstants.HTTP_PROTOCOL_PREFIX;
+    }
+    List<String> urlComponents = new ArrayList<>(Collections.singletonList(protocol));
     urlComponents.add(znRecord.getSimpleField(SIMPLE_FIELD_KEY_HOSTNAME));
     String port = znRecord.getSimpleField(SIMPLE_FIELD_KEY_PORT);
     if (port != null && !port.isEmpty()) {

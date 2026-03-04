@@ -19,7 +19,6 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
-import org.apache.helix.HelixDefinedState;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
@@ -35,40 +34,6 @@ public class TestStateTransitionHelper {
   @BeforeMethod
   public void setup() {
     _masterSlaveSMD = BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
-  }
-
-  // ========================================
-  // Tests for isActiveState
-  // ========================================
-
-  @Test
-  public void testIsActiveState_ActiveStates() {
-    Assert.assertTrue(StateTransitionHelper.isActiveState("MASTER"));
-    Assert.assertTrue(StateTransitionHelper.isActiveState("SLAVE"));
-    Assert.assertTrue(StateTransitionHelper.isActiveState("LEADER"));
-    Assert.assertTrue(StateTransitionHelper.isActiveState("STANDBY"));
-    Assert.assertTrue(StateTransitionHelper.isActiveState("ONLINE"));
-  }
-
-  @Test
-  public void testIsActiveState_InactiveStates() {
-    Assert.assertFalse(StateTransitionHelper.isActiveState("OFFLINE"));
-    Assert.assertFalse(StateTransitionHelper.isActiveState(HelixDefinedState.ERROR.name()));
-    Assert.assertFalse(StateTransitionHelper.isActiveState(HelixDefinedState.DROPPED.name()));
-  }
-
-  @Test
-  public void testIsActiveState_NullAndEmpty() {
-    Assert.assertFalse(StateTransitionHelper.isActiveState(null));
-    Assert.assertFalse(StateTransitionHelper.isActiveState(""));
-  }
-
-  @Test
-  public void testIsActiveState_CaseInsensitive() {
-    Assert.assertFalse(StateTransitionHelper.isActiveState("error"));
-    Assert.assertFalse(StateTransitionHelper.isActiveState("dropped"));
-    Assert.assertFalse(StateTransitionHelper.isActiveState("offline"));
-    Assert.assertFalse(StateTransitionHelper.isActiveState("Offline"));
   }
 
   // ========================================

@@ -497,55 +497,71 @@ public class InstanceValidationUtil {
   }
 
   /**
-   * Get the set of states that should be considered "unhealthy" (not active) for min active replica checks.
+   * Returns the set of states considered unhealthy (not active) for min active replica checks,
+   * given pre-fetched resource configuration and state model definition objects.
    *
-   * The logic is as follows:
-   * 1. If the resource has ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK configured in ResourceConfig,
-   *    use that list and consider all other states as unhealthy.
-   * 2. Otherwise, use the default behavior: DROPPED, ERROR, and the initial state are unhealthy.
+   * <p>Logic:
+   * <ol>
+   *   <li>If {@code resourceConfig} has ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK configured
+   *       with a non-empty list, all states not in that list (case-insensitive) are unhealthy.</li>
+   *   <li>Otherwise (default): {@link #UNHEALTHY_STATES} (DROPPED, ERROR) plus the model's
+   *       initial state (e.g. OFFLINE for MasterSlave) are unhealthy.</li>
+   * </ol>
    *
-   * Note: If an empty list is configured for ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK,
-   * the default behavior is used (empty list does NOT mean "no states are active").
+   * <p>An empty configured list falls back to default behavior — it does NOT mean "no states
+   * are active".
    *
-   * @param dataAccessor The data accessor
-   * @param propertyKeyBuilder The property key builder
-   * @param resourceName The resource name
-   * @param stateModelDefRef The state model definition reference name
-   * @return Set of state names considered unhealthy
+   * <p>This overload performs no ZooKeeper reads, making it suitable for use in pipeline stages
+   * that already hold cached data.
+   *
+   * @param resourceConfig the resource configuration, or {@code null} if unavailable
+   * @param stateModelDef  the state model definition, or {@code null} if unavailable
+   * @return mutable set of state names considered unhealthy
+   */
+  public static Set<String> getUnhealthyStates(ResourceConfig resourceConfig,
+      StateModelDefinition stateModelDef) {
+    Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
+
+    List<String> customActiveStates = resourceConfig != null
+        ? resourceConfig.getActiveStatesForMinActiveReplicaCheck()
+        : null;
+
+    if (customActiveStates != null && !customActiveStates.isEmpty()) {
+      if (stateModelDef != null && stateModelDef.getStatesPriorityList() != null) {
+        unhealthyStates.addAll(stateModelDef.getStatesPriorityList());
+      }
+      unhealthyStates.removeIf(state ->
+          customActiveStates.stream().anyMatch(active -> active.equalsIgnoreCase(state)));
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceConfig.getResourceName(), unhealthyStates);
+      return unhealthyStates;
+    }
+
+    if (stateModelDef != null) {
+      unhealthyStates.add(stateModelDef.getInitialState());
+    }
+    if (_logger.isDebugEnabled()) {
+      String resourceName = resourceConfig != null ? resourceConfig.getResourceName() : "unknown";
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceName, unhealthyStates);
+    }
+    return unhealthyStates;
+  }
+
+  /**
+   * Fetches ResourceConfig and StateModelDefinition via ZooKeeper and delegates to
+   * {@link #getUnhealthyStates(ResourceConfig, StateModelDefinition)}.
    */
   private static Set<String> getUnhealthyStates(HelixDataAccessor dataAccessor,
-      PropertyKey.Builder propertyKeyBuilder, String resourceName,
-      String stateModelDefRef) {
-
+      PropertyKey.Builder propertyKeyBuilder, String resourceName, String stateModelDefRef) {
     StateModelDefinition stateModelDefinition = stateModelDefRef != null
         ? dataAccessor.getProperty(propertyKeyBuilder.stateModelDef(stateModelDefRef))
         : null;
-
-    Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
-
-    // Try to get resource config to check for custom active states configuration
-    ResourceConfig resourceConfig = dataAccessor.getProperty(propertyKeyBuilder.resourceConfig(resourceName));
-
-    if (resourceConfig != null) {
-      List<String> customActiveStates = resourceConfig.getActiveStatesForMinActiveReplicaCheck();
-      // Note: Empty list falls back to default behavior (empty list does NOT mean "no states are active")
-      if (customActiveStates != null && !customActiveStates.isEmpty()) {
-        if (stateModelDefinition != null && stateModelDefinition.getStatesPriorityList() != null) {
-          unhealthyStates.addAll(stateModelDefinition.getStatesPriorityList());
-        }
-        // Remove custom active states (case-insensitive) - what remains are unhealthy
-        unhealthyStates.removeIf(state ->
-            customActiveStates.stream().anyMatch(active -> active.equalsIgnoreCase(state)));
-        _logger.debug("Resource {} using custom active states for min active replica check: {}. Unhealthy states: {}",
-            resourceName, customActiveStates, unhealthyStates);
-        return unhealthyStates;
-      }
-    }
-
-    // Default behavior: DROPPED, ERROR, and initial state are unhealthy
-    if (stateModelDefinition != null) {
-      unhealthyStates.add(stateModelDefinition.getInitialState());
-    }
+    ResourceConfig resourceConfig =
+        dataAccessor.getProperty(propertyKeyBuilder.resourceConfig(resourceName));
+    Set<String> unhealthyStates = getUnhealthyStates(resourceConfig, stateModelDefinition);
+    _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+        resourceName, unhealthyStates);
     return unhealthyStates;
   }
 }
