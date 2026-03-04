@@ -159,8 +159,6 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
       String resourceName = entry.getKey();
       Resource resource = entry.getValue();
 
-      metricsPerResource.put(resourceName, new MessageThrottleProcessor.ResourceThrottleMetrics());
-
       if (!bestPossibleStateOutput.containsResource(resourceName)) {
         LogUtil.logInfo(logger, _eventId, String.format(
             "Skip calculating intermediate state for resource %s because the best possible state is not available.",
@@ -186,9 +184,15 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
         continue;
       }
 
+      // Only track metrics for FULL_AUTO resources that have messages and go through throttling
+      metricsPerResource.put(resourceName, new MessageThrottleProcessor.ResourceThrottleMetrics());
+
       // Find error partitions for this resource
       Map<String, List<String>> preferenceLists =
           bestPossibleStateOutput.getPreferenceLists(resourceName);
+      if (preferenceLists == null) {
+        preferenceLists = Collections.emptyMap();
+      }
 
       Set<Partition> errorPartitions = findErrorPartitions(resourceName, currentStateOutput);
       metricsPerResource.get(resourceName).errorPartitions = errorPartitions;

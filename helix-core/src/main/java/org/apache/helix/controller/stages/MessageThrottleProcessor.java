@@ -20,6 +20,7 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -103,7 +104,7 @@ public class MessageThrottleProcessor {
       Map<String, List<String>> preferenceLists =
           bestPossibleStateOutput.getPreferenceLists(resourceName);
       if (preferenceLists == null) {
-        preferenceLists = java.util.Collections.emptyMap();
+        preferenceLists = Collections.emptyMap();
       }
 
       chargePendingTransitions(resource, currentStateOutput, throttleController,
