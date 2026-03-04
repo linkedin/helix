@@ -50,7 +50,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * REFACTORED VERSION (V2) - For code review before integration.
+ * REFACTORED VERSION (V2) 
  *
  * For partition compute the Intermediate State (instance,state) pair based on the BestPossibleState
  * and CurrentState, with all constraints applied (such as state transition throttling).
@@ -58,7 +58,6 @@ import org.slf4j.LoggerFactory;
  * Key improvements:
  * - Uses Strategy pattern for message ordering (AvailabilityAware vs ResourcePriority)
  * - Extracted throttling logic to MessageThrottleProcessor
- * - Reduced from 875 to 437 lines (50% reduction)
  * - Clear separation of concerns with intermediate/ package helpers
  */
 public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
