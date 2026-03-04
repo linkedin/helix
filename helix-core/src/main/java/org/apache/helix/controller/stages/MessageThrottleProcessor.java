@@ -1,4 +1,4 @@
-package org.apache.helix.controller.stages.intermediate;
+package org.apache.helix.controller.stages;
 
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -29,11 +29,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.apache.helix.api.config.StateTransitionThrottleConfig.RebalanceType;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
-import org.apache.helix.controller.stages.BestPossibleStateOutput;
-import org.apache.helix.controller.stages.CurrentStateOutput;
-import org.apache.helix.controller.stages.MessageOutput;
-import org.apache.helix.controller.stages.StateTransitionHelper;
-import org.apache.helix.controller.stages.StateTransitionThrottleController;
+import org.apache.helix.controller.stages.intermediate.MessageOrderingStrategy;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Message;
@@ -56,7 +52,6 @@ public class MessageThrottleProcessor {
    * @param throttleController Controller for managing throttle quotas
    * @param cache Cluster data provider
    * @param metricsPerResource Metrics tracking for each resource
-   * @param messageOutput Message output to update with throttled messages
    * @param resourceMap Map of resources being processed
    * @param bestPossibleStateOutput Best possible state output
    * @return Map of resource -> partition -> approved messages
@@ -67,7 +62,6 @@ public class MessageThrottleProcessor {
       StateTransitionThrottleController throttleController,
       ResourceControllerDataProvider cache,
       Map<String, ResourceThrottleMetrics> metricsPerResource,
-      MessageOutput messageOutput,
       Map<String, Resource> resourceMap,
       BestPossibleStateOutput bestPossibleStateOutput) {
 
@@ -77,7 +71,7 @@ public class MessageThrottleProcessor {
 
     // Then process new messages
     return processWithThrottling(messages, currentStateOutput, throttleController,
-        cache, metricsPerResource, messageOutput);
+        cache, metricsPerResource);
   }
 
   /**
@@ -94,19 +88,23 @@ public class MessageThrottleProcessor {
       String resourceName = entry.getKey();
       Resource resource = entry.getValue();
 
-      if (!bestPossibleStateOutput.containsResource(resourceName)) {
-        continue;
-      }
-
       IdealState idealState = cache.getIdealState(resourceName);
-      if (idealState == null) {
+      if (idealState == null
+          || !IdealState.RebalanceMode.FULL_AUTO.equals(idealState.getRebalanceMode())) {
         continue;
       }
 
       StateModelDefinition stateModelDef =
           cache.getStateModelDef(idealState.getStateModelDefRef());
+      if (stateModelDef == null) {
+        continue;
+      }
+
       Map<String, List<String>> preferenceLists =
           bestPossibleStateOutput.getPreferenceLists(resourceName);
+      if (preferenceLists == null) {
+        preferenceLists = java.util.Collections.emptyMap();
+      }
 
       chargePendingTransitions(resource, currentStateOutput, throttleController,
           cache, preferenceLists, stateModelDef);
@@ -121,8 +119,7 @@ public class MessageThrottleProcessor {
       CurrentStateOutput currentStateOutput,
       StateTransitionThrottleController throttleController,
       ResourceControllerDataProvider cache,
-      Map<String, ResourceThrottleMetrics> metricsPerResource,
-      MessageOutput messageOutput) {
+      Map<String, ResourceThrottleMetrics> metricsPerResource) {
 
     Map<String, Map<Partition, List<Message>>> approvedMessages = new HashMap<>();
     Map<String, Map<String, String>> derivedStates = new HashMap<>();
@@ -140,8 +137,14 @@ public class MessageThrottleProcessor {
           resourceName + ":" + partition.getPartitionName(),
           k -> new HashMap<>(currentStateOutput.getCurrentStateMap(resourceName, partition)));
 
+      // Compute required states and state model def from cache
+      Map<String, Integer> requiredStates = getRequiredStates(resourceName, cache, ctx.preferenceList);
+      IdealState idealState = cache.getIdealState(resourceName);
+      StateModelDefinition stateModelDef = idealState != null
+          ? cache.getStateModelDef(idealState.getStateModelDefRef()) : null;
+
       // Classify message
-      RebalanceType type = classifyMessage(ctx.requiredStates, message, derivedState);
+      RebalanceType type = classifyMessage(requiredStates, message, derivedState);
       message.setSTRebalanceType(type == RebalanceType.RECOVERY_BALANCE
           ? Message.STRebalanceType.RECOVERY_REBALANCE
           : Message.STRebalanceType.LOAD_REBALANCE);
@@ -153,17 +156,11 @@ public class MessageThrottleProcessor {
       // Check throttle
       int errorThreshold = getErrorThreshold(cache.getClusterConfig());
       boolean throttled = shouldThrottle(message, resourceName, partition, type,
-          ctx.stateModelDef, throttleController, metrics.errorPartitions.size(),
+          stateModelDef, throttleController, metrics.errorPartitions.size(),
           errorThreshold, cache);
 
       if (throttled) {
         metrics.recordThrottled(type, message.getId());
-        // Remove throttled message from input so downstream sees only approved messages
-        Map<Partition, List<Message>> resourceMsgMap =
-            messageOutput.getResourceMessageMap(resourceName);
-        if (resourceMsgMap != null && resourceMsgMap.get(partition) != null) {
-          resourceMsgMap.get(partition).remove(message);
-        }
       } else {
         derivedState.put(message.getTgtName(), message.getToState());
         approvedMessages.get(resourceName)
@@ -346,19 +343,26 @@ public class MessageThrottleProcessor {
    * Comparator for ordering pending messages by priority.
    */
   private static class MessagePriorityComparator implements java.util.Comparator<Message> {
+    // Default priority for states not in the state model (e.g., DROPPED, ERROR).
+    // Integer.MAX_VALUE places them after all modeled states.
+    private static final int DEFAULT_STATE_PRIORITY = Integer.MAX_VALUE;
+
     private final Map<String, Integer> preferenceInstanceMap;
     private final Map<String, Integer> statePriorityMap;
 
     MessagePriorityComparator(List<String> preferenceList, Map<String, Integer> statePriorityMap) {
+      // Use (a, b) -> a merge function to handle duplicate entries in preference list
       this.preferenceInstanceMap = IntStream.range(0, preferenceList.size()).boxed()
-          .collect(Collectors.toMap(preferenceList::get, i -> i));
+          .collect(Collectors.toMap(preferenceList::get, i -> i, (a, b) -> a));
       this.statePriorityMap = statePriorityMap;
     }
 
     @Override
     public int compare(Message m1, Message m2) {
       if (!m1.getToState().equals(m2.getToState())) {
-        return statePriorityMap.get(m1.getToState()).compareTo(statePriorityMap.get(m2.getToState()));
+        int p1 = statePriorityMap.getOrDefault(m1.getToState(), DEFAULT_STATE_PRIORITY);
+        int p2 = statePriorityMap.getOrDefault(m2.getToState(), DEFAULT_STATE_PRIORITY);
+        return Integer.compare(p1, p2);
       }
       if (preferenceInstanceMap.containsKey(m1.getTgtName())
           && preferenceInstanceMap.containsKey(m2.getTgtName())) {

@@ -37,7 +37,6 @@ import org.apache.helix.controller.pipeline.AbstractBaseStage;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.controller.stages.intermediate.AvailabilityAwareOrderingStrategy;
 import org.apache.helix.controller.stages.intermediate.MessageOrderingStrategy;
-import org.apache.helix.controller.stages.intermediate.MessageThrottleProcessor;
 import org.apache.helix.controller.stages.intermediate.ResourcePriorityOrderingStrategy;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.IdealState;
@@ -45,7 +44,6 @@ import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
-import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.mbeans.ResourceMonitor;
 import org.slf4j.Logger;
@@ -120,10 +118,7 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
     MessageOrderingStrategy orderingStrategy;
     if (cache.getClusterConfig().isAvailabilityAwarePrioritizationEnabled()) {
       LogUtil.logInfo(logger, _eventId, "Using availability-aware prioritization");
-      AvailabilityAwareOrderingStrategy strategy =
-          new AvailabilityAwareOrderingStrategy(cache, currentStateOutput);
-      strategy.setEventId(_eventId);
-      orderingStrategy = strategy;
+      orderingStrategy = new AvailabilityAwareOrderingStrategy(cache, currentStateOutput);
     } else {
       orderingStrategy = new ResourcePriorityOrderingStrategy(cache,
           bestPossibleStateOutput, currentStateOutput);
@@ -134,12 +129,12 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
     MessageThrottleProcessor throttleProcessor = new MessageThrottleProcessor();
     Map<String, Map<Partition, List<Message>>> approvedMessages =
         throttleProcessor.processMessagesWithThrottling(allMessages, currentStateOutput,
-            throttleController, cache, metricsPerResource, messageOutput, resourceMap,
+            throttleController, cache, metricsPerResource, resourceMap,
             bestPossibleStateOutput);
 
     // 4. Build intermediate states from approved messages
     buildIntermediateStates(approvedMessages, resourceMap, currentStateOutput,
-        bestPossibleStateOutput, cache, messageOutput, output, failedResources);
+        bestPossibleStateOutput, cache, output, failedResources);
 
     // 5. Update monitoring
     updateMonitoring(monitor, failedResources, output, metricsPerResource, cache);
@@ -192,8 +187,6 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
       }
 
       // Find error partitions for this resource
-      StateModelDefinition stateModelDef =
-          cache.getStateModelDef(idealState.getStateModelDefRef());
       Map<String, List<String>> preferenceLists =
           bestPossibleStateOutput.getPreferenceLists(resourceName);
 
@@ -204,12 +197,10 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
       for (Map.Entry<Partition, List<Message>> msgEntry : resourceMessages.entrySet()) {
         Partition partition = msgEntry.getKey();
         List<String> preferenceList = preferenceLists.get(partition.getPartitionName());
-        Map<String, Integer> requiredStates =
-            MessageThrottleProcessor.getRequiredStates(resourceName, cache, preferenceList);
 
         for (Message message : msgEntry.getValue()) {
           allMessages.add(new MessageOrderingStrategy.MessageContext(
-              message, partition, resourceName, stateModelDef, requiredStates));
+              message, partition, resourceName, preferenceList));
         }
       }
     }
@@ -225,7 +216,7 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
       Map<String, Map<Partition, List<Message>>> approvedMessages,
       Map<String, Resource> resourceMap,
       CurrentStateOutput currentStateOutput, BestPossibleStateOutput bestPossibleStateOutput,
-      ResourceControllerDataProvider cache, MessageOutput messageOutput,
+      ResourceControllerDataProvider cache,
       IntermediateStateOutput output, List<String> failedResources) {
 
     for (String resourceName : resourceMap.keySet()) {
