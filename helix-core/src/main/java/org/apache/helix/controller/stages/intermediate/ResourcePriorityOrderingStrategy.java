@@ -64,7 +64,7 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
 
   /**
    * Fallback partition score used when a partition is absent from the pre-computed score map.
-   * Scores are {@code [missingTopState=0, activeReplicas=0, idealMatches=0]}, which places the
+   * Scores are {@code [hasTopState=0, activeReplicas=0, idealMatches=0]}, which sorts the
    * partition at the same level as a fully-degraded partition — a safe conservative default.
    */
   private static final int[] DEFAULT_PARTITION_SCORE = {0, 0, 0};
@@ -167,7 +167,8 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
 
   /**
    * Builds partition priority scores for sorting.
-   * Returns {resource -> {partition -> [missingTopState, activeReplicas, idealMatches]}}.
+   * Returns {resource -> {partition -> [hasTopState, activeReplicas, idealMatches]}}.
+   * Lower values sort first (ascending), so hasTopState=0 (missing) outranks hasTopState=1 (present).
    */
   private Map<String, Map<String, int[]>> buildPartitionPriorityScores(
       List<MessageContext> messages) {
@@ -193,10 +194,12 @@ public class ResourcePriorityOrderingStrategy implements MessageOrderingStrategy
             Map<String, String> bpMap = e.getValue();
             Map<String, String> csMap = currentStates.getOrDefault(p, Collections.emptyMap());
 
-            int missingTop = csMap.containsValue(topState) ? 1 : 0;
+            // hasTopState=0 means top state is absent (missing); ascending sort puts 0 first,
+            // so partitions missing their top state get the highest priority.
+            int hasTopState = csMap.containsValue(topState) ? 1 : 0;
             int active = StateTransitionHelper.countActiveReplicas(bpMap, csMap);
             int matched = StateTransitionHelper.countIdealMatches(bpMap, csMap);
-            partScores.put(p.getPartitionName(), new int[]{missingTop, active, matched});
+            partScores.put(p.getPartitionName(), new int[]{hasTopState, active, matched});
           }
         }
         return partScores;
