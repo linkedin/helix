@@ -131,6 +131,10 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
             throttleController, cache, metricsPerResource, resourceMap,
             bestPossibleStateOutput);
 
+    // 3a. Sync messageOutput to only contain approved messages so that MessageDispatchStage
+    // does not dispatch messages that were throttled by this stage.
+    syncMessageOutput(messageOutput, approvedMessages, metricsPerResource.keySet());
+
     // 4. Build intermediate states from approved messages
     buildIntermediateStates(approvedMessages, resourceMap, currentStateOutput,
         bestPossibleStateOutput, cache, output, failedResources);
@@ -209,6 +213,30 @@ public class IntermediateStateCalcStageV2 extends AbstractBaseStage {
     }
 
     return allMessages;
+  }
+
+  // ========================================
+  // Step 3a: Sync MessageOutput for downstream stages
+  // ========================================
+
+  /**
+   * Replace each throttled resource's partition message lists in messageOutput with only the
+   * approved messages, so that MessageDispatchStage dispatches exactly what this stage approved.
+   */
+  private void syncMessageOutput(MessageOutput messageOutput,
+      Map<String, Map<Partition, List<Message>>> approvedMessages,
+      Set<String> throttledResources) {
+    for (String resourceName : throttledResources) {
+      Map<Partition, List<Message>> originalMessages =
+          messageOutput.getResourceMessageMap(resourceName);
+      Map<Partition, List<Message>> approved =
+          approvedMessages.getOrDefault(resourceName, Collections.emptyMap());
+      for (Partition partition : originalMessages.keySet()) {
+        List<Message> approvedForPartition =
+            approved.getOrDefault(partition, Collections.emptyList());
+        messageOutput.addMessages(resourceName, partition, approvedForPartition);
+      }
+    }
   }
 
   // ========================================

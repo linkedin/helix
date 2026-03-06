@@ -124,6 +124,7 @@ public class MessageThrottleProcessor {
 
     Map<String, Map<Partition, List<Message>>> approvedMessages = new HashMap<>();
     Map<String, Map<String, String>> derivedStates = new HashMap<>();
+    int errorThreshold = getErrorThreshold(cache.getClusterConfig());
 
     for (MessageOrderingStrategy.MessageContext ctx : messages) {
       Message message = ctx.message;
@@ -155,7 +156,6 @@ public class MessageThrottleProcessor {
       metrics.recordMessage(type, message.getId());
 
       // Check throttle
-      int errorThreshold = getErrorThreshold(cache.getClusterConfig());
       boolean throttled = shouldThrottle(message, resourceName, partition, type,
           stateModelDef, throttleController, metrics.errorPartitions.size(),
           errorThreshold, cache);
@@ -294,8 +294,14 @@ public class MessageThrottleProcessor {
       ResourceControllerDataProvider cache, List<String> preferenceList) {
 
     IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return Collections.emptyMap();
+    }
     StateModelDefinition stateModelDef =
         cache.getStateModelDef(idealState.getStateModelDefRef());
+    if (stateModelDef == null) {
+      return Collections.emptyMap();
+    }
 
     int requiredReplicas = idealState.getMinActiveReplicas() == -1
         ? idealState.getReplicaCount(preferenceList == null ? 0 : preferenceList.size())
