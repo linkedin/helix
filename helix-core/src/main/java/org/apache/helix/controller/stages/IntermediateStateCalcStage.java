@@ -64,13 +64,23 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   @Override
   public void process(ClusterEvent event) throws Exception {
     _eventId = event.getEventId();
+
+    // Check if V2 is enabled via cluster config and delegate if so
+    ResourceControllerDataProvider cache =
+        event.getAttribute(AttributeName.ControllerDataProvider.name());
+    if (cache != null && cache.getClusterConfig() != null
+        && cache.getClusterConfig().isIntermediateStateCalcStageV2Enabled()) {
+      LogUtil.logInfo(logger, _eventId,
+          "IntermediateStateCalcStage V2 is enabled via cluster config. Delegating to V2.");
+      new IntermediateStateCalcStageV2().process(event);
+      return;
+    }
+
     CurrentStateOutput currentStateOutput = event.getAttribute(AttributeName.CURRENT_STATE.name());
     BestPossibleStateOutput bestPossibleStateOutput =
         event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
     Map<String, Resource> resourceToRebalance =
         event.getAttribute(AttributeName.RESOURCES_TO_REBALANCE.name());
-    ResourceControllerDataProvider cache =
-        event.getAttribute(AttributeName.ControllerDataProvider.name());
     MessageOutput messageOutput = event.getAttribute(AttributeName.MESSAGES_SELECTED.name());
 
     if (currentStateOutput == null || bestPossibleStateOutput == null || resourceToRebalance == null

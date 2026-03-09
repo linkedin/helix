@@ -177,6 +177,11 @@ public class ClusterConfig extends HelixProperty {
     // When enabled, messages are prioritized based on availability impact score across all resources,
     // rather than processing resources in priority order.
     AVAILABILITY_AWARE_PRIORITIZATION_ENABLED,
+
+    // Enable the refactored IntermediateStateCalcStage (V2) which uses a strategy pattern
+    // for message ordering and extracted throttle logic. When disabled (default), the original
+    // IntermediateStateCalcStage (V1) is used for backward compatibility.
+    INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -851,6 +856,28 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isAvailabilityAwarePrioritizationEnabled() {
     return _record.getBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the refactored IntermediateStateCalcStage (V2).
+   * When enabled, the controller uses IntermediateStateCalcStageV2 which features a strategy
+   * pattern for message ordering and extracted throttle logic. When disabled (default), the
+   * original IntermediateStateCalcStage (V1) is used for backward compatibility.
+   * @param enabled true to enable V2, false to use V1 (default)
+   */
+  public void setIntermediateStateCalcStageV2Enabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Check whether the refactored IntermediateStateCalcStage (V2) is enabled.
+   * By default, it is DISABLED (V1 is used).
+   * @return true if V2 is enabled
+   */
+  public boolean isIntermediateStateCalcStageV2Enabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), false);
   }
 
   /**
