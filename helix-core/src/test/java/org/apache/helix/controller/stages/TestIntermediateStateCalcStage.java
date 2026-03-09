@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
@@ -959,11 +960,18 @@ public class TestIntermediateStateCalcStage extends BaseStageTest {
     runStage(event, new ReadClusterDataStage());
 
     // Run V1 stage -- it should delegate to V2
-    runStage(event, new IntermediateStateCalcStage());
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
 
-    // Verify intermediate state was computed (by V2)
-    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
-    Assert.assertNotNull(output, "V2 should have computed intermediate state output");
+    // Verify V2 was instantiated
+    Assert.assertTrue(v2Created.get(), "V2 stage should have been instantiated when enabled");
   }
 
   @Test
@@ -1014,10 +1022,20 @@ public class TestIntermediateStateCalcStage extends BaseStageTest {
         new ResourceControllerDataProvider());
     runStage(event, new ReadClusterDataStage());
 
-    // Run V1 stage -- it should use V1 logic
-    runStage(event, new IntermediateStateCalcStage());
+    // Run V1 stage -- it should use V1 logic, not delegate to V2
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
 
-    // Verify intermediate state was computed (by V1)
+    // Verify V2 was NOT instantiated
+    Assert.assertFalse(v2Created.get(), "V2 stage should NOT have been instantiated when disabled");
+    // Also verify V1 produced output
     IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
     Assert.assertNotNull(output, "V1 should have computed intermediate state output");
   }

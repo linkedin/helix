@@ -72,7 +72,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         && cache.getClusterConfig().isIntermediateStateCalcStageV2Enabled()) {
       LogUtil.logInfo(logger, _eventId,
           "IntermediateStateCalcStage V2 is enabled via cluster config. Delegating to V2.");
-      new IntermediateStateCalcStageV2().process(event);
+      createV2Stage().process(event);
       return;
     }
 
@@ -103,6 +103,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       validateMaxPartitionsPerInstance(event, cache, intermediateStateOutput,
           maxPartitionPerInstance);
     }
+  }
+
+  protected IntermediateStateCalcStageV2 createV2Stage() {
+    return new IntermediateStateCalcStageV2();
   }
 
   /**
