@@ -585,7 +585,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       // getPreferenceLists() always returns an initialized map (never null) since ZNRecord
       // initializes listFields as a TreeMap. A null result would indicate a programming error.
       Map<String, List<String>> preferenceLists = idealState.getPreferenceLists();
-      if (preferenceLists.isEmpty()) {
+      if (preferenceLists == null || preferenceLists.isEmpty()) {
         return checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
       }
       int emptyListCount = 0;
