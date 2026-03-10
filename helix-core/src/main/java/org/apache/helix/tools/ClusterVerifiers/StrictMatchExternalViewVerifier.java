@@ -92,8 +92,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
   private StrictMatchExternalViewVerifier(RealmAwareZkClient zkClient, String clusterName,
       Set<String> resources, Set<String> expectLiveInstances, boolean isDeactivatedNodeAware,
       boolean isLenientMatch, int waitPeriodTillVerify, boolean usesExternalZkClient) {
-    // Initialize StrictMatchExternalViewVerifier with usesExternalZkClient = false so that
-    // StrictMatchExternalViewVerifier::close() would close ZkClient to prevent thread leakage
+    // When usesExternalZkClient is false, close() will close the client to prevent thread leakage.
     super(zkClient, clusterName, usesExternalZkClient, waitPeriodTillVerify);
     _resources = resources == null ? new HashSet<>() : new HashSet<>(resources);
     _expectLiveInstances =
@@ -336,6 +335,10 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       // ignore jobs
     default:
       return true;
+    }
+
+    if (!_isLenientMatch) {
+      return mappingInExternalView.equals(idealPartitionState);
     }
 
     StateModelDefinition stateModelDef =
