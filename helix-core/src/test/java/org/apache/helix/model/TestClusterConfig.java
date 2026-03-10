@@ -428,4 +428,20 @@ public class TestClusterConfig {
       // expected
     }
   }
+
+  @Test
+  public void testIntermediateStateCalcStageV2Enabled() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+
+    // Default should be disabled
+    Assert.assertFalse(clusterConfig.isIntermediateStateCalcStageV2Enabled());
+
+    // Enable
+    clusterConfig.setIntermediateStateCalcStageV2Enabled(true);
+    Assert.assertTrue(clusterConfig.isIntermediateStateCalcStageV2Enabled());
+
+    // Disable
+    clusterConfig.setIntermediateStateCalcStageV2Enabled(false);
+    Assert.assertFalse(clusterConfig.isIntermediateStateCalcStageV2Enabled());
+  }
 }

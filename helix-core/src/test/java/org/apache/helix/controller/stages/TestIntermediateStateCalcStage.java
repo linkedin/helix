@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
@@ -907,6 +908,136 @@ public class TestIntermediateStateCalcStage extends BaseStageTest {
           "Partition " + partition.getPartitionName()
               + " should be throttled because ANY quota on the instance is exhausted");
     }
+  }
+
+  @Test
+  public void testDelegatesToV2WhenEnabled() {
+    String resourcePrefix = "resource";
+    int nResource = 2;
+    int nPartition = 2;
+    int nReplica = 3;
+
+    String[] resources = new String[nResource];
+    for (int i = 0; i < nResource; i++) {
+      resources[i] = resourcePrefix + "_" + i;
+    }
+
+    preSetup(resources, nReplica, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    // Enable V2
+    _clusterConfig.setIntermediateStateCalcStageV2Enabled(true);
+    _clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(1);
+    setClusterConfig(_clusterConfig);
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    for (String resource : resources) {
+      IdealState is = accessor.getProperty(accessor.keyBuilder().idealStates(resource));
+      setSingleIdealState(is);
+
+      for (int p = 0; p < nPartition; p++) {
+        Partition partition = new Partition(resource + "_" + p);
+        for (int r = 0; r < nReplica; r++) {
+          String instanceName = HOSTNAME_PREFIX + r;
+          currentStateOutput.setCurrentState(resource, partition, instanceName, "ONLINE");
+          bestPossibleStateOutput.setState(resource, partition, instanceName, "ONLINE");
+        }
+      }
+    }
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+
+    // Run V1 stage -- it should delegate to V2
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
+
+    // Verify V2 was instantiated
+    Assert.assertTrue(v2Created.get(), "V2 stage should have been instantiated when enabled");
+  }
+
+  @Test
+  public void testUsesV1WhenV2Disabled() {
+    String resourcePrefix = "resource";
+    int nResource = 2;
+    int nPartition = 2;
+    int nReplica = 3;
+
+    String[] resources = new String[nResource];
+    for (int i = 0; i < nResource; i++) {
+      resources[i] = resourcePrefix + "_" + i;
+    }
+
+    preSetup(resources, nReplica, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    // V2 not enabled (default false)
+    _clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(1);
+    setClusterConfig(_clusterConfig);
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    for (String resource : resources) {
+      IdealState is = accessor.getProperty(accessor.keyBuilder().idealStates(resource));
+      setSingleIdealState(is);
+
+      for (int p = 0; p < nPartition; p++) {
+        Partition partition = new Partition(resource + "_" + p);
+        for (int r = 0; r < nReplica; r++) {
+          String instanceName = HOSTNAME_PREFIX + r;
+          currentStateOutput.setCurrentState(resource, partition, instanceName, "ONLINE");
+          bestPossibleStateOutput.setState(resource, partition, instanceName, "ONLINE");
+        }
+      }
+    }
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+
+    // Run V1 stage -- it should use V1 logic, not delegate to V2
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
+
+    // Verify V2 was NOT instantiated
+    Assert.assertFalse(v2Created.get(), "V2 stage should NOT have been instantiated when disabled");
+    // Also verify V1 produced output
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+    Assert.assertNotNull(output, "V1 should have computed intermediate state output");
   }
 
   private void preSetup(String[] resources, int numOfLiveInstances, int numOfReplicas) {
