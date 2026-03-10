@@ -320,4 +320,87 @@ public class TestClusterVerifier extends ZkUnitTestBase {
         .build();
     Assert.assertTrue(bestPossibleVerifier.verify(10000));
   }
+
+  @Test
+  public void testLenientMatchStableCluster() throws InterruptedException {
+    // When cluster is fully stable, lenient match should pass just like strict match
+    HelixClusterVerifier strictVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(strictVerifier.verify(10000));
+
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+  }
+
+  @Test
+  public void testLenientMatchWithStoppedParticipant() throws InterruptedException {
+    // Ensure stable first
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(SEMI_AUTO_RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+
+    // Stop a participant — creates OFFLINE entries in ExternalView for Semi-Auto resources
+    _participants[0].syncStop();
+    Thread.sleep(500);
+
+    // Strict mode: OFFLINE entries don't match ideal state → fails within short timeout
+    HelixClusterVerifier strictVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(SEMI_AUTO_RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertFalse(strictVerifier.verify(3000));
+
+    // Lenient mode: OFFLINE entries stripped → remaining active states match
+    lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(SEMI_AUTO_RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+  }
+
+  @Test
+  public void testLenientMatchWithSleepTransition() throws InterruptedException {
+    // Ensure stable first
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+
+    // Restart participant with stuck transitions — state transitions never complete,
+    // so MASTER/SLAVE assignments won't match ExternalView
+    _participants[0].syncStop();
+    Thread.sleep(1000);
+
+    _participants[0] = new MockParticipantManager(ZK_ADDR, _clusterName, _participants[0].getInstanceName());
+    _participants[0].setTransition(new SleepTransition(99999999));
+    _participants[0].syncStart();
+
+    // Even lenient mode should fail — this is an active state mismatch (stuck transitions),
+    // not just OFFLINE/DROPPED entries
+    lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertFalse(lenientVerifier.verify(3000));
+  }
 }
