@@ -94,7 +94,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       boolean isLenientMatch, int waitPeriodTillVerify, boolean usesExternalZkClient) {
     // Initialize StrictMatchExternalViewVerifier with usesExternalZkClient = false so that
     // StrictMatchExternalViewVerifier::close() would close ZkClient to prevent thread leakage
-    super(zkClient, clusterName, usesExternalZkClient, 0);
+    super(zkClient, clusterName, usesExternalZkClient, waitPeriodTillVerify);
     _resources = resources == null ? new HashSet<>() : new HashSet<>(resources);
     _expectLiveInstances =
         expectLiveInstances == null ? new HashSet<>() : new HashSet<>(expectLiveInstances);
@@ -307,7 +307,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
   private boolean verifyExternalView(ResourceControllerDataProvider dataCache, ExternalView externalView,
       IdealState idealState) {
-    Map<String, Map<String, String>> mappingInExtview = externalView.getRecord().getMapFields();
+    Map<String, Map<String, String>> mappingInExternalView = externalView.getRecord().getMapFields();
     Map<String, Map<String, String>> idealPartitionState;
 
     switch (idealState.getRebalanceMode()) {
@@ -338,20 +338,28 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       return true;
     }
 
-    if (_isLenientMatch) {
-      String stateModelDefName = idealState.getStateModelDefRef();
-      StateModelDefinition stateModelDef = dataCache.getStateModelDef(stateModelDefName);
-      if (stateModelDef != null) {
-        Set<String> ignoreStates = new HashSet<>(
-            Arrays.asList(stateModelDef.getInitialState(), HelixDefinedState.DROPPED.toString()));
-        Map<String, Map<String, String>> evCopy = deepCopyMapFields(mappingInExtview);
-        Map<String, Map<String, String>> idealCopy = deepCopyMapFields(idealPartitionState);
-        removeEntriesWithIgnoredStates(evCopy.entrySet().iterator(), ignoreStates);
-        removeEntriesWithIgnoredStates(idealCopy.entrySet().iterator(), ignoreStates);
-        return evCopy.equals(idealCopy);
-      }
+    StateModelDefinition stateModelDef =
+        dataCache.getStateModelDef(idealState.getStateModelDefRef());
+    return compareMappings(mappingInExternalView, idealPartitionState, stateModelDef);
+  }
+
+  private boolean compareMappings(Map<String, Map<String, String>> actualMappings,
+      Map<String, Map<String, String>> expectedMappings, StateModelDefinition stateModelDef) {
+    if (!_isLenientMatch || stateModelDef == null) {
+      return actualMappings.equals(expectedMappings);
     }
-    return mappingInExtview.equals(idealPartitionState);
+
+    Set<String> ignoredStates = new HashSet<>(
+        Arrays.asList(stateModelDef.getInitialState(), HelixDefinedState.DROPPED.toString()));
+    return copyWithoutIgnoredStates(actualMappings, ignoredStates)
+        .equals(copyWithoutIgnoredStates(expectedMappings, ignoredStates));
+  }
+
+  private static Map<String, Map<String, String>> copyWithoutIgnoredStates(
+      Map<String, Map<String, String>> original, Set<String> ignoredStates) {
+    Map<String, Map<String, String>> copiedMappings = deepCopyMapFields(original);
+    removeEntriesWithIgnoredStates(copiedMappings.entrySet().iterator(), ignoredStates);
+    return copiedMappings;
   }
 
   private static Map<String, Map<String, String>> deepCopyMapFields(
@@ -363,7 +371,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
     return copy;
   }
 
-  private void removeEntriesWithIgnoredStates(
+  private static void removeEntriesWithIgnoredStates(
       Iterator<Map.Entry<String, Map<String, String>>> partitionInstanceStateMapIter,
       Set<String> ignoredStates) {
     while (partitionInstanceStateMapIter.hasNext()) {
