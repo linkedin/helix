@@ -372,6 +372,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // less than the threshold. Otherwise, only allow downward-transition load balance
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
 
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        clusterConfig.isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
+
     // Sort partitions in case of urgent partition need to take the quota first.
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
     partitions.sort(new PartitionPriorityComparator(bestPossiblePartitionStateMap.getStateMap(),
@@ -394,6 +397,11 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : messagesToThrottle) {
         RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredState, message, derivedCurrentStateMap);
+        if (recoveryRebalanceForTopStateDownwardTransition
+            && rebalanceType.equals(RebalanceType.LOAD_BALANCE)
+            && isTopStateDownwardTransition(stateModelDef, message)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
 
         // Number of states required by StateModelDefinition are not satisfied, need recovery
         if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
@@ -452,6 +460,23 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
 
     LogUtil.logDebug(logger, _eventId, String.format("End processing resource: %s", resourceName));
     return intermediatePartitionStateMap;
+  }
+
+  /**
+   * Check if the message represents a top state downward transition (e.g., MASTER→SLAVE, LEADER→STANDBY).
+   * Used when the cluster config enables treating such transitions as recovery rebalance.
+   */
+  private boolean isTopStateDownwardTransition(StateModelDefinition stateModelDef, Message msg) {
+    String topState = stateModelDef.getTopState();
+    if (topState == null) {
+      return false;
+    }
+    String secondTopState =
+        stateModelDef.getNextStateForTransition(topState, stateModelDef.getInitialState());
+    if (secondTopState == null) {
+      return false;
+    }
+    return topState.equals(msg.getFromState()) && secondTopState.equals(msg.getToState());
   }
 
   /**

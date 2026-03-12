@@ -173,6 +173,10 @@ public class ClusterConfig extends HelixProperty {
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
 
+    // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
+    // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
+    ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION,
+
     // Enable availability-aware cross-resource prioritization for state transitions.
     // When enabled, messages are prioritized based on availability impact score across all resources,
     // rather than processing resources in priority order.
@@ -1354,5 +1358,26 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  /**
+   * @return true if top state downward transitions (e.g., MASTER->SLAVE, LEADER->STANDBY)
+   *         should be classified as RECOVERY_REBALANCE instead of LOAD_BALANCE
+   */
+  public boolean isRecoveryRebalanceForTopStateDownwardTransitionEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        false);
+  }
+
+  /**
+   * Enable or disable classifying top state downward transitions as RECOVERY_REBALANCE.
+   *
+   * @param enabled true to classify top state downward transitions as RECOVERY_REBALANCE
+   */
+  public void setRecoveryRebalanceForTopStateDownwardTransitionEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        enabled);
   }
 }
