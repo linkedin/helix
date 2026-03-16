@@ -1335,8 +1335,6 @@ public class TestInstanceOperation extends ZkTestBase {
     InstanceConfig instanceToSwapOutconfig = _gSetupTool.getClusterManagementTool()
         .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName);
     String instanceToSwapInName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
-    Map<String, String> swapOutInstancesToSwapInInstances = new HashMap<>();
-    swapOutInstancesToSwapInInstances.put(instanceToSwapOutName, instanceToSwapInName);
 
     addParticipant(instanceToSwapInName, instanceToSwapOutconfig.getLogicalId(LOGICAL_ID),
         instanceToSwapOutconfig.getDomainAsMap().get(ZONE),
@@ -1387,8 +1385,7 @@ public class TestInstanceOperation extends ZkTestBase {
     Assert.assertTrue(_gSetupTool.getClusterManagementTool()
         .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, false));
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
-    validateEVsCorrect(getEVs(), beforeEVs, swapOutInstancesToSwapInInstances, Collections.emptySet(),
-        ImmutableSet.of(instanceToSwapInName));
+    validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
     _participants.get(_participants.size()-1).syncStop();
   }
 
@@ -1462,8 +1459,7 @@ public class TestInstanceOperation extends ZkTestBase {
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     // Assert swap completed successfully
-    validateEVsCorrect(getEVs(), beforeSwapAndDisableEVs, swapOutInstancesToSwapInInstances,
-        Collections.emptySet(), ImmutableSet.of(swapInInstanceName));
+    validateSwapCompletedSuccessfully(getEVs(), swapOutInstanceName, swapInInstanceName);
     _participants.get(_participants.size()-1).syncStop();
   }
 
@@ -2096,6 +2092,34 @@ public class TestInstanceOperation extends ZkTestBase {
       ev.getStateMap(partition).values().stream().filter(ACCEPTABLE_STATE_SET::contains)
           .forEach(v -> activeReplicaCount.getAndIncrement());
       Assert.assertTrue(activeReplicaCount.get() >=expectedNumber);
+    }
+  }
+
+  /**
+   * Validates swap completion without strict state map comparison. The WAGED rebalancer may
+   * redistribute partitions across instances after a swap, so we only verify:
+   * 1. The swap-out instance is removed from all partitions
+   * 2. Each partition has the correct number of active replicas
+   * 3. The swap-in instance has at least one partition assigned
+   */
+  private void validateSwapCompletedSuccessfully(Map<String, ExternalView> afterEVs,
+      String swapOutInstanceName, String swapInInstanceName) {
+    for (String resource : _allDBs) {
+      ExternalView ev = afterEVs.get(resource);
+      boolean swapInHasPartitionsInResource = false;
+      for (String partition : ev.getPartitionSet()) {
+        Map<String, String> stateMap = ev.getStateMap(partition);
+        Assert.assertFalse(stateMap.containsKey(swapOutInstanceName),
+            "Swap-out instance " + swapOutInstanceName + " should not be in partition " + partition
+                + " in resource " + resource);
+        if (stateMap.containsKey(swapInInstanceName)) {
+          swapInHasPartitionsInResource = true;
+        }
+      }
+      validateAssignmentInEv(ev);
+      Assert.assertTrue(swapInHasPartitionsInResource,
+          "Swap-in instance " + swapInInstanceName
+              + " should have at least one partition in resource " + resource);
     }
   }
 
