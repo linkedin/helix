@@ -397,9 +397,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : messagesToThrottle) {
         RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredState, message, derivedCurrentStateMap);
-        if (recoveryRebalanceForTopStateDownwardTransition
-            && rebalanceType.equals(RebalanceType.LOAD_BALANCE)
-            && isTopStateDownwardTransition(stateModelDef, message)) {
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDef)) {
           rebalanceType = RebalanceType.RECOVERY_BALANCE;
         }
 
@@ -463,23 +462,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   }
 
   /**
-   * Check if the message represents a top state downward transition (e.g., MASTER→SLAVE, LEADER→STANDBY).
-   * Used when the cluster config enables treating such transitions as recovery rebalance.
-   */
-  private boolean isTopStateDownwardTransition(StateModelDefinition stateModelDef, Message msg) {
-    String topState = stateModelDef.getTopState();
-    if (topState == null) {
-      return false;
-    }
-    String secondTopState =
-        stateModelDef.getNextStateForTransition(topState, stateModelDef.getInitialState());
-    if (secondTopState == null) {
-      return false;
-    }
-    return topState.equals(msg.getFromState()) && secondTopState.equals(msg.getToState());
-  }
-
-  /**
    * Determine the message is downward message or not.
    * @param message                  message for load rebalance
    * @param stateModelDefinition     state model definition object for this resource
@@ -509,6 +491,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       StateTransitionThrottleController throttleController, ResourceControllerDataProvider cache,
       Map<String, List<String>> preferenceLists, StateModelDefinition stateModelDefinition) {
     String resourceName = resource.getResourceName();
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
     // check and charge pending transitions
     for (Partition partition : resource.getPartitions()) {
       // To clarify that custom mode does not apply recovery/load rebalance since user can define different number of
@@ -531,6 +515,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : pendingMessages) {
         StateTransitionThrottleConfig.RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredStates, message, currentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDefinition)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
         String currentState = currentStateMap.get(message.getTgtName());
         if (currentState == null) {
           currentState = stateModelDefinition.getInitialState();
