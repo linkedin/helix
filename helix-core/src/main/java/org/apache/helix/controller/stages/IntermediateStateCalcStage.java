@@ -386,6 +386,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // less than the threshold. Otherwise, only allow downward-transition load balance
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
 
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        clusterConfig.isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
+
     // Sort partitions in case of urgent partition need to take the quota first.
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
     partitions.sort(new PartitionPriorityComparator(bestPossiblePartitionStateMap.getStateMap(),
@@ -408,6 +411,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : messagesToThrottle) {
         RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredState, message, derivedCurrentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDef)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
 
         // Number of states required by StateModelDefinition are not satisfied, need recovery
         if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
@@ -498,6 +505,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       StateTransitionThrottleController throttleController, ResourceControllerDataProvider cache,
       Map<String, List<String>> preferenceLists, StateModelDefinition stateModelDefinition) {
     String resourceName = resource.getResourceName();
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
     // check and charge pending transitions
     for (Partition partition : resource.getPartitions()) {
       // To clarify that custom mode does not apply recovery/load rebalance since user can define different number of
@@ -520,6 +529,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : pendingMessages) {
         StateTransitionThrottleConfig.RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredStates, message, currentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDefinition)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
         String currentState = currentStateMap.get(message.getTgtName());
         if (currentState == null) {
           currentState = stateModelDefinition.getInitialState();

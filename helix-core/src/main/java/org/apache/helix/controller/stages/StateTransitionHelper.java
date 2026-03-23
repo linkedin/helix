@@ -22,6 +22,7 @@ package org.apache.helix.controller.stages;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
 
@@ -128,5 +129,32 @@ public class StateTransitionHelper {
       }
     }
     return matches;
+  }
+
+  /**
+   * Determines whether a state-transition message should be reclassified from
+   * {@link RebalanceType#LOAD_BALANCE} to {@link RebalanceType#RECOVERY_BALANCE}.
+   *
+   * <p>Normally, a top-state downward transition (e.g., MASTER-&gt;SLAVE or LEADER-&gt;STANDBY)
+   * is classified as {@code LOAD_BALANCE} by the standard rebalance-type logic because the
+   * second-top-state count already satisfies {@code minActiveReplicas}. This means the transition
+   * shares throttle quota with regular load-balance work, potentially delaying urgent leadership
+   * handoffs when load-balance throttles are saturated.</p>
+   *
+   * <p>When the cluster config flag
+   * {@code ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION} is enabled, this method
+   * returns {@code true} for any message whose {@code fromState} is the top state and whose
+   * transition is downward, so callers can reclassify it as {@code RECOVERY_BALANCE} and give
+   * it higher throttle priority.</p>
+   *
+   * @param configEnabled whether the cluster config flag is enabled
+   * @param message       the state-transition message to evaluate
+   * @param stateModelDef the state model definition for the resource (may be {@code null})
+   * @return {@code true} if the message should be reclassified as recovery rebalance
+   */
+  public static boolean shouldReclassifyForTopStateHandOff(boolean configEnabled, Message message,
+      StateModelDefinition stateModelDef) {
+    return configEnabled && stateModelDef != null && isTopStateHandoff(message.getFromState(),
+        message.getToState(), stateModelDef.getTopState(), stateModelDef);
   }
 }

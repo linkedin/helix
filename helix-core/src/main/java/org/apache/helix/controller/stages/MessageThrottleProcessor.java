@@ -145,8 +145,12 @@ public class MessageThrottleProcessor {
       StateModelDefinition stateModelDef = idealState != null
           ? cache.getStateModelDef(idealState.getStateModelDefRef()) : null;
 
-      // Classify message
       RebalanceType type = classifyMessage(requiredStates, message, derivedState);
+      if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+          cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled(),
+          message, stateModelDef)) {
+        type = RebalanceType.RECOVERY_BALANCE;
+      }
       message.setSTRebalanceType(type == RebalanceType.RECOVERY_BALANCE
           ? Message.STRebalanceType.RECOVERY_REBALANCE
           : Message.STRebalanceType.LOAD_REBALANCE);
@@ -255,6 +259,8 @@ public class MessageThrottleProcessor {
       Map<String, List<String>> preferenceLists, StateModelDefinition stateModelDef) {
 
     String resourceName = resource.getResourceName();
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
 
     for (Partition partition : resource.getPartitions()) {
       List<String> preferenceList = preferenceLists.get(partition.getPartitionName());
@@ -272,6 +278,10 @@ public class MessageThrottleProcessor {
 
       for (Message message : pendingMessages) {
         RebalanceType type = classifyMessage(requiredStates, message, currentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDef)) {
+          type = RebalanceType.RECOVERY_BALANCE;
+        }
         String currentState = currentStateMap.getOrDefault(
             message.getTgtName(), stateModelDef.getInitialState());
 
