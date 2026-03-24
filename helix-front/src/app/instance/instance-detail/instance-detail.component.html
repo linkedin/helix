@@ -25,12 +25,27 @@
         [instance]="instanceName"
       ></hi-detail-header>
       <hi-disabled-label
-        *ngIf="!isLoading && !instance.liveInstance"
+        *ngIf="!isLoading && !instance.online"
         text="OFFLINE"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && !instance.enabled"
+        *ngIf="!isLoading && instance.operationState === 'DISABLE'"
         text="DISABLED"
+      ></hi-disabled-label>
+      <hi-disabled-label
+        *ngIf="!isLoading && instance.operationState === 'UNKNOWN'"
+        text="UNKNOWN"
+        class="label-unknown"
+      ></hi-disabled-label>
+      <hi-disabled-label
+        *ngIf="!isLoading && instance.operationState === 'EVACUATE'"
+        text="EVACUATING"
+        class="label-evacuate"
+      ></hi-disabled-label>
+      <hi-disabled-label
+        *ngIf="!isLoading && instance.operationState === 'SWAP_IN'"
+        text="SWAP IN"
+        class="label-swap-in"
       ></hi-disabled-label>
     </mat-toolbar-row>
     <mat-toolbar-row class="information">
@@ -57,7 +72,7 @@
       <mat-menu #menu="matMenu">
         <button
           mat-menu-item
-          *ngIf="instance && instance.enabled"
+          *ngIf="instance && instance.operationState === 'ENABLE'"
           (click)="disableInstance()"
         >
           <mat-icon>not_interested</mat-icon>
@@ -65,7 +80,7 @@
         </button>
         <button
           mat-menu-item
-          *ngIf="instance && !instance.enabled"
+          *ngIf="instance && instance.operationState !== 'ENABLE'"
           (click)="enableInstance()"
         >
           <mat-icon>play_circle_outline</mat-icon>
