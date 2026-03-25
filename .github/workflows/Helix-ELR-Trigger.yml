@@ -21,7 +21,7 @@ jobs:
         run: |
           BRANCH="${{ github.event.ref }}"
           # Extract version: handles both release-1.4.5-dev-... and release_1.6.0-dev-...
-          VERSION=$(echo "$BRANCH" | sed -E 's/^release[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          VERSION=$(echo "$BRANCH" | sed -E 's/^release[-_]//')
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected release branch: $BRANCH (version: $VERSION)"
