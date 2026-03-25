@@ -449,6 +449,36 @@ public class TestInstanceMonitor {
   }
 
   @Test
+  public void testDomainInfoValidGauge() throws JMException {
+    String testCluster = "testCluster";
+    String testInstance = "testInstance";
+    String testDomain = "testDomain:key=value";
+    InstanceMonitor monitor =
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+
+    // Default should be valid (1)
+    Assert.assertEquals(monitor.getDomainInfoValid(), 1L);
+
+    // Mark domain info as invalid
+    monitor.updateDomainInfoValid(false);
+    Assert.assertEquals(monitor.getDomainInfoValid(), 0L);
+
+    // Mark domain info as valid again
+    monitor.updateDomainInfoValid(true);
+    Assert.assertEquals(monitor.getDomainInfoValid(), 1L);
+
+    // Toggle multiple times
+    monitor.updateDomainInfoValid(false);
+    Assert.assertEquals(monitor.getDomainInfoValid(), 0L);
+    monitor.updateDomainInfoValid(false);
+    Assert.assertEquals(monitor.getDomainInfoValid(), 0L);
+    monitor.updateDomainInfoValid(true);
+    Assert.assertEquals(monitor.getDomainInfoValid(), 1L);
+
+    monitor.unregister();
+  }
+
+  @Test
   public void testPartitionCountEdgeCases() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";

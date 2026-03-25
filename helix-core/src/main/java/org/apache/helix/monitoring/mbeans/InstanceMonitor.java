@@ -60,7 +60,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
     INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
     PARTITION_COUNT_GAUGE("PartitionGauge"),
-    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge");
+    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge"),
+    DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge");
 
     private final String metricName;
 
@@ -93,6 +94,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _errorPartitionsGauge;
   private SimpleDynamicMetric<Long> _partitionCountGauge;
   private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
+  private SimpleDynamicMetric<Long> _domainInfoValidGauge;
 
   // Instance Operation Duration Gauges (in milliseconds)
   private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
@@ -171,6 +173,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE.metricName(), 0L);
     _instanceOperationDurationUnknownGauge = new SimpleDynamicMetric<>(
         InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE.metricName(), 0L);
+
+    _domainInfoValidGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.DOMAIN_INFO_VALID_GAUGE.metricName(), 1L);
   }
 
   private List<DynamicMetric<?, ?>> buildAttributeList() {
@@ -190,7 +195,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _instanceOperationDurationDisableGauge,
         _instanceOperationDurationEvacuateGauge,
         _instanceOperationDurationSwapInGauge,
-        _instanceOperationDurationUnknownGauge
+        _instanceOperationDurationUnknownGauge,
+        _domainInfoValidGauge
     );
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
@@ -229,6 +235,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   protected long getPartitionCount() { return _partitionCountGauge.getValue(); }
 
   protected long getTopStatePartitionCount() { return _topStatePartitionCountGauge.getValue(); }
+
+  protected long getDomainInfoValid() { return _domainInfoValidGauge.getValue(); }
+
+  /**
+   * Updates whether this instance has valid domain info for the cluster's topology configuration.
+   * @param isValid true if domain info is correctly populated, false otherwise
+   */
+  public synchronized void updateDomainInfoValid(boolean isValid) {
+    _domainInfoValidGauge.updateValue(isValid ? 1L : 0L);
+  }
 
   /**
    * Get the current duration in ENABLE operation (in milliseconds)
