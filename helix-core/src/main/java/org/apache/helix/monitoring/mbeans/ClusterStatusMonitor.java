@@ -412,6 +412,9 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param invalidInstances the set of instance names whose domain info is not correctly populated
    */
   public void updateInstanceDomainInfoValidity(Set<String> invalidInstances) {
+    if (invalidInstances == null) {
+      invalidInstances = Collections.emptySet();
+    }
     synchronized (_instanceMonitorMap) {
       for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
         boolean isInvalid = invalidInstances.contains(entry.getKey());
