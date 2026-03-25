@@ -1,0 +1,52 @@
+name: Trigger ELR on Release Branch
+
+on:
+  create:
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-elr:
+    # Only run when a release branch is created (not tags)
+    if: >
+      github.event.ref_type == 'branch' &&
+      (startsWith(github.event.ref, 'release-') ||
+       startsWith(github.event.ref, 'release_'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract version from branch name
+        id: version
+        run: |
+          BRANCH="${{ github.event.ref }}"
+          # Extract version: handles both release-1.4.5-dev-... and release_1.6.0-dev-...
+          VERSION=$(echo "$BRANCH" | sed -E 's/^release[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected release branch: $BRANCH (version: $VERSION)"
+
+      - name: Dispatch ELR publish workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ELR_TRIGGER_PAT }}
+          script: |
+            const branch = '${{ steps.version.outputs.branch }}';
+            const version = '${{ steps.version.outputs.version }}';
+
+            console.log(`Triggering ELR for branch: ${branch}, version: ${version}`);
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'linkedin',
+              repo: 'helix-elr',
+              workflow_id: 'publish-linkedin-jfrog.yml',
+              // Adjust 'ref' to whichever branch in helix-elr holds this workflow
+              ref: 'master',
+              inputs: {
+                // Adjust these input names to match what publish-linkedin-jfrog.yml expects
+                branch: branch,
+                version: version,
+              }
+            });
+
+            console.log('ELR workflow dispatch triggered successfully.');
