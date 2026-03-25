@@ -40,12 +40,13 @@ jobs:
               owner: 'linkedin',
               repo: 'helix-elr',
               workflow_id: 'publish-linkedin-jfrog.yml',
-              // Adjust 'ref' to whichever branch in helix-elr holds this workflow
-              ref: 'master',
+              ref: 'helix-elr-main',
               inputs: {
-                // Adjust these input names to match what publish-linkedin-jfrog.yml expects
-                branch: branch,
                 version: version,
+                branch: branch,
+                repo: 'linkedin/helix',
+                jdk_build_version: '11',
+                jdk_release_version: '11',
               }
             });
 
