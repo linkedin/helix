@@ -132,4 +132,22 @@ export class InstanceService extends HelixService {
       null
     );
   }
+
+  public setInstanceOperation(
+    clusterName: string,
+    instanceName: string,
+    operation: InstanceOperationState,
+    reason: string
+  ) {
+    const params = [
+      `command=setInstanceOperation`,
+      `instanceOperation=${operation}`,
+      `instanceOperationSource=USER`,
+      `reason=${encodeURIComponent(reason)}`,
+    ].join('&');
+    return this.post(
+      `/clusters/${clusterName}/instances/${instanceName}?${params}`,
+      null
+    );
+  }
 }
