@@ -86,6 +86,8 @@ export class UserCtrl {
 
           ldap.search(LDAP.base, opts, function (err, result) {
             let isInAdminGroup = false;
+            let responseSent = false;
+            let tokenRequestPending = false;
             result.on('searchEntry', function (entry) {
               if (entry.object && !err) {
                 const groups = entry.object['memberOf'];
@@ -100,6 +102,7 @@ export class UserCtrl {
                     // is specified in the config
                     //
                     if (IDENTITY_TOKEN_SOURCE) {
+                      tokenRequestPending = true;
                       const body = JSON.stringify({
                         username: credential.username,
                         password: credential.password,
@@ -125,12 +128,11 @@ export class UserCtrl {
                       }
 
                       function callback(error, _res, body) {
-                        if (error) {
-                          throw new Error(
-                            `Failed to get ${IDENTITY_TOKEN_SOURCE} Token: ${error}`
-                          );
-                        } else if (body?.error) {
-                          throw new Error(body?.error);
+                        tokenRequestPending = false;
+                        if (error || body?.error) {
+                          req.session.isAdmin = isInAdminGroup;
+                          responseSent = true;
+                          res.json(isInAdminGroup);
                         } else {
                           const parsedBody = JSON.parse(body);
                           req.session.isAdmin = isInAdminGroup;
@@ -146,6 +148,7 @@ export class UserCtrl {
                             expires: cookieExpiresDate,
                           };
                           res.cookie(cookieName, cookieValue, cookieOptions);
+                          responseSent = true;
                           res.json(isInAdminGroup);
 
                           return parsedBody;
@@ -154,6 +157,7 @@ export class UserCtrl {
                       request.post(options, callback);
                     } else {
                       req.session.isAdmin = isInAdminGroup;
+                      responseSent = true;
                       res.json(isInAdminGroup);
                     }
                     //
@@ -163,7 +167,14 @@ export class UserCtrl {
                 }
               } else {
                 req.session.isAdmin = isInAdminGroup;
+                responseSent = true;
                 res.json(isInAdminGroup);
+              }
+            });
+            result.on('end', function () {
+              if (!responseSent && !tokenRequestPending) {
+                req.session.isAdmin = false;
+                res.json(false);
               }
             });
           });
