@@ -5,11 +5,11 @@ on:
     # Runs twice a week: Monday and Thursday at 06:00 UTC
     - cron: '0 6 * * 1'
     - cron: '0 6 * * 4'
-  # Allow manual trigger for testing or ad-hoc releases
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   create-release-and-trigger-elr:
@@ -21,7 +21,6 @@ jobs:
         with:
           ref: dev
           fetch-depth: 0
-          # PAT needed to push to dev and create release branch
           token: ${{ secrets.ELR_TRIGGER_PAT }}
 
       - name: Set up JDK 11
@@ -40,62 +39,48 @@ jobs:
         run: |
           git fetch --all
 
-          # Read current version from dev pom.xml (e.g. 1.6.0-SNAPSHOT → 1.6.0)
           SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           BASE_VERSION=${SNAPSHOT_VERSION%-SNAPSHOT}
           echo "Base version from dev pom.xml: $BASE_VERSION"
 
-          # Find the most recent release branch for this version prefix
           EXISTING_BRANCH=$(git branch -r \
             | grep "origin/release_${BASE_VERSION}" \
             | sed 's|.*origin/||' \
             | sort | tail -1 | xargs)
 
           if [ -z "$EXISTING_BRANCH" ]; then
-            # (a) No release branch for this version yet — create one
             echo "No existing release branch for $BASE_VERSION. Will create one."
             echo "action=create" >> "$GITHUB_OUTPUT"
             echo "release_base_version=$BASE_VERSION" >> "$GITHUB_OUTPUT"
           else
             echo "Found existing release branch: $EXISTING_BRANCH"
 
-            # Check for new commits in dev since the release branch was cut
             MERGE_BASE=$(git merge-base origin/dev "origin/$EXISTING_BRANCH")
             NEW_COMMITS=$(git log "${MERGE_BASE}..origin/dev" --oneline | wc -l | xargs)
             echo "New commits in dev since last release branch: $NEW_COMMITS"
 
             if [ "$NEW_COMMITS" -gt 0 ]; then
-              # (b) New commits exist — bump patch, cut new release branch
-              echo "New commits found. Will bump patch version and create new release."
-
               MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
               MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
               PATCH=$(echo "$BASE_VERSION" | cut -d. -f3)
               NEW_BASE_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              NEW_SNAPSHOT="${NEW_BASE_VERSION}-SNAPSHOT"
 
+              echo "New commits found. Will open PR to bump patch version."
               echo "action=bump_and_create" >> "$GITHUB_OUTPUT"
               echo "release_base_version=$NEW_BASE_VERSION" >> "$GITHUB_OUTPUT"
-              echo "new_snapshot_version=${NEW_BASE_VERSION}-SNAPSHOT" >> "$GITHUB_OUTPUT"
+              echo "new_snapshot_version=$NEW_SNAPSHOT" >> "$GITHUB_OUTPUT"
             else
-              # (c) No new commits — nothing to release
               echo "No new commits in dev since last release. Skipping."
               echo "action=skip" >> "$GITHUB_OUTPUT"
             fi
           fi
 
-      - name: Bump patch version in dev pom.xml
-        if: steps.plan.outputs.action == 'bump_and_create'
-        run: |
-          NEW_SNAPSHOT="${{ steps.plan.outputs.new_snapshot_version }}"
-          echo "Bumping dev pom.xml to $NEW_SNAPSHOT"
-          mvn versions:set -DnewVersion="$NEW_SNAPSHOT" -DgenerateBackupPoms=false
-          git add -A
-          git commit -m "Bump version to $NEW_SNAPSHOT for next release cycle"
-          git push origin dev
+      # --- Case (a): no existing release branch — cut directly and dispatch ELR ---
 
-      - name: Compute release version and branch name
-        id: release
-        if: steps.plan.outputs.action != 'skip'
+      - name: Compute release version [create]
+        id: release_create
+        if: steps.plan.outputs.action == 'create'
         run: |
           TIMESTAMP=$(date +%Y%m%d%H%M)
           BASE="${{ steps.plan.outputs.release_base_version }}"
@@ -103,28 +88,25 @@ jobs:
           BRANCH="release_${RELEASE_VERSION}"
           echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Release version: $RELEASE_VERSION  Branch: $BRANCH"
 
-      - name: Cut release branch and set version in pom.xml
-        if: steps.plan.outputs.action != 'skip'
+      - name: Cut release branch and set pom.xml version [create]
+        if: steps.plan.outputs.action == 'create'
         run: |
-          git checkout -b "${{ steps.release.outputs.branch }}"
-          mvn versions:set -DnewVersion="${{ steps.release.outputs.release_version }}" -DgenerateBackupPoms=false
+          git checkout -b "${{ steps.release_create.outputs.branch }}"
+          mvn versions:set -DnewVersion="${{ steps.release_create.outputs.release_version }}" -DgenerateBackupPoms=false
           git add -A
-          git commit -m "Set release version to ${{ steps.release.outputs.release_version }}"
-          git push origin "${{ steps.release.outputs.branch }}"
+          git commit -m "Set release version to ${{ steps.release_create.outputs.release_version }}"
+          git push origin "${{ steps.release_create.outputs.branch }}"
 
-      - name: Dispatch ELR publish workflow
-        if: steps.plan.outputs.action != 'skip'
+      - name: Dispatch ELR [create]
+        if: steps.plan.outputs.action == 'create'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.ELR_TRIGGER_PAT }}
           script: |
-            const branch = '${{ steps.release.outputs.branch }}';
-            const version = '${{ steps.release.outputs.release_version }}';
-
-            console.log(`Triggering ELR for branch: ${branch}, version: ${version}`);
-
+            const branch = '${{ steps.release_create.outputs.branch }}';
+            const version = '${{ steps.release_create.outputs.release_version }}';
+            console.log(`Triggering ELR: branch=${branch} version=${version}`);
             await github.rest.actions.createWorkflowDispatch({
               owner: 'linkedin',
               repo: 'helix-elr',
@@ -139,4 +121,42 @@ jobs:
               }
             });
 
-            console.log('ELR workflow dispatch triggered successfully.');
+      # --- Case (b): new commits exist — open PR to bump patch version in dev ---
+      # After the PR is manually merged, Helix-ELR-Release-Cut.yml takes over.
+
+      - name: Open PR to bump patch version in dev
+        if: steps.plan.outputs.action == 'bump_and_create'
+        env:
+          GH_TOKEN: ${{ secrets.ELR_TRIGGER_PAT }}
+        run: |
+          NEW_SNAPSHOT="${{ steps.plan.outputs.new_snapshot_version }}"
+          BUMP_BRANCH="automated/version-bump-${NEW_SNAPSHOT}"
+
+          git checkout -b "$BUMP_BRANCH"
+          mvn versions:set -DnewVersion="$NEW_SNAPSHOT" -DgenerateBackupPoms=false
+          git add -A
+          git commit -m "Bump version to $NEW_SNAPSHOT for next release cycle"
+          git push origin "$BUMP_BRANCH"
+
+          # Ensure the label exists (no-op if already present)
+          gh label create elr-release-cut --color 0075ca --description "Triggers ELR release cut on merge" --repo linkedin/helix 2>/dev/null || true
+
+          gh pr create \
+            --repo linkedin/helix \
+            --base dev \
+            --head "$BUMP_BRANCH" \
+            --label elr-release-cut \
+            --title "Bump version to $NEW_SNAPSHOT for next release cycle" \
+            --body "$(cat <<'EOF'
+          ## Automated version bump
+
+          This PR was opened automatically by the **Scheduled ELR Release** workflow
+          because new commits were found in \`dev\` since the last release branch was cut.
+
+          **Once this PR is merged**, the [Helix-ELR-Release-Cut](.github/workflows/Helix-ELR-Release-Cut.yml)
+          workflow will automatically:
+          1. Cut a new release branch from \`dev\`
+          2. Set the release version in \`pom.xml\` on the release branch
+          3. Dispatch the ELR publish workflow in \`helix-elr\`
+          EOF
+          )"
