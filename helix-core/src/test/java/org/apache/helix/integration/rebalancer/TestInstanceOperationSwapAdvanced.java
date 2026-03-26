@@ -395,8 +395,6 @@ public class TestInstanceOperationSwapAdvanced extends TestInstanceOperationBase
 
     enabledTopologyAwareRebalance();
 
-    Map<String, ExternalView> originalEVs = getEVs();
-
     String instanceToSwapOutName = _participants.get(0).getInstanceName();
     InstanceConfig instanceToSwapOutInstanceConfig = _gSetupTool.getClusterManagementTool()
         .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName);
