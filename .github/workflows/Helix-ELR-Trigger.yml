@@ -20,7 +20,8 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: dev
-          # PAT needed so the pushed branch can trigger other workflows
+          fetch-depth: 0
+          # PAT needed to push to dev and create release branch
           token: ${{ secrets.ELR_TRIGGER_PAT }}
 
       - name: Set up JDK 11
@@ -29,35 +30,98 @@ jobs:
           java-version: '11'
           distribution: 'temurin'
 
-      - name: Derive release version from pom.xml
-        id: version
-        run: |
-          SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          BASE_VERSION=${SNAPSHOT_VERSION%-SNAPSHOT}
-          TIMESTAMP=$(date +%Y%m%d%H%M)
-          RELEASE_VERSION="${BASE_VERSION}-dev-${TIMESTAMP}"
-          BRANCH="release_${RELEASE_VERSION}"
-          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Derived version: $RELEASE_VERSION, branch: $BRANCH"
-
-      - name: Create release branch and bump pom.xml
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${{ steps.version.outputs.branch }}"
-          mvn versions:set -DnewVersion="${{ steps.version.outputs.release_version }}" -DgenerateBackupPoms=false
+
+      - name: Determine action
+        id: plan
+        run: |
+          git fetch --all
+
+          # Read current version from dev pom.xml (e.g. 1.6.0-SNAPSHOT → 1.6.0)
+          SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          BASE_VERSION=${SNAPSHOT_VERSION%-SNAPSHOT}
+          echo "Base version from dev pom.xml: $BASE_VERSION"
+
+          # Find the most recent release branch for this version prefix
+          EXISTING_BRANCH=$(git branch -r \
+            | grep "origin/release_${BASE_VERSION}" \
+            | sed 's|.*origin/||' \
+            | sort | tail -1 | xargs)
+
+          if [ -z "$EXISTING_BRANCH" ]; then
+            # (a) No release branch for this version yet — create one
+            echo "No existing release branch for $BASE_VERSION. Will create one."
+            echo "action=create" >> "$GITHUB_OUTPUT"
+            echo "release_base_version=$BASE_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found existing release branch: $EXISTING_BRANCH"
+
+            # Check for new commits in dev since the release branch was cut
+            MERGE_BASE=$(git merge-base origin/dev "origin/$EXISTING_BRANCH")
+            NEW_COMMITS=$(git log "${MERGE_BASE}..origin/dev" --oneline | wc -l | xargs)
+            echo "New commits in dev since last release branch: $NEW_COMMITS"
+
+            if [ "$NEW_COMMITS" -gt 0 ]; then
+              # (b) New commits exist — bump patch, cut new release branch
+              echo "New commits found. Will bump patch version and create new release."
+
+              MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+              MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+              PATCH=$(echo "$BASE_VERSION" | cut -d. -f3)
+              NEW_BASE_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+              echo "action=bump_and_create" >> "$GITHUB_OUTPUT"
+              echo "release_base_version=$NEW_BASE_VERSION" >> "$GITHUB_OUTPUT"
+              echo "new_snapshot_version=${NEW_BASE_VERSION}-SNAPSHOT" >> "$GITHUB_OUTPUT"
+            else
+              # (c) No new commits — nothing to release
+              echo "No new commits in dev since last release. Skipping."
+              echo "action=skip" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Bump patch version in dev pom.xml
+        if: steps.plan.outputs.action == 'bump_and_create'
+        run: |
+          NEW_SNAPSHOT="${{ steps.plan.outputs.new_snapshot_version }}"
+          echo "Bumping dev pom.xml to $NEW_SNAPSHOT"
+          mvn versions:set -DnewVersion="$NEW_SNAPSHOT" -DgenerateBackupPoms=false
           git add -A
-          git commit -m "Set release version to ${{ steps.version.outputs.release_version }}"
-          git push origin "${{ steps.version.outputs.branch }}"
+          git commit -m "Bump version to $NEW_SNAPSHOT for next release cycle"
+          git push origin dev
+
+      - name: Compute release version and branch name
+        id: release
+        if: steps.plan.outputs.action != 'skip'
+        run: |
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          BASE="${{ steps.plan.outputs.release_base_version }}"
+          RELEASE_VERSION="${BASE}-dev-${TIMESTAMP}"
+          BRANCH="release_${RELEASE_VERSION}"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Release version: $RELEASE_VERSION  Branch: $BRANCH"
+
+      - name: Cut release branch and set version in pom.xml
+        if: steps.plan.outputs.action != 'skip'
+        run: |
+          git checkout -b "${{ steps.release.outputs.branch }}"
+          mvn versions:set -DnewVersion="${{ steps.release.outputs.release_version }}" -DgenerateBackupPoms=false
+          git add -A
+          git commit -m "Set release version to ${{ steps.release.outputs.release_version }}"
+          git push origin "${{ steps.release.outputs.branch }}"
 
       - name: Dispatch ELR publish workflow
+        if: steps.plan.outputs.action != 'skip'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.ELR_TRIGGER_PAT }}
           script: |
-            const branch = '${{ steps.version.outputs.branch }}';
-            const version = '${{ steps.version.outputs.release_version }}';
+            const branch = '${{ steps.release.outputs.branch }}';
+            const version = '${{ steps.release.outputs.release_version }}';
 
             console.log(`Triggering ELR for branch: ${branch}, version: ${version}`);
 
