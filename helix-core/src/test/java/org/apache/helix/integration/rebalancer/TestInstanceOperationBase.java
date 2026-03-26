@@ -80,7 +80,7 @@ public abstract class TestInstanceOperationBase extends ZkTestBase {
   protected final int ZONE_COUNT = 4;
   protected final int START_NUM_NODE = 10;
   protected static final int START_PORT = 12918;
-  protected static int _nextStartPort = START_PORT;
+  protected static final AtomicInteger _nextStartPort = new AtomicInteger(START_PORT);
   protected static final int PARTITIONS = 20;
 
   protected final String CLASS_NAME = getShortClassName();
@@ -129,7 +129,7 @@ public abstract class TestInstanceOperationBase extends ZkTestBase {
     _gSetupTool.addCluster(CLUSTER_NAME, true);
 
     for (int i = 0; i < START_NUM_NODE; i++) {
-      String participantName = PARTICIPANT_PREFIX + "_" + _nextStartPort;
+      String participantName = PARTICIPANT_PREFIX + "_" + _nextStartPort.get();
       addParticipant(participantName);
     }
 
@@ -236,7 +236,7 @@ public abstract class TestInstanceOperationBase extends ZkTestBase {
 
     // 5. Restore participant count to START_NUM_NODE
     while (_participants.size() < START_NUM_NODE) {
-      addParticipant(PARTICIPANT_PREFIX + "_" + _nextStartPort);
+      addParticipant(PARTICIPANT_PREFIX + "_" + _nextStartPort.get());
     }
 
     // 6. Reset state model delay to default
@@ -364,7 +364,7 @@ public abstract class TestInstanceOperationBase extends ZkTestBase {
     }
     _participants.add(participant);
     _participantNames.add(participantName);
-    _nextStartPort++;
+    _nextStartPort.getAndIncrement();
   }
 
   // -----------------------------------------------------------------------
