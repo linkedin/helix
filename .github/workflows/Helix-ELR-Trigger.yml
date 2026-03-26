@@ -16,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout master
+      - name: Checkout dev
         uses: actions/checkout@v3
         with:
-          ref: master
+          ref: dev
           # PAT needed so the pushed branch can trigger other workflows
           token: ${{ secrets.ELR_TRIGGER_PAT }}
 
