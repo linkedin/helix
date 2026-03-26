@@ -559,6 +559,78 @@ public class TestClusterStatusMonitor {
     Assert.assertEquals(_server.getAttribute(type2ObjectName, "AvailableThreadGauge"), 29L);
   }
 
+  @Test
+  public void testUpdateInstanceDomainInfoValidity() throws Exception {
+    String clusterName = "TestCluster_DomainInfo";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    int numInstances = 5;
+    Set<String> instanceSet = Sets.newHashSet();
+    for (int i = 0; i < numInstances; i++) {
+      instanceSet.add("instance_" + i);
+    }
+
+    // Register instance monitors via setClusterInstanceStatus
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    // All instances should default to valid (1)
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Assert.assertTrue(_server.isRegistered(objName));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      Assert.assertTrue(value instanceof Long);
+      Assert.assertEquals((long) value, 1L,
+          "Instance " + instance + " should default to valid domain info");
+    }
+
+    // Mark some instances as invalid
+    Set<String> invalidInstances = Sets.newHashSet();
+    invalidInstances.add("instance_1");
+    invalidInstances.add("instance_3");
+    monitor.updateInstanceDomainInfoValidity(invalidInstances);
+
+    // Verify invalid instances have gauge = 0, valid instances have gauge = 1
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      long expected = invalidInstances.contains(instance) ? 0L : 1L;
+      Assert.assertEquals((long) value, expected,
+          "Instance " + instance + " DomainInfoValidGauge mismatch");
+    }
+
+    // Update again with a different set of invalid instances
+    Set<String> newInvalidInstances = Sets.newHashSet();
+    newInvalidInstances.add("instance_0");
+    monitor.updateInstanceDomainInfoValidity(newInvalidInstances);
+
+    // instance_1 and instance_3 should now be valid (1), instance_0 should be invalid (0)
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      long expected = newInvalidInstances.contains(instance) ? 0L : 1L;
+      Assert.assertEquals((long) value, expected,
+          "Instance " + instance + " DomainInfoValidGauge mismatch after update");
+    }
+
+    // Update with empty set — all should be valid
+    monitor.updateInstanceDomainInfoValidity(Collections.emptySet());
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      Assert.assertEquals((long) value, 1L,
+          "Instance " + instance + " should be valid when no invalid instances");
+    }
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName));
+  }
+
   private void verifyCapacityMetrics(ClusterStatusMonitor monitor, Map<String, Double> maxUsageMap,
       Map<String, Map<String, Integer>> instanceCapacityMap)
       throws MalformedObjectNameException, IOException, AttributeNotFoundException, MBeanException,
