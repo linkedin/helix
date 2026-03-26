@@ -199,8 +199,12 @@ public class TestInstanceOperationSwapAdvanced extends TestInstanceOperationBase
             .getOperation(),
         InstanceConstants.InstanceOperation.UNKNOWN);
 
-    verifier(() -> (validateEVsCorrect(getEVs(), originalEVs, swapOutInstancesToSwapInInstances,
-        Collections.emptySet(), ImmutableSet.of(instanceToSwapInName))), TIMEOUT);
+    // WAGED rebalancer may recompute a different global optimum after swap completion,
+    // so validate swap outcome structurally rather than via exact state-map comparison.
+    verifier(() -> {
+      validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
+      return true;
+    }, TIMEOUT);
   }
 
   @Test
@@ -252,8 +256,12 @@ public class TestInstanceOperationSwapAdvanced extends TestInstanceOperationBase
     Assert.assertFalse(_gSetupTool.getClusterManagementTool()
         .getInstanceConfig(CLUSTER_NAME, instanceToSwapOutName).getInstanceEnabled());
 
-    verifier(() -> (validateEVsCorrect(getEVs(), originalEVs, swapOutInstancesToSwapInInstances,
-        Collections.emptySet(), ImmutableSet.of(instanceToSwapInName))), TIMEOUT);
+    // WAGED rebalancer may recompute a different global optimum after swap completion,
+    // so validate swap outcome structurally rather than via exact state-map comparison.
+    verifier(() -> {
+      validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
+      return true;
+    }, TIMEOUT);
   }
 
   @Test
