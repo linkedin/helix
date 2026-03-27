@@ -25,8 +25,8 @@ export class HelixCtrl {
 
     const user = req.session.username;
     const method = req.method.toLowerCase();
-    if (method != 'get' && !req.session.isAdmin) {
-      res.status(403).send('Forbidden');
+    if (method != 'get' && !req.session.username) {
+      res.status(401).send('Unauthorized, must be logged in to make write requests');
       return;
     }
 

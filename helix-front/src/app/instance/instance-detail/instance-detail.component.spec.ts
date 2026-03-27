@@ -34,12 +34,14 @@ describe('InstanceDetailComponent', () => {
     showConfirmation: () => Promise.resolve(false),
   };
 
-  function setupWithInstance(instance: Instance) {
+  function setupWithInstance(instance: Instance, mockServiceOverrides?: any) {
     const mockInstanceService = {
       get: () => of(instance),
       can: () => of(true),
       enable: () => of(null),
       disable: () => of(null),
+      setInstanceOperation: () => of(null),
+      ...mockServiceOverrides,
     };
 
     TestBed.configureTestingModule({
@@ -146,4 +148,25 @@ describe('InstanceDetailComponent', () => {
 
     expect(component.isLoading).toBe(false);
   });
+
+  it('should have evacuateInstance method', () => {
+    const instance = new Instance(
+      'host1_1234', 'TestCluster', true, true,
+      undefined, undefined, 'ENABLE'
+    );
+    setupWithInstance(instance);
+
+    expect(typeof component.evacuateInstance).toBe('function');
+  });
+
+  it('should have setInstanceState method', () => {
+    const instance = new Instance(
+      'host1_1234', 'TestCluster', true, true,
+      undefined, undefined, 'ENABLE'
+    );
+    setupWithInstance(instance);
+
+    expect(typeof component.setInstanceState).toBe('function');
+  });
+
 });

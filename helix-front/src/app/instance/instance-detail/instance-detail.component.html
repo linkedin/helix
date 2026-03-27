@@ -72,7 +72,15 @@
       <mat-menu #menu="matMenu">
         <button
           mat-menu-item
-          *ngIf="instance && instance.operationState === 'ENABLE'"
+          *ngIf="instance && instance.operationState !== 'ENABLE'"
+          (click)="enableInstance()"
+        >
+          <mat-icon>play_circle_outline</mat-icon>
+          <span>Enable this Instance</span>
+        </button>
+        <button
+          mat-menu-item
+          *ngIf="instance && instance.operationState !== 'DISABLE'"
           (click)="disableInstance()"
         >
           <mat-icon>not_interested</mat-icon>
@@ -80,12 +88,13 @@
         </button>
         <button
           mat-menu-item
-          *ngIf="instance && instance.operationState !== 'ENABLE'"
-          (click)="enableInstance()"
+          *ngIf="instance && instance.operationState !== 'EVACUATE'"
+          (click)="evacuateInstance()"
         >
-          <mat-icon>play_circle_outline</mat-icon>
-          <span>Enable this Instance</span>
+          <mat-icon>exit_to_app</mat-icon>
+          <span>Evacuate this Instance</span>
         </button>
+        <mat-divider></mat-divider>
         <button mat-menu-item (click)="removeInstance()">
           <mat-icon>delete</mat-icon>
           <span>REMOVE this Instance</span>

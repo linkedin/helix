@@ -355,4 +355,48 @@ describe('InstanceService', () => {
       });
     });
   });
+
+  describe('setInstanceOperation', () => {
+    it('should POST with correct query parameters for EVACUATE', (done) => {
+      service
+        .setInstanceOperation('TestCluster', 'host1_1234', 'EVACUATE', 'incident response')
+        .subscribe(() => done());
+
+      const req = httpMock.expectOne((r) =>
+        r.url.includes('/clusters/TestCluster/instances/host1_1234') &&
+        r.url.includes('command=setInstanceOperation') &&
+        r.url.includes('instanceOperation=EVACUATE') &&
+        r.url.includes('instanceOperationSource=USER') &&
+        r.url.includes('reason=incident%20response')
+      );
+      expect(req.request.method).toBe('POST');
+      req.flush(null);
+    });
+
+    it('should POST with correct query parameters for ENABLE', (done) => {
+      service
+        .setInstanceOperation('TestCluster', 'host1_1234', 'ENABLE', 'recovery complete')
+        .subscribe(() => done());
+
+      const req = httpMock.expectOne((r) =>
+        r.url.includes('command=setInstanceOperation') &&
+        r.url.includes('instanceOperation=ENABLE')
+      );
+      expect(req.request.method).toBe('POST');
+      req.flush(null);
+    });
+
+    it('should POST with correct query parameters for DISABLE', (done) => {
+      service
+        .setInstanceOperation('TestCluster', 'host1_1234', 'DISABLE', 'maintenance window')
+        .subscribe(() => done());
+
+      const req = httpMock.expectOne((r) =>
+        r.url.includes('command=setInstanceOperation') &&
+        r.url.includes('instanceOperation=DISABLE')
+      );
+      expect(req.request.method).toBe('POST');
+      req.flush(null);
+    });
+  });
 });

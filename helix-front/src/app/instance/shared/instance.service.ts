@@ -1,5 +1,6 @@
 import { map } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
+import { HttpParams } from '@angular/common/http';
 
 import { Instance, InstanceOperationState } from './instance.model';
 import { HelixService } from '../../core/helix.service';
@@ -130,6 +131,24 @@ export class InstanceService extends HelixService {
     return this.post(
       `/clusters/${clusterName}/instances/${instanceName}?command=disable`,
       null
+    );
+  }
+
+  public setInstanceOperation(
+    clusterName: string,
+    instanceName: string,
+    operation: InstanceOperationState,
+    reason: string
+  ) {
+    const params = new HttpParams()
+      .set('command', 'setInstanceOperation')
+      .set('instanceOperation', operation)
+      .set('instanceOperationSource', 'USER')
+      .set('reason', reason);
+    return this.post(
+      `/clusters/${clusterName}/instances/${instanceName}`,
+      null,
+      params
     );
   }
 }

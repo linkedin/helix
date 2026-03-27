@@ -41,18 +41,17 @@ export class UserCtrl {
   }
 
   //
-  // Check the server-side session store,
-  // see if this helix-front ExpressJS server
-  // already knows that the current user is an admin.
+  // Returns true if the user is authenticated (has a valid session).
+  // Per-user authorization is handled by helix-rest's DatavaultAuthValidator
+  // via Identity-Token forwarding.
   //
   protected can(req: HelixRequest, res: Response) {
     try {
-      return res.json(req.session.isAdmin ? true : false);
+      return res.json(req.session.username ? true : false);
     } catch (err) {
       throw new Error(
-        `Error from /can logged in admin user session status endpoint: ${err}`
+        `Error from /can endpoint: ${err}`
       );
-      return false;
     }
   }
 
@@ -86,8 +85,7 @@ export class UserCtrl {
 
           ldap.search(LDAP.base, opts, function (err, result) {
             let isInAdminGroup = false;
-            let responseSent = false;
-            let tokenRequestPending = false;
+            let searchComplete = false;
             result.on('searchEntry', function (entry) {
               if (entry.object && !err) {
                 const groups = entry.object['memberOf'];
@@ -95,86 +93,69 @@ export class UserCtrl {
                   const groupName = group.split(',', 1)[0].split('=')[1];
                   if (groupName == LDAP.adminGroup) {
                     isInAdminGroup = true;
-
-                    //
-                    // Get an Identity-Token
-                    // if an IDENTITY_TOKEN_SOURCE
-                    // is specified in the config
-                    //
-                    if (IDENTITY_TOKEN_SOURCE) {
-                      tokenRequestPending = true;
-                      const body = JSON.stringify({
-                        username: credential.username,
-                        password: credential.password,
-                        ...CUSTOM_IDENTITY_TOKEN_REQUEST_BODY,
-                      });
-
-                      const options: HelixRequestOptions = {
-                        url: IDENTITY_TOKEN_SOURCE,
-                        json: '',
-                        body,
-                        headers: {
-                          'Content-Type': 'application/json',
-                        },
-                        agentOptions: {
-                          rejectUnauthorized: false,
-                        },
-                      };
-
-                      if (SSL.cafiles.length > 0) {
-                        options.agentOptions.ca = readFileSync(SSL.cafiles[0], {
-                          encoding: 'utf-8',
-                        });
-                      }
-
-                      function callback(error, _res, body) {
-                        tokenRequestPending = false;
-                        if (error || body?.error) {
-                          req.session.isAdmin = isInAdminGroup;
-                          responseSent = true;
-                          res.json(isInAdminGroup);
-                        } else {
-                          const parsedBody = JSON.parse(body);
-                          req.session.isAdmin = isInAdminGroup;
-                          req.session.identityToken = parsedBody;
-
-                          const cookieName = 'helixui_identity.token';
-                          const cookieValue =
-                            parsedBody.value[TOKEN_RESPONSE_KEY];
-                          const cookieExpiresDate = new Date(
-                            parsedBody.value[TOKEN_EXPIRATION_KEY]
-                          );
-                          const cookieOptions = {
-                            expires: cookieExpiresDate,
-                          };
-                          res.cookie(cookieName, cookieValue, cookieOptions);
-                          responseSent = true;
-                          res.json(isInAdminGroup);
-
-                          return parsedBody;
-                        }
-                      }
-                      request.post(options, callback);
-                    } else {
-                      req.session.isAdmin = isInAdminGroup;
-                      responseSent = true;
-                      res.json(isInAdminGroup);
-                    }
-                    //
-                    // END Get an Identity-Token
-                    //
                   }
                 }
-              } else {
-                req.session.isAdmin = isInAdminGroup;
-                responseSent = true;
-                res.json(isInAdminGroup);
               }
             });
             result.on('end', function () {
-              if (!responseSent && !tokenRequestPending) {
-                req.session.isAdmin = false;
-                res.json(false);
+              if (searchComplete) {
+                return;
+              }
+              searchComplete = true;
+              req.session.isAdmin = isInAdminGroup;
+
+              //
+              // Fetch an Identity-Token for ALL authenticated users
+              // so that helix-rest can perform per-user authorization
+              // via DatavaultAuthValidator.
+              //
+              if (IDENTITY_TOKEN_SOURCE) {
+                const body = JSON.stringify({
+                  username: credential.username,
+                  password: credential.password,
+                  ...CUSTOM_IDENTITY_TOKEN_REQUEST_BODY,
+                });
+
+                const options: HelixRequestOptions = {
+                  url: IDENTITY_TOKEN_SOURCE,
+                  json: '',
+                  body,
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  agentOptions: {
+                    rejectUnauthorized: false,
+                  },
+                };
+
+                if (SSL.cafiles.length > 0) {
+                  options.agentOptions.ca = readFileSync(SSL.cafiles[0], {
+                    encoding: 'utf-8',
+                  });
+                }
+
+                request.post(options, function (error, _res, body) {
+                  if (error || body?.error) {
+                    res.json(true);
+                  } else {
+                    const parsedBody = JSON.parse(body);
+                    req.session.identityToken = parsedBody;
+
+                    const cookieName = 'helixui_identity.token';
+                    const cookieValue =
+                      parsedBody.value[TOKEN_RESPONSE_KEY];
+                    const cookieExpiresDate = new Date(
+                      parsedBody.value[TOKEN_EXPIRATION_KEY]
+                    );
+                    const cookieOptions = {
+                      expires: cookieExpiresDate,
+                    };
+                    res.cookie(cookieName, cookieValue, cookieOptions);
+                    res.json(true);
+                  }
+                });
+              } else {
+                res.json(true);
               }
             });
           });
