@@ -28,7 +28,7 @@ jobs:
     - name: Run All Tests
       run: mvn -q -fae test
     - name: Upload to Codecov
-      uses: codecov/codecov-action@aa56896cf108bd10b5eb883cd1d24196da57f695
+      uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe
       if: ${{ github.repository == 'apache/helix' && github.event_name == 'push' && (success() || failure()) }}
     - name: Generate Test Report
       uses: dorny/test-reporter@v1
