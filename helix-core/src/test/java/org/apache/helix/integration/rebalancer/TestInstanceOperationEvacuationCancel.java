@@ -15,14 +15,11 @@ import org.testng.annotations.Test;
 
 public class TestInstanceOperationEvacuationCancel extends TestInstanceOperationBase {
 
-  @Test
-  public void testEvacuateAndCancelBeforeBootstrapFinish() throws Exception {
-    System.out.println(
-        "START TestInstanceOperationEvacuationCancel.testEvacuateAndCancelBeforeBootstrapFinish() at "
-            + new Date(System.currentTimeMillis()));
-
-    enabledTopologyAwareRebalance();
-
+  /**
+   * Adds two extra MasterSlave resources to increase the partition count so that
+   * evacuation has enough work to avoid completing prematurely during cancel tests.
+   */
+  private void createAdditionalMasterSlaveResources() throws InterruptedException {
     createResourceWithDelayedRebalance(CLUSTER_NAME, "TEST_DB3_DELAYED_CRUSHED", "MasterSlave",
         PARTITIONS, REPLICA, REPLICA - 1, 200000, CrushEdRebalanceStrategy.class.getName());
     _allDBs.add("TEST_DB3_DELAYED_CRUSHED");
@@ -30,7 +27,18 @@ public class TestInstanceOperationEvacuationCancel extends TestInstanceOperation
         PARTITIONS, REPLICA, REPLICA - 1);
     _allDBs.add("TEST_DB4_DELAYED_WAGED");
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
+  }
 
+  @Test
+  public void testEvacuateAndCancelBeforeBootstrapFinish() throws Exception {
+    System.out.println(
+        "START TestInstanceOperationEvacuationCancel.testEvacuateAndCancelBeforeBootstrapFinish() at "
+            + new Date(System.currentTimeMillis()));
+
+    enabledTopologyAwareRebalance();
+    createAdditionalMasterSlaveResources();
+
+    // Negative delay = slow upward transitions (OFFLINE→SLAVE, SLAVE→MASTER)
     _stateModelDelay = -10000L;
     String instanceToEvacuate = _participants.get(0).getInstanceName();
     _gSetupTool.getClusterManagementTool().setInstanceOperation(CLUSTER_NAME, instanceToEvacuate,
@@ -60,6 +68,8 @@ public class TestInstanceOperationEvacuationCancel extends TestInstanceOperation
       validateAssignmentInEv(assignment.get(resource));
     }
 
+    // ST delay exceeds verifier timeout, so convergence only succeeds because
+    // cancelling the evacuation (ENABLE) triggers state transition cancellation.
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     assignment = getEVs();
@@ -77,15 +87,9 @@ public class TestInstanceOperationEvacuationCancel extends TestInstanceOperation
             + new Date(System.currentTimeMillis()));
 
     enabledTopologyAwareRebalance();
+    createAdditionalMasterSlaveResources();
 
-    createResourceWithDelayedRebalance(CLUSTER_NAME, "TEST_DB3_DELAYED_CRUSHED", "MasterSlave",
-        PARTITIONS, REPLICA, REPLICA - 1, 200000, CrushEdRebalanceStrategy.class.getName());
-    _allDBs.add("TEST_DB3_DELAYED_CRUSHED");
-    createResourceWithWagedRebalance(CLUSTER_NAME, "TEST_DB4_DELAYED_WAGED", "MasterSlave",
-        PARTITIONS, REPLICA, REPLICA - 1);
-    _allDBs.add("TEST_DB4_DELAYED_WAGED");
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
-
+    // Positive delay = slow downward transitions (MASTER→SLAVE, SLAVE→OFFLINE, OFFLINE→DROPPED)
     _stateModelDelay = 10000L;
 
     String instanceToEvacuate = _participants.get(0).getInstanceName();
