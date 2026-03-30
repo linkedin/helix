@@ -29,7 +29,7 @@ jobs:
       uses: codecov/codecov-action@v5
       with:
         files: '**/target/site/jacoco/jacoco.xml'
-        fail_ci_if_error: false
+        fail_ci_if_error: true
     - name: Print Tests Results
       run: .github/scripts/printTestResult.sh
       if: ${{ success() || failure() }}
