@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.model.Partition;
@@ -89,5 +90,17 @@ public class OptimalAssignment {
   public String getFailures() {
     // TODO: format the error string
     return _failedAssignments.toString();
+  }
+
+  /**
+   * @return A map of failure reason description to the number of nodes that failed for that reason,
+   *         aggregated across all failed replicas.
+   */
+  public Map<String, Long> getFailureSummary() {
+    return _failedAssignments.values().stream()
+        .flatMap(nodeFailures -> nodeFailures.values().stream())
+        .flatMap(List::stream)
+        .collect(Collectors.groupingBy(reason -> reason != null ? reason : "Unknown",
+            Collectors.counting()));
   }
 }

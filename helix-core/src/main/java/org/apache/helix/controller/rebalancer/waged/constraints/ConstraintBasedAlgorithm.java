@@ -112,8 +112,13 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       // stop immediately if any replica cannot find best assignable node
       if (!maybeBestNode.isPresent() || optimalAssignment.hasAnyFailure()) {
         String errorMessage = String.format(
-            "Unable to find any available candidate node for partition %s; Fail reasons: %s",
-            replica.getPartitionName(), optimalAssignment.getFailures());
+            "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
+                + "Failure summary: %s; Fail reasons: %s",
+            replica.getPartitionName(),
+            replica.getResourceName(),
+            clusterModel.getContext().getClusterName(),
+            optimalAssignment.getFailureSummary(),
+            optimalAssignment.getFailures());
         throw new HelixRebalanceException(errorMessage,
             HelixRebalanceException.Type.FAILED_TO_CALCULATE);
       }
