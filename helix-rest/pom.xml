@@ -21,7 +21,7 @@
   <parent>
     <groupId>org.apache.helix</groupId>
     <artifactId>helix</artifactId>
-    <version>1.4.4-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -43,7 +43,6 @@
   </organization>
 
   <properties>
-    <revision>1.4.4-SNAPSHOT</revision>
     <osgi.import>
       org.apache.helix*,
       org.apache.commons.cli*,
@@ -61,7 +60,7 @@
     <dependency>
       <groupId>org.apache.helix</groupId>
       <artifactId>metadata-store-directory-common</artifactId>
-      <version>${revision}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.yaml</groupId>
