@@ -41,7 +41,7 @@ jobs:
       - name: Derive versions
         id: version
         run: |
-          SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=revision -q -DforceStdout)
           BASE_VERSION=${SNAPSHOT_VERSION%-SNAPSHOT}
 
           MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
@@ -103,7 +103,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git checkout -b "${{ steps.version.outputs.release_branch }}"
-          mvn versions:set \
+          mvn versions:set-property \
+            -Dproperty=revision \
             -DnewVersion="${{ steps.version.outputs.release_version }}" \
             -DgenerateBackupPoms=false
           git add -A
@@ -116,7 +117,8 @@ jobs:
         run: |
           git checkout dev
           git pull origin dev
-          mvn versions:set \
+          mvn versions:set-property \
+            -Dproperty=revision \
             -DnewVersion="${{ steps.version.outputs.next_dev_version }}" \
             -DgenerateBackupPoms=false
           git add -A
