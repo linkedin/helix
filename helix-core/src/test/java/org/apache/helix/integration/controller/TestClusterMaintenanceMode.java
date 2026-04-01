@@ -443,7 +443,13 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         null);
     TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, 2000L);
 
-    // Bring all instances back up
+    // Stop the extra instance added in testMaintenanceModeAddNewInstance so we have a
+    // predictable instance count (_numNodes) for percentage calculations
+    if (_newInstance != null && _newInstance.isConnected()) {
+      _newInstance.syncStop();
+    }
+
+    // Bring all original instances back up
     for (int i = 0; i < _numNodes; i++) {
       if (!_participants[i].isConnected()) {
         String instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + i);
@@ -451,16 +457,18 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         _participants[i].syncStart();
       }
     }
-    TestHelper.verify(
-        () -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == _numNodes, 2000L);
+    // Total routable instances = _numNodes (3) + 1 (_newInstance, offline but still registered).
+    // _newInstance is stopped but its InstanceConfig still exists in the cluster, so it counts
+    // as a routable instance. Total routable = _numNodes + 1 = 4.
+    int totalRegisteredRoutable = _numNodes + 1;
 
-    // Set percentage-based config: entry at 30% (of 3 nodes = 0, so >0 triggers), exit at 33%
-    // (of 3 nodes = 0, so exit only when 0 offline)
-    // Use absolute entry threshold of 1 for reliable entry, and percentage-based exit
+    // Set percentage-based exit config.
+    // Use absolute entry threshold of 1 for reliable entry, and percentage-based exit.
+    // 24% of 4 routable = 0 (integer truncation). So exit only when 0 offline/disabled.
     ClusterConfig clusterConfig = _manager.getConfigAccessor().getClusterConfig(CLUSTER_NAME);
     clusterConfig.setMaxOfflineInstancesAllowed(1);
     clusterConfig.setNumOfflineInstancesForAutoExit(-1); // Disable absolute exit
-    clusterConfig.setNumOfflineInstancesForAutoExitPercentage(33);
+    clusterConfig.setNumOfflineInstancesForAutoExitPercentage(24);
     _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
 
     // Kill 2 instances to trigger auto-enter (2 > 1)
@@ -470,24 +478,27 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     TestHelper.verify(
         () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, TIMEOUT);
 
-    // Bring up 1 instance (1 still offline). 33% of 3 = 0, so 1 > 0, should NOT auto-exit
+    // Bring up 1 instance (1 original still offline + _newInstance offline = 2 offline).
+    // Effective exit threshold = 24% of 4 = 0. 2 > 0, so should NOT auto-exit.
     String instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + 0);
     _participants[0] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
     _participants[0].syncStart();
-    TestHelper.verify(
-        () -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == _numNodes - 1,
-        2000L);
     // Give some time for the pipeline to run and verify maintenance is NOT exited
     Thread.sleep(2000);
     MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
     Assert.assertNotNull(maintenanceSignal, "Cluster should still be in maintenance");
 
-    // Bring up the last instance (0 offline). 0 <= 0, so should auto-exit
+    // Bring up the last original instance AND _newInstance so all are online (0 offline).
+    // 0 <= 0, so should auto-exit.
     instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + 1);
     _participants[1] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
     _participants[1].syncStart();
+    _newInstance =
+        new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, _newInstance.getInstanceName());
+    _newInstance.syncStart();
     TestHelper.verify(
-        () -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == _numNodes, 2000L);
+        () -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == totalRegisteredRoutable,
+        2000L);
 
     // Verify cluster auto-exited maintenance
     TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, TIMEOUT);

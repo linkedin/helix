@@ -608,6 +608,14 @@ public class ClusterConfig extends HelixProperty {
           "Max offline instances allowed percentage must be between 0 and 100, or -1 to disable. Got: "
               + maxOfflineInstancesAllowedPercentage);
     }
+    int exitPercentage = getNumOfflineInstancesForAutoExitPercentage();
+    if (exitPercentage >= 0 && maxOfflineInstancesAllowedPercentage >= 0) {
+      if (maxOfflineInstancesAllowedPercentage < exitPercentage) {
+        throw new HelixException(
+            "Entry percentage threshold must be greater than or equal to exit percentage threshold! "
+                + "Entry: " + maxOfflineInstancesAllowedPercentage + ", Exit: " + exitPercentage);
+      }
+    }
     _record.setIntField(
         ClusterConfigProperty.MAX_OFFLINE_INSTANCES_ALLOWED_PERCENTAGE.name(),
         maxOfflineInstancesAllowedPercentage);
@@ -684,7 +692,7 @@ public class ClusterConfig extends HelixProperty {
     int effectivePercentage = -1;
     if (percentageThreshold >= 0) {
       effectivePercentage =
-          (totalRoutableCount > 0) ? (totalRoutableCount * percentageThreshold / 100) : 0;
+          (totalRoutableCount > 0) ? (int) ((long) totalRoutableCount * percentageThreshold / 100) : 0;
     }
 
     if (absoluteThreshold < 0) {

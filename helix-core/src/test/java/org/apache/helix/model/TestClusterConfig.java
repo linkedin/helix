@@ -490,6 +490,14 @@ public class TestClusterConfig {
   }
 
   @Test(expectedExceptions = HelixException.class)
+  public void testSetEntryPercentageBelowExistingExitPercentage() {
+    // Reverse validation: setting entry below already-set exit should throw
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    testConfig.setNumOfflineInstancesForAutoExitPercentage(50);
+    testConfig.setMaxOfflineInstancesAllowedPercentage(30); // entry < exit, should throw
+  }
+
+  @Test(expectedExceptions = HelixException.class)
   public void testSetAutoExitPercentageTooHigh() {
     ClusterConfig testConfig = new ClusterConfig("testId");
     testConfig.setNumOfflineInstancesForAutoExitPercentage(101);
@@ -570,6 +578,13 @@ public class TestClusterConfig {
   public void testResolveEffectiveThresholdLargeCluster() {
     // 5% of 500 = 25, absolute=30. Stricter is 25.
     Assert.assertEquals(ClusterConfig.resolveEffectiveThreshold(30, 5, 500), 25);
+  }
+
+  @Test
+  public void testResolveEffectiveThresholdNoIntegerOverflow() {
+    // Verify that large totalRoutableCount * percentageThreshold does not overflow
+    // 50% of 30,000,000 = 15,000,000 (would overflow int if not using long arithmetic)
+    Assert.assertEquals(ClusterConfig.resolveEffectiveThreshold(-1, 50, 30_000_000), 15_000_000);
   }
 
   private void trySetInvalidAbnormalStatesResolverMap(ClusterConfig testConfig,
