@@ -1112,7 +1112,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @return resource bean name
    */
   protected String getResourceBeanName(String resourceName) {
-    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, resourceName);
+    // JMX ObjectName values cannot contain ':', '=', ',', '*', or '?' unquoted.
+    // Quote the resource name only when it contains such characters to avoid
+    // MalformedObjectNameException (e.g. URN-style names like urn:li:foo:bar),
+    // while leaving normal resource names unchanged in the MBean key.
+    String safeResourceName = resourceName.matches(".*[,:=*?].*")
+        ? ObjectName.quote(resourceName) : resourceName;
+    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, safeResourceName);
   }
 
   /**
