@@ -66,10 +66,10 @@ jobs:
       - name: Check for new changes
         id: changes
         run: |
-          NEXT_PATCH="${{ steps.version.outputs.next_patch }}"
+          BASE_VERSION="${{ steps.version.outputs.base_version }}"
 
-          # Look for branches matching the bumped patch version
-          LATEST_RELEASE_BRANCH=$(git branch -r --list "origin/release_${NEXT_PATCH}-dev-*" \
+          # Look for existing release branches for the current base version
+          LATEST_RELEASE_BRANCH=$(git branch -r --list "origin/release_${BASE_VERSION}-dev-*" \
             | sed 's|origin/||' \
             | tr -d ' ' \
             | sort | tail -n 1)
@@ -95,27 +95,16 @@ jobs:
         run: |
           echo "No new commits on dev since the last release branch. Skipping release."
 
-      # ── 4. Cut release branch with bumped patch version in pom.xml ────────
-      - name: Create release branch
+      # ── 4. Bump dev pom.xml to next SNAPSHOT ──────────────────────────────
+      #       Must happen before cutting the release branch so this commit lands
+      #       on both dev and the release branch — future comparisons won't
+      #       count the pom bump as a new change.
+      - name: Bump dev to next SNAPSHOT
         if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git checkout -b "${{ steps.version.outputs.release_branch }}"
-          mvn versions:set-property \
-            -Dproperty=revision \
-            -DnewVersion="${{ steps.version.outputs.release_version }}" \
-            -DgenerateBackupPoms=false
-          git add -A
-          git commit -m "chore: set release version to ${{ steps.version.outputs.release_version }}"
-          git push origin "${{ steps.version.outputs.release_branch }}"
-
-      # ── 5. Bump dev pom.xml to next SNAPSHOT ──────────────────────────────
-      - name: Bump dev to next SNAPSHOT
-        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
-        run: |
-          git checkout dev
           git pull origin dev
           mvn versions:set-property \
             -Dproperty=revision \
@@ -124,6 +113,13 @@ jobs:
           git add -A
           git commit -m "chore: bump dev to ${{ steps.version.outputs.next_dev_version }}"
           git push origin dev
+
+      # ── 5. Cut release branch from dev ────────────────────────────────────
+      - name: Create release branch
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        run: |
+          git checkout -b "${{ steps.version.outputs.release_branch }}"
+          git push origin "${{ steps.version.outputs.release_branch }}"
 
       # ── 6. Trigger ELR publish ─────────────────────────────────────────────
       - name: Dispatch ELR publish workflow
