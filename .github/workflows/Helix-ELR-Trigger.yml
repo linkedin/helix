@@ -91,16 +91,17 @@ jobs:
 
       # ── 3. Skip if nothing new ─────────────────────────────────────────────
       - name: No changes — skip release
-        if: steps.changes.outputs.has_changes == 'false'
+        if: steps.changes.outputs.has_changes != 'true'
         run: |
           echo "No new commits on dev since the last release branch. Skipping release."
+          exit 0
 
       # ── 4. Bump dev pom.xml to next SNAPSHOT ──────────────────────────────
       #       Must happen before cutting the release branch so this commit lands
       #       on both dev and the release branch — future comparisons won't
       #       count the pom bump as a new change.
       - name: Bump dev to next SNAPSHOT
-        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -116,14 +117,14 @@ jobs:
 
       # ── 5. Cut release branch from dev ────────────────────────────────────
       - name: Create release branch
-        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
         run: |
           git checkout -b "${{ steps.version.outputs.release_branch }}"
           git push origin "${{ steps.version.outputs.release_branch }}"
 
       # ── 6. Trigger ELR publish ─────────────────────────────────────────────
       - name: Dispatch ELR publish workflow
-        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.ELR_TRIGGER_PAT }}
