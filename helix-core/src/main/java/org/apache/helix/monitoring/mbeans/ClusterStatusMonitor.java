@@ -405,6 +405,25 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Updates the domain info validity gauge for each instance. Instances in the invalidInstances
+   * set will have their gauge set to 0 (invalid), all other registered instances will be set
+   * to 1 (valid).
+   *
+   * @param invalidInstances the set of instance names whose domain info is not correctly populated
+   */
+  public void updateInstanceDomainInfoValidity(Set<String> invalidInstances) {
+    if (invalidInstances == null) {
+      invalidInstances = Collections.emptySet();
+    }
+    synchronized (_instanceMonitorMap) {
+      for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
+        boolean isInvalid = invalidInstances.contains(entry.getKey());
+        entry.getValue().updateDomainInfoValid(!isInvalid);
+      }
+    }
+  }
+
+  /**
    * Update the duration of handling a cluster event in a certain phase.
    * @param phase
    * @param duration
@@ -1112,13 +1131,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @return resource bean name
    */
   protected String getResourceBeanName(String resourceName) {
-    // JMX ObjectName values cannot contain ':', '=', ',', '*', or '?' unquoted.
-    // Quote the resource name only when it contains such characters to avoid
-    // MalformedObjectNameException (e.g. URN-style names like urn:li:foo:bar),
-    // while leaving normal resource names unchanged in the MBean key.
-    String safeResourceName = resourceName.matches(".*[,:=*?].*")
-        ? ObjectName.quote(resourceName) : resourceName;
-    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, safeResourceName);
+    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, resourceName);
   }
 
   /**
