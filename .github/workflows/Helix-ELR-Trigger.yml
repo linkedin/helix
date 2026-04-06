@@ -1,0 +1,148 @@
+name: Scheduled ELR Release
+
+on:
+  schedule:
+    # Runs twice a week: Monday and Thursday at 06:00 UTC
+    - cron: '0 6 * * 1'
+    - cron: '0 6 * * 4'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — skip branch creation, dev bump, and ELR dispatch'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  create-release-and-trigger-elr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v3
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.ELR_TRIGGER_PAT }}
+
+      - name: Fetch all remote branches
+        run: git fetch --all
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      # ── 1. Read version from dev pom.xml ──────────────────────────────────
+      - name: Derive versions
+        id: version
+        run: |
+          SNAPSHOT_VERSION=$(mvn help:evaluate -Dexpression=revision -q -DforceStdout)
+          BASE_VERSION=${SNAPSHOT_VERSION%-SNAPSHOT}
+
+          MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+          PATCH=$(echo "$BASE_VERSION" | cut -d. -f3)
+          NEXT_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          RELEASE_VERSION="${NEXT_PATCH}-dev-${TIMESTAMP}"   # e.g. 1.4.6-dev-202503271030
+          RELEASE_BRANCH="release_${RELEASE_VERSION}"        # e.g. release_1.4.6-dev-202503271030
+          NEXT_DEV_VERSION="${NEXT_PATCH}-SNAPSHOT"          # e.g. 1.4.6-SNAPSHOT
+
+          echo "base_version=$BASE_VERSION"             >> "$GITHUB_OUTPUT"
+          echo "next_patch=$NEXT_PATCH"                 >> "$GITHUB_OUTPUT"
+          echo "release_version=$RELEASE_VERSION"       >> "$GITHUB_OUTPUT"
+          echo "release_branch=$RELEASE_BRANCH"         >> "$GITHUB_OUTPUT"
+          echo "next_dev_version=$NEXT_DEV_VERSION"     >> "$GITHUB_OUTPUT"
+
+          echo "Base: $BASE_VERSION | Release: $RELEASE_VERSION | Next dev: $NEXT_DEV_VERSION"
+
+      # ── 2. Check if there are new commits on dev vs latest release branch ──
+      - name: Check for new changes
+        id: changes
+        run: |
+          BASE_VERSION="${{ steps.version.outputs.base_version }}"
+
+          # Look for existing release branches for the current base version
+          LATEST_RELEASE_BRANCH=$(git branch -r --list "origin/release_${BASE_VERSION}-dev-*" \
+            | sed 's|origin/||' \
+            | tr -d ' ' \
+            | sort | tail -n 1)
+
+          echo "Latest release branch found: '$LATEST_RELEASE_BRANCH'"
+
+          if [ -z "$LATEST_RELEASE_BRANCH" ]; then
+            echo "No prior release branch found — will create first release."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            COMMIT_COUNT=$(git rev-list --count "origin/${LATEST_RELEASE_BRANCH}..origin/dev")
+            echo "New commits since $LATEST_RELEASE_BRANCH: $COMMIT_COUNT"
+            if [ "$COMMIT_COUNT" -gt 0 ]; then
+              echo "has_changes=true"  >> "$GITHUB_OUTPUT"
+            else
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # ── 3. Skip if nothing new ─────────────────────────────────────────────
+      - name: No changes — skip release
+        if: steps.changes.outputs.has_changes != 'true'
+        run: |
+          echo "No new commits on dev since the last release branch. Skipping release."
+          exit 0
+
+      # ── 4. Bump dev pom.xml to next SNAPSHOT ──────────────────────────────
+      #       Must happen before cutting the release branch so this commit lands
+      #       on both dev and the release branch — future comparisons won't
+      #       count the pom bump as a new change.
+      - name: Bump dev to next SNAPSHOT
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git pull origin dev
+          mvn versions:set-property \
+            -Dproperty=revision \
+            -DnewVersion="${{ steps.version.outputs.next_dev_version }}" \
+            -DgenerateBackupPoms=false
+          git add -A
+          git commit -m "chore: bump dev to ${{ steps.version.outputs.next_dev_version }}"
+          git push origin dev
+
+      # ── 5. Cut release branch from dev ────────────────────────────────────
+      - name: Create release branch
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        run: |
+          git checkout -b "${{ steps.version.outputs.release_branch }}"
+          git push origin "${{ steps.version.outputs.release_branch }}"
+
+      # ── 6. Trigger ELR publish ─────────────────────────────────────────────
+      - name: Dispatch ELR publish workflow
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ELR_TRIGGER_PAT }}
+          script: |
+            const branch  = '${{ steps.version.outputs.release_branch }}';
+            const version = '${{ steps.version.outputs.release_version }}';
+            console.log(`Triggering ELR for branch: ${branch}, version: ${version}`);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'linkedin',
+              repo:  'helix-elr',
+              workflow_id: 'publish-linkedin-jfrog.yml',
+              ref:   'helix-elr-main',
+              inputs: {
+                version:             version,
+                branch:              branch,
+                repo:                'linkedin/helix',
+                jdk_build_version:   '11',
+                jdk_release_version: '11',
+              }
+            });
+            console.log('ELR workflow dispatch triggered successfully.');
