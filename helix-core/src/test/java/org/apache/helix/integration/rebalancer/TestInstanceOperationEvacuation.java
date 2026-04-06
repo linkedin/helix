@@ -27,6 +27,7 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     createDBInSemiAuto(_gSetupTool, CLUSTER_NAME, semiAutoDB,
         _participants.stream().map(ZKHelixManager::getInstanceName).collect(Collectors.toList()),
         BuiltInStateModelDefinitions.OnlineOffline.name(), 1, _participants.size());
+    _allDBs.add(semiAutoDB);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     Map<String, ExternalView> assignment = getEVs();
@@ -34,6 +35,11 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
       Assert.assertTrue(
           getParticipantsInEv(assignment.get(resource)).containsAll(_participantNames));
     }
+
+    // Remove semiAutoDB from _allDBs before evacuation: SEMI_AUTO resources use fixed
+    // preference lists and don't participate in evacuation, so the strict-match verifier
+    // cannot converge if it includes them.
+    _allDBs.remove(semiAutoDB);
 
     String instanceToEvacuate = _participants.get(0).getInstanceName();
     _gSetupTool.getClusterManagementTool()
@@ -59,7 +65,6 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, semiAutoDB);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
     Assert.assertEquals(getEVs(), assignment);
   }
 
@@ -118,6 +123,7 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     _gSetupTool.getClusterManagementTool()
         .setInstanceOperation(CLUSTER_NAME, mockNewInstance,
             InstanceConstants.InstanceOperation.EVACUATE);
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     _gSetupTool.getClusterManagementTool().enableInstance(CLUSTER_NAME, mockNewInstance, true);
 
@@ -160,7 +166,7 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     String instanceToEvacuate = _participants.get(0).getInstanceName();
     String customizedDB = "CustomizedTestDB";
     Map<Integer, String> partitionInstanceMap = new HashMap<>();
-    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(0).getInstanceName());
+    partitionInstanceMap.put(0, _participants.get(0).getInstanceName());
     createResourceInCustomizedMode(_gSetupTool, CLUSTER_NAME, customizedDB, partitionInstanceMap);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
@@ -192,8 +198,8 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     String instanceToEvacuate = _participants.get(0).getInstanceName();
     String customizedDB = "CustomizedTestDB";
     Map<Integer, String> partitionInstanceMap = new HashMap<>();
-    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(0).getInstanceName());
-    partitionInstanceMap.put(Integer.valueOf(1), _participants.get(0).getInstanceName());
+    partitionInstanceMap.put(0, _participants.get(0).getInstanceName());
+    partitionInstanceMap.put(1, _participants.get(0).getInstanceName());
     createResourceInCustomizedMode(_gSetupTool, CLUSTER_NAME, customizedDB, partitionInstanceMap);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
@@ -208,8 +214,8 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
         .manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null, null);
     Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
 
-    partitionInstanceMap.put(Integer.valueOf(0), _participants.get(1).getInstanceName());
-    partitionInstanceMap.put(Integer.valueOf(1), _participants.get(1).getInstanceName());
+    partitionInstanceMap.put(0, _participants.get(1).getInstanceName());
+    partitionInstanceMap.put(1, _participants.get(1).getInstanceName());
     IdealState newIdealState =
         createCustomizedResourceIdealState(customizedDB, partitionInstanceMap);
     _gSetupTool.getClusterManagementTool()
