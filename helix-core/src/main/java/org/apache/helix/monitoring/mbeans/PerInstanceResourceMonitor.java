@@ -98,9 +98,11 @@ public class PerInstanceResourceMonitor extends DynamicMBeanProvider {
 
     @Override
     public String toString() {
+      String safeResourceName = ClusterStatusMonitor.JMX_SPECIAL_CHARS.matcher(_resourceName).find()
+          ? ObjectName.quote(_resourceName) : _resourceName;
       return ClusterStatusMonitor.CLUSTER_DN_KEY + "=" + _clusterName + ","
           + ClusterStatusMonitor.INSTANCE_DN_KEY + "=" + _instanceName + ","
-          + ClusterStatusMonitor.RESOURCE_DN_KEY + "=" + _resourceName;
+          + ClusterStatusMonitor.RESOURCE_DN_KEY + "=" + safeResourceName;
     }
   }
 
