@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +36,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractBaseStage;
 import org.apache.helix.controller.pipeline.StageException;
+import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
@@ -118,6 +120,14 @@ public class ReadClusterDataStage extends AbstractBaseStage {
           return null;
         }
       });
+
+      asyncExecute(dataProvider.getAsyncTasksThreadPool(), new Callable<Object>() {
+        @Override
+        public Object call() {
+          validateAndReportInstanceDomainInfo(clusterConfig, dataProvider, clusterStatusMonitor);
+          return null;
+        }
+      });
     } else {
       asyncExecute(dataProvider.getAsyncTasksThreadPool(), new Callable<Object>() {
         @Override
@@ -129,6 +139,45 @@ public class ReadClusterDataStage extends AbstractBaseStage {
         }
       });
     }
+  }
+
+  /**
+   * Validates domain info for all instances against the cluster's topology configuration and
+   * updates the DomainInfoValidGauge metric. Only runs when allowParticipantAutoJoin is enabled.
+   *
+   * An instance is considered invalid if {@link InstanceConfig#validateTopologySettingInInstanceConfig}
+   * throws, which covers:
+   * - Empty or missing domain info on an instance when topology-aware is enabled
+   * - Missing fault zone type key in the domain map
+   * - Missing zone ID when using legacy (non-custom) topology
+   */
+  static void validateAndReportInstanceDomainInfo(ClusterConfig clusterConfig,
+      BaseControllerDataProvider dataProvider, ClusterStatusMonitor clusterStatusMonitor) {
+    if (clusterStatusMonitor == null || clusterConfig == null) {
+      return;
+    }
+
+    String autoJoin = clusterConfig.getRecord()
+        .getSimpleField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN);
+    if (!Boolean.parseBoolean(autoJoin)) {
+      return;
+    }
+
+    Set<String> invalidInstances = new HashSet<>();
+    Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+    for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
+      String instanceName = entry.getKey();
+      InstanceConfig instanceConfig = entry.getValue();
+      try {
+        instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+      } catch (Exception e) {
+        invalidInstances.add(instanceName);
+        logger.warn("Instance {} has invalid domain info for cluster topology configuration",
+            instanceName, e);
+      }
+    }
+
+    clusterStatusMonitor.updateInstanceDomainInfoValidity(invalidInstances);
   }
 
   /**
