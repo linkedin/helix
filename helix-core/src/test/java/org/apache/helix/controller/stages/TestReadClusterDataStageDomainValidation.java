@@ -71,7 +71,7 @@ public class TestReadClusterDataStageDomainValidation {
 
     registerInstances(instanceConfigMap);
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
 
     assertDomainInfoValidGauge("instance_0", 1L);
@@ -81,13 +81,13 @@ public class TestReadClusterDataStageDomainValidation {
   public void testSkipsWhenMonitorIsNull() {
     _clusterConfig.getRecord().setSimpleField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, "true");
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, null);
   }
 
   @Test
   public void testSkipsWhenClusterConfigIsNull() {
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         null, _dataProvider, _monitor);
   }
 
@@ -102,7 +102,7 @@ public class TestReadClusterDataStageDomainValidation {
 
     registerInstances(instanceConfigMap);
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
 
     assertDomainInfoValidGauge("instance_0", 1L);
@@ -132,7 +132,7 @@ public class TestReadClusterDataStageDomainValidation {
 
     registerInstances(instanceConfigMap);
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
 
     assertDomainInfoValidGauge("instance_valid", 1L);
@@ -158,7 +158,7 @@ public class TestReadClusterDataStageDomainValidation {
 
     registerInstances(instanceConfigMap);
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
 
     assertDomainInfoValidGauge("instance_with_zone", 1L);
@@ -181,13 +181,13 @@ public class TestReadClusterDataStageDomainValidation {
 
     registerInstances(instanceConfigMap);
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
     assertDomainInfoValidGauge("instance_0", 0L);
 
     config.setDomain("zone=us-west-1,instance=instance_0");
 
-    ReadClusterDataStage.validateAndUpdateInstanceDomainInfoStatus(
+    ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
     assertDomainInfoValidGauge("instance_0", 1L);
   }

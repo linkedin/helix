@@ -124,7 +124,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       asyncExecute(dataProvider.getAsyncTasksThreadPool(), new Callable<Object>() {
         @Override
         public Object call() {
-          validateAndUpdateInstanceDomainInfoStatus(clusterConfig, dataProvider, clusterStatusMonitor);
+          validateAndReportInstanceDomainInfo(clusterConfig, dataProvider, clusterStatusMonitor);
           return null;
         }
       });
@@ -151,7 +151,7 @@ public class ReadClusterDataStage extends AbstractBaseStage {
    * - Missing fault zone type key in the domain map
    * - Missing zone ID when using legacy (non-custom) topology
    */
-  static void validateAndUpdateInstanceDomainInfoStatus(ClusterConfig clusterConfig,
+  static void validateAndReportInstanceDomainInfo(ClusterConfig clusterConfig,
       BaseControllerDataProvider dataProvider, ClusterStatusMonitor clusterStatusMonitor) {
     if (clusterStatusMonitor == null || clusterConfig == null) {
       return;
