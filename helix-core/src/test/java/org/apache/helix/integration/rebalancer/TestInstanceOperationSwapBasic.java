@@ -125,6 +125,8 @@ public class TestInstanceOperationSwapBasic extends TestInstanceOperationBase {
     Assert.assertTrue(_gSetupTool.getClusterManagementTool()
         .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, false));
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
   }
 
   @Test(expectedExceptions = HelixException.class)
