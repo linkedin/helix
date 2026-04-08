@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 import javax.management.JMException;
 import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
@@ -68,6 +69,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   static final String JOB_TYPE_DN_KEY = "jobType";
   static final String DEFAULT_WORKFLOW_JOB_TYPE = "DEFAULT";
   public static final String DEFAULT_TAG = "DEFAULT";
+
+  static final Pattern JMX_SPECIAL_CHARS = Pattern.compile("[,:=*?]");
 
   private final String _clusterName;
   private final MBeanServer _beanServer;
@@ -1131,7 +1134,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @return resource bean name
    */
   protected String getResourceBeanName(String resourceName) {
-    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, resourceName);
+    // JMX ObjectName values cannot contain ':', '=', ',', '*', or '?' unquoted.
+    // Quote the resource name only when it contains such characters to avoid
+    // MalformedObjectNameException (e.g. URN-style names like urn:li:foo:bar),
+    // while leaving normal resource names unchanged in the MBean key.
+    String safeResourceName = JMX_SPECIAL_CHARS.matcher(resourceName).find()
+        ? ObjectName.quote(resourceName) : resourceName;
+    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, safeResourceName);
   }
 
   /**
