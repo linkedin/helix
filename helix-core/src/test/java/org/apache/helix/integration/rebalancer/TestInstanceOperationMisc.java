@@ -5,7 +5,6 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.constants.InstanceConstants;
@@ -146,21 +145,23 @@ public class TestInstanceOperationMisc extends TestInstanceOperationBase {
       for (String resource : _allDBs) {
         ExternalView ev = assignment.get(resource);
         for (String partition : ev.getPartitionSet()) {
-          AtomicInteger activeReplicaCount = new AtomicInteger();
-          ev.getStateMap(partition).values().stream().filter(
-                  v -> v.equals("MASTER") || v.equals("LEADER") || v.equals("SLAVE")
-                      || v.equals("FOLLOWER") || v.equals("STANDBY"))
-              .forEach(v -> activeReplicaCount.getAndIncrement());
-          if (activeReplicaCount.get() < REPLICA - 1
+          long activeReplicaCount = ev.getStateMap(partition).values().stream()
+              .filter(ACCEPTABLE_STATE_SET::contains).count();
+          if (activeReplicaCount < REPLICA - 1
               || (ev.getStateMap(partition).containsKey(evacuateInstanceName)
-              && (ev.getStateMap(partition).get(evacuateInstanceName).equals("MASTER")
-              || ev.getStateMap(partition).get(evacuateInstanceName).equals("LEADER")))) {
+              && TOP_STATE_SET.contains(
+                  ev.getStateMap(partition).get(evacuateInstanceName)))) {
             return false;
           }
         }
       }
       return true;
     }, 30000);
+
+    Map<String, ExternalView> assignment = getEVs();
+    for (String resource : _allDBs) {
+      validateAssignmentInEv(assignment.get(resource), REPLICA - 1);
+    }
   }
 
   @Test
