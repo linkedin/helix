@@ -798,6 +798,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _disabledPartitions.clear();
       _oldDisabledPartitions.clear();
       _rebalanceFailure = false;
+      _inMaintenance = false;
+      _paused = false;
       _maxInstanceMsgQueueSize.set(0L);
       _totalPastDueMsgSize.set(0L);
       _totalMsgQueueSize.set(0L);

@@ -765,4 +765,25 @@ public class TestClusterStatusMonitor {
 
     monitor.reset();
   }
+
+  @Test()
+  public void testResetClearsMaintenanceAndPausedState() throws Exception {
+    String clusterName = "TestCluster_resetMaintenance";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+
+    // Set maintenance and paused to true
+    monitor.setMaintenance(true);
+    monitor.setPaused(true);
+    Assert.assertEquals(monitor.getMaintenance(), 1L,
+        "Maintenance metric should be 1 after setMaintenance(true)");
+    Assert.assertEquals(monitor.getPaused(), 1L,
+        "Paused metric should be 1 after setPaused(true)");
+
+    // Reset should clear both flags
+    monitor.reset();
+    Assert.assertEquals(monitor.getMaintenance(), 0L,
+        "Maintenance metric should be 0 after reset()");
+    Assert.assertEquals(monitor.getPaused(), 0L,
+        "Paused metric should be 0 after reset()");
+  }
 }
