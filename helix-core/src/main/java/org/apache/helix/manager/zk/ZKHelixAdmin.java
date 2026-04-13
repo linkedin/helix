@@ -532,7 +532,7 @@ public class ZKHelixAdmin implements HelixAdmin {
    * @param swapInInstanceName  The instance that is being swapped in
    * @return OperationCheckResult with completion status and any blockers.
    */
-  private OperationCheckResult canCompleteSwapWithDetails(String clusterName, String swapOutInstanceName,
+  private OperationCheckResult canCompleteSwap(String clusterName, String swapOutInstanceName,
       String swapInInstanceName) {
     OperationCheckResult.Builder resultBuilder = new OperationCheckResult.Builder();
     BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
@@ -696,15 +696,6 @@ public class ZKHelixAdmin implements HelixAdmin {
     return resultBuilder.build();
   }
 
-  /**
-   * Backward-compatible boolean wrapper around canCompleteSwapWithDetails.
-   */
-  private boolean canCompleteSwap(String clusterName, String swapOutInstanceName,
-      String swapInInstanceName) {
-    return canCompleteSwapWithDetails(clusterName, swapOutInstanceName, swapInInstanceName)
-        .isSuccessful();
-  }
-
   private static List<String> safeGetChildNames(BaseDataAccessor<ZNRecord> baseAccessor,
       String path) {
     List<String> children = baseAccessor.getChildNames(path, 0);
@@ -746,7 +737,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     // Check if the swap is ready to be completed.
     return canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
-        swapInInstanceConfig.getInstanceName());
+        swapInInstanceConfig.getInstanceName()).isSuccessful();
   }
 
   @Override
@@ -779,7 +770,7 @@ public class ZKHelixAdmin implements HelixAdmin {
               instanceName, clusterName)));
     }
 
-    return canCompleteSwapWithDetails(clusterName, swapOutInstanceConfig.getInstanceName(),
+    return canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
         swapInInstanceConfig.getInstanceName());
   }
 
@@ -822,7 +813,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     // Skip the readiness check when forceComplete is true; otherwise require it to pass.
     if (!forceComplete) {
-      OperationCheckResult swapCheck = canCompleteSwapWithDetails(clusterName,
+      OperationCheckResult swapCheck = canCompleteSwap(clusterName,
           swapOutInstanceConfig.getInstanceName(), swapInInstanceConfig.getInstanceName());
       if (!swapCheck.isSuccessful()) {
         return swapCheck;
