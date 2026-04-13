@@ -62,6 +62,7 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
@@ -463,11 +464,16 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                   .build());
           break;
         case canCompleteSwap:
-          return OK(OBJECT_MAPPER.writeValueAsString(
-              ImmutableMap.of("successful", admin.canCompleteSwap(clusterId, instanceName))));
+          OperationCheckResult swapCheckResult = admin.canCompleteSwapWithDetails(clusterId, instanceName);
+          return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
+              "successful", swapCheckResult.isSuccessful(),
+              "blockers", swapCheckResult.getBlockers())));
         case completeSwapIfPossible:
-          return OK(OBJECT_MAPPER.writeValueAsString(
-              ImmutableMap.of("successful", admin.completeSwapIfPossible(clusterId, instanceName, force))));
+          OperationCheckResult completeSwapResult =
+              admin.completeSwapIfPossibleWithDetails(clusterId, instanceName, force);
+          return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
+              "successful", completeSwapResult.isSuccessful(),
+              "blockers", completeSwapResult.getBlockers())));
         case addInstanceTag:
           if (!validInstance(node, instanceName)) {
             return badRequest("Instance names are not match!");
