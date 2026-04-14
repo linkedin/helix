@@ -19,6 +19,8 @@ package org.apache.helix.model;
  * under the License.
  */
 
+import java.util.Collections;
+
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -114,7 +116,7 @@ public class TestPartialInstanceConfigUpdate {
     ZNRecord record = new ZNRecord("test-host_1690");
     record.setListField(
         InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name(),
-        java.util.Collections.singletonList("{\"OPERATION\":\"EVACUATE\"}"));
+        Collections.singletonList("{\"OPERATION\":\"EVACUATE\"}"));
 
     boolean payloadChangesOperation =
         record.getListFields().containsKey(
