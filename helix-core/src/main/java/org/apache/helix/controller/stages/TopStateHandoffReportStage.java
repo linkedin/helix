@@ -533,9 +533,16 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     long toTopStateUserLatency = DEFAULT_HANDOFF_USER_LATENCY;
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
     for (String instanceName : stateMap.keySet()) {
+      if (!liveInstances.containsKey(instanceName)) {
+        continue;
+      }
       CurrentState currentState =
           cache.getCurrentState(instanceName, liveInstances.get(instanceName).getEphemeralOwner())
               .get(resourceName);
+      if (currentState == null || currentState.getState(partition.getPartitionName()) == null) {
+        // Current state may be transiently unavailable (e.g., transition in-flight), skip instance
+        continue;
+      }
       if (currentState.getState(partition.getPartitionName()).equalsIgnoreCase(topState)) {
         if (currentState.getEndTime(partition.getPartitionName()) <= handOffEndTime) {
           handOffEndTime = currentState.getEndTime(partition.getPartitionName());
