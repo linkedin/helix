@@ -20,6 +20,7 @@ package org.apache.helix.util;
  */
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
@@ -37,7 +38,6 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
@@ -47,9 +47,10 @@ public class InstanceUtil {
   private InstanceUtil() {
   }
 
-  // Validators for instance operation transitions
+  // Validators for instance operation transitions.
+  // Return Optional.empty() for success, or Optional.of(reason) for failure.
   private static final InstanceOperationValidator ALWAYS_ALLOWED =
-      (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> OperationCheckResult.success();
+      (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> Optional.empty();
   private static final InstanceOperationValidator ALL_MATCHES_ARE_UNKNOWN =
       (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> {
         List<InstanceConfig> matchingInstances =
@@ -58,9 +59,9 @@ public class InstanceUtil {
         if (matchingInstances.isEmpty() || matchingInstances.stream().allMatch(
             instance -> instance.getInstanceOperation().getOperation()
                 .equals(InstanceConstants.InstanceOperation.UNKNOWN))) {
-          return OperationCheckResult.success();
+          return Optional.empty();
         }
-        return OperationCheckResult.failed(
+        return Optional.of(
             "All matching logical ID instances must be in UNKNOWN state. Matching instances: "
                 + formatMatchingInstances(matchingInstances));
       };
@@ -74,9 +75,9 @@ public class InstanceUtil {
                 .equals(InstanceConstants.InstanceOperation.UNKNOWN)
                 || instance.getInstanceOperation().getOperation()
                 .equals(InstanceConstants.InstanceOperation.EVACUATE))) {
-          return OperationCheckResult.success();
+          return Optional.empty();
         }
-        return OperationCheckResult.failed(
+        return Optional.of(
             "All matching logical ID instances must be in UNKNOWN or EVACUATE state. Matching instances: "
                 + formatMatchingInstances(matchingInstances));
       };
@@ -90,9 +91,9 @@ public class InstanceUtil {
                 .equals(InstanceConstants.InstanceOperation.ENABLE)
                 || instance.getInstanceOperation().getOperation()
                 .equals(InstanceConstants.InstanceOperation.DISABLE))) {
-          return OperationCheckResult.success();
+          return Optional.empty();
         }
-        return OperationCheckResult.failed(matchingInstances.isEmpty()
+        return Optional.of(matchingInstances.isEmpty()
             ? "No matching logical ID instances found. At least one must be in ENABLE or DISABLE state."
             : "At least one matching logical ID instance must be in ENABLE or DISABLE state. Matching instances: "
                 + formatMatchingInstances(matchingInstances));
@@ -186,14 +187,14 @@ public class InstanceUtil {
     }
 
     InstanceOperationValidator validator = transitionMap.get(targetOperation);
-    OperationCheckResult validationResult = validator != null
+    Optional<String> blocker = validator != null
         ? validator.validate(baseDataAccessor, configAccessor, clusterName, instanceConfig)
-        : OperationCheckResult.failed("No validator found for transition");
-    if (!validationResult.isSuccessful()) {
+        : Optional.of("No validator found for transition");
+    if (blocker.isPresent()) {
       throw new HelixException(
           "Failed validation for instance operation transition from " + currentOperation + " to "
               + targetOperation + " for instance " + instanceConfig.getInstanceName()
-              + ". " + String.join("; ", validationResult.getBlockers()));
+              + ". " + blocker.get());
     }
   }
 
@@ -321,11 +322,11 @@ public class InstanceUtil {
   }
 
   /**
-   * Validates an instance operation transition. Returns a successful OperationCheckResult if valid,
-   * or a failed OperationCheckResult with descriptive blockers if invalid.
+   * Validates an instance operation transition. Returns Optional.empty() if valid,
+   * or Optional.of(reason) if invalid.
    */
   private interface InstanceOperationValidator {
-    OperationCheckResult validate(@Nullable BaseDataAccessor<ZNRecord> baseDataAccessor,
+    Optional<String> validate(@Nullable BaseDataAccessor<ZNRecord> baseDataAccessor,
         @Nullable ConfigAccessor configAccessor, String clusterName, InstanceConfig instanceConfig);
   }
 }

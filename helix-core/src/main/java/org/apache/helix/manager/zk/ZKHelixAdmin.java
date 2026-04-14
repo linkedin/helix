@@ -672,6 +672,9 @@ public class ZKHelixAdmin implements HelixAdmin {
 
       // Iterate over all partitions in the swapOutInstance's current state for the resource
       // and ensure that the swapInInstance has the correct state for the partition.
+      int mismatchCount = 0;
+      int totalPartitions = swapOutResourceCurrentState.getPartitionStateMap().size();
+      String firstMismatchExample = null;
       for (String partitionName : swapOutResourceCurrentState.getPartitionStateMap().keySet()) {
         String swapOutPartitionState = swapOutResourceCurrentState.getState(partitionName);
         String swapInPartitionState = swapInResourceCurrentState.getState(partitionName);
@@ -690,15 +693,22 @@ public class ZKHelixAdmin implements HelixAdmin {
                             stateModelDefinition.getTopState())) && secondTopStates.contains(
                         swapInPartitionState))) || swapOutPartitionState.equals(
             swapInPartitionState))) {
-          String blocker = String.format(
-              "SwapOutInstance %s has partition %s in state %s but SwapInInstance %s has partition %s in state %s for resource %s."
-                  + " Swap will not complete unless SwapInInstance has partition in correct states.",
-              swapOutInstanceName, partitionName, swapOutPartitionState,
-              swapInInstanceName, partitionName, swapInPartitionState != null ? swapInPartitionState : "MISSING",
-              swapOutResource);
-          logger.warn(blocker + " cluster={}", clusterName);
-          resultBuilder.addBlocker(blocker);
+          mismatchCount++;
+          if (firstMismatchExample == null) {
+            firstMismatchExample = String.format("%s: expected %s, got %s",
+                partitionName, swapOutPartitionState,
+                swapInPartitionState != null ? swapInPartitionState : "MISSING");
+          }
         }
+      }
+      if (mismatchCount > 0) {
+        String blocker = String.format(
+            "SwapInInstance %s has %d/%d partitions in incorrect state for resource %s (e.g., %s)."
+                + " Swap will not complete unless SwapInInstance has all partitions in correct states.",
+            swapInInstanceName, mismatchCount, totalPartitions, swapOutResource,
+            firstMismatchExample);
+        logger.warn(blocker + " cluster={}", clusterName);
+        resultBuilder.addBlocker(blocker);
       }
     }
 
