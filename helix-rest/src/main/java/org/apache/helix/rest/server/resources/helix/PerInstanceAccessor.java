@@ -891,14 +891,27 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       Command command) {
     InstanceConfig originalInstanceConfigCopy =
         configAccessor.getInstanceConfig(clusterName, instanceName);
-    InstanceConstants.InstanceOperation currentOperation = originalInstanceConfigCopy.getInstanceOperation().getOperation();
-    InstanceConstants.InstanceOperation targetOperation = newInstanceConfig.getInstanceOperation().getOperation();
-    try {
-      InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName, originalInstanceConfigCopy,
-          currentOperation, targetOperation);
-    } catch (HelixException e) {
-      throw new IllegalArgumentException(String.format(
-          "Failed topology setting update in instance %s, got exception %s", instanceName, e));
+    // Only validate instance operation transition if the update payload actually contains
+    // operation-related fields. Partial updates from the UI (e.g., editing a single mapField)
+    // do not include HELIX_INSTANCE_OPERATIONS or HELIX_ENABLED, and getInstanceOperation()
+    // would return the default ENABLE, causing a false validation failure.
+    boolean payloadChangesOperation =
+        newInstanceConfig.getRecord().getListFields().containsKey(
+            InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name())
+        || newInstanceConfig.getRecord().getSimpleFields().containsKey(
+            InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name());
+    if (payloadChangesOperation) {
+      InstanceConstants.InstanceOperation currentOperation =
+          originalInstanceConfigCopy.getInstanceOperation().getOperation();
+      InstanceConstants.InstanceOperation targetOperation =
+          newInstanceConfig.getInstanceOperation().getOperation();
+      try {
+        InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName,
+            originalInstanceConfigCopy, currentOperation, targetOperation);
+      } catch (HelixException e) {
+        throw new IllegalArgumentException(String.format(
+            "Failed topology setting update in instance %s, got exception %s", instanceName, e));
+      }
     }
     if (command == Command.delete) {
       for (Map.Entry<String, String> entry : newInstanceConfig.getRecord().getSimpleFields()
