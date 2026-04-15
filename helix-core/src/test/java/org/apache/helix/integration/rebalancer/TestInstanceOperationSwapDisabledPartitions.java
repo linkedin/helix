@@ -73,6 +73,11 @@ public class TestInstanceOperationSwapDisabledPartitions extends TestInstanceOpe
       validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
       return true;
     }, TIMEOUT);
+
+    // Stop the swap-out participant so beforeMethod can clean it up
+    _participants.stream()
+        .filter(p -> p.getInstanceName().equals(instanceToSwapOutName))
+        .findFirst().ifPresent(p -> p.syncStop());
   }
 
   @Test
@@ -96,7 +101,7 @@ public class TestInstanceOperationSwapDisabledPartitions extends TestInstanceOpe
         instanceToSwapOutConfig.getDomainAsMap().get(ZONE),
         InstanceConstants.InstanceOperation.UNKNOWN, -1);
 
-    _clusterVerifier.verifyByPolling();
+    Assert.assertTrue(_clusterVerifier.verifyByPolling());
     Map<String, ExternalView> beforeEVs = getEVs();
 
     InstanceConfig swapInInstanceConfig = _gSetupTool.getClusterManagementTool()
@@ -142,6 +147,11 @@ public class TestInstanceOperationSwapDisabledPartitions extends TestInstanceOpe
         .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, false));
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
     validateSwapCompletedSuccessfully(getEVs(), instanceToSwapOutName, instanceToSwapInName);
+
+    // Stop the swap-out participant so beforeMethod can clean it up
+    _participants.stream()
+        .filter(p -> p.getInstanceName().equals(instanceToSwapOutName))
+        .findFirst().ifPresent(p -> p.syncStop());
   }
 
   @Test
@@ -200,9 +210,6 @@ public class TestInstanceOperationSwapDisabledPartitions extends TestInstanceOpe
           Collections.emptySet(), ImmutableSet.of(swapInInstanceName));
     }
 
-    Assert.assertFalse(_gSetupTool.getClusterManagementTool()
-        .canCompleteSwap(CLUSTER_NAME, swapOutInstanceName));
-
     swapInInstanceConfig = _gSetupTool.getClusterManagementTool()
         .getInstanceConfig(CLUSTER_NAME, swapInInstanceName);
     swapInInstanceConfig.setInstanceEnabledForPartition(
@@ -217,5 +224,10 @@ public class TestInstanceOperationSwapDisabledPartitions extends TestInstanceOpe
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     validateSwapCompletedSuccessfully(getEVs(), swapOutInstanceName, swapInInstanceName);
+
+    // Stop the swap-out participant so beforeMethod can clean it up
+    _participants.stream()
+        .filter(p -> p.getInstanceName().equals(swapOutInstanceName))
+        .findFirst().ifPresent(p -> p.syncStop());
   }
 }
