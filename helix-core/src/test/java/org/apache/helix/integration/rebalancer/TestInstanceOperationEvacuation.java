@@ -41,6 +41,7 @@ public class TestInstanceOperationEvacuation extends TestInstanceOperationBase {
     // cannot converge if it includes them.
     _allDBs.remove(semiAutoDB);
 
+
     String instanceToEvacuate = _participants.get(0).getInstanceName();
     _gSetupTool.getClusterManagementTool()
         .setInstanceOperation(CLUSTER_NAME, instanceToEvacuate,
