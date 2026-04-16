@@ -20,6 +20,7 @@ package org.apache.helix.util;
  */
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
@@ -46,39 +47,56 @@ public class InstanceUtil {
   private InstanceUtil() {
   }
 
-  // Validators for instance operation transitions
+  // Validators for instance operation transitions.
+  // Return Optional.empty() for success, or Optional.of(reason) for failure.
   private static final InstanceOperationValidator ALWAYS_ALLOWED =
-      (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> true;
+      (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> Optional.empty();
   private static final InstanceOperationValidator ALL_MATCHES_ARE_UNKNOWN =
       (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> {
         List<InstanceConfig> matchingInstances =
             findInstancesWithMatchingLogicalId(baseDataAccessor, configAccessor, clusterName,
                 instanceConfig);
-        return matchingInstances.isEmpty() || matchingInstances.stream().allMatch(
+        if (matchingInstances.isEmpty() || matchingInstances.stream().allMatch(
             instance -> instance.getInstanceOperation().getOperation()
-                .equals(InstanceConstants.InstanceOperation.UNKNOWN));
+                .equals(InstanceConstants.InstanceOperation.UNKNOWN))) {
+          return Optional.empty();
+        }
+        return Optional.of(
+            "All matching logical ID instances must be in UNKNOWN state. Matching instances: "
+                + formatMatchingInstances(matchingInstances));
       };
   private static final InstanceOperationValidator ALL_MATCHES_ARE_UNKNOWN_OR_EVACUATE =
       (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> {
         List<InstanceConfig> matchingInstances =
             findInstancesWithMatchingLogicalId(baseDataAccessor, configAccessor, clusterName,
                 instanceConfig);
-        return matchingInstances.isEmpty() || matchingInstances.stream().allMatch(instance ->
+        if (matchingInstances.isEmpty() || matchingInstances.stream().allMatch(instance ->
             instance.getInstanceOperation().getOperation()
                 .equals(InstanceConstants.InstanceOperation.UNKNOWN)
                 || instance.getInstanceOperation().getOperation()
-                .equals(InstanceConstants.InstanceOperation.EVACUATE));
+                .equals(InstanceConstants.InstanceOperation.EVACUATE))) {
+          return Optional.empty();
+        }
+        return Optional.of(
+            "All matching logical ID instances must be in UNKNOWN or EVACUATE state. Matching instances: "
+                + formatMatchingInstances(matchingInstances));
       };
   private static final InstanceOperationValidator ANY_MATCH_ENABLE_OR_DISABLE =
       (baseDataAccessor, configAccessor, clusterName, instanceConfig) -> {
         List<InstanceConfig> matchingInstances =
             findInstancesWithMatchingLogicalId(baseDataAccessor, configAccessor, clusterName,
                 instanceConfig);
-        return !matchingInstances.isEmpty() && matchingInstances.stream().anyMatch(instance ->
+        if (!matchingInstances.isEmpty() && matchingInstances.stream().anyMatch(instance ->
             instance.getInstanceOperation().getOperation()
                 .equals(InstanceConstants.InstanceOperation.ENABLE)
                 || instance.getInstanceOperation().getOperation()
-                .equals(InstanceConstants.InstanceOperation.DISABLE));
+                .equals(InstanceConstants.InstanceOperation.DISABLE))) {
+          return Optional.empty();
+        }
+        return Optional.of(matchingInstances.isEmpty()
+            ? "No matching logical ID instances found. At least one must be in ENABLE or DISABLE state."
+            : "At least one matching logical ID instance must be in ENABLE or DISABLE state. Matching instances: "
+                + formatMatchingInstances(matchingInstances));
       };
 
   // Validator map for valid instance operation transitions <currentOperation>:<targetOperation>:<validator>
@@ -159,17 +177,24 @@ public class InstanceUtil {
         VALID_INSTANCE_OPERATION_TRANSITIONS.get(currentOperation);
 
     if (transitionMap == null || !transitionMap.containsKey(targetOperation)) {
+      String validTransitions = transitionMap != null ? transitionMap.keySet().toString() : "none";
       throw new HelixException(
           "Invalid instance operation transition from " + currentOperation + " to "
-              + targetOperation);
+              + targetOperation + " for instance " + instanceConfig.getInstanceName()
+              + ". Valid transitions from " + currentOperation + ": " + validTransitions
+              + ". Current operation source: " + instanceConfig.getInstanceOperation().getSource()
+              + ", reason: " + instanceConfig.getInstanceOperation().getReason());
     }
 
     InstanceOperationValidator validator = transitionMap.get(targetOperation);
-    if (validator == null || !validator.validate(baseDataAccessor, configAccessor, clusterName,
-        instanceConfig)) {
+    Optional<String> blocker = validator != null
+        ? validator.validate(baseDataAccessor, configAccessor, clusterName, instanceConfig)
+        : Optional.of("No validator found for transition");
+    if (blocker.isPresent()) {
       throw new HelixException(
           "Failed validation for instance operation transition from " + currentOperation + " to "
-              + targetOperation);
+              + targetOperation + " for instance " + instanceConfig.getInstanceName()
+              + ". " + blocker.get());
     }
   }
 
@@ -282,12 +307,26 @@ public class InstanceUtil {
 
     if (!succeeded) {
       throw new HelixException(
-          "Failed to update instance operation. Please check if instance is disabled.");
+          "Failed to update instance operation for instance " + instanceName + " in cluster "
+              + clusterName + " (target operation: "
+              + (instanceOperation != null ? instanceOperation.getOperation() : "ENABLE")
+              + "). The ZooKeeper update did not succeed.");
     }
   }
 
+  private static String formatMatchingInstances(List<InstanceConfig> matchingInstances) {
+    return matchingInstances.stream()
+        .map(ic -> ic.getInstanceName() + " (operation="
+            + ic.getInstanceOperation().getOperation() + ")")
+        .collect(Collectors.joining(", "));
+  }
+
+  /**
+   * Validates an instance operation transition. Returns Optional.empty() if valid,
+   * or Optional.of(reason) if invalid.
+   */
   private interface InstanceOperationValidator {
-    boolean validate(@Nullable BaseDataAccessor<ZNRecord> baseDataAccessor,
+    Optional<String> validate(@Nullable BaseDataAccessor<ZNRecord> baseDataAccessor,
         @Nullable ConfigAccessor configAccessor, String clusterName, InstanceConfig instanceConfig);
   }
 }

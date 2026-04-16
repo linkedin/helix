@@ -96,6 +96,7 @@ import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.PauseSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.ConfigStringUtil;
@@ -518,20 +519,22 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   /**
-   * Check to see if swapping between two instances is ready to be completed. Checks: 1. Both
-   * instances must be alive. 2. Both instances must only have one session and not be carrying over
-   * from a previous session. 3. Both instances must have no pending messages. 4. Both instances
-   * cannot have partitions in the ERROR state 5. SwapIn instance must have correct state for all
-   * partitions that are currently assigned to the SwapOut instance.
-   * TODO: We may want to make this a public API in the future.
+   * Check to see if swapping between two instances is ready to be completed and return
+   * detailed results including specific blockers. Checks:
+   * 1. Both instances must be alive.
+   * 2. Both instances must only have one session and not be carrying over from a previous session.
+   * 3. Both instances must have no pending messages.
+   * 4. Both instances cannot have partitions in the ERROR state.
+   * 5. SwapIn instance must have correct state for all partitions assigned to SwapOut instance.
    *
    * @param clusterName         The cluster name
    * @param swapOutInstanceName The instance that is being swapped out
    * @param swapInInstanceName  The instance that is being swapped in
-   * @return True if the swap is ready to be completed, false otherwise.
+   * @return OperationCheckResult with completion status and any blockers.
    */
-  private boolean canCompleteSwap(String clusterName, String swapOutInstanceName,
+  private OperationCheckResult canCompleteSwap(String clusterName, String swapOutInstanceName,
       String swapInInstanceName) {
+    OperationCheckResult.Builder resultBuilder = new OperationCheckResult.Builder();
     BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, baseAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
@@ -544,13 +547,16 @@ public class ZKHelixAdmin implements HelixAdmin {
     InstanceConfig swapOutInstanceConfig = getInstanceConfig(clusterName, swapOutInstanceName);
     InstanceConfig swapInInstanceConfig = getInstanceConfig(clusterName, swapInInstanceName);
     if (swapInLiveInstance == null) {
-      logger.warn(
-          "SwapOutInstance {} is {} + {} and SwapInInstance {} is OFFLINE + {} for cluster {}. Swap will"
-              + " not complete unless SwapInInstance instance is ONLINE.",
+      String blocker = String.format(
+          "SwapOutInstance %s is %s (operation=%s) and SwapInInstance %s is OFFLINE (operation=%s)."
+              + " Swap will not complete unless SwapInInstance is ONLINE.",
           swapOutInstanceName, swapOutLiveInstance != null ? "ONLINE" : "OFFLINE",
-          swapOutInstanceConfig.getInstanceOperation().getOperation(), swapInInstanceName,
-          swapInInstanceConfig.getInstanceOperation().getOperation(), clusterName);
-      return false;
+          swapOutInstanceConfig.getInstanceOperation().getOperation(),
+          swapInInstanceName, swapInInstanceConfig.getInstanceOperation().getOperation());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+      // Cannot proceed with further checks if swap-in is offline
+      return resultBuilder.build();
     }
 
     // 2. Check that both instances only have one session and are not carrying any over.
@@ -560,37 +566,58 @@ public class ZKHelixAdmin implements HelixAdmin {
         PropertyPathBuilder.instanceCurrentState(clusterName, swapOutInstanceName));
     List<String> swapInSessions = safeGetChildNames(baseAccessor,
         PropertyPathBuilder.instanceCurrentState(clusterName, swapInInstanceName));
-    if (swapOutSessions.size() > 1 || swapInSessions.size() > 1) {
-      logger.warn(
-          "SwapOutInstance {} is carrying over from prev session and SwapInInstance {} is carrying over from prev session for cluster {}."
+    if (swapOutSessions.size() > 1) {
+      String blocker = String.format(
+          "SwapOutInstance %s is carrying over from a previous session (%d sessions found)."
               + " Swap will not complete unless both instances have only one session.",
-          swapOutInstanceName, swapInInstanceName, clusterName);
-      return false;
+          swapOutInstanceName, swapOutSessions.size());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (swapInSessions.size() > 1) {
+      String blocker = String.format(
+          "SwapInInstance %s is carrying over from a previous session (%d sessions found)."
+              + " Swap will not complete unless both instances have only one session.",
+          swapInInstanceName, swapInSessions.size());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (resultBuilder.hasBlockers()) {
+      return resultBuilder.build();
     }
 
-    // 3. Check that the swapOutInstance has no pending messages.
+    // 3. Check that instances have no pending messages.
     List<Message> swapOutMessages =
         accessor.getChildValues(keyBuilder.messages(swapOutInstanceName), true);
     int swapOutPendingMessageCount = swapOutMessages != null ? swapOutMessages.size() : 0;
     List<Message> swapInMessages =
         accessor.getChildValues(keyBuilder.messages(swapInInstanceName), true);
     int swapInPendingMessageCount = swapInMessages != null ? swapInMessages.size() : 0;
-    if ((swapOutLiveInstance != null && swapOutPendingMessageCount > 0)
-        || swapInPendingMessageCount > 0) {
-      logger.warn(
-          "SwapOutInstance {} has {} pending messages and SwapInInstance {} has {} pending messages for cluster {}."
-              + " Swap will not complete unless both SwapOutInstance(only when live)"
-              + " and SwapInInstance have no pending messages unless.",
-          swapOutInstanceName, swapOutPendingMessageCount, swapInInstanceName,
-          swapInPendingMessageCount, clusterName);
-      return false;
+    if (swapOutLiveInstance != null && swapOutPendingMessageCount > 0) {
+      String blocker = String.format(
+          "SwapOutInstance %s has %d pending messages."
+              + " Swap will not complete unless SwapOutInstance (when live) has no pending messages.",
+          swapOutInstanceName, swapOutPendingMessageCount);
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (swapInPendingMessageCount > 0) {
+      String blocker = String.format(
+          "SwapInInstance %s has %d pending messages."
+              + " Swap will not complete unless SwapInInstance has no pending messages.",
+          swapInInstanceName, swapInPendingMessageCount);
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (resultBuilder.hasBlockers()) {
+      return resultBuilder.build();
     }
 
-    // 4. If the swap-out instance is not alive or is disabled, we return true without checking
-    // the current states on the swap-in instance.
+    // 4. If the swap-out instance is not alive or is disabled, we can complete without
+    // checking current states on the swap-in instance.
     if (swapOutLiveInstance == null || swapOutInstanceConfig.getInstanceOperation().getOperation()
         .equals(InstanceConstants.InstanceOperation.DISABLE)) {
-      return true;
+      return resultBuilder.build();
     }
 
     // 5. Collect a list of all partitions that have a current state on swapOutInstance
@@ -612,10 +639,12 @@ public class ZKHelixAdmin implements HelixAdmin {
           accessor.getProperty(keyBuilder.stateModelDef(idealState.getStateModelDefRef()));
       if (stateModelDefinition == null) {
         // State model missing; be conservative.
-        logger.warn(
-            "StateModelDefinition is null for resource {} in cluster {}. Cannot verify swap correctness.",
+        String blocker = String.format(
+            "StateModelDefinition is null for resource %s in cluster %s. Cannot verify swap correctness.",
             swapOutResource, clusterName);
-        return false;
+        logger.warn(blocker);
+        resultBuilder.addBlocker(blocker);
+        continue;
       }
       String topState = stateModelDefinition.getTopState();
       Set<String> secondTopStates = stateModelDefinition.getSecondTopStates();
@@ -632,23 +661,29 @@ public class ZKHelixAdmin implements HelixAdmin {
 
       // Check to make sure swapInInstance has a current state for the resource
       if (swapInResourceCurrentState == null) {
-        logger.warn(
-            "SwapOutInstance {} has current state for resource {} but SwapInInstance {} does not for cluster {}."
+        String blocker = String.format(
+            "SwapOutInstance %s has current state for resource %s but SwapInInstance %s does not."
                 + " Swap will not complete unless both instances have current states for all resources.",
-            swapOutInstanceName, swapOutResource, swapInInstanceName, clusterName);
-        return false;
+            swapOutInstanceName, swapOutResource, swapInInstanceName);
+        logger.warn(blocker + " cluster={}", clusterName);
+        resultBuilder.addBlocker(blocker);
+        continue;
       }
 
       // Iterate over all partitions in the swapOutInstance's current state for the resource
       // and ensure that the swapInInstance has the correct state for the partition.
+      int mismatchCount = 0;
+      int totalPartitions = swapOutResourceCurrentState.getPartitionStateMap().size();
+      String firstMismatchExample = null;
       for (String partitionName : swapOutResourceCurrentState.getPartitionStateMap().keySet()) {
         String swapOutPartitionState = swapOutResourceCurrentState.getState(partitionName);
         String swapInPartitionState = swapInResourceCurrentState.getState(partitionName);
 
         // SwapInInstance should have the correct state for the partition.
-        // All states should match except for the case where the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES
-        // or the swap-out partition is ERROR state.
-        // When the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES, the swap-in partition should be in a secondTopStates.
+        // All states should match except for the case where the topState is not ALL_REPLICAS
+        // or ALL_CANDIDATE_NODES or the swap-out partition is ERROR state.
+        // When the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES, the swap-in partition
+        // should be in a secondTopStates.
         if (!(swapOutPartitionState.equals(HelixDefinedState.ERROR.name()) || (
             topState.equals(swapOutPartitionState) && (
                 swapOutPartitionState.equals(swapInPartitionState) ||
@@ -658,17 +693,26 @@ public class ZKHelixAdmin implements HelixAdmin {
                             stateModelDefinition.getTopState())) && secondTopStates.contains(
                         swapInPartitionState))) || swapOutPartitionState.equals(
             swapInPartitionState))) {
-          logger.warn(
-              "SwapOutInstance {} has partition {} in {} but SwapInInstance {} has partition {} in state {} for cluster {}."
-                  + " Swap will not complete unless SwapInInstance has partition in correct states.",
-              swapOutInstanceName, partitionName, swapOutPartitionState, swapInInstanceName,
-              partitionName, swapInPartitionState, clusterName);
-          return false;
+          mismatchCount++;
+          if (firstMismatchExample == null) {
+            firstMismatchExample = String.format("%s: expected %s, got %s",
+                partitionName, swapOutPartitionState,
+                swapInPartitionState != null ? swapInPartitionState : "MISSING");
+          }
         }
+      }
+      if (mismatchCount > 0) {
+        String blocker = String.format(
+            "SwapInInstance %s has %d/%d partitions in incorrect state for resource %s (e.g., %s)."
+                + " Swap will not complete unless SwapInInstance has all partitions in correct states.",
+            swapInInstanceName, mismatchCount, totalPartitions, swapOutResource,
+            firstMismatchExample);
+        logger.warn(blocker + " cluster={}", clusterName);
+        resultBuilder.addBlocker(blocker);
       }
     }
 
-    return true;
+    return resultBuilder.build();
   }
 
   private static List<String> safeGetChildNames(BaseDataAccessor<ZNRecord> baseAccessor,
@@ -679,22 +723,25 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean canCompleteSwap(String clusterName, String instanceName) {
+    return canCompleteSwapWithDetails(clusterName, instanceName).isSuccessful();
+  }
+
+  @Override
+  public OperationCheckResult canCompleteSwapWithDetails(String clusterName, String instanceName) {
     InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
     if (instanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} does not exist. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Instance %s does not exist in cluster %s.", instanceName, clusterName)));
     }
 
     List<InstanceConfig> swappingInstances =
         InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Instance %s in cluster %s is not swapping with exactly one other instance "
+              + "(found %d matching instances).", instanceName, clusterName,
+              swappingInstances.size())));
     }
 
     InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
@@ -704,13 +751,11 @@ public class ZKHelixAdmin implements HelixAdmin {
         .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
         : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Could not determine swap-out/swap-in pair for instance %s in cluster %s.",
+              instanceName, clusterName)));
     }
 
-    // Check if the swap is ready to be completed.
     return canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
         swapInInstanceConfig.getInstanceName());
   }
@@ -718,22 +763,26 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean completeSwapIfPossible(String clusterName, String instanceName,
       boolean forceComplete) {
+    return completeSwapIfPossibleWithDetails(clusterName, instanceName, forceComplete).isSuccessful();
+  }
+
+  @Override
+  public OperationCheckResult completeSwapIfPossibleWithDetails(String clusterName,
+      String instanceName, boolean forceComplete) {
     InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
     if (instanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} does not exist. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s does not exist. Cannot determine if the swap is complete.",
+          instanceName, clusterName));
     }
 
     List<InstanceConfig> swappingInstances =
         InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s is not swapping with exactly one other instance (found %d matching instances).",
+          instanceName, clusterName, swappingInstances.size()));
     }
 
     InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
@@ -743,16 +792,18 @@ public class ZKHelixAdmin implements HelixAdmin {
         .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
         : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s is not swapping with any other instance.",
+          instanceName, clusterName));
     }
 
     // Skip the readiness check when forceComplete is true; otherwise require it to pass.
-    if (!forceComplete && !canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
-        swapInInstanceConfig.getInstanceName())) {
-      return false;
+    if (!forceComplete) {
+      OperationCheckResult swapCheck = canCompleteSwap(clusterName,
+          swapOutInstanceConfig.getInstanceName(), swapInInstanceConfig.getInstanceName());
+      if (!swapCheck.isSuccessful()) {
+        return swapCheck;
+      }
     }
 
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
@@ -787,7 +838,12 @@ public class ZKHelixAdmin implements HelixAdmin {
       return config.getRecord();
     });
 
-    return baseAccessor.multiSet(updaterMap);
+    if (!baseAccessor.multiSet(updaterMap)) {
+      return OperationCheckResult.failed(String.format(
+          "Failed to update instance configs for swap completion in cluster %s. "
+              + "The ZooKeeper update did not succeed.", clusterName));
+    }
+    return OperationCheckResult.success();
   }
 
   @Override
