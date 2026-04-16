@@ -167,5 +167,12 @@ public class TestInstanceOperationEvacuationCancel extends TestInstanceOperation
     verifier(
         () -> _admin.isReadyForPreparingJoiningCluster(CLUSTER_NAME, instanceToEvacuate),
         60000);
+
+    // Stop the evacuated participant so beforeMethod can clean it up.
+    // Without this, the instance stays connected in EVACUATE state and
+    // _participants grows unboundedly across test runs.
+    _participants.stream()
+        .filter(p -> p.getInstanceName().equals(instanceToEvacuate))
+        .findFirst().ifPresent(p -> p.syncStop());
   }
 }
