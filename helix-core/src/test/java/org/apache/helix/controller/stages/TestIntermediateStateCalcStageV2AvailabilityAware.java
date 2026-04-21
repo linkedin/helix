@@ -25,6 +25,7 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
+import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -51,6 +52,23 @@ public class TestIntermediateStateCalcStageV2AvailabilityAware
   protected void setClusterConfig(ClusterConfig clusterConfig) {
     clusterConfig.setAvailabilityAwarePrioritizationEnabled(true);
     super.setClusterConfig(clusterConfig);
+  }
+
+  // V1→V2 routing is already covered at the V2 level.
+  // Since this subclass always enables both V2 and availability-aware, skip this structural test.
+  @Override
+  @Test(enabled = false)
+  public void testDelegatesToV2WhenEnabled() {
+  }
+
+  private String getPartitionState(IntermediateStateOutput output, String resource,
+      Partition partition, String instance) {
+    PartitionStateMap psm = output.getPartitionStateMap(resource);
+    Assert.assertNotNull(psm, "No output produced for resource: " + resource);
+    Map<String, String> stateMap = psm.getStateMap().get(partition);
+    Assert.assertNotNull(stateMap,
+        "No state map for partition " + partition.getPartitionName() + " in resource: " + resource);
+    return stateMap.get(instance);
   }
 
   /**
@@ -185,20 +203,17 @@ public class TestIntermediateStateCalcStageV2AvailabilityAware
     IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
 
     // resourceB: recovery approved (top state missing, score 1,000,000)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceB).getStateMap().get(partB).get(instance0),
+    Assert.assertEquals(getPartitionState(output, resourceB, partB, instance0),
         "ONLINE",
         "resourceB (fully degraded) should have its recovery approved");
 
     // resourceC: recovery approved (top state missing, score 1,000,000)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceC).getStateMap().get(partC).get(instance1),
+    Assert.assertEquals(getPartitionState(output, resourceC, partC, instance1),
         "ONLINE",
         "resourceC (fully degraded) should have its recovery approved");
 
     // resourceA: recovery throttled (partially degraded, low score)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceA).getStateMap().get(partA).get(instance2),
+    Assert.assertEquals(getPartitionState(output, resourceA, partA, instance2),
         "OFFLINE",
         "resourceA (partially degraded) should be throttled when cluster recovery quota is exhausted");
   }
@@ -300,14 +315,12 @@ public class TestIntermediateStateCalcStageV2AvailabilityAware
     IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
 
     // resourceB: handoff approved (score 999,999 — top-state handoff)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceB).getStateMap().get(partB).get(instance0),
+    Assert.assertEquals(getPartitionState(output, resourceB, partB, instance0),
         "SLAVE",
         "resourceB handoff (MASTER→SLAVE) should be approved — it scores 999,999");
 
     // resourceA: upward transition throttled (low score)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceA).getStateMap().get(partA).get(instance0),
+    Assert.assertEquals(getPartitionState(output, resourceA, partA, instance0),
         "OFFLINE",
         "resourceA upward transition should be throttled when instance ANY quota is exhausted by handoff");
   }
@@ -451,20 +464,17 @@ public class TestIntermediateStateCalcStageV2AvailabilityAware
     IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
 
     // resourceC: load-balance approved (most degraded, score 0.50)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceC).getStateMap().get(partC).get(instance1),
+    Assert.assertEquals(getPartitionState(output, resourceC, partC, instance1),
         "ONLINE",
         "resourceC (most degraded, 1/4 active, score 0.50) should have its load-balance approved");
 
     // resourceB: load-balance approved (moderately degraded, score 0.33)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceB).getStateMap().get(partB).get(instance2),
+    Assert.assertEquals(getPartitionState(output, resourceB, partB, instance2),
         "ONLINE",
         "resourceB (moderately degraded, 2/4 active, score 0.33) should have its load-balance approved");
 
     // resourceA: load-balance throttled (least degraded, score 0.25)
-    Assert.assertEquals(
-        output.getPartitionStateMap(resourceA).getStateMap().get(partA).get(instance3),
+    Assert.assertEquals(getPartitionState(output, resourceA, partA, instance3),
         "OFFLINE",
         "resourceA (least degraded, 3/4 active, score 0.25) should be throttled when cluster "
             + "load-balance quota is exhausted");
