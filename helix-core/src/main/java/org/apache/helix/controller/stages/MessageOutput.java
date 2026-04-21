@@ -54,7 +54,7 @@ public class MessageOutput {
     if (!_messagesMap.containsKey(resourceName)) {
       _messagesMap.put(resourceName, new HashMap<Partition, List<Message>>());
     }
-    _messagesMap.get(resourceName).put(partition, messages);
+    _messagesMap.get(resourceName).put(partition, new ArrayList<>(messages));
   }
 
   public void addStatusChangeMessages(List<Message> messages) {
