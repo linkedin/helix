@@ -117,15 +117,18 @@ public abstract class AbstractDataCache<T extends HelixProperty> {
     for (PropertyKey key : cachedKeys) {
       String path = key.getPath();
       if (_dirtyPaths.remove(path)) {
-        // Watch fired → unconditional reload; re-watch happens after successful getProperty.
+        // Watch fired → unconditional reload. Clear _watchedPaths so subscribeWatch below
+        // actually calls subscribeDataChanges (ZK watches are one-shot; after handleDataDeleted
+        // the watch is gone and must be re-registered explicitly).
+        _watchedPaths.remove(path);
         reloadKeys.add(key);
       } else if (_watchedPaths.contains(path)) {
         T property = cachedPropertyMap.get(key);
-        if (property != null && property.getBucketSize() == 0) {
-          // Active watch, no change notification, non-bucketed → safe to reuse with no ZK call.
+        if (property != null && property.getBucketSize() == 0 && property.getStat() != null) {
+          // Active watch, no change notification, non-bucketed, stat populated → safe to reuse.
           refreshedPropertyMap.put(key, property);
         } else {
-          // Bucketed property: fall through to stat check.
+          // Bucketed property or null stat: fall through to stat check.
           statCheckKeys.add(key);
         }
       } else {
@@ -182,9 +185,12 @@ public abstract class AbstractDataCache<T extends HelixProperty> {
     while (watchIter.hasNext()) {
       String watchedPath = watchIter.next();
       if (!activePaths.contains(watchedPath)) {
+        // Remove dirty flag BEFORE unsubscribing: if the ZK event thread fires handleDataChange
+        // between unsubscribeDataChanges and the remove below, the notification is dropped.
+        // Removing first is safe because the path is leaving the cache regardless.
+        _dirtyPaths.remove(watchedPath);
         baseAccessor.unsubscribeDataChanges(watchedPath, _watchListener);
         watchIter.remove();
-        _dirtyPaths.remove(watchedPath);
       }
     }
 
@@ -193,6 +199,19 @@ public abstract class AbstractDataCache<T extends HelixProperty> {
     LOG.debug("refreshed keys: {}", reloadKeys);
 
     return refreshedPropertyMap;
+  }
+
+  /**
+   * Clears all watch state so that the next {@link #refreshProperties} call stat-checks and
+   * re-registers watches for every path from scratch. Must be called whenever the underlying
+   * ZK session is re-established, because ZK watches are server-side and are discarded on session
+   * expiry. ZkClient fires {@code handleDataChange} for all registered listeners on reconnect
+   * (via {@code fireAllEvents}), which normally re-populates {@code _dirtyPaths} automatically;
+   * this method is an additional safety net for cases where that mechanism is bypassed.
+   */
+  public void clearWatchesOnSessionReset() {
+    _watchedPaths.clear();
+    _dirtyPaths.clear();
   }
 
   /**
