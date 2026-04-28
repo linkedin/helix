@@ -1,4 +1,4 @@
 # Default reviewers for all PRs.
 # At least one approval from a code owner is required before merging.
 # GitHub will automatically exclude the PR author from the reviewer list.
-* @kabragaurav @thestreak101 @ngngwr @Chr0nicl3 @proud-parselmouth @laxman-ch @LZD-PratyushBhatt @PranaviAncha
+* @kabragaurav @thestreak101 @ngngwr @proud-parselmouth @laxman-ch @LZD-PratyushBhatt @PranaviAncha @arkmish
