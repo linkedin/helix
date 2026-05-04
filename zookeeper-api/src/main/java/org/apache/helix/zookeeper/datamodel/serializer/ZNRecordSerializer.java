@@ -124,21 +124,18 @@ public class ZNRecordSerializer implements ZkSerializer {
       return null;
     }
 
-    ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
-
     mapper.enable(MapperFeature.AUTO_DETECT_FIELDS);
     mapper.enable(MapperFeature.AUTO_DETECT_SETTERS);
     mapper.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-    try {
-      //decompress the data if its already compressed
-      if (GZipCompressionUtil.isCompressed(bytes)) {
-        byte[] uncompressedBytes = GZipCompressionUtil.uncompress(bais);
-        bais = new ByteArrayInputStream(uncompressedBytes);
-      }
 
-      return mapper.readValue(bais, ZNRecord.class);
+    // Option A: stream-decompress directly into Jackson rather than materializing the full
+    // decompressed byte[] in a BAOS. Avoids humongous byte[] allocations for large IdealStates.
+    try (java.io.InputStream is = GZipCompressionUtil.isCompressed(bytes)
+        ? new java.util.zip.GZIPInputStream(new ByteArrayInputStream(bytes))
+        : new ByteArrayInputStream(bytes)) {
+      return mapper.readValue(is, ZNRecord.class);
     } catch (Exception e) {
-      LOG.error("Exception during deserialization of bytes: {}", new String(bytes), e);
+      LOG.error("Exception during deserialization of bytes", e);
       return null;
     }
   }
