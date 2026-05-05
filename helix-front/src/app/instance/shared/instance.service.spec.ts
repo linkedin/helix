@@ -152,15 +152,15 @@ describe('InstanceService', () => {
         expect(instances).toHaveLength(4);
         const byName = new Map(instances.map((i) => [i.name, i]));
 
-        expect(byName.get('hostA_1')!.operationState).toBe('ENABLE');
-        expect(byName.get('hostA_1')!.online).toBe(true);
+        expect(byName.get('hostA_1')?.operationState).toBe('ENABLE');
+        expect(byName.get('hostA_1')?.online).toBe(true);
 
-        expect(byName.get('hostB_2')!.operationState).toBe('DISABLE');
-        expect(byName.get('hostB_2')!.online).toBe(false);
+        expect(byName.get('hostB_2')?.operationState).toBe('DISABLE');
+        expect(byName.get('hostB_2')?.online).toBe(false);
 
-        expect(byName.get('hostC_3')!.operationState).toBe('EVACUATE');
+        expect(byName.get('hostC_3')?.operationState).toBe('EVACUATE');
 
-        expect(byName.get('hostD_4')!.operationState).toBe('UNKNOWN');
+        expect(byName.get('hostD_4')?.operationState).toBe('UNKNOWN');
         done();
       });
 

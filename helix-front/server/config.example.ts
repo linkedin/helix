@@ -41,13 +41,13 @@ export const CUSTOM_IDENTITY_TOKEN_REQUEST_BODY: any = {};
  * from the custom identity token response
  * sent by your Identity Token API.
  */
-export const TOKEN_RESPONSE_KEY: string = 'token';
+export const TOKEN_RESPONSE_KEY = 'token';
 
 /**
  * This is the key that helix-front uses
  * to access the token expiration datetime
  */
-export const TOKEN_EXPIRATION_KEY: string = 'expires';
+export const TOKEN_EXPIRATION_KEY = 'expires';
 
 /**
  * This is the key that helix-front uses
@@ -61,4 +61,4 @@ export const APP_INSIGHTS_CONNECTION_STRING: string | null = null;
  * An optional proxy url
  *
  */
-export const PROXY_URL: string = 'www.example.com';
+export const PROXY_URL = 'www.example.com';
