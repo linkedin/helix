@@ -1,5 +1,4 @@
 import { Request } from 'express';
-import request from 'request';
 
 export interface HelixRequest extends Request {
   session?: HelixSession;
@@ -13,18 +12,3 @@ interface HelixSession {
   username: string;
   isAdmin: boolean;
 }
-
-type AgentOptions = {
-  rejectUnauthorized: boolean;
-  ca?: string;
-  key?: Buffer;
-  cert?: Buffer;
-};
-
-export type HelixRequestOptions = {
-  url: string;
-  json: string;
-  headers: request.Headers;
-  agentOptions: AgentOptions;
-  body?: string;
-};
