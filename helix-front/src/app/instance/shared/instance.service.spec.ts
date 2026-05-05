@@ -363,11 +363,11 @@ describe('InstanceService', () => {
         .subscribe(() => done());
 
       const req = httpMock.expectOne((r) =>
-        r.url.includes('/clusters/TestCluster/instances/host1_1234') &&
-        r.url.includes('command=setInstanceOperation') &&
-        r.url.includes('instanceOperation=EVACUATE') &&
-        r.url.includes('instanceOperationSource=USER') &&
-        r.url.includes('reason=incident%20response')
+        r.urlWithParams.includes('/clusters/TestCluster/instances/host1_1234') &&
+        r.urlWithParams.includes('command=setInstanceOperation') &&
+        r.urlWithParams.includes('instanceOperation=EVACUATE') &&
+        r.urlWithParams.includes('instanceOperationSource=USER') &&
+        r.urlWithParams.includes('reason=incident%20response')
       );
       expect(req.request.method).toBe('POST');
       req.flush(null);
@@ -379,8 +379,8 @@ describe('InstanceService', () => {
         .subscribe(() => done());
 
       const req = httpMock.expectOne((r) =>
-        r.url.includes('command=setInstanceOperation') &&
-        r.url.includes('instanceOperation=ENABLE')
+        r.urlWithParams.includes('command=setInstanceOperation') &&
+        r.urlWithParams.includes('instanceOperation=ENABLE')
       );
       expect(req.request.method).toBe('POST');
       req.flush(null);
@@ -392,8 +392,8 @@ describe('InstanceService', () => {
         .subscribe(() => done());
 
       const req = httpMock.expectOne((r) =>
-        r.url.includes('command=setInstanceOperation') &&
-        r.url.includes('instanceOperation=DISABLE')
+        r.urlWithParams.includes('command=setInstanceOperation') &&
+        r.urlWithParams.includes('instanceOperation=DISABLE')
       );
       expect(req.request.method).toBe('POST');
       req.flush(null);
