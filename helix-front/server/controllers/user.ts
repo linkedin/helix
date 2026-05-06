@@ -86,6 +86,7 @@ export class UserCtrl {
       credential.password,
       (err) => {
         if (err) {
+          console.error('LDAP bind failed:', err);
           ldap.unbind();
           res.status(401).json(false);
           return;
@@ -105,6 +106,7 @@ export class UserCtrl {
 
         ldap.search(LDAP.base, opts, function (searchErr, result) {
           if (searchErr || !result) {
+            console.error('LDAP search failed:', searchErr);
             ldap.unbind();
             res.json(true);
             return;
@@ -113,21 +115,22 @@ export class UserCtrl {
           let isInAdminGroup = false;
           let searchComplete = false;
           result.on('searchEntry', function (entry) {
-            if (entry.object) {
-              const groups = entry.object['memberOf'];
-              if (Array.isArray(groups)) {
-                for (const group of groups) {
-                  const groupName = group.split(',', 1)[0].split('=')[1];
-                  if (groupName == LDAP.adminGroup) {
-                    isInAdminGroup = true;
-                  }
-                }
+            if (!entry.object) return;
+            // ldapjs returns memberOf as a string when the user is in
+            // exactly one group, and as a string[] when in multiple.
+            const raw = entry.object['memberOf'];
+            const groups = Array.isArray(raw) ? raw : raw ? [raw] : [];
+            for (const group of groups) {
+              const groupName = group.split(',', 1)[0].split('=')[1];
+              if (groupName == LDAP.adminGroup) {
+                isInAdminGroup = true;
               }
             }
           });
-          result.on('error', function () {
+          result.on('error', function (err) {
             if (searchComplete) return;
             searchComplete = true;
+            console.error('LDAP search error:', err);
             ldap.unbind();
             res.json(true);
           });
@@ -182,7 +185,8 @@ export class UserCtrl {
               };
               res.cookie(cookieName, cookieValue, cookieOptions);
               res.json(true);
-            } catch {
+            } catch (error) {
+              console.error('Identity token fetch failed:', error);
               res.json(true);
             } finally {
               clearTimeout(timeoutId);
