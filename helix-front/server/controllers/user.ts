@@ -1,7 +1,8 @@
 import { Response, Router } from 'express';
 import * as LdapClient from 'ldapjs';
-import * as request from 'request';
+import { fetch, Agent } from 'undici';
 import { readFileSync } from 'fs';
+import type { ConnectionOptions } from 'tls';
 
 import {
   LDAP,
@@ -9,8 +10,24 @@ import {
   CUSTOM_IDENTITY_TOKEN_REQUEST_BODY,
   SSL,
 } from '../config';
-import { HelixRequest, HelixRequestOptions } from './d';
+import { HelixRequest } from './d';
 import { TOKEN_EXPIRATION_KEY, TOKEN_RESPONSE_KEY } from '../config';
+
+// SSL material is read once at import. The identity-token endpoint only
+// validates the server cert — no client mTLS — so we just trust SSL.cafiles[0].
+const tokenConnectOpts: ConnectionOptions = { rejectUnauthorized: false };
+if (SSL.cafiles.length > 0) {
+  tokenConnectOpts.ca = readFileSync(SSL.cafiles[0], { encoding: 'utf-8' });
+}
+const tokenDispatcher = new Agent({ connect: tokenConnectOpts });
+
+const TOKEN_TIMEOUT_MS = 10000;
+
+function escapeLdapFilter(str: string): string {
+  return str.replace(/([\\*()\x00])/g, (c) =>
+    '\\' + c.charCodeAt(0).toString(16).padStart(2, '0')
+  );
+}
 
 export class UserCtrl {
   constructor(router: Router) {
@@ -69,97 +86,113 @@ export class UserCtrl {
       credential.password,
       (err) => {
         if (err) {
+          console.error('LDAP bind failed:', err);
+          ldap.unbind();
           res.status(401).json(false);
-        } else {
-          // LDAP login success
-          const opts = {
-            filter:
-              '(&(sAMAccountName=' +
-              credential.username +
-              ')(objectcategory=person))',
-            scope: 'sub',
-          };
+          return;
+        }
 
-          req.session.username = credential.username;
-          res.set('Username', credential.username);
+        // LDAP login success
+        const opts: LdapClient.SearchOptions = {
+          filter:
+            '(&(sAMAccountName=' +
+            escapeLdapFilter(credential.username) +
+            ')(objectcategory=person))',
+          scope: 'sub',
+        };
 
-          ldap.search(LDAP.base, opts, function (err, result) {
-            let isInAdminGroup = false;
-            let searchComplete = false;
-            result.on('searchEntry', function (entry) {
-              if (entry.object && !err) {
-                const groups = entry.object['memberOf'];
-                for (const group of groups) {
-                  const groupName = group.split(',', 1)[0].split('=')[1];
-                  if (groupName == LDAP.adminGroup) {
-                    isInAdminGroup = true;
-                  }
-                }
+        req.session.username = credential.username;
+        res.set('Username', credential.username);
+
+        ldap.search(LDAP.base, opts, function (searchErr, result) {
+          if (searchErr || !result) {
+            console.error('LDAP search failed:', searchErr);
+            ldap.unbind();
+            res.json(true);
+            return;
+          }
+
+          let isInAdminGroup = false;
+          let searchComplete = false;
+          result.on('searchEntry', function (entry) {
+            if (!entry.object) return;
+            // ldapjs returns memberOf as a string when the user is in
+            // exactly one group, and as a string[] when in multiple.
+            const raw = entry.object['memberOf'];
+            const groups = Array.isArray(raw) ? raw : raw ? [raw] : [];
+            for (const group of groups) {
+              const groupName = group.split(',', 1)[0].split('=')[1];
+              if (groupName == LDAP.adminGroup) {
+                isInAdminGroup = true;
               }
+            }
+          });
+          result.on('error', function (err) {
+            if (searchComplete) return;
+            searchComplete = true;
+            console.error('LDAP search error:', err);
+            ldap.unbind();
+            res.json(true);
+          });
+          result.on('end', async function () {
+            if (searchComplete) return;
+            searchComplete = true;
+            ldap.unbind();
+            req.session.isAdmin = isInAdminGroup;
+
+            //
+            // Fetch an Identity-Token for ALL authenticated users
+            // so that helix-rest can perform per-user authorization
+            // via DatavaultAuthValidator.
+            //
+            if (!IDENTITY_TOKEN_SOURCE) {
+              res.json(true);
+              return;
+            }
+
+            const tokenBody = JSON.stringify({
+              username: credential.username,
+              password: credential.password,
+              ...CUSTOM_IDENTITY_TOKEN_REQUEST_BODY,
             });
-            result.on('end', function () {
-              if (searchComplete) {
+
+            const abort = new AbortController();
+            const timeoutId = setTimeout(() => abort.abort(), TOKEN_TIMEOUT_MS);
+            try {
+              const tokenResponse = await fetch(IDENTITY_TOKEN_SOURCE, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: tokenBody,
+                dispatcher: tokenDispatcher,
+                signal: abort.signal,
+              });
+
+              const tokenText = await tokenResponse.text();
+              const parsedBody = JSON.parse(tokenText);
+
+              if (!tokenResponse.ok || parsedBody?.error) {
+                res.json(true);
                 return;
               }
-              searchComplete = true;
-              req.session.isAdmin = isInAdminGroup;
 
-              //
-              // Fetch an Identity-Token for ALL authenticated users
-              // so that helix-rest can perform per-user authorization
-              // via DatavaultAuthValidator.
-              //
-              if (IDENTITY_TOKEN_SOURCE) {
-                const body = JSON.stringify({
-                  username: credential.username,
-                  password: credential.password,
-                  ...CUSTOM_IDENTITY_TOKEN_REQUEST_BODY,
-                });
+              req.session.identityToken = parsedBody;
 
-                const options: HelixRequestOptions = {
-                  url: IDENTITY_TOKEN_SOURCE,
-                  json: '',
-                  body,
-                  headers: {
-                    'Content-Type': 'application/json',
-                  },
-                  agentOptions: {
-                    rejectUnauthorized: false,
-                  },
-                };
-
-                if (SSL.cafiles.length > 0) {
-                  options.agentOptions.ca = readFileSync(SSL.cafiles[0], {
-                    encoding: 'utf-8',
-                  });
-                }
-
-                request.post(options, function (error, _res, body) {
-                  if (error || body?.error) {
-                    res.json(true);
-                  } else {
-                    const parsedBody = JSON.parse(body);
-                    req.session.identityToken = parsedBody;
-
-                    const cookieName = 'helixui_identity.token';
-                    const cookieValue =
-                      parsedBody.value[TOKEN_RESPONSE_KEY];
-                    const cookieExpiresDate = new Date(
-                      parsedBody.value[TOKEN_EXPIRATION_KEY]
-                    );
-                    const cookieOptions = {
-                      expires: cookieExpiresDate,
-                    };
-                    res.cookie(cookieName, cookieValue, cookieOptions);
-                    res.json(true);
-                  }
-                });
-              } else {
-                res.json(true);
-              }
-            });
+              const cookieName = 'helixui_identity.token';
+              const cookieValue = parsedBody.value[TOKEN_RESPONSE_KEY];
+              const cookieExpiresDate = new Date(parsedBody.value[TOKEN_EXPIRATION_KEY]);
+              const cookieOptions = {
+                expires: cookieExpiresDate,
+              };
+              res.cookie(cookieName, cookieValue, cookieOptions);
+              res.json(true);
+            } catch (error) {
+              console.error('Identity token fetch failed:', error);
+              res.json(true);
+            } finally {
+              clearTimeout(timeoutId);
+            }
           });
-        }
+        });
       }
     );
   }
