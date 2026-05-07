@@ -88,6 +88,42 @@ public class TestWorkflowControllerDataProviderEvacuate {
     Assert.assertFalse(placementEligible.contains(disableLive));
   }
 
+  /**
+   * Regression guard for the throttle-path NPE fix at AbstractTaskDispatcher.java:651.
+   * The pre-fix code did `cache.getAssignableInstanceConfigMap().get(instance).getMaxConcurrentTask()`
+   * which NPE'd for EVACUATE-flagged live instances because they are filtered out of
+   * `_assignableInstanceConfigMap` by `InstanceConfig.isAssignable()`. The fix uses
+   * `cache.getInstanceConfigMap()` instead, which returns the full config including EVACUATE.
+   * This test asserts both maps' contents to lock in the contract relied upon by the fix.
+   */
+  @Test
+  public void testInstanceConfigMapIncludesEvacuateForThrottlePath() {
+    String enabledLive = "host_enabled_live";
+    String evacuateLive = "host_evacuate_live";
+
+    Map<String, InstanceConfig> configMap = new HashMap<>();
+    configMap.put(enabledLive,
+        instanceWithOperation(enabledLive, InstanceConstants.InstanceOperation.ENABLE));
+    configMap.put(evacuateLive,
+        instanceWithOperation(evacuateLive, InstanceConstants.InstanceOperation.EVACUATE));
+
+    List<LiveInstance> liveInstances =
+        Arrays.asList(new LiveInstance(enabledLive), new LiveInstance(evacuateLive));
+
+    WorkflowControllerDataProvider provider = newProvider(configMap, liveInstances);
+
+    // Full instance config map (used by the fixed throttle path) must include EVACUATE
+    Assert.assertNotNull(provider.getInstanceConfigMap().get(evacuateLive),
+        "InstanceConfigMap must include EVACUATE instance - throttle path depends on this");
+    Assert.assertNotNull(provider.getInstanceConfigMap().get(enabledLive));
+
+    // Assignable instance config map (used by the BUGGY pre-fix throttle path) does NOT include
+    // EVACUATE. Locking this in to document the contract that necessitated the fix.
+    Assert.assertNull(provider.getAssignableInstanceConfigMap().get(evacuateLive),
+        "AssignableInstanceConfigMap must NOT include EVACUATE - this is why the original throttle code path NPE'd");
+    Assert.assertNotNull(provider.getAssignableInstanceConfigMap().get(enabledLive));
+  }
+
   @Test
   public void testEnabledLiveInstancesWithTagIncludesEvacuate() {
     String tag = "BACKUP_TAG";
