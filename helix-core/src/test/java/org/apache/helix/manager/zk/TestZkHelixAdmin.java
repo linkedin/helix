@@ -224,12 +224,14 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     }
 
     // Tests that ZkClientException thrown from ZkClient should be caught
-    // and it should be converted HelixException to be rethrown
+    // and converted to HelixException. dropInstance is now a two-phase batched
+    // drop that delegates the subtree delete to ZkClient.deleteRecursively;
+    // simulate the racy NotEmpty case by having deleteRecursively throw the
+    // legacy exception shape so the existing 3-retry loop is exercised.
     String instancePath = PropertyPathBuilder.instance(clusterName, config.getInstanceName());
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
     RealmAwareZkClient mockZkClient = Mockito.mock(RealmAwareZkClient.class);
-    // Mock the exists() method to let dropInstance() reach deleteRecursively().
     Mockito.when(mockZkClient.exists(instanceConfigPath)).thenReturn(true);
     Mockito.when(mockZkClient.exists(instancePath)).thenReturn(true);
     Mockito.when(mockZkClient.exists(liveInstancePath)).thenReturn(false);
@@ -237,7 +239,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         new ZkException("ZkException: failed to delete " + instancePath,
             new KeeperException.NotEmptyException(
                 "NotEmptyException: directory" + instancePath + " is not empty"))))
-        .when(mockZkClient).deleteRecursivelyAtomic(Arrays.asList(instancePath, instanceConfigPath));
+        .when(mockZkClient).deleteRecursively(instancePath);
 
     HelixAdmin helixAdminMock = new ZKHelixAdmin(mockZkClient);
     try {
@@ -1365,6 +1367,146 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     }
     Assert.assertTrue(admin.getInstancesInCluster(clusterName).isEmpty(), "Instances should be removed");
 
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Verifies dropInstance handles a subtree larger than the ZkClient
+  // delete-batch threshold (~1000 ops) end-to-end against real ZK. Reproduces
+  // the production scenario where an instance accumulates many MESSAGES; the
+  // legacy single deleteRecursivelyAtomic() built one multi() packet that
+  // crossed jute.maxbuffer.
+  @Test
+  public void testDropInstanceWithLargeMessageSubtree() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceLargeSubtree";
+    final String instanceName = "host_with_many_messages";
+    final int numMessages = 2500; // > 2 batches at ZkClient layer
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+
+    String messagesPath = PropertyPathBuilder.instanceMessage(clusterName, instanceName);
+    for (int i = 0; i < numMessages; i++) {
+      _gZkClient.createPersistent(messagesPath + "/msg-" + i);
+    }
+    AssertJUnit.assertEquals(numMessages, _gZkClient.getChildren(messagesPath).size());
+
+    admin.dropInstance(clusterName, new InstanceConfig(instanceName));
+
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    AssertJUnit.assertFalse("instance subtree should be gone", _gZkClient.exists(instancePath));
+    AssertJUnit.assertFalse("instance config should be gone", _gZkClient.exists(instanceConfigPath));
+    AssertJUnit.assertTrue("cluster instance list should be empty",
+        admin.getInstancesInCluster(clusterName).isEmpty());
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Resume case: if a previous dropInstance partially completed (config
+  // deleted but subtree delete failed), a follow-up dropInstance should clean
+  // up the remaining subtree instead of erroring on "config does not exist".
+  @Test
+  public void testDropInstanceResumesAfterPartialDelete() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceResume";
+    final String instanceName = "host_partial";
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+    String messagesPath = PropertyPathBuilder.instanceMessage(clusterName, instanceName);
+    _gZkClient.createPersistent(messagesPath + "/leftover-msg");
+
+    // Simulate a prior partial drop: InstanceConfig already deleted, subtree remains.
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    _gZkClient.delete(instanceConfigPath);
+    AssertJUnit.assertFalse(_gZkClient.exists(instanceConfigPath));
+    AssertJUnit.assertTrue(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+
+    admin.dropInstance(clusterName, new InstanceConfig(instanceName));
+
+    AssertJUnit.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Realistic instance shape: addInstance creates 7 standard subdirs, plus
+  // depth>=2 paths under CURRENTSTATES (sessionId/resource) and ERRORS.
+  // Verifies the BFS children-first ordering inside ZkClient.deleteRecursively
+  // works for non-trivial trees.
+  @Test
+  public void testDropInstanceWithDeepSubtreeShape() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceDeepShape";
+    final String instanceName = "host_deep";
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+
+    String csPath = PropertyPathBuilder.instanceCurrentState(clusterName, instanceName);
+    String session = "session-1";
+    _gZkClient.createPersistent(csPath + "/" + session);
+    for (int i = 0; i < 50; i++) {
+      _gZkClient.createPersistent(csPath + "/" + session + "/resource-" + i);
+    }
+    String msgPath = PropertyPathBuilder.instanceMessage(clusterName, instanceName);
+    for (int i = 0; i < 100; i++) {
+      _gZkClient.createPersistent(msgPath + "/msg-" + i);
+    }
+    String errPath = PropertyPathBuilder.instanceError(clusterName, instanceName);
+    _gZkClient.createPersistent(errPath + "/" + session);
+    _gZkClient.createPersistent(errPath + "/" + session + "/res-1");
+
+    admin.dropInstance(clusterName, new InstanceConfig(instanceName));
+
+    AssertJUnit.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+    AssertJUnit.assertFalse(_gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Non-NotEmpty errors from deleteRecursively must NOT trigger the 3-retry
+  // loop. The production incident was 1880 threads stuck retrying
+  // CONNECTIONLOSS for 24h; we want fail-fast for anything that isn't the
+  // racy NotEmpty case.
+  @Test
+  public void testDropInstanceFailsFastOnNonRetryableError() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceFailFast";
+    final String instanceName = "host_failfast";
+    InstanceConfig config = new InstanceConfig(instanceName);
+
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
+
+    RealmAwareZkClient mockZkClient = Mockito.mock(RealmAwareZkClient.class);
+    Mockito.when(mockZkClient.exists(instanceConfigPath)).thenReturn(true);
+    Mockito.when(mockZkClient.exists(instancePath)).thenReturn(true);
+    Mockito.when(mockZkClient.exists(liveInstancePath)).thenReturn(false);
+    // Simulate an unrecoverable error (no NotEmpty cause chain, so the
+    // outer NotEmpty retry loop must NOT retry).
+    Mockito.doThrow(new ZkClientException("simulated unrecoverable ZK error"))
+        .when(mockZkClient).deleteRecursively(instancePath);
+
+    HelixAdmin helixAdminMock = new ZKHelixAdmin(mockZkClient);
+    long start = System.currentTimeMillis();
+    try {
+      helixAdminMock.dropInstance(clusterName, config);
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      Assert.assertEquals(expected.getMessage(),
+          "Failed to drop instance: " + instanceName + ". Retry times: 0",
+          "Non-NotEmpty errors must not trigger the 3-retry loop");
+    }
+    long elapsed = System.currentTimeMillis() - start;
+    AssertJUnit.assertTrue("dropInstance should fail fast (took " + elapsed + " ms)", elapsed < 2000);
+
+    Mockito.verify(mockZkClient, Mockito.times(1)).deleteRecursively(instancePath);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 }
