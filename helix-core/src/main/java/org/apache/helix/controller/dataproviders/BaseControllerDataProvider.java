@@ -715,6 +715,20 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
+   * Return a set of all instances that have the EVACUATE InstanceOperation.
+   * Per InstanceOperation.EVACUATE semantics, replicas are moved off the node only after
+   * the (N+1) replacement replica has been bootstrapped, so existing replica states
+   * (e.g., MASTER) may still be hosted on these instances during the swap-out window.
+   *
+   * @return An unmodifiable set of instance names with EVACUATE operation
+   */
+  public Set<String> getEvacuatingInstances() {
+    return Collections.unmodifiableSet(
+        _derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
+            InstanceConstants.InstanceOperation.EVACUATE).keySet());
+  }
+
+  /**
    * Return all the live nodes that are enabled. If a node is enabled, it is assignable.
    * @return An unmodifiable set contains live instance name and that are marked enabled
    */
