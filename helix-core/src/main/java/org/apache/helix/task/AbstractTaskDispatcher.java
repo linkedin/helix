@@ -647,8 +647,15 @@ public abstract class AbstractTaskDispatcher {
       int jobCfgLimitation =
           jobCfg.getNumConcurrentTasksPerInstance() - assignedPartitions.get(instance).size();
       // 2. throttled by participant capacity
-      int participantCapacity =
-          cache.getAssignableInstanceConfigMap().get(instance).getMaxConcurrentTask();
+      // Use the full instance config map rather than getAssignableInstanceConfigMap(): the latter
+      // is filtered by InstanceConfig.isAssignable() (only ENABLE/DISABLE) and would return null
+      // for EVACUATE-flagged instances that the task pipeline now schedules tasks onto, causing
+      // an NPE on the chained getMaxConcurrentTask() below. The configured task capacity of an
+      // instance is independent of its rebalancer-eligibility operation. See CICP-34004.
+      InstanceConfig instanceConfig = cache.getInstanceConfigMap().get(instance);
+      int participantCapacity = instanceConfig == null
+          ? InstanceConfig.MAX_CONCURRENT_TASK_NOT_SET
+          : instanceConfig.getMaxConcurrentTask();
       if (participantCapacity == InstanceConfig.MAX_CONCURRENT_TASK_NOT_SET) {
         participantCapacity = cache.getClusterConfig().getMaxConcurrentTaskPerInstance();
       }

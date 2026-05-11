@@ -19,7 +19,9 @@ package org.apache.helix.controller.dataproviders;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +29,7 @@ import java.util.Set;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.common.caches.AbstractDataCache;
 import org.apache.helix.common.caches.TaskDataCache;
@@ -263,6 +266,49 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
   public Map<String, CurrentState> getTaskCurrentState(String instanceName,
       String clientSessionId) {
     return _taskCurrentStateCache.getParticipantState(instanceName, clientSessionId);
+  }
+
+  /**
+   * Override to include EVACUATE-flagged live instances. The task framework co-locates tasks
+   * with existing replica states (e.g., MASTER) of the target resource. EVACUATE instances may
+   * still host such replicas until the (N+1) replacement replica completes bootstrap; excluding
+   * them here causes FixedTargetTaskAssignmentCalculator to leave those task partitions
+   * unassigned, which manifests as stuck/timed-out workflow jobs (e.g., backup, bulk operations)
+   * during long swap-out windows. See CICP-34004.
+   *
+   * Note: this override is intentionally scoped to the task pipeline. Replica-placement
+   * pipelines (WAGED, DelayedAuto) continue to use the base class behavior which excludes
+   * EVACUATE - correct for NEW replica assignment per InstanceOperation.EVACUATE semantics.
+   */
+  @Override
+  public Set<String> getEnabledLiveInstances() {
+    Set<String> result = new HashSet<>(super.getEnabledLiveInstances());
+    Set<String> liveInstances = getLiveInstances().keySet();
+    for (String instance : getEvacuatingInstances()) {
+      if (liveInstances.contains(instance)) {
+        result.add(instance);
+      }
+    }
+    return Collections.unmodifiableSet(result);
+  }
+
+  /**
+   * Override applies the same EVACUATE-inclusive policy as {@link #getEnabledLiveInstances()},
+   * then filters by instance tag. The base class implementation routes through
+   * getAssignableInstancesWithTag, which excludes EVACUATE instances (since isAssignable() is
+   * false for them); this override sources tags directly from InstanceConfig instead.
+   */
+  @Override
+  public Set<String> getEnabledLiveInstancesWithTag(String instanceTag) {
+    Set<String> result = new HashSet<>();
+    Map<String, InstanceConfig> configMap = getInstanceConfigMap();
+    for (String instance : getEnabledLiveInstances()) {
+      InstanceConfig config = configMap.get(instance);
+      if (config != null && config.containsTag(instanceTag)) {
+        result.add(instance);
+      }
+    }
+    return Collections.unmodifiableSet(result);
   }
 
   @Override
