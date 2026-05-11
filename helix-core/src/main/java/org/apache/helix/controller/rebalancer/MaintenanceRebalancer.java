@@ -21,8 +21,11 @@ package org.apache.helix.controller.rebalancer;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
@@ -90,6 +93,32 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
 
       currentIdealState.setPreferenceList(partition.getPartitionName(), preferenceList);
     }
+
+    // Clear preferenceList for partitions that have no participant CurrentState.
+    // Under maintenance mode the cluster is meant to be frozen: new replicas should
+    // not be bootstrapped. A listFields entry without any CurrentState represents a
+    // planned-but-not-executed placement (e.g., WAGED wrote a target for a partition
+    // whose in-flight swap had not converged before MM activated). Preserving such an
+    // entry causes the inherited mapping calculator to dispatch a bootstrap that
+    // bypasses the per-pipeline capacity check in DelayedAutoRebalancer, which can
+    // push hosts over their configured cap. Generalize Branch A's
+    // "clear-all-when-no-CS" behavior to a per-partition rule.
+    Set<String> partitionNamesWithCurrentState = currentStateMap.keySet().stream()
+        .map(Partition::getPartitionName)
+        .collect(Collectors.toCollection(HashSet::new));
+    for (Map.Entry<String, List<String>> entry :
+        currentIdealState.getPreferenceLists().entrySet()) {
+      if (!partitionNamesWithCurrentState.contains(entry.getKey())) {
+        if (!entry.getValue().isEmpty()) {
+          LOG.info(
+              "Clearing preferenceList for partition {} in resource {} under maintenance mode "
+                  + "(no participant CurrentState).",
+              entry.getKey(), resourceName);
+          entry.getValue().clear();
+        }
+      }
+    }
+
     LOG.info(String
         .format("End computing ideal state for resource %s in maintenance mode.", resourceName));
     return currentIdealState;
