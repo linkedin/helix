@@ -157,7 +157,6 @@ public class TestWorkflowControllerDataProviderEvacuate {
   }
 
   /**
-   * Coverage for EVACUATE -&gt; ENABLE transition during a live cache (CICP-34004 review nit).
    * Phase 1: instance is EVACUATE, must be eligible via the override.
    * Phase 2: same instance flipped to ENABLE on the same provider instance, must remain
    * eligible - but now through the base-class path (super.getEnabledLiveInstances()),
