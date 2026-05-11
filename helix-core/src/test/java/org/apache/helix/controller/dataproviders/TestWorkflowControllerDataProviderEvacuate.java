@@ -156,6 +156,44 @@ public class TestWorkflowControllerDataProviderEvacuate {
         "Tagged task assignment must include EVACUATE+live+tagged instances and exclude untagged");
   }
 
+  /**
+   * Coverage for EVACUATE -&gt; ENABLE transition during a live cache (CICP-34004 review nit).
+   * Phase 1: instance is EVACUATE, must be eligible via the override.
+   * Phase 2: same instance flipped to ENABLE on the same provider instance, must remain
+   * eligible - but now through the base-class path (super.getEnabledLiveInstances()),
+   * not the override's EVACUATE-additive branch. This guards against future changes that
+   * might inadvertently couple the override's behavior to the initial state.
+   */
+  @Test
+  public void testEvacuateFlipsBackToEnableExposesInstance() {
+    String host = "host_flipping";
+
+    Map<String, InstanceConfig> configMap = new HashMap<>();
+    configMap.put(host, instanceWithOperation(host, InstanceConstants.InstanceOperation.EVACUATE));
+    List<LiveInstance> liveInstances = Arrays.asList(new LiveInstance(host));
+
+    WorkflowControllerDataProvider provider = newProvider(configMap, liveInstances);
+
+    // Phase 1: EVACUATE+live - eligible via override (additive branch).
+    Assert.assertTrue(provider.getEnabledLiveInstances().contains(host),
+        "EVACUATE+live must be task-eligible (override path)");
+    Assert.assertFalse(provider.getEvacuatingInstances().isEmpty(),
+        "Sanity: instance must be in evacuating set before flip");
+
+    // Mutate in place: flip the same instance to ENABLE. setInstanceConfigMap rebuilds
+    // _derivedInstanceCache (BaseControllerDataProvider#updateInstanceSets), so the
+    // override's super.getEnabledLiveInstances() now returns the host directly.
+    Map<String, InstanceConfig> flippedMap = new HashMap<>();
+    flippedMap.put(host, instanceWithOperation(host, InstanceConstants.InstanceOperation.ENABLE));
+    provider.setInstanceConfigMap(flippedMap);
+
+    // Phase 2: ENABLE+live - eligible via super (not via the EVACUATE-additive branch).
+    Assert.assertTrue(provider.getEnabledLiveInstances().contains(host),
+        "ENABLE+live must remain task-eligible after EVACUATE->ENABLE flip (base path)");
+    Assert.assertTrue(provider.getEvacuatingInstances().isEmpty(),
+        "After flip, evacuating set must be empty - confirms eligibility is via super, not override");
+  }
+
   private static WorkflowControllerDataProvider newProvider(Map<String, InstanceConfig> configMap,
       List<LiveInstance> liveInstances) {
     WorkflowControllerDataProvider provider = new WorkflowControllerDataProvider(CLUSTER);
