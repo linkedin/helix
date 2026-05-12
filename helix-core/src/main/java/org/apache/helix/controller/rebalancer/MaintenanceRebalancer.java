@@ -61,18 +61,6 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
       CurrentStateOutput currentStateOutput, ResourceControllerDataProvider clusterData) {
     LOG.info("Start computing ideal state for resource {} in maintenance mode.", resourceName);
 
-    // Without a CurrentStateOutput we have no information about which partitions
-    // are still live on participants and which are not, so we cannot decide which
-    // preferenceLists to rebuild and which to clear. Returning the IdealState
-    // unchanged is the safe no-op: the next pipeline run will provide a non-null
-    // CurrentStateOutput, and DelayedAutoRebalancer's per-pipeline cap-check
-    // continues to enforce safety on placements in the meantime.
-    if (currentStateOutput == null) {
-      LOG.warn("CurrentStateOutput is null for resource {} in maintenance mode; "
-          + "leaving IdealState unchanged.", resourceName);
-      return currentIdealState;
-    }
-
     // CurrentStateOutput returns Map<Partition, Map<host, state>> keyed by Partition
     // objects, but the unified loop below iterates partition names from
     // currentIdealState.getPartitionSet() (Set<String>). Build a name-indexed view
