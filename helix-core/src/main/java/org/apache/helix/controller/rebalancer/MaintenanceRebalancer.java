@@ -37,24 +37,28 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
   private static final Logger LOG = LoggerFactory.getLogger(MaintenanceRebalancer.class);
 
   /**
-   * Under maintenance mode, the cluster is meant to be frozen: no new replicas should be
+   * Under maintenance mode the cluster is meant to be frozen: no new replicas should be
    * bootstrapped. For every partition of the resource, the rebalancer sets the
    * preferenceList to the participant-reported CurrentState hosts (or empty if no
    * participant reports state for that partition).
    *
    * <p>For partitions with CurrentState reports, the preferenceList is rebuilt from the
-   * reported hosts, ordered to keep top-state hosts first (so role assignments are
-   * preserved). For partitions without CurrentState, the preferenceList is set to empty,
-   * which causes the inherited mapping calculator to produce no BestPossibleState and
-   * therefore no OFFLINE -> ASSIGNED message dispatch.
+   * reported hosts, ordered so that any top-state host (as defined by the resource's
+   * state model) is listed first. No host that has the partition in CurrentState is
+   * dropped from the preferenceList. For partitions without any CurrentState report,
+   * the preferenceList is set to empty so the inherited mapping calculator produces
+   * no BestPossibleState for the partition and the pipeline emits no state-transition
+   * messages for it; this is what enforces "no new bootstrap under MM" regardless of
+   * which upstream rebalancer wrote the original listFields entry or what state model
+   * the resource uses.
    *
-   * <p>This is the single-rule version of what was previously a two-branch implementation
-   * (Branch A: clear all when the entire resource has no CurrentState; Branch B: rebuild
-   * preferenceLists only for partitions with CurrentState). The previous Branch B silently
-   * preserved listFields entries for partitions whose participants had not reported yet,
-   * which let WAGED-written speculative placements (target hosts for in-flight swaps that
-   * had not converged) be dispatched without the per-pipeline capacity check that lives
-   * in DelayedAutoRebalancer. The unified rule eliminates that asymmetry.
+   * <p>This unifies what was previously a two-branch implementation: Branch A cleared
+   * every preferenceList when the entire resource had no CurrentState, and Branch B
+   * rebuilt preferenceLists only for partitions that did have CurrentState. The
+   * previous Branch B silently preserved listFields entries for partitions with no
+   * CurrentState yet, which could let a planned-but-not-executed placement get
+   * dispatched under MM and bypass safety checks that other rebalancers normally
+   * apply on placement. The unified rule eliminates that asymmetry.
    */
   @Override
   public IdealState computeNewIdealState(String resourceName, IdealState currentIdealState,
@@ -97,21 +101,20 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     //
     // 1. Partitions with at least one participant CurrentState report keep their
     //    placement: the preferenceList is rebuilt from the CS hosts and sorted so
-    //    top-state replicas come first. No host that has the partition in CS will
-    //    be evicted by MaintenanceRebalancer.
+    //    any top-state host (per the resource's state model) appears first. No host
+    //    that has the partition in CurrentState is evicted by this rebalancer.
     //
     // 2. Partitions without any participant CurrentState report get an empty
-    //    preferenceList. The inherited mapping calculator
-    //    (AbstractRebalancer.computeBestPossibleStateForPartition) then returns an
-    //    empty BestPossibleStateMap, MessageGenerationPhase emits no transition,
-    //    and no OFFLINE -> ASSIGNED bootstrap is dispatched. This prevents
-    //    MaintenanceRebalancer from acting on speculative listFields entries that
-    //    WAGED may have written for in-flight swaps that had not yet converged
-    //    when maintenance mode activated -- the original bypass that allowed
-    //    over-cap dispatches.
+    //    preferenceList. With an empty preferenceList the inherited mapping
+    //    calculator produces no BestPossibleState entry for the partition, so the
+    //    downstream pipeline emits no state-transition messages and no replica is
+    //    bootstrapped. This is what enforces the maintenance-mode contract of "no
+    //    new bootstrap" for partitions whose listFields may have been written
+    //    speculatively (e.g., a planned target for an in-flight move that had not
+    //    yet been realized when MM activated).
     //
-    // Iteration uses currentIdealState.getPartitionSet() so partitions that
-    // exist only as listFields entries (the dangerous case) are also visited.
+    // Iteration uses currentIdealState.getPartitionSet() so partitions that exist
+    // only as listFields entries -- the dangerous case under MM -- are also visited.
     for (String partitionName : currentIdealState.getPartitionSet()) {
       Map<String, String> stateMap = currentStateByPartitionName.get(partitionName);
 
