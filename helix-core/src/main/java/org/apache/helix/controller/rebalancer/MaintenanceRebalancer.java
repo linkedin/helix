@@ -61,14 +61,29 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
       CurrentStateOutput currentStateOutput, ResourceControllerDataProvider clusterData) {
     LOG.info("Start computing ideal state for resource {} in maintenance mode.", resourceName);
 
-    // Defensive NPE guard: a null CurrentStateOutput leaves the IS unchanged.
+    // Without a CurrentStateOutput we have no information about which partitions
+    // are still live on participants and which are not, so we cannot decide which
+    // preferenceLists to rebuild and which to clear. Returning the IdealState
+    // unchanged is the safe no-op: the next pipeline run will provide a non-null
+    // CurrentStateOutput, and DelayedAutoRebalancer's per-pipeline cap-check
+    // continues to enforce safety on placements in the meantime.
     if (currentStateOutput == null) {
       LOG.warn("CurrentStateOutput is null for resource {} in maintenance mode; "
           + "leaving IdealState unchanged.", resourceName);
       return currentIdealState;
     }
 
-    // Index CurrentState by partition name for O(1) lookup in the unified loop below.
+    // CurrentStateOutput returns Map<Partition, Map<host, state>> keyed by Partition
+    // objects, but the unified loop below iterates partition names from
+    // currentIdealState.getPartitionSet() (Set<String>). Build a name-indexed view
+    // of CurrentState up front so the per-partition lookup inside the loop is a
+    // constant-time HashMap.get() rather than a linear scan over Partition keys.
+    //
+    // A null currentStateMap (the resource has no CurrentState entries at all,
+    // e.g., the resource has never been touched by any participant) leaves
+    // currentStateByPartitionName empty. The loop below then treats every
+    // partition as a "no CS" case and clears each preferenceList, which is
+    // identical to the pre-refactor Branch A behavior.
     Map<Partition, Map<String, String>> currentStateMap =
         currentStateOutput.getCurrentStateMap(resourceName);
     Map<String, Map<String, String>> currentStateByPartitionName = new HashMap<>();
@@ -86,17 +101,38 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     StateModelDefinition stateModelDef =
         clusterData.getStateModelDef(currentIdealState.getStateModelDefRef());
 
-    // Single per-partition rule for every partition the IdealState knows about:
-    //   preferenceList = sorted(CurrentState hosts)   if CurrentState is non-empty
-    //   preferenceList = []                            otherwise
+    // Invariant for every partition in the resource under maintenance mode:
+    //
+    //   preferenceList = sorted(participant CurrentState hosts for this partition)
+    //
+    // Two consequences fall out of this single rule:
+    //
+    // 1. Partitions with at least one participant CurrentState report keep their
+    //    placement: the preferenceList is rebuilt from the CS hosts and sorted so
+    //    top-state replicas come first. No host that has the partition in CS will
+    //    be evicted by MaintenanceRebalancer.
+    //
+    // 2. Partitions without any participant CurrentState report get an empty
+    //    preferenceList. The inherited mapping calculator
+    //    (AbstractRebalancer.computeBestPossibleStateForPartition) then returns an
+    //    empty BestPossibleStateMap, MessageGenerationPhase emits no transition,
+    //    and no OFFLINE -> ASSIGNED bootstrap is dispatched. This prevents
+    //    MaintenanceRebalancer from acting on speculative listFields entries that
+    //    WAGED may have written for in-flight swaps that had not yet converged
+    //    when maintenance mode activated -- the original bypass that allowed
+    //    over-cap dispatches.
+    //
+    // Iteration uses currentIdealState.getPartitionSet() so partitions that
+    // exist only as listFields entries (the dangerous case) are also visited.
     for (String partitionName : currentIdealState.getPartitionSet()) {
       Map<String, String> stateMap = currentStateByPartitionName.get(partitionName);
 
       if (stateMap == null || stateMap.isEmpty()) {
-        // No participant reports state for this partition. Under MM we do not
-        // bootstrap new replicas, so clear any planned-but-not-executed
-        // listFields entry. The inherited mapping calculator will then produce
-        // an empty BestPossibleStateMap for this partition.
+        // No participant CurrentState for this partition -> clear the
+        // preferenceList. setPreferenceList(name, new ArrayList<>()) replaces the
+        // list rather than mutating it in place, which avoids
+        // UnsupportedOperationException if the stored list happens to be
+        // immutable (e.g., set via Arrays.asList or Collections.emptyList).
         currentIdealState.setPreferenceList(partitionName, new ArrayList<>());
         continue;
       }
