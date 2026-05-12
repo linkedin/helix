@@ -88,12 +88,25 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     //
     //   preferenceList = sorted(participant CurrentState hosts for this partition)
     //
+    // Example resource with two partitions, P0 and P1:
+    //   IS.listFields before: P0 -> [hostA, hostB]
+    //                         P1 -> [hostC, hostD]
+    //   CurrentState:         P0 -> { hostA:LEADER, hostB:FOLLOWER }
+    //                         P1 -> (no participant reports any state)
+    //   IS.listFields after:  P0 -> [hostA, hostB]   (rebuilt from CS, LEADER first)
+    //                         P1 -> []                (cleared because no CS report)
+    //
     // Two consequences fall out of this single rule:
     //
     // 1. Partitions with at least one participant CurrentState report keep their
     //    placement: the preferenceList is rebuilt from the CS hosts and sorted so
     //    any top-state host (per the resource's state model) appears first. No host
     //    that has the partition in CurrentState is evicted by this rebalancer.
+    //
+    //    Example:
+    //      IS preferenceList: [hostA, hostB]
+    //      CurrentState:      { hostA:FOLLOWER, hostB:LEADER }
+    //      -->  preferenceList after = [hostB, hostA]   (LEADER promoted to head)
     //
     // 2. Partitions without any participant CurrentState report get an empty
     //    preferenceList. With an empty preferenceList the inherited mapping
@@ -103,6 +116,11 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     //    new bootstrap" for partitions whose listFields may have been written
     //    speculatively (e.g., a planned target for an in-flight move that had not
     //    yet been realized when MM activated).
+    //
+    //    Example:
+    //      IS preferenceList: [hostX, hostY]
+    //      CurrentState:      (no entries for this partition)
+    //      -->  preferenceList after = []
     //
     // Iteration uses currentIdealState.getPartitionSet() so partitions that exist
     // only as listFields entries -- the dangerous case under MM -- are also visited.
