@@ -51,14 +51,6 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
    * messages for it; this is what enforces "no new bootstrap under MM" regardless of
    * which upstream rebalancer wrote the original listFields entry or what state model
    * the resource uses.
-   *
-   * <p>This unifies what was previously a two-branch implementation: Branch A cleared
-   * every preferenceList when the entire resource had no CurrentState, and Branch B
-   * rebuilt preferenceLists only for partitions that did have CurrentState. The
-   * previous Branch B silently preserved listFields entries for partitions with no
-   * CurrentState yet, which could let a planned-but-not-executed placement get
-   * dispatched under MM and bypass safety checks that other rebalancers normally
-   * apply on placement. The unified rule eliminates that asymmetry.
    */
   @Override
   public IdealState computeNewIdealState(String resourceName, IdealState currentIdealState,
@@ -66,7 +58,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     LOG.info("Start computing ideal state for resource {} in maintenance mode.", resourceName);
 
     // CurrentStateOutput returns Map<Partition, Map<host, state>> keyed by Partition
-    // objects, but the unified loop below iterates partition names from
+    // objects, but the loop below iterates partition names from
     // currentIdealState.getPartitionSet() (Set<String>). Build a name-indexed view
     // of CurrentState up front so the per-partition lookup inside the loop is a
     // constant-time HashMap.get() rather than a linear scan over Partition keys.
@@ -74,8 +66,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     // A null currentStateMap (the resource has no CurrentState entries at all,
     // e.g., the resource has never been touched by any participant) leaves
     // currentStateByPartitionName empty. The loop below then treats every
-    // partition as a "no CS" case and clears each preferenceList, which is
-    // identical to the pre-refactor Branch A behavior.
+    // partition as a "no CS" case and clears each preferenceList.
     Map<Partition, Map<String, String>> currentStateMap =
         currentStateOutput.getCurrentStateMap(resourceName);
     Map<String, Map<String, String>> currentStateByPartitionName = new HashMap<>();
