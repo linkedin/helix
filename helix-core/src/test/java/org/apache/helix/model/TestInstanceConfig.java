@@ -608,4 +608,127 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig2.getRecord().getSimpleField(
         InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "EVACUATE");
   }
+
+  @Test
+  public void testPlannedMaintenanceUnsetByDefault() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    Assert.assertEquals(cfg.getPlannedMaintenanceUntilMs(),
+        InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+    Assert.assertTrue(cfg.getPlannedMaintenanceMetadata().isEmpty());
+    Assert.assertFalse(cfg.isUnderPlannedMaintenance(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testPlannedMaintenanceSetAndGet() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long expiresAt = System.currentTimeMillis() + 60_000L;
+    cfg.setPlannedMaintenanceUntilMs(expiresAt);
+    Assert.assertEquals(cfg.getPlannedMaintenanceUntilMs(), expiresAt);
+  }
+
+  @Test
+  public void testIsUnderPlannedMaintenanceWindow() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long now = 1_000_000L;
+    cfg.setPlannedMaintenanceUntilMs(now + 5_000L);
+
+    Assert.assertTrue(cfg.isUnderPlannedMaintenance(now));
+    Assert.assertTrue(cfg.isUnderPlannedMaintenance(now + 4_999L));
+    Assert.assertFalse(cfg.isUnderPlannedMaintenance(now + 5_000L),
+        "Boundary: nowMs == untilMs is no longer under maintenance");
+    Assert.assertFalse(cfg.isUnderPlannedMaintenance(now + 5_001L));
+  }
+
+  @Test
+  public void testPlannedMaintenanceClearViaNegativeValue() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long expiresAt = System.currentTimeMillis() + 60_000L;
+    cfg.setPlannedMaintenanceUntilMs(expiresAt);
+    cfg.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "venice-deploy", "source",
+        "AUTOMATION"));
+
+    cfg.setPlannedMaintenanceUntilMs(InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+
+    Assert.assertEquals(cfg.getPlannedMaintenanceUntilMs(),
+        InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+    Assert.assertTrue(cfg.getPlannedMaintenanceMetadata().isEmpty(),
+        "Clear must also drop the metadata map");
+    Assert.assertFalse(cfg.getRecord().getSimpleFields().containsKey(
+        InstanceConfig.InstanceConfigProperty.PLANNED_MAINTENANCE_UNTIL_MS.name()));
+    Assert.assertFalse(cfg.getRecord().getMapFields().containsKey(
+        InstanceConfig.InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name()));
+  }
+
+  @Test
+  public void testPlannedMaintenanceClearViaZero() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setPlannedMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+    cfg.setPlannedMaintenanceUntilMs(0L);
+    Assert.assertEquals(cfg.getPlannedMaintenanceUntilMs(),
+        InstanceConfig.PLANNED_MAINTENANCE_NOT_SET,
+        "Zero is treated as a clear sentinel alongside -1");
+  }
+
+  @Test
+  public void testPlannedMaintenanceMetadataSetAndGet() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "venice-deploy",
+        "source", "AUTOMATION"));
+
+    Map<String, String> got = cfg.getPlannedMaintenanceMetadata();
+    Assert.assertEquals(got.size(), 2);
+    Assert.assertEquals(got.get("reason"), "venice-deploy");
+    Assert.assertEquals(got.get("source"), "AUTOMATION");
+  }
+
+  @Test(expectedExceptions = UnsupportedOperationException.class)
+  public void testPlannedMaintenanceMetadataIsReadOnly() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "x"));
+    cfg.getPlannedMaintenanceMetadata().put("source", "MANUAL");
+  }
+
+  @Test
+  public void testPlannedMaintenanceMetadataNullClears() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "x"));
+    cfg.setPlannedMaintenanceMetadata(null);
+    Assert.assertTrue(cfg.getPlannedMaintenanceMetadata().isEmpty());
+
+    cfg.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "x"));
+    cfg.setPlannedMaintenanceMetadata(Collections.emptyMap());
+    Assert.assertTrue(cfg.getPlannedMaintenanceMetadata().isEmpty());
+  }
+
+  @Test
+  public void testPlannedMaintenanceMetadataIsDefensiveCopied() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    Map<String, String> source = new HashMap<>();
+    source.put("reason", "x");
+    cfg.setPlannedMaintenanceMetadata(source);
+    source.put("reason", "y");
+    Assert.assertEquals(cfg.getPlannedMaintenanceMetadata().get("reason"), "x",
+        "Setter must take a defensive copy");
+  }
+
+  @Test
+  public void testPlannedMaintenanceNotTransferredByOverwrite() {
+    InstanceConfig source = new InstanceConfig("source");
+    source.setHostName("source-host");
+    source.setPort("1234");
+    source.setPlannedMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+    source.setPlannedMaintenanceMetadata(ImmutableMap.of("reason", "venice-deploy"));
+
+    InstanceConfig target = new InstanceConfig("target");
+    target.setHostName("target-host");
+    target.setPort("5678");
+
+    target.overwriteInstanceConfig(source);
+
+    Assert.assertEquals(target.getPlannedMaintenanceUntilMs(),
+        InstanceConfig.PLANNED_MAINTENANCE_NOT_SET,
+        "Planned-maintenance marker is per-operation transient state and must not transfer "
+            + "via overwriteInstanceConfig (e.g., during swap-in)");
+    Assert.assertTrue(target.getPlannedMaintenanceMetadata().isEmpty());
+  }
 }

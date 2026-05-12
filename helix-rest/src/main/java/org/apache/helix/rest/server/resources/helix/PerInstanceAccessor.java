@@ -67,6 +67,8 @@ import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
+import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
@@ -315,6 +317,61 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       LOG.error("Failed to takeInstances:", e);
       return badRequest("Failed to takeInstances: " + e.getMessage());
     }
+  }
+
+  /**
+   * Set or clear the planned-maintenance budget-exemption marker on a single instance.
+   *
+   * <p>Request body:
+   * <pre>{@code { "expiresAtMillis": 1776385800000, "reason": "...", "source": "AUTOMATION" }}</pre>
+   *
+   * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) clears the marker. An
+   * omitted or zero {@code expiresAtMillis} falls back to the cluster-level
+   * {@code DEFAULT_PLANNED_MAINTENANCE_DURATION_MS}; if neither is set, the call is rejected.
+   * The write fails if it would push the cluster-wide count of marked instances above the
+   * configured {@code MAX_PLANNED_MAINTENANCE_INSTANCES} or
+   * {@code MAX_PLANNED_MAINTENANCE_PERCENTAGE} cap.
+   */
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @POST
+  @Path("plannedMaintenance")
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Response setPlannedMaintenance(String jsonContent,
+      @PathParam("clusterId") String clusterId,
+      @PathParam("instanceName") String instanceName) {
+    try {
+      JsonNode node = parseJsonOrEmpty(jsonContent);
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(PlannedMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+      String reason = node.path("reason").asText(null);
+      String source = node.path("source").asText(null);
+
+      PlannedMaintenanceWriteHandler handler =
+          new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      long effective = handler.applyPlannedMaintenance(clusterId,
+          Collections.singletonList(instanceName), expiresAtMillis, reason, source,
+          System.currentTimeMillis());
+
+      ObjectNode body = JsonNodeFactory.instance.objectNode();
+      body.put("instance", instanceName);
+      body.put("expiresAtMillis", effective);
+      return JSONRepresentation(body);
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      LOG.error("Failed to set planned maintenance for {} in cluster {}", instanceName, clusterId,
+          e);
+      return serverError(e);
+    }
+  }
+
+  private static JsonNode parseJsonOrEmpty(String jsonContent) throws IOException {
+    if (jsonContent == null || jsonContent.isEmpty()) {
+      return JsonNodeFactory.instance.objectNode();
+    }
+    JsonNode parsed = OBJECT_MAPPER.readTree(jsonContent);
+    return parsed == null ? JsonNodeFactory.instance.objectNode() : parsed;
   }
 
   private MaintenanceOpInputFields readMaintenanceInputFromJson(String jsonContent) throws IOException {

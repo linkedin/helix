@@ -20,18 +20,21 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import javax.ws.rs.Consumes;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
 import com.codahale.metrics.annotation.ResponseMetered;
@@ -50,6 +53,8 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
+import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -420,6 +425,71 @@ public class InstancesAccessor extends AbstractHelixResource {
               "Failed to get parallel stoppable instances for cluster %s with a HelixException!",
               clusterId), e);
       throw e;
+    }
+  }
+
+  /**
+   * Set or clear the planned-maintenance budget-exemption marker on a batch of instances.
+   *
+   * <p>Request body:
+   * <pre>{@code
+   * { "instances": ["h1", "h2", ...],
+   *   "expiresAtMillis": 1776385800000,
+   *   "reason": "...", "source": "AUTOMATION" }
+   * }</pre>
+   *
+   * <p>TTL resolution and cap enforcement follow the same rules as the single-instance
+   * endpoint. The cap check uses a single snapshot of cluster-wide markers and treats the
+   * batch as one atomic write from a quota perspective; if the batch would push the post-write
+   * count above the cap, none of the writes are performed.
+   */
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @POST
+  @Path("plannedMaintenance:batch")
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Response setPlannedMaintenanceBatch(@PathParam("clusterId") String clusterId,
+      String content) {
+    try {
+      if (content == null || content.isEmpty()) {
+        return badRequest("Request body is required");
+      }
+      JsonNode node = OBJECT_MAPPER.readTree(content);
+      if (node == null) {
+        return badRequest("Invalid JSON body");
+      }
+      JsonNode instancesNode = node.get("instances");
+      if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
+        return badRequest("Field 'instances' must be a non-empty array");
+      }
+      List<String> instances = new ArrayList<>(instancesNode.size());
+      for (JsonNode element : instancesNode) {
+        instances.add(element.asText());
+      }
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(PlannedMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+      String reason = node.path("reason").asText(null);
+      String source = node.path("source").asText(null);
+
+      PlannedMaintenanceWriteHandler handler =
+          new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      long effective = handler.applyPlannedMaintenance(clusterId, instances, expiresAtMillis,
+          reason, source, System.currentTimeMillis());
+
+      ObjectNode body = JsonNodeFactory.instance.objectNode();
+      ArrayNode arr = body.putArray("instances");
+      for (String n : instances) {
+        arr.add(n);
+      }
+      body.put("expiresAtMillis", effective);
+      return JSONRepresentation(body);
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (IOException e) {
+      return badRequest("Failed to parse body: " + e.getMessage());
+    } catch (Exception e) {
+      _logger.error("Failed to set planned maintenance batch in cluster {}", clusterId, e);
+      return serverError(e);
     }
   }
 }

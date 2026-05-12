@@ -74,8 +74,29 @@ public class InstanceConfig extends HelixProperty {
     INSTANCE_CAPACITY_MAP,
     TARGET_TASK_THREAD_POOL_SIZE,
     HELIX_INSTANCE_OPERATIONS,
-    INSTANCE_OPERATION_STATE
+    INSTANCE_OPERATION_STATE,
+    PLANNED_MAINTENANCE_UNTIL_MS,
+    PLANNED_MAINTENANCE_METADATA
   }
+
+  /**
+   * Keys used inside the PLANNED_MAINTENANCE_METADATA map field. The map is purely audit
+   * data; it does not influence the budget-exemption decision.
+   */
+  public static final class PlannedMaintenanceMetadataKey {
+    public static final String REASON = "reason";
+    public static final String SOURCE = "source";
+    public static final String SET_AT_MS = "setAtMs";
+
+    private PlannedMaintenanceMetadataKey() {
+    }
+  }
+
+  /**
+   * Sentinel returned by {@link #getPlannedMaintenanceUntilMs()} when no marker is set.
+   * Callers clear the marker by passing this value to {@link #setPlannedMaintenanceUntilMs(long)}.
+   */
+  public static final long PLANNED_MAINTENANCE_NOT_SET = -1L;
 
   public static class InstanceOperation {
     private static final String DEFAULT_INSTANCE_OPERATION_SOURCE =
@@ -234,11 +255,15 @@ public class InstanceConfig extends HelixProperty {
   private static final ObjectMapper _objectMapper = new ObjectMapper();
 
   // These fields are not allowed to be overwritten by the merge method because
-  // they are unique properties of an instance.
+  // they are unique properties of an instance. Planned-maintenance fields are listed here
+  // because the marker is tied to a specific operation window on the source instance and must
+  // not transfer onto a swap-in target via overwriteInstanceConfig.
   private static final ImmutableSet<InstanceConfigProperty> NON_OVERWRITABLE_PROPERTIES =
       ImmutableSet.of(InstanceConfigProperty.HELIX_HOST, InstanceConfigProperty.HELIX_PORT,
           InstanceConfigProperty.HELIX_ZONE_ID, InstanceConfigProperty.DOMAIN,
-          InstanceConfigProperty.INSTANCE_INFO_MAP);
+          InstanceConfigProperty.INSTANCE_INFO_MAP,
+          InstanceConfigProperty.PLANNED_MAINTENANCE_UNTIL_MS,
+          InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA);
 
   private static final Logger _logger = LoggerFactory.getLogger(InstanceConfig.class.getName());
 
@@ -435,6 +460,74 @@ public class InstanceConfig extends HelixProperty {
   public long getInstanceEnabledTime() {
     return _record.getLongField(InstanceConfigProperty.HELIX_ENABLED_TIMESTAMP.name(),
         HELIX_ENABLED_TIMESTAMP_DEFAULT_VALUE);
+  }
+
+  /**
+   * Get the planned-maintenance expiry timestamp (Unix millis) for this instance. While
+   * {@code now < returnedValue}, the instance is excluded from the cluster-wide offline budget
+   * check that drives auto maintenance mode.
+   *
+   * @return the expiry timestamp, or {@link #PLANNED_MAINTENANCE_NOT_SET} when no marker is set.
+   */
+  public long getPlannedMaintenanceUntilMs() {
+    return _record.getLongField(InstanceConfigProperty.PLANNED_MAINTENANCE_UNTIL_MS.name(),
+        PLANNED_MAINTENANCE_NOT_SET);
+  }
+
+  /**
+   * Set or clear the planned-maintenance expiry timestamp. Passing
+   * {@link #PLANNED_MAINTENANCE_NOT_SET} (or any non-positive value) clears both the timestamp
+   * and the associated metadata map. Callers writing a real expiry must supply a Unix millis
+   * value strictly greater than zero.
+   *
+   * @param expiresAtMillis the new expiry timestamp, or a non-positive value to clear.
+   */
+  public void setPlannedMaintenanceUntilMs(long expiresAtMillis) {
+    if (expiresAtMillis <= 0L) {
+      _record.getSimpleFields()
+          .remove(InstanceConfigProperty.PLANNED_MAINTENANCE_UNTIL_MS.name());
+      _record.getMapFields()
+          .remove(InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name());
+      return;
+    }
+    _record.setLongField(InstanceConfigProperty.PLANNED_MAINTENANCE_UNTIL_MS.name(),
+        expiresAtMillis);
+  }
+
+  /**
+   * Returns true when this instance currently carries a planned-maintenance marker that has not
+   * yet expired. The check is purely a wall-clock comparison against {@code nowMs}; callers
+   * pass {@code System.currentTimeMillis()} (or a deterministic clock in tests).
+   *
+   * @param nowMs the current time in Unix millis.
+   */
+  public boolean isUnderPlannedMaintenance(long nowMs) {
+    long until = getPlannedMaintenanceUntilMs();
+    return until > 0L && nowMs < until;
+  }
+
+  /**
+   * Get the audit metadata associated with the current planned-maintenance marker. The returned
+   * map is read-only and never null; an empty map indicates no metadata was recorded.
+   */
+  public Map<String, String> getPlannedMaintenanceMetadata() {
+    Map<String, String> metadata =
+        _record.getMapField(InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name());
+    return metadata == null ? Collections.emptyMap() : Collections.unmodifiableMap(metadata);
+  }
+
+  /**
+   * Replace the audit metadata for the current planned-maintenance marker. Passing null or an
+   * empty map removes the map field entirely. Has no effect on the expiry timestamp.
+   */
+  public void setPlannedMaintenanceMetadata(Map<String, String> metadata) {
+    if (metadata == null || metadata.isEmpty()) {
+      _record.getMapFields()
+          .remove(InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name());
+      return;
+    }
+    _record.setMapField(InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name(),
+        new HashMap<>(metadata));
   }
 
   /**

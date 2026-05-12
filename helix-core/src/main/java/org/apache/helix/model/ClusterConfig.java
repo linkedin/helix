@@ -81,6 +81,19 @@ public class ClusterConfig extends HelixProperty {
     MAX_OFFLINE_INSTANCES_ALLOWED,
     NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT, // For auto-exiting maintenance mode
 
+    // Planned-maintenance budget exemption. Instances carrying a
+    // PLANNED_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded from the
+    // MAX_OFFLINE_INSTANCES_ALLOWED count while the marker is valid.
+    // Cap on the number of instances that can carry a planned-maintenance marker
+    // simultaneously. Either form (absolute or percentage) may be set; if both are set the
+    // smaller resolved value wins.
+    MAX_PLANNED_MAINTENANCE_INSTANCES,
+    MAX_PLANNED_MAINTENANCE_PERCENTAGE,
+    // Fallback TTL (in millis) used by the planned-maintenance write path when the caller
+    // omits an explicit expiresAtMillis. Not a default in the "always applied" sense: when
+    // unset, writes that omit expiresAtMillis are rejected.
+    DEFAULT_PLANNED_MAINTENANCE_DURATION_MS,
+
     TARGET_EXTERNALVIEW_ENABLED,
     @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
     // precedence if it is set
@@ -577,6 +590,70 @@ public class ClusterConfig extends HelixProperty {
    */
   public int getMaxOfflineInstancesAllowed() {
     return _record.getIntField(ClusterConfigProperty.MAX_OFFLINE_INSTANCES_ALLOWED.name(), -1);
+  }
+
+  /**
+   * Sentinel returned by the planned-maintenance cluster-config getters when the field is
+   * unset on the cluster. The auto-MM filter and the REST write path both treat the unset
+   * value as "feature disabled for this cluster".
+   */
+  public static final int PLANNED_MAINTENANCE_LIMIT_UNSET = -1;
+  public static final long PLANNED_MAINTENANCE_DURATION_UNSET = -1L;
+
+  /**
+   * Set the maximum number of instances that may simultaneously carry a planned-maintenance
+   * marker. Pass {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} to clear.
+   */
+  public void setMaxPlannedMaintenanceInstances(int maxPlannedMaintenanceInstances) {
+    _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
+        maxPlannedMaintenanceInstances);
+  }
+
+  /**
+   * @return the configured absolute cap on planned-maintenance markers, or
+   *     {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} when not set.
+   */
+  public int getMaxPlannedMaintenanceInstances() {
+    return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
+        PLANNED_MAINTENANCE_LIMIT_UNSET);
+  }
+
+  /**
+   * Set the maximum percentage (0-100) of cluster instances that may simultaneously carry a
+   * planned-maintenance marker. Pass {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} to clear.
+   */
+  public void setMaxPlannedMaintenancePercentage(int maxPlannedMaintenancePercentage) {
+    _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
+        maxPlannedMaintenancePercentage);
+  }
+
+  /**
+   * @return the configured percentage cap on planned-maintenance markers, or
+   *     {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} when not set.
+   */
+  public int getMaxPlannedMaintenancePercentage() {
+    return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
+        PLANNED_MAINTENANCE_LIMIT_UNSET);
+  }
+
+  /**
+   * Set the fallback duration (millis) applied by the planned-maintenance write path when the
+   * caller does not supply an explicit expiresAtMillis. Pass
+   * {@link #PLANNED_MAINTENANCE_DURATION_UNSET} to clear (callers must then always pass an
+   * explicit expiry, or the write is rejected).
+   */
+  public void setDefaultPlannedMaintenanceDurationMs(long defaultPlannedMaintenanceDurationMs) {
+    _record.setLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
+        defaultPlannedMaintenanceDurationMs);
+  }
+
+  /**
+   * @return the configured fallback duration in millis, or
+   *     {@link #PLANNED_MAINTENANCE_DURATION_UNSET} when not set.
+   */
+  public long getDefaultPlannedMaintenanceDurationMs() {
+    return _record.getLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
+        PLANNED_MAINTENANCE_DURATION_UNSET);
   }
 
   /**

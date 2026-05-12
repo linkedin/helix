@@ -382,6 +382,21 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
               instanceEntry.getValue().getInstanceOperation().getOperation()))
           .collect(Collectors.toSet())
           .size() - cache.getEnabledLiveInstances().size();
+      // Subtract instances carrying a valid planned-maintenance marker that are currently
+      // counted as offline (routable config, not in the enabled-live set). Planned-and-alive
+      // instances are already absent from the budget and must not be double-subtracted, so we
+      // intersect the marker filter with the !enabledLive predicate. The filter applies
+      // symmetrically: same expression gates both MM entry and (via the same code path on the
+      // next pipeline tick) MM exit.
+      long nowMs = System.currentTimeMillis();
+      Set<String> enabledLive = cache.getEnabledLiveInstances();
+      int plannedAndOfflineCount = (int) cache.getInstanceConfigMap().entrySet().stream()
+          .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+              instanceEntry.getValue().getInstanceOperation().getOperation()))
+          .filter(instanceEntry -> instanceEntry.getValue().isUnderPlannedMaintenance(nowMs))
+          .filter(instanceEntry -> !enabledLive.contains(instanceEntry.getKey()))
+          .count();
+      instancesUnableToAcceptOnlineReplicas -= plannedAndOfflineCount;
       if (instancesUnableToAcceptOnlineReplicas > maxInstancesUnableToAcceptOnlineReplicas) {
         String errMsg = String.format(
             "Instances unable to take ONLINE replicas count %d greater than allowed count %d. Put cluster %s into "

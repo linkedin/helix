@@ -21,6 +21,7 @@ package org.apache.helix.controller.stages;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
@@ -31,6 +32,7 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Partition;
 import org.slf4j.Logger;
@@ -89,9 +91,25 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
       if (numOfflineInstancesForAutoExit < 0) {
         return; // Config is not set, no auto-exit
       }
-      // Get the count of all instances that are either offline or disabled
+      // Get the count of all instances that are either offline or disabled, symmetrically
+      // excluding planned-maintenance instances that are not currently live. This matches
+      // the filter applied at MM entry in BestPossibleStateCalcStage and keeps a deploy
+      // window from blocking auto-recovery.
+      Set<String> assignable = cache.getAssignableInstances();
+      Set<String> enabledLive = cache.getEnabledLiveInstances();
+      long nowMs = System.currentTimeMillis();
+      int plannedAndOfflineCount = 0;
+      for (String instanceName : assignable) {
+        if (enabledLive.contains(instanceName)) {
+          continue;
+        }
+        InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
+        if (cfg != null && cfg.isUnderPlannedMaintenance(nowMs)) {
+          plannedAndOfflineCount++;
+        }
+      }
       int offlineDisabledCount =
-          cache.getAssignableInstances().size() - cache.getEnabledLiveInstances().size();
+          assignable.size() - enabledLive.size() - plannedAndOfflineCount;
       shouldExitMaintenance = offlineDisabledCount <= numOfflineInstancesForAutoExit;
       reason = String.format(
           "Auto-exiting maintenance mode for cluster %s; Num. of offline/disabled instances is %d, less than or equal to the exit threshold %d",
