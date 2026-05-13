@@ -449,11 +449,11 @@ public class TestClusterConfig {
   public void testPlannedMaintenanceFieldsUnsetByDefault() {
     ClusterConfig clusterConfig = new ClusterConfig("testCluster");
     Assert.assertEquals(clusterConfig.getMaxPlannedMaintenanceInstances(),
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     Assert.assertEquals(clusterConfig.getMaxPlannedMaintenancePercentage(),
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     Assert.assertEquals(clusterConfig.getDefaultPlannedMaintenanceDurationMs(),
-        ClusterConfig.PLANNED_MAINTENANCE_DURATION_UNSET);
+        -1L);
   }
 
   @Test
@@ -476,17 +476,17 @@ public class TestClusterConfig {
     clusterConfig.setDefaultPlannedMaintenanceDurationMs(3_600_000L);
 
     clusterConfig.setMaxPlannedMaintenanceInstances(
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     clusterConfig.setMaxPlannedMaintenancePercentage(
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     clusterConfig.setDefaultPlannedMaintenanceDurationMs(
-        ClusterConfig.PLANNED_MAINTENANCE_DURATION_UNSET);
+        -1L);
 
     Assert.assertEquals(clusterConfig.getMaxPlannedMaintenanceInstances(),
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     Assert.assertEquals(clusterConfig.getMaxPlannedMaintenancePercentage(),
-        ClusterConfig.PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
     Assert.assertEquals(clusterConfig.getDefaultPlannedMaintenanceDurationMs(),
-        ClusterConfig.PLANNED_MAINTENANCE_DURATION_UNSET);
+        -1L);
   }
 }

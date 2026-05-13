@@ -98,13 +98,7 @@ public class PlannedMaintenanceWriteHandler {
     }
     List<String> deduped = new ArrayList<>(dedupedSet);
 
-    // Validate every incoming instance exists before doing any cap math or writes. Otherwise
-    // a bogus name would inflate the cap projection (one extra slot per nonexistent name) and
-    // the post-cap write loop would still throw partway through, leaving previously-mutated
-    // instances in an inconsistent committed state.
-    for (String instanceName : deduped) {
-      loadInstanceConfig(clusterId, instanceName);
-    }
+    assertInstancesExist(clusterId, deduped);
 
     boolean clear = callerExpiresAtMillis < 0L;
     if (clear) {
@@ -157,6 +151,21 @@ public class PlannedMaintenanceWriteHandler {
   }
 
   /**
+   * Confirm every supplied instance exists in the cluster before mutating any of them. This
+   * runs before TTL resolution and cap enforcement so that a bogus name does not inflate the
+   * cap projection (one extra slot per nonexistent name) and does not leave already-mutated
+   * instances behind on a partial-failure path.
+   */
+  private void assertInstancesExist(String clusterId, List<String> instanceNames) {
+    for (String instanceName : instanceNames) {
+      if (_admin.getInstanceConfig(clusterId, instanceName) == null) {
+        throw new BadRequestException(
+            "Instance " + instanceName + " not found in cluster " + clusterId);
+      }
+    }
+  }
+
+  /**
    * Apply the resolution rules documented in the class javadoc. Visible for testing.
    */
   static long resolveExpiresAtMillis(long callerExpiresAtMillis, ClusterConfig clusterConfig,
@@ -169,8 +178,12 @@ public class PlannedMaintenanceWriteHandler {
       }
       return callerExpiresAtMillis;
     }
+    // At this point the caller did not supply a positive expiry. Fall back to the cluster
+    // default only if the operator configured one. The getter returns the sentinel -1L when
+    // the field is absent, which is the single "feature off" signal here; we compare against
+    // it directly so the intent is explicit.
     long defaultDuration = clusterConfig.getDefaultPlannedMaintenanceDurationMs();
-    if (defaultDuration > 0L) {
+    if (defaultDuration != -1L) {
       return nowMs + defaultDuration;
     }
     throw new BadRequestException(

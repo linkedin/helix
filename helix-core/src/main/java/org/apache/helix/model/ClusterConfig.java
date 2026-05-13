@@ -81,17 +81,17 @@ public class ClusterConfig extends HelixProperty {
     MAX_OFFLINE_INSTANCES_ALLOWED,
     NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT, // For auto-exiting maintenance mode
 
-    // Planned-maintenance budget exemption. Instances carrying a
+    // Planned-maintenance budget exemption. Instances carrying a valid
     // PLANNED_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded from the
-    // MAX_OFFLINE_INSTANCES_ALLOWED count while the marker is valid.
-    // Cap on the number of instances that can carry a planned-maintenance marker
-    // simultaneously. Either form (absolute or percentage) may be set; if both are set the
-    // smaller resolved value wins.
+    // MAX_OFFLINE_INSTANCES_ALLOWED count while the marker has not expired.
+    // Caps on the number of instances that can carry a planned-maintenance marker
+    // simultaneously. Either form may be set; if both are set the smaller resolved value
+    // wins. -1 means the cap is not configured.
     MAX_PLANNED_MAINTENANCE_INSTANCES,
     MAX_PLANNED_MAINTENANCE_PERCENTAGE,
-    // Fallback TTL (in millis) used by the planned-maintenance write path when the caller
-    // omits an explicit expiresAtMillis. Not a default in the "always applied" sense: when
-    // unset, writes that omit expiresAtMillis are rejected.
+    // Fallback TTL (in millis) applied by the planned-maintenance write path when the
+    // caller omits expiresAtMillis. When unset (-1), callers must always supply an
+    // explicit expiresAtMillis; otherwise the write is rejected.
     DEFAULT_PLANNED_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
@@ -593,16 +593,9 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Sentinel returned by the planned-maintenance cluster-config getters when the field is
-   * unset on the cluster. The auto-MM filter and the REST write path both treat the unset
-   * value as "feature disabled for this cluster".
-   */
-  public static final int PLANNED_MAINTENANCE_LIMIT_UNSET = -1;
-  public static final long PLANNED_MAINTENANCE_DURATION_UNSET = -1L;
-
-  /**
    * Set the maximum number of instances that may simultaneously carry a planned-maintenance
-   * marker. Pass {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} to clear.
+   * marker. Pass {@code -1} to clear (matches the {@code MAX_OFFLINE_INSTANCES_ALLOWED}
+   * convention of inline {@code -1} for "not set").
    */
   public void setMaxPlannedMaintenanceInstances(int maxPlannedMaintenanceInstances) {
     _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
@@ -610,17 +603,17 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * @return the configured absolute cap on planned-maintenance markers, or
-   *     {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} when not set.
+   * @return the configured absolute cap on planned-maintenance markers, or {@code -1} when
+   *     not set.
    */
   public int getMaxPlannedMaintenanceInstances() {
     return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
-        PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
   }
 
   /**
    * Set the maximum percentage (0-100) of cluster instances that may simultaneously carry a
-   * planned-maintenance marker. Pass {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} to clear.
+   * planned-maintenance marker. Pass {@code -1} to clear.
    */
   public void setMaxPlannedMaintenancePercentage(int maxPlannedMaintenancePercentage) {
     _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
@@ -628,19 +621,18 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * @return the configured percentage cap on planned-maintenance markers, or
-   *     {@link #PLANNED_MAINTENANCE_LIMIT_UNSET} when not set.
+   * @return the configured percentage cap on planned-maintenance markers, or {@code -1} when
+   *     not set.
    */
   public int getMaxPlannedMaintenancePercentage() {
     return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
-        PLANNED_MAINTENANCE_LIMIT_UNSET);
+        -1);
   }
 
   /**
    * Set the fallback duration (millis) applied by the planned-maintenance write path when the
-   * caller does not supply an explicit expiresAtMillis. Pass
-   * {@link #PLANNED_MAINTENANCE_DURATION_UNSET} to clear (callers must then always pass an
-   * explicit expiry, or the write is rejected).
+   * caller omits expiresAtMillis. Pass {@code -1L} to clear; when cleared, planned-maintenance
+   * writes that omit expiresAtMillis are rejected.
    */
   public void setDefaultPlannedMaintenanceDurationMs(long defaultPlannedMaintenanceDurationMs) {
     _record.setLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
@@ -648,12 +640,11 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * @return the configured fallback duration in millis, or
-   *     {@link #PLANNED_MAINTENANCE_DURATION_UNSET} when not set.
+   * @return the configured fallback duration in millis, or {@code -1L} when not set.
    */
   public long getDefaultPlannedMaintenanceDurationMs() {
     return _record.getLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
-        PLANNED_MAINTENANCE_DURATION_UNSET);
+        -1L);
   }
 
   /**

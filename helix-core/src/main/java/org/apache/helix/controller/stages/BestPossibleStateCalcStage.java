@@ -373,30 +373,26 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     int maxInstancesUnableToAcceptOnlineReplicas =
         cache.getClusterConfig().getMaxOfflineInstancesAllowed();
     if (maxInstancesUnableToAcceptOnlineReplicas >= 0) {
-      // Instead of only checking the offline instances, we consider how many instances in the cluster
-      // are not assignable and live. This is because some instances may be online but have an unassignable
-      // InstanceOperation such as EVACUATE, and DISABLE. We will exclude SWAP_IN and UNKNOWN instances from
-      // they should not account against the capacity of the cluster.
-      int instancesUnableToAcceptOnlineReplicas = cache.getInstanceConfigMap().entrySet().stream()
+      // Build the set of instances that currently count toward the offline budget:
+      //   routable InstanceConfig minus the enabled-live set. We exclude UNROUTABLE
+      //   operations (e.g. SWAP_IN, UNKNOWN) up front because those should not consume
+      //   cluster capacity. Then we drop instances carrying a valid planned-maintenance
+      //   marker, since they're intentionally offline within an operator-approved window.
+      // The filter is symmetric: the same expression gates both MM entry here and MM exit
+      // via MaintenanceRecoveryStage on the next pipeline tick.
+      Set<String> offlineBudgetInstances = cache.getInstanceConfigMap().entrySet().stream()
           .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
               instanceEntry.getValue().getInstanceOperation().getOperation()))
-          .collect(Collectors.toSet())
-          .size() - cache.getEnabledLiveInstances().size();
-      // Subtract instances carrying a valid planned-maintenance marker that are currently
-      // counted as offline (routable config, not in the enabled-live set). Planned-and-alive
-      // instances are already absent from the budget and must not be double-subtracted, so we
-      // intersect the marker filter with the !enabledLive predicate. The filter applies
-      // symmetrically: same expression gates both MM entry and (via the same code path on the
-      // next pipeline tick) MM exit.
+          .map(Map.Entry::getKey)
+          .collect(Collectors.toCollection(HashSet::new));
+      offlineBudgetInstances.removeAll(cache.getEnabledLiveInstances());
+
       long nowMs = System.currentTimeMillis();
-      Set<String> enabledLive = cache.getEnabledLiveInstances();
-      int plannedAndOfflineCount = (int) cache.getInstanceConfigMap().entrySet().stream()
-          .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-              instanceEntry.getValue().getInstanceOperation().getOperation()))
-          .filter(instanceEntry -> instanceEntry.getValue().isUnderPlannedMaintenance(nowMs))
-          .filter(instanceEntry -> !enabledLive.contains(instanceEntry.getKey()))
-          .count();
-      instancesUnableToAcceptOnlineReplicas -= plannedAndOfflineCount;
+      offlineBudgetInstances.removeIf(instanceName -> {
+        InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
+        return cfg != null && cfg.isUnderPlannedMaintenance(nowMs);
+      });
+      int instancesUnableToAcceptOnlineReplicas = offlineBudgetInstances.size();
       if (instancesUnableToAcceptOnlineReplicas > maxInstancesUnableToAcceptOnlineReplicas) {
         String errMsg = String.format(
             "Instances unable to take ONLINE replicas count %d greater than allowed count %d. Put cluster %s into "
