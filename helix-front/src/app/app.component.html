@@ -28,10 +28,20 @@
       <span class="helix-title">Helix</span>
     </a>
     <span fxFlex="1 1 auto"></span>
-    <a mat-button (click)="login()">
+    <button mat-button [matMenuTriggerFor]="userMenu">
       <mat-icon>person</mat-icon>
       {{ currentUser | async }}
-    </a>
+    </button>
+    <mat-menu #userMenu="matMenu">
+      <button mat-menu-item (click)="login()">
+        <mat-icon>login</mat-icon>
+        <span>Sign In</span>
+      </button>
+      <button mat-menu-item (click)="logout()">
+        <mat-icon>logout</mat-icon>
+        <span>Sign Out</span>
+      </button>
+    </mat-menu>
   </mat-toolbar>
   <mat-progress-bar
     *ngIf="isLoading"

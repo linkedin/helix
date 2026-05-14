@@ -116,4 +116,16 @@ export class AppComponent implements OnInit {
         }
       );
   }
+
+  logout() {
+    this.service.logout().subscribe(
+      () => {
+        this.currentUser = this.service.getCurrentUser();
+        this.helper.showSnackBar('Signed out successfully.');
+      },
+      (error) => {
+        this.helper.showError(error);
+      }
+    );
+  }
 }
