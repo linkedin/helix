@@ -63,7 +63,8 @@ export class UserCtrl {
         res.status(500).json({ error: 'Logout failed' });
         return;
       }
-      res.clearCookie('connect.sid');
+      res.clearCookie('connect.sid', { path: '/' });
+      res.clearCookie('helixui_identity.token');
       res.json(true);
     });
   }

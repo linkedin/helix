@@ -33,11 +33,11 @@
       {{ currentUser | async }}
     </button>
     <mat-menu #userMenu="matMenu">
-      <button mat-menu-item (click)="login()">
+      <button mat-menu-item (click)="login()" *ngIf="(currentUser | async) === 'Sign In'">
         <mat-icon>login</mat-icon>
         <span>Sign In</span>
       </button>
-      <button mat-menu-item (click)="logout()">
+      <button mat-menu-item (click)="logout()" *ngIf="(currentUser | async) !== 'Sign In'">
         <mat-icon>logout</mat-icon>
         <span>Sign Out</span>
       </button>
