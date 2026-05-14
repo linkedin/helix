@@ -20,7 +20,10 @@ package org.apache.helix.rest.clusterMaintenanceService;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,9 +50,15 @@ import org.slf4j.LoggerFactory;
  *   <li>Else fail with {@link BadRequestException}.
  * </ol>
  *
- * <p>A non-positive {@code expiresAtMillis} (the {@code -1} sentinel) means "clear the
- * marker." Clears skip cap enforcement and TTL resolution; they just remove the timestamp
- * and metadata.
+ * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) means "clear the marker."
+ * Clears skip cap enforcement and TTL resolution; they just remove the timestamp and metadata.
+ *
+ * <p>Semantics mirror the batch stoppable check: per-instance failures (missing instance, cap
+ * exceeded for the candidate's position in the input order) do not abort the call. They are
+ * reported through {@link PlannedMaintenanceResult#getRejected()} so the caller can decide
+ * how to handle them. Caller-side bugs that invalidate the entire request (empty input list,
+ * missing/past expiry with no cluster default, missing cluster) still surface as
+ * {@link BadRequestException}.
  */
 public class PlannedMaintenanceWriteHandler {
   private static final Logger LOG =
@@ -70,22 +79,126 @@ public class PlannedMaintenanceWriteHandler {
   }
 
   /**
-   * Writes (or clears) planned-maintenance markers on the supplied instances atomically from
-   * the caller's point of view: cap enforcement uses a single snapshot of current markers, and
-   * either all writes succeed or the call throws.
+   * Writes (or clears) planned-maintenance markers on the supplied instances. The cap snapshot
+   * is read once and instances are processed in input order; instances that fit the remaining
+   * quota are written, the rest land in {@link PlannedMaintenanceResult#getRejected()}.
    *
    * @param clusterId the cluster.
-   * @param instanceNames instances to mark (non-empty, no duplicates).
+   * @param instanceNames instances to mark (caller may supply duplicates; they are deduped in
+   *     input order).
    * @param callerExpiresAtMillis 0 = caller did not supply a value; positive = explicit expiry;
    *     negative = clear.
    * @param reason audit metadata (optional, ignored on clear).
    * @param source audit metadata (optional, ignored on clear).
    * @param nowMs current time, supplied by the caller for testability.
-   * @return resolved effective expiry timestamp, or {@link InstanceConfig#PLANNED_MAINTENANCE_NOT_SET}
-   *     for clears.
+   * @return a {@link PlannedMaintenanceResult} listing the applied instances, the rejected
+   *     instances with reasons, and the resolved effective expiry.
    */
-  public long applyPlannedMaintenance(String clusterId, List<String> instanceNames,
-      long callerExpiresAtMillis, String reason, String source, long nowMs) {
+  public PlannedMaintenanceResult applyPlannedMaintenance(String clusterId,
+      List<String> instanceNames, long callerExpiresAtMillis, String reason, String source,
+      long nowMs) {
+    List<String> deduped = dedup(instanceNames);
+
+    boolean clear = callerExpiresAtMillis < 0L;
+    if (clear) {
+      return applyClear(clusterId, deduped);
+    }
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterId);
+    if (clusterConfig == null) {
+      throw new BadRequestException("Cluster " + clusterId + " not found");
+    }
+    long effectiveExpiresAtMillis =
+        resolveExpiresAtMillis(callerExpiresAtMillis, clusterConfig, nowMs);
+    Map<String, String> metadata = buildMetadata(reason, source, nowMs);
+    return applySet(clusterId, clusterConfig, deduped, effectiveExpiresAtMillis, metadata, nowMs);
+  }
+
+  // ---- Clear path -------------------------------------------------------------------------
+
+  private PlannedMaintenanceResult applyClear(String clusterId, List<String> deduped) {
+    Set<String> clusterInstances = loadClusterInstances(clusterId);
+    List<String> applied = new ArrayList<>(deduped.size());
+    Map<String, String> rejected = new LinkedHashMap<>();
+
+    for (String instanceName : deduped) {
+      if (!clusterInstances.contains(instanceName)) {
+        rejected.put(instanceName, instanceNotFound(clusterId, instanceName));
+        continue;
+      }
+      InstanceConfig cfg = _admin.getInstanceConfig(clusterId, instanceName);
+      cfg.setPlannedMaintenanceUntilMs(InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+      _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
+      applied.add(instanceName);
+    }
+    LOG.info("Cleared planned-maintenance marker: cluster={}, applied={}, rejected={}",
+        clusterId, applied.size(), rejected.size());
+    return new PlannedMaintenanceResult(applied, rejected,
+        InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+  }
+
+  // ---- Set path ---------------------------------------------------------------------------
+
+  private PlannedMaintenanceResult applySet(String clusterId, ClusterConfig clusterConfig,
+      List<String> deduped, long effectiveExpiresAtMillis, Map<String, String> metadata,
+      long nowMs) {
+    Set<String> clusterInstances = loadClusterInstances(clusterId);
+    Map<String, String> rejected = new LinkedHashMap<>();
+
+    // First pass: classify input as existing-candidate vs missing-instance. Missing instances
+    // are recorded against rejected and dropped from further processing; the remaining
+    // candidates compete for the cap quota in input order.
+    List<String> candidates = new ArrayList<>(deduped.size());
+    for (String instanceName : deduped) {
+      if (clusterInstances.contains(instanceName)) {
+        candidates.add(instanceName);
+      } else {
+        rejected.put(instanceName, instanceNotFound(clusterId, instanceName));
+      }
+    }
+
+    // Snapshot the cap quota that's actually available for this batch. NOTE: the snapshot is
+    // a single read; concurrent writes from another caller could race past the cap. The
+    // design accepts this because the cap is a safety rail (not a strict invariant) and a
+    // transient overage cascades correctly into MM the moment a real outage arrives.
+    int remainingQuota =
+        computeRemainingQuota(clusterId, clusterConfig, clusterInstances, candidates, nowMs);
+
+    List<String> applied = new ArrayList<>(candidates.size());
+    String capRejectMessage = capRejectMessage(clusterConfig);
+    for (String instanceName : candidates) {
+      if (remainingQuota <= 0) {
+        rejected.put(instanceName, capRejectMessage);
+        continue;
+      }
+      InstanceConfig cfg = _admin.getInstanceConfig(clusterId, instanceName);
+      cfg.setPlannedMaintenanceUntilMs(effectiveExpiresAtMillis);
+      if (!metadata.isEmpty()) {
+        cfg.setPlannedMaintenanceMetadata(metadata);
+      }
+      _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
+      applied.add(instanceName);
+      remainingQuota--;
+    }
+    LOG.info("Wrote planned-maintenance markers: cluster={}, applied={}, rejected={}, "
+            + "expiresAtMillis={}", clusterId, applied.size(), rejected.size(),
+        effectiveExpiresAtMillis);
+    return new PlannedMaintenanceResult(applied, rejected, effectiveExpiresAtMillis);
+  }
+
+  /**
+   * Returns the set of instances currently registered in the cluster. Used for existence
+   * checks; HelixAdmin#getInstanceConfig throws on missing instances rather than returning
+   * null, so we check membership against this set instead of catching exceptions per-instance.
+   */
+  private Set<String> loadClusterInstances(String clusterId) {
+    List<String> all = _admin.getInstancesInCluster(clusterId);
+    return all == null ? Collections.emptySet() : new HashSet<>(all);
+  }
+
+  // ---- Helpers ----------------------------------------------------------------------------
+
+  private static List<String> dedup(List<String> instanceNames) {
     if (instanceNames == null || instanceNames.isEmpty()) {
       throw new BadRequestException("instanceNames must not be empty");
     }
@@ -96,77 +209,15 @@ public class PlannedMaintenanceWriteHandler {
       }
       dedupedSet.add(name);
     }
-    List<String> deduped = new ArrayList<>(dedupedSet);
-
-    assertInstancesExist(clusterId, deduped);
-
-    boolean clear = callerExpiresAtMillis < 0L;
-    if (clear) {
-      for (String instanceName : deduped) {
-        InstanceConfig cfg = loadInstanceConfig(clusterId, instanceName);
-        cfg.setPlannedMaintenanceUntilMs(InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
-        _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
-      }
-      LOG.info("Cleared planned-maintenance marker on {} instances in cluster {}",
-          deduped.size(), clusterId);
-      return InstanceConfig.PLANNED_MAINTENANCE_NOT_SET;
-    }
-
-    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterId);
-    if (clusterConfig == null) {
-      throw new BadRequestException("Cluster " + clusterId + " not found");
-    }
-
-    long effectiveExpiresAtMillis =
-        resolveExpiresAtMillis(callerExpiresAtMillis, clusterConfig, nowMs);
-
-    // NOTE: cap enforcement uses a snapshot of cluster-wide markers taken at this moment.
-    // Concurrent writes from another caller could race past the cap; the design treats this
-    // as acceptable because the cap is a safety rail, not a strict invariant, and a transient
-    // overage cascades correctly into MM the moment a real outage arrives.
-    enforceClusterCap(clusterId, clusterConfig, dedupedSet, nowMs);
-
-    Map<String, String> metadata = buildMetadata(reason, source, nowMs);
-
-    for (String instanceName : deduped) {
-      InstanceConfig cfg = loadInstanceConfig(clusterId, instanceName);
-      cfg.setPlannedMaintenanceUntilMs(effectiveExpiresAtMillis);
-      if (!metadata.isEmpty()) {
-        cfg.setPlannedMaintenanceMetadata(metadata);
-      }
-      _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
-    }
-    LOG.info("Wrote planned-maintenance marker on {} instances in cluster {}, expiresAtMillis={}",
-        deduped.size(), clusterId, effectiveExpiresAtMillis);
-    return effectiveExpiresAtMillis;
+    return new ArrayList<>(dedupedSet);
   }
 
-  private InstanceConfig loadInstanceConfig(String clusterId, String instanceName) {
-    InstanceConfig cfg = _admin.getInstanceConfig(clusterId, instanceName);
-    if (cfg == null) {
-      throw new BadRequestException(
-          "Instance " + instanceName + " not found in cluster " + clusterId);
-    }
-    return cfg;
+  private static String instanceNotFound(String clusterId, String instanceName) {
+    return "instance not found in cluster " + clusterId;
   }
 
   /**
-   * Confirm every supplied instance exists in the cluster before mutating any of them. This
-   * runs before TTL resolution and cap enforcement so that a bogus name does not inflate the
-   * cap projection (one extra slot per nonexistent name) and does not leave already-mutated
-   * instances behind on a partial-failure path.
-   */
-  private void assertInstancesExist(String clusterId, List<String> instanceNames) {
-    for (String instanceName : instanceNames) {
-      if (_admin.getInstanceConfig(clusterId, instanceName) == null) {
-        throw new BadRequestException(
-            "Instance " + instanceName + " not found in cluster " + clusterId);
-      }
-    }
-  }
-
-  /**
-   * Apply the resolution rules documented in the class javadoc. Visible for testing.
+   * Apply the TTL resolution rules documented in the class javadoc. Visible for testing.
    */
   static long resolveExpiresAtMillis(long callerExpiresAtMillis, ClusterConfig clusterConfig,
       long nowMs) {
@@ -191,47 +242,63 @@ public class PlannedMaintenanceWriteHandler {
             + " configured");
   }
 
-  private void enforceClusterCap(String clusterId, ClusterConfig clusterConfig,
-      Set<String> incomingInstances, long nowMs) {
+  /**
+   * Returns the number of new markers this batch may apply before hitting the cluster cap.
+   * Markers already held by instances that are <b>not</b> in this batch count against the
+   * quota; markers on instances within the batch do not (they will be rewritten as part of
+   * the same call).
+   *
+   * <p>Returns {@link Integer#MAX_VALUE} when no cap is configured or the cluster has no
+   * instances.
+   */
+  private int computeRemainingQuota(String clusterId, ClusterConfig clusterConfig,
+      Set<String> clusterInstances, List<String> candidates, long nowMs) {
     int absoluteCap = clusterConfig.getMaxPlannedMaintenanceInstances();
     int percentageCap = clusterConfig.getMaxPlannedMaintenancePercentage();
     if (absoluteCap < 0 && percentageCap < 0) {
-      return;
+      return Integer.MAX_VALUE;
+    }
+    if (clusterInstances.isEmpty()) {
+      return Integer.MAX_VALUE;
     }
 
-    List<String> allInstances = _admin.getInstancesInCluster(clusterId);
-    if (allInstances == null || allInstances.isEmpty()) {
-      return;
-    }
-    int currentlyMarked = 0;
-    for (String name : allInstances) {
-      // The incoming write will reset each incoming instance's marker; counting the
-      // post-write state requires us to skip the pre-write value here and add the full batch
-      // size below.
-      if (incomingInstances.contains(name)) {
+    Set<String> candidateSet = new HashSet<>(candidates);
+    int markedByOthers = 0;
+    for (String name : clusterInstances) {
+      if (candidateSet.contains(name)) {
         continue;
       }
       InstanceConfig cfg = _admin.getInstanceConfig(clusterId, name);
       if (cfg != null && cfg.isUnderPlannedMaintenance(nowMs)) {
-        currentlyMarked++;
+        markedByOthers++;
       }
     }
-    int projectedMarked = currentlyMarked + incomingInstances.size();
 
     int effectiveCap = Integer.MAX_VALUE;
     if (absoluteCap >= 0) {
       effectiveCap = Math.min(effectiveCap, absoluteCap);
     }
     if (percentageCap >= 0) {
-      int byPercentage = (int) Math.floor((percentageCap * (long) allInstances.size()) / 100.0);
+      int byPercentage =
+          (int) Math.floor((percentageCap * (long) clusterInstances.size()) / 100.0);
       effectiveCap = Math.min(effectiveCap, byPercentage);
     }
-    if (projectedMarked > effectiveCap) {
-      throw new BadRequestException(String.format(
-          "Write would push planned-maintenance count to %d, exceeds cluster cap %d "
-              + "(absoluteCap=%d, percentageCap=%d, clusterSize=%d)",
-          projectedMarked, effectiveCap, absoluteCap, percentageCap, allInstances.size()));
+    return Math.max(0, effectiveCap - markedByOthers);
+  }
+
+  private static String capRejectMessage(ClusterConfig clusterConfig) {
+    int absoluteCap = clusterConfig.getMaxPlannedMaintenanceInstances();
+    int percentageCap = clusterConfig.getMaxPlannedMaintenancePercentage();
+    if (absoluteCap >= 0 && percentageCap >= 0) {
+      return String.format(
+          "would exceed planned-maintenance cap (MAX_PLANNED_MAINTENANCE_INSTANCES=%d, "
+              + "MAX_PLANNED_MAINTENANCE_PERCENTAGE=%d)",
+          absoluteCap, percentageCap);
     }
+    if (absoluteCap >= 0) {
+      return "would exceed MAX_PLANNED_MAINTENANCE_INSTANCES=" + absoluteCap;
+    }
+    return "would exceed MAX_PLANNED_MAINTENANCE_PERCENTAGE=" + percentageCap;
   }
 
   private static Map<String, String> buildMetadata(String reason, String source, long nowMs) {
@@ -248,9 +315,45 @@ public class PlannedMaintenanceWriteHandler {
     return metadata;
   }
 
+  // ---- Types ------------------------------------------------------------------------------
+
   /**
-   * Unchecked exception signalling a 400-class write failure. Callers translate this to a
-   * Response with status 400 and the message body.
+   * Outcome of one {@link #applyPlannedMaintenance} invocation. {@link #getApplied()} is
+   * always a list (possibly empty); {@link #getRejected()} is always a map (possibly empty)
+   * keyed by instance name with a free-form reason as the value. {@link #getResolvedExpiresAtMillis()}
+   * is the server-resolved expiry, or {@link InstanceConfig#PLANNED_MAINTENANCE_NOT_SET} for
+   * clear operations.
+   */
+  public static final class PlannedMaintenanceResult {
+    private final List<String> _applied;
+    private final Map<String, String> _rejected;
+    private final long _resolvedExpiresAtMillis;
+
+    PlannedMaintenanceResult(List<String> applied, Map<String, String> rejected,
+        long resolvedExpiresAtMillis) {
+      _applied = Collections.unmodifiableList(applied);
+      _rejected = Collections.unmodifiableMap(rejected);
+      _resolvedExpiresAtMillis = resolvedExpiresAtMillis;
+    }
+
+    public List<String> getApplied() {
+      return _applied;
+    }
+
+    public Map<String, String> getRejected() {
+      return _rejected;
+    }
+
+    public long getResolvedExpiresAtMillis() {
+      return _resolvedExpiresAtMillis;
+    }
+  }
+
+  /**
+   * Unchecked exception signalling a 400-class write failure for caller-side bugs that
+   * invalidate the entire request (empty input, malformed expiry, missing cluster default).
+   * Per-instance failures (missing instance, cap overflow) do <b>not</b> throw; they are
+   * reported via {@link PlannedMaintenanceResult#getRejected()} instead.
    */
   public static class BadRequestException extends RuntimeException {
     public BadRequestException(String message) {

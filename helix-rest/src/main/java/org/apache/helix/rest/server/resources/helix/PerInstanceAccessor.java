@@ -327,10 +327,11 @@ public class PerInstanceAccessor extends AbstractHelixResource {
    *
    * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) clears the marker. An
    * omitted or zero {@code expiresAtMillis} falls back to the cluster-level
-   * {@code DEFAULT_PLANNED_MAINTENANCE_DURATION_MS}; if neither is set, the call is rejected.
-   * The write fails if it would push the cluster-wide count of marked instances above the
-   * configured {@code MAX_PLANNED_MAINTENANCE_INSTANCES} or
-   * {@code MAX_PLANNED_MAINTENANCE_PERCENTAGE} cap.
+   * {@code DEFAULT_PLANNED_MAINTENANCE_DURATION_MS}; if neither is set, the call is rejected
+   * with 400. Per-instance failures (instance not found, cap exhausted) are surfaced as 400
+   * with the reason in the body so the single-endpoint contract stays binary; the batch
+   * endpoint at {@code POST /clusters/{c}/instances?command=plannedMaintenance} reports
+   * per-instance results in a 200 response instead.
    */
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
@@ -349,14 +350,19 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
       PlannedMaintenanceWriteHandler handler =
           new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
-      long effective = handler.applyPlannedMaintenance(clusterId,
-          Collections.singletonList(instanceName), expiresAtMillis, reason, source,
-          System.currentTimeMillis());
+      PlannedMaintenanceWriteHandler.PlannedMaintenanceResult result =
+          handler.applyPlannedMaintenance(clusterId, Collections.singletonList(instanceName),
+              expiresAtMillis, reason, source, System.currentTimeMillis());
 
-      ObjectNode body = JsonNodeFactory.instance.objectNode();
-      body.put("instance", instanceName);
-      body.put("expiresAtMillis", effective);
-      return JSONRepresentation(body);
+      if (result.getApplied().contains(instanceName)) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("instance", instanceName);
+        body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+        return JSONRepresentation(body);
+      }
+      // Single-instance call cannot be partial; surface the per-instance reason as 400.
+      String rejectReason = result.getRejected().getOrDefault(instanceName, "rejected");
+      return badRequest(rejectReason);
     } catch (BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {

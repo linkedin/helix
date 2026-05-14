@@ -264,16 +264,26 @@ public class InstancesAccessor extends AbstractHelixResource {
 
   /**
    * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/plannedMaintenance}. Sets or
-   * clears the planned-maintenance budget-exemption marker on a list of instances atomically
-   * from a quota standpoint: cap enforcement uses a single snapshot of current cluster-wide
-   * markers and the batch is rejected before any write if it would push the count over the cap.
+   * clears the planned-maintenance budget-exemption marker on a list of instances. Mirrors
+   * the partial-accept contract of the batch stoppable check: instances are processed in
+   * input order, instances that fit the cap quota (or that exist on a clear) are listed
+   * under {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs
+   * that invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
+   * missing expiry with no cluster default) are still surfaced as 400.
    *
-   * <p>Body shape:
+   * <p>Request body:
    * <pre>{@code
    * { "instances": ["h1", "h2", ...],
    *   "expiresAtMillis": 1776385800000,
    *   "reason": "...",
    *   "source": "AUTOMATION" }
+   * }</pre>
+   *
+   * <p>Success response (HTTP 200):
+   * <pre>{@code
+   * { "applied":  ["h1", "h2"],
+   *   "rejected": { "h3": "would exceed MAX_PLANNED_MAINTENANCE_INSTANCES=2" },
+   *   "expiresAtMillis": 1776385800000 }
    * }</pre>
    */
   private Response batchSetPlannedMaintenance(String clusterId, JsonNode node) {
@@ -293,15 +303,20 @@ public class InstancesAccessor extends AbstractHelixResource {
 
       PlannedMaintenanceWriteHandler handler =
           new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
-      long effective = handler.applyPlannedMaintenance(clusterId, instances, expiresAtMillis,
-          reason, source, System.currentTimeMillis());
+      PlannedMaintenanceWriteHandler.PlannedMaintenanceResult result =
+          handler.applyPlannedMaintenance(clusterId, instances, expiresAtMillis, reason, source,
+              System.currentTimeMillis());
 
       ObjectNode body = JsonNodeFactory.instance.objectNode();
-      ArrayNode arr = body.putArray("instances");
-      for (String n : instances) {
-        arr.add(n);
+      ArrayNode appliedArr = body.putArray("applied");
+      for (String name : result.getApplied()) {
+        appliedArr.add(name);
       }
-      body.put("expiresAtMillis", effective);
+      ObjectNode rejectedNode = body.putObject("rejected");
+      for (Map.Entry<String, String> entry : result.getRejected().entrySet()) {
+        rejectedNode.put(entry.getKey(), entry.getValue());
+      }
+      body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
       return JSONRepresentation(body);
     } catch (BadRequestException e) {
       return badRequest(e.getMessage());
