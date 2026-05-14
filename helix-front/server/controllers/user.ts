@@ -34,6 +34,7 @@ export class UserCtrl {
     // uncomment the following line to use customized login
     // router.route('/user/authorize').get(this.authorize);
     router.route('/user/login').post(this.login.bind(this));
+    router.route('/user/logout').post(this.logout.bind(this));
     router.route('/user/current').get(this.current);
     router.route('/user/can').get(this.can);
   }
@@ -70,6 +71,17 @@ export class UserCtrl {
         `Error from /can endpoint: ${err}`
       );
     }
+  }
+
+  protected logout(req: HelixRequest, res: Response) {
+    req.session.destroy((err) => {
+      if (err) {
+        res.status(500).json({ error: 'Logout failed' });
+        return;
+      }
+      res.clearCookie('connect.sid');
+      res.json(true);
+    });
   }
 
   protected login(req: HelixRequest, res: Response) {

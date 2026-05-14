@@ -16,6 +16,12 @@ export class UserService {
       .pipe(catchError((_) => _));
   }
 
+  public logout(): Observable<any> {
+    return this.http
+      .post(`${Settings.userAPI}/logout`, {}, { headers: this.getHeaders() })
+      .pipe(catchError((_) => _));
+  }
+
   public login(username: string, password: string): Observable<any> {
     const url = `${Settings.userAPI}/login`;
     const body = { username, password };
