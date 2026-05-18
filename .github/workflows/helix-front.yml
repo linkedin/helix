@@ -17,16 +17,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "14.x"
-          cache: "yarn"
-          cache-dependency-path: "helix-front/yarn.lock"
-
-      - name: Pin yarn version
-        run: npm install -g yarn@1.22.10 && yarn --version
 
       - name: Install dependencies
-        run: |
-          echo 'registry=https://registry.yarnpkg.com/' > .npmrc
-          yarn --frozen-lockfile --ignore-engines
+        run: yarn --ignore-engines
         working-directory: helix-front
 
       - name: Format check
