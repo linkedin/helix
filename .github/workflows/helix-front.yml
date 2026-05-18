@@ -17,11 +17,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "14.x"
-          cache: "yarn"
-          cache-dependency-path: "helix-front/yarn.lock"
 
       - name: Install dependencies
-        run: yarn --ignore-engines
+        run: |
+          yarn cache clean
+          yarn --ignore-engines
+          echo "=== Installed @angular/common ==="
+          python3 -c "import json; print(json.load(open('node_modules/@angular/common/package.json'))['version'])"
         working-directory: helix-front
 
       - name: Format check
