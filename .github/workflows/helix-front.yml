@@ -21,7 +21,9 @@ jobs:
           cache-dependency-path: "helix-front/yarn.lock"
 
       - name: Install dependencies
-        run: yarn --frozen-lockfile --ignore-engines
+        run: |
+          echo 'registry "https://registry.yarnpkg.com"' > .yarnrc
+          yarn --frozen-lockfile --ignore-engines
         working-directory: helix-front
 
       - name: Format check
