@@ -32,7 +32,11 @@
       <mat-icon>person</mat-icon>
       {{ currentUser | async }}
     </a>
-    <button mat-button [matMenuTriggerFor]="userMenu" *ngIf="(currentUser | async) !== 'Sign In'">
+    <button
+      mat-button
+      [matMenuTriggerFor]="userMenu"
+      *ngIf="(currentUser | async) !== 'Sign In'"
+    >
       <mat-icon>person</mat-icon>
       {{ currentUser | async }}
     </button>

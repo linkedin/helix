@@ -17,8 +17,11 @@ export class UserService {
   }
 
   public logout(): Observable<any> {
-    return this.http
-      .post(`${Settings.userAPI}/logout`, {}, { headers: this.getHeaders() });
+    return this.http.post(
+      `${Settings.userAPI}/logout`,
+      {},
+      { headers: this.getHeaders() }
+    );
   }
 
   public login(username: string, password: string): Observable<any> {
