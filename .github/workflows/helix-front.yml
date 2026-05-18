@@ -20,16 +20,11 @@ jobs:
           cache: "yarn"
           cache-dependency-path: "helix-front/yarn.lock"
 
-      - name: Install dependencies
-        run: |
-          yarn cache clean
-          yarn --frozen-lockfile --ignore-engines
-        working-directory: helix-front
+      - name: Pin yarn version
+        run: npm install -g yarn@1.22.10 && yarn --version
 
-      - name: Debug angular version
-        run: |
-          cat node_modules/@angular/common/package.json | python3 -c "import sys,json; print('Installed @angular/common version:', json.load(sys.stdin)['version'])"
-          ls node_modules/@angular/common/ | head -20
+      - name: Install dependencies
+        run: yarn --frozen-lockfile --ignore-engines
         working-directory: helix-front
 
       - name: Format check
