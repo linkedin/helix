@@ -20,16 +20,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          yarn cache clean
-          yarn --ignore-engines
-          echo "=== Installed @angular/common ==="
-          python3 -c "import json; print(json.load(open('node_modules/@angular/common/package.json'))['version'])"
+          npm install --ignore-engines 2>&1 | tail -5
+          echo "Installed @angular/common version:"
+          node -e "console.log(require('@angular/common/package.json').version)"
         working-directory: helix-front
 
       - name: Format check
-        run: yarn format:check
+        run: npx prettier --check .
         working-directory: helix-front
 
       - name: Build
-        run: yarn prepack
+        run: |
+          cp server/config.example.ts server/config.ts
+          npx ng build --aot --configuration production
+          npx tsc -p server
         working-directory: helix-front
