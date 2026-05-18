@@ -17,31 +17,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "14.x"
-
-      - name: Debug environment
-        run: |
-          echo "=== yarn version ==="
-          yarn --version
-          which yarn
-          echo "=== yarn config ==="
-          yarn config list 2>&1 | head -30
-          echo "=== .npmrc ==="
-          cat .npmrc || echo "no .npmrc"
-          echo "=== global .npmrc ==="
-          cat ~/.npmrc || echo "no global .npmrc"
-          echo "=== npm config ==="
-          npm config list 2>&1 | head -10
-          echo "=== resolutions in package.json ==="
-          python3 -c "import json; r=json.load(open('package.json')).get('resolutions',{}); print({k:v for k,v in r.items() if 'common' in k})"
-        working-directory: helix-front
+          cache: "yarn"
+          cache-dependency-path: "helix-front/yarn.lock"
 
       - name: Install dependencies
-        run: |
-          yarn --ignore-engines 2>&1 | tee /tmp/yarn-install.log
-          echo "=== Installed @angular/common ==="
-          python3 -c "import json; print(json.load(open('node_modules/@angular/common/package.json'))['version'])"
-          echo "=== yarn why @angular/common ==="
-          yarn why @angular/common 2>&1 | head -20
+        run: yarn --ignore-engines
         working-directory: helix-front
 
       - name: Format check
