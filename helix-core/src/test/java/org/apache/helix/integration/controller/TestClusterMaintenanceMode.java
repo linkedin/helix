@@ -461,6 +461,86 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
   }
 
   /**
+   * Test that auto-exit works with percentage-based threshold.
+   * With 3 total instances and exit percentage of 33%, the effective exit threshold is
+   * 3 * 33 / 100 = 0 (integer truncation). So the cluster should auto-exit only when
+   * all instances are back online (0 offline).
+   */
+  @Test(dependsOnMethods = "testMaintenanceHistory")
+  public void testAutoExitMaintenanceModeWithPercentage() throws Exception {
+    // First, exit any existing maintenance mode
+    _gSetupTool.getClusterManagementTool().manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null,
+        null);
+    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, 2000L);
+
+    // Stop the extra instance added in testMaintenanceModeAddNewInstance so we have a
+    // predictable instance count (_numNodes) for percentage calculations
+    if (_newInstance != null && _newInstance.isConnected()) {
+      _newInstance.syncStop();
+    }
+
+    // Bring all original instances back up
+    for (int i = 0; i < _numNodes; i++) {
+      if (!_participants[i].isConnected()) {
+        String instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + i);
+        _participants[i] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
+        _participants[i].syncStart();
+      }
+    }
+    // Total routable instances = _numNodes (3) + 1 (_newInstance, offline but still registered).
+    // _newInstance is stopped but its InstanceConfig still exists in the cluster, so it counts
+    // as a routable instance. Total routable = _numNodes + 1 = 4.
+    int totalRegisteredRoutable = _numNodes + 1;
+
+    // Set percentage-based exit config.
+    // Use absolute entry threshold of 1 for reliable entry, and percentage-based exit.
+    // 24% of 4 routable = 0 (integer truncation). So exit only when 0 offline/disabled.
+    ClusterConfig clusterConfig = _manager.getConfigAccessor().getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setMaxOfflineInstancesAllowed(1);
+    clusterConfig.setNumOfflineInstancesForAutoExit(-1); // Disable absolute exit
+    clusterConfig.setNumOfflineInstancesForAutoExitPercentage(24);
+    _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    // Kill 2 instances to trigger auto-enter (2 > 1)
+    for (int i = 0; i < 2; i++) {
+      _participants[i].syncStop();
+    }
+    TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, TIMEOUT);
+
+    // Bring up 1 instance (1 original still offline + _newInstance offline = 2 offline).
+    // Effective exit threshold = 24% of 4 = 0. 2 > 0, so should NOT auto-exit.
+    String instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + 0);
+    _participants[0] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
+    _participants[0].syncStart();
+    // Give some time for the pipeline to run and verify maintenance is NOT exited
+    Thread.sleep(2000);
+    MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
+    Assert.assertNotNull(maintenanceSignal, "Cluster should still be in maintenance");
+
+    // Bring up the last original instance AND _newInstance so all are online (0 offline).
+    // 0 <= 0, so should auto-exit.
+    instanceName = PARTICIPANT_PREFIX + "_" + (_startPort + 1);
+    _participants[1] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
+    _participants[1].syncStart();
+    _newInstance =
+        new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, _newInstance.getInstanceName());
+    _newInstance.syncStart();
+    TestHelper.verify(
+        () -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == totalRegisteredRoutable,
+        2000L);
+
+    // Verify cluster auto-exited maintenance
+    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, TIMEOUT);
+
+    // Clean up: reset configs
+    clusterConfig = _manager.getConfigAccessor().getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setMaxOfflineInstancesAllowed(-1);
+    clusterConfig.setNumOfflineInstancesForAutoExitPercentage(-1);
+    _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
+  }
+
+  /**
    * Convert a String representation of a Map into a Map object for verification purposes.
    * @param value
    * @return
