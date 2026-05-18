@@ -22,8 +22,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          echo 'registry "https://registry.yarnpkg.com"' > .yarnrc
+          yarn cache clean
           yarn --frozen-lockfile --ignore-engines
+        working-directory: helix-front
+
+      - name: Debug angular version
+        run: |
+          cat node_modules/@angular/common/package.json | python3 -c "import sys,json; print('Installed @angular/common version:', json.load(sys.stdin)['version'])"
+          ls node_modules/@angular/common/ | head -20
         working-directory: helix-front
 
       - name: Format check
