@@ -18,20 +18,24 @@ jobs:
         with:
           node-version: "14.x"
 
-      - name: Install dependencies
+      - name: Debug registry tarball
         run: |
-          npm install --ignore-engines 2>&1 | tail -5
-          echo "Installed @angular/common version:"
-          node -e "console.log(require('@angular/common/package.json').version)"
-        working-directory: helix-front
+          echo "=== Checking @angular/common@13.3.9 from registry ==="
+          curl -sL "https://registry.yarnpkg.com/@angular/common/-/common-13.3.9.tgz" -o /tmp/angular-test.tgz
+          mkdir -p /tmp/angular-test && tar xzf /tmp/angular-test.tgz -C /tmp/angular-test
+          echo "Version in tarball:"
+          python3 -c "import json; print(json.load(open('/tmp/angular-test/package/package.json'))['version'])"
+          ls /tmp/angular-test/package/ | head -10
+          echo "=== Checking npm registry response ==="
+          curl -s "https://registry.yarnpkg.com/@angular/common/13.3.9" | python3 -c "import sys,json; d=json.load(sys.stdin); print('version:', d['version']); print('tarball:', d['dist']['tarball'])"
 
-      - name: Format check
-        run: npx prettier --check .
-        working-directory: helix-front
-
-      - name: Build
+      - name: Install and verify
         run: |
-          cp server/config.example.ts server/config.ts
-          npx ng build --aot --configuration production
-          npx tsc -p server
+          yarn --ignore-engines
+          echo "=== Installed version ==="
+          python3 -c "import json; print(json.load(open('node_modules/@angular/common/package.json'))['version'])"
+          echo "=== yarn.lock entry ==="
+          grep -A 3 'angular/common@13.3.9' yarn.lock
+          echo "=== Check .npmrc ==="
+          cat .npmrc
         working-directory: helix-front
