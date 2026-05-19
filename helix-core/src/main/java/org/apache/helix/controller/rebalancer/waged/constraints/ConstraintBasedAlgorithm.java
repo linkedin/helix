@@ -90,7 +90,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         throw new HelixRebalanceException(String
             .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
                 clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
       }
       // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
       positiveEstimateClusterRemainCap.put(capacityKey,
@@ -120,7 +121,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
             optimalAssignment.getFailureSummary(),
             optimalAssignment.getFailures());
         throw new HelixRebalanceException(errorMessage,
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
       }
       AssignableNode bestNode = maybeBestNode.get();
       // Assign the replica and update the cluster model.
@@ -354,7 +356,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       LOG.error("Constraint evaluation failed during {}: {}", errorContext, e.getMessage(), e);
       throw new HelixRebalanceException(
           String.format("Failed during %s: %s", errorContext, e.getMessage()),
-          HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+          HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL, e);
     }
   }
 }

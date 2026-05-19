@@ -97,6 +97,54 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getContinuousTaskRebalanceFailureCount();
 
+  // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
+  // Each WAGED HelixRebalanceException increments exactly one of these. The pair
+  // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended
+  // rollup signal for alert routing.
+
+  /**
+   * @return Number of WAGED failures attributable to customer-controlled cluster/resource
+   *         configuration (sum of capacity, candidate-node, resource-config, cluster-config).
+   */
+  long getWagedCustomerActionableFailureCounter();
+
+  /**
+   * @return Number of WAGED failures attributable to Helix-controlled infrastructure
+   *         (metadata store, algorithm engine, async executor, unknown).
+   */
+  long getWagedInternalFailureCounter();
+
+  /** @return Number of WAGED failures caused by cluster capacity being insufficient. */
+  long getWagedFailureCapacityDeficitCounter();
+
+  /** @return Number of WAGED failures where no candidate node satisfied all hard constraints. */
+  long getWagedFailureNoCandidateNodeCounter();
+
+  /** @return Number of WAGED failures caused by invalid resource configuration. */
+  long getWagedFailureInvalidResourceConfigCounter();
+
+  /** @return Number of WAGED failures caused by invalid cluster/instance configuration. */
+  long getWagedFailureInvalidClusterConfigCounter();
+
+  /** @return Number of WAGED failures caused by assignment-metadata-store I/O. */
+  long getWagedFailureMetadataStoreIoCounter();
+
+  /** @return Number of WAGED failures inside the constraint algorithm internals. */
+  long getWagedFailureAlgorithmInternalCounter();
+
+  /** @return Number of WAGED failures originating in the async runner execution. */
+  long getWagedFailureAsyncExecutionCounter();
+
+  /** @return Number of WAGED failures with no specific category attribution. */
+  long getWagedFailureUnknownCounter();
+
+  /**
+   * @return 1 if the most recent WAGED rebalance returned the last-known-good fallback assignment
+   *         instead of a freshly computed one; 0 otherwise. A sustained 1 indicates WAGED is
+   *         silently serving stale assignments and the underlying failure should be investigated.
+   */
+  long getWagedFallbackInUseGauge();
+
   /**
    * @return number of all resources in this cluster
    */

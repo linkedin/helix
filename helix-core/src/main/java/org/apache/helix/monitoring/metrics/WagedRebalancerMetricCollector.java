@@ -61,6 +61,17 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     // compute failure. And this fallback logic won't impact this counting.
     RebalanceFailureCounter,
 
+    // Per-category breakdown of RebalanceFailureCounter. Each WAGED failure increments exactly one
+    // of these in addition to RebalanceFailureCounter. See HelixRebalanceException.FailureCategory.
+    FailureCategoryCapacityDeficitCounter,
+    FailureCategoryNoCandidateNodeCounter,
+    FailureCategoryInvalidResourceConfigCounter,
+    FailureCategoryInvalidClusterConfigCounter,
+    FailureCategoryMetadataStoreIoCounter,
+    FailureCategoryAlgorithmInternalCounter,
+    FailureCategoryAsyncExecutionCounter,
+    FailureCategoryUnknownCounter,
+
     // Waged rebalance counters.
     GlobalBaselineCalcCounter,
     PartialRebalanceCounter,
@@ -117,6 +128,22 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
         new BaselineDivergenceGauge(WagedRebalancerMetricNames.BaselineDivergenceGauge.name());
     CountMetric calcFailureCount =
         new RebalanceFailureCount(WagedRebalancerMetricNames.RebalanceFailureCounter.name());
+    CountMetric failureCategoryCapacityDeficitCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryCapacityDeficitCounter.name());
+    CountMetric failureCategoryNoCandidateNodeCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryNoCandidateNodeCounter.name());
+    CountMetric failureCategoryInvalidResourceConfigCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryInvalidResourceConfigCounter.name());
+    CountMetric failureCategoryInvalidClusterConfigCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryInvalidClusterConfigCounter.name());
+    CountMetric failureCategoryMetadataStoreIoCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryMetadataStoreIoCounter.name());
+    CountMetric failureCategoryAlgorithmInternalCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryAlgorithmInternalCounter.name());
+    CountMetric failureCategoryAsyncExecutionCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryAsyncExecutionCounter.name());
+    CountMetric failureCategoryUnknownCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryUnknownCounter.name());
     CountMetric globalBaselineCalcCounter =
         new RebalanceCounter(WagedRebalancerMetricNames.GlobalBaselineCalcCounter.name());
     CountMetric partialRebalanceCounter =
@@ -135,6 +162,14 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     addMetric(stateWriteLatencyGauge);
     addMetric(baselineDivergenceGauge);
     addMetric(calcFailureCount);
+    addMetric(failureCategoryCapacityDeficitCounter);
+    addMetric(failureCategoryNoCandidateNodeCounter);
+    addMetric(failureCategoryInvalidResourceConfigCounter);
+    addMetric(failureCategoryInvalidClusterConfigCounter);
+    addMetric(failureCategoryMetadataStoreIoCounter);
+    addMetric(failureCategoryAlgorithmInternalCounter);
+    addMetric(failureCategoryAsyncExecutionCounter);
+    addMetric(failureCategoryUnknownCounter);
     addMetric(globalBaselineCalcCounter);
     addMetric(partialRebalanceCounter);
     addMetric(emergencyRebalanceCounter);

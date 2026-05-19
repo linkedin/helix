@@ -219,7 +219,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private final StatefulRebalancerRef _rebalancerRef = new StatefulRebalancerRef() {
     @Override
     protected StatefulRebalancer createRebalancer(HelixManager helixManager) {
-      return new WagedRebalancer(helixManager);
+      WagedRebalancer wagedRebalancer = new WagedRebalancer(helixManager);
+      // Mirror per-FailureCategory failure counters and the fallback gauge onto the cluster
+      // status monitor so they are visible at ClusterStatus:cluster=<name>.
+      wagedRebalancer.setClusterStatusMonitor(_clusterStatusMonitor);
+      return wagedRebalancer;
     }
   };
 

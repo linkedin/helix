@@ -52,6 +52,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
@@ -101,6 +102,11 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   // the public method computeNewIdealStates.
   private RebalanceAlgorithm _rebalanceAlgorithm;
   private Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> _preference = NOT_CONFIGURED_PREFERENCE;
+
+  // Mirror of WAGED failure-category counters onto the ClusterStatusMonitor so cluster-level
+  // dashboards see the same signal. May be null when WagedRebalancer is used outside the
+  // pipeline (e.g. ReadOnlyWagedRebalancer for the REST partitionAssignment API).
+  private volatile ClusterStatusMonitor _clusterStatusMonitor;
 
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
@@ -195,6 +201,21 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         _writeLatency, _rebalanceFailureCount, isAsyncGlobalRebalanceEnabled);
   }
 
+  /**
+   * Attach the cluster-level status monitor so per-{@link HelixRebalanceException.FailureCategory}
+   * counters get mirrored from the WagedRebalancerMetricCollector (Rebalancer JMX domain) onto
+   * ClusterStatusMonitor (ClusterStatus JMX domain). Safe to call multiple times; subsequent calls
+   * replace the reference. May be null when WAGED is used outside the controller pipeline.
+   *
+   * Also propagates the reference to the async runners so their background-thread catch blocks
+   * can record failures that never reach the synchronous catch in computeNewIdealStates.
+   */
+  public void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
+    _clusterStatusMonitor = clusterStatusMonitor;
+    _partialRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
+    _globalRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
+  }
+
   // Update the global rebalance mode to be asynchronous or synchronous
   public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {
     _globalRebalanceRunner.setGlobalRebalanceAsyncMode(isAsyncGlobalRebalanceEnabled);
@@ -240,17 +261,28 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       Map<String, Resource> resourceMap, final CurrentStateOutput currentStateOutput)
       throws HelixRebalanceException {
     LOG.info("Start computing new ideal states for resources: {}", resourceMap.keySet().toString());
-    validateInput(clusterData, resourceMap);
+    try {
+      validateInput(clusterData, resourceMap);
+    } catch (HelixRebalanceException ex) {
+      // Record validation failures (INVALID_INPUT / INVALID_RESOURCE_CONFIG) too. We do not enter
+      // the fallback path here -- a bad input set must not silently use last-known-good.
+      _rebalanceFailureCount.increment(1L);
+      reportFailureCategory(ex);
+      throw ex;
+    }
 
     Map<String, IdealState> newIdealStates;
+    boolean usedFallback = false;
     try {
       // Calculate the target assignment based on the current cluster status.
       newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
           _rebalanceAlgorithm);
     } catch (HelixRebalanceException ex) {
-      LOG.error("Failed to calculate the new assignments.", ex);
+      LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
+          ex.getFailureCategory(), ex.isCustomerActionable(), ex);
       // Record the failure in metrics.
       _rebalanceFailureCount.increment(1L);
+      reportFailureCategory(ex);
 
       HelixRebalanceException.Type failureType = ex.getFailureType();
       if (failureTypesToPropagate().contains(failureType)) {
@@ -259,9 +291,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         throw ex;
       } else {
         // return the previously calculated assignment.
+        usedFallback = true;
         LOG.warn(
             "Returning the last known-good best possible assignment from metadata store due to "
-                + "rebalance failure of type: {}", failureType);
+                + "rebalance failure of type: {} category: {}", failureType, ex.getFailureCategory());
         // Note that don't return an assignment based on the current state if there is no previously
         // calculated result in this fallback logic.
         Map<String, ResourceAssignment> assignmentRecord =
@@ -269,6 +302,11 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
                 resourceMap.keySet());
         newIdealStates = convertResourceAssignment(clusterData, assignmentRecord);
       }
+    }
+    // Reflect whether this run produced a fresh assignment or fell back. Always update so that
+    // a previously sticky "true" resets on the next clean run.
+    if (_clusterStatusMonitor != null) {
+      _clusterStatusMonitor.setWagedFallbackInUseGauge(usedFallback);
     }
 
     // Construct the new best possible states according to the current state and target assignment.
@@ -368,7 +406,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       } catch (Exception ex) {
         throw new HelixRebalanceException(
             "Failed to calculate the new IdealState for resource: " + resourceName,
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
     }
     return finalIdealStateMap;
@@ -376,6 +415,22 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
 
   protected List<HelixRebalanceException.Type> failureTypesToPropagate() {
     return FAILURE_TYPES_TO_PROPAGATE;
+  }
+
+  /**
+   * Increment the per-{@link HelixRebalanceException.FailureCategory} counter on the cluster
+   * status monitor (when attached) so dashboards see the classified breakdown alongside the
+   * existing aggregate RebalanceFailureCounter.
+   *
+   * Called from every catch site in {@link #computeNewIdealStates} and from the async-runner
+   * report path. Safe to call when the monitor is not attached -- a null check covers the
+   * ReadOnlyWagedRebalancer / unit-test cases.
+   */
+  protected void reportFailureCategory(HelixRebalanceException ex) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.reportWagedFailureByCategory(ex.getFailureCategory());
+    }
   }
 
   /**
@@ -425,7 +480,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     } catch (Exception e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
       throw new HelixRebalanceException("Failed to compute for delayed rebalance overwrites in cluster "
-          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, e);
+          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, e);
     } finally {
       _rebalanceOverwriteLatency.endMeasuringLatency();
     }
@@ -481,7 +537,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
                 currentBestPossibleAssignment);
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to generate cluster model for emergency rebalance.",
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
       newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
     } else {
@@ -549,7 +606,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (!nonCompatibleResources.isEmpty()) {
       throw new HelixRebalanceException(String.format(
           "Input contains invalid resource(s) that cannot be rebalanced by the WAGED rebalancer. %s",
-          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT);
+          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT,
+          HelixRebalanceException.FailureCategory.INVALID_RESOURCE_CONFIG);
     }
   }
 
@@ -582,7 +640,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         _writeLatency.endMeasuringLatency();
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to persist the new best possible assignment.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     } else {
       LOG.debug("Assignment Metadata Store is null. Skip persisting the best possible assignment.");

@@ -60,7 +60,8 @@ class AssignmentManager {
       } catch (Exception ex) {
         throw new HelixRebalanceException(
             "Failed to get the current baseline assignment because of unexpected error.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     }
     currentBaseline.keySet().retainAll(resources);
@@ -97,7 +98,8 @@ class AssignmentManager {
       } catch (Exception ex) {
         throw new HelixRebalanceException(
             "Failed to get the current best possible assignment because of unexpected error.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     }
     currentBestAssignment.keySet().retainAll(resources);

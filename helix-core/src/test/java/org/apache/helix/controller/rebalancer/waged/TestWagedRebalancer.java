@@ -340,7 +340,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertEquals(_metadataStore.getBestPossibleAssignment(), testResourceAssignmentMap);
   }
 
-  @Test(dependsOnMethods = "testRebalance", expectedExceptions = HelixRebalanceException.class, expectedExceptionsMessageRegExp = "Input contains invalid resource\\(s\\) that cannot be rebalanced by the WAGED rebalancer. \\[Resource1\\] Failure Type: INVALID_INPUT")
+  @Test(dependsOnMethods = "testRebalance", expectedExceptions = HelixRebalanceException.class, expectedExceptionsMessageRegExp = "Input contains invalid resource\\(s\\) that cannot be rebalanced by the WAGED rebalancer. \\[Resource1\\] Failure Type: INVALID_INPUT Category: INVALID_RESOURCE_CONFIG")
   public void testNonCompatibleConfiguration()
       throws IOException, HelixRebalanceException {
     _metadataStore.reset();
@@ -378,9 +378,16 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
           clusterData.getEnabledLiveInstances(), new CurrentStateOutput(), _algorithm);
       Assert.fail("Rebalance shall fail.");
     } catch (HelixRebalanceException ex) {
-      Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+      // PartialRebalanceRunner now preserves the original FailureType and FailureCategory
+      // through the sync re-wrap (previously it lost both into the generic FAILED_TO_CALCULATE).
+      // The underlying cause here is a missing state model definition surfacing as
+      // INVALID_CLUSTER_STATUS / INVALID_CLUSTER_CONFIG.
+      Assert.assertEquals(ex.getFailureType(),
+          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+      Assert.assertEquals(ex.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG);
       Assert.assertEquals(ex.getMessage(),
-          "Failed to calculate for the new best possible. Failure Type: FAILED_TO_CALCULATE");
+          "Failed to calculate for the new best possible. Failure Type: INVALID_CLUSTER_STATUS Category: INVALID_CLUSTER_CONFIG");
     }
 
     // The rebalance will be done with empty mapping result since there is no previously calculated
@@ -408,8 +415,10 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(),
           HelixRebalanceException.Type.INVALID_REBALANCER_STATUS);
+      Assert.assertEquals(ex.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.METADATA_STORE_IO);
       Assert.assertEquals(ex.getMessage(),
-          "Failed to get the current best possible assignment because of unexpected error. Failure Type: INVALID_REBALANCER_STATUS");
+          "Failed to get the current best possible assignment because of unexpected error. Failure Type: INVALID_REBALANCER_STATUS Category: METADATA_STORE_IO");
     }
   }
 

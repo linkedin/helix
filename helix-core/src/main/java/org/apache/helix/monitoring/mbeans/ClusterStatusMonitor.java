@@ -39,6 +39,7 @@ import javax.management.ObjectName;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
@@ -92,6 +93,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
 
+  // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
+  // enum value so reads on never-incremented categories return 0 instead of NPE.
+  private final Map<HelixRebalanceException.FailureCategory, AtomicLong> _wagedFailureCategoryCounters =
+      new ConcurrentHashMap<>();
+  private final AtomicLong _wagedCustomerActionableFailureCount = new AtomicLong(0L);
+  private final AtomicLong _wagedInternalFailureCount = new AtomicLong(0L);
+  private volatile boolean _wagedFallbackInUse = false;
+
   // Cluster-level instance operation counts
   private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
       new ConcurrentHashMap<>();
@@ -124,6 +133,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     // Initialize the map with all operation types
     for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
       _perOperationInstanceCount.put(operation, new AtomicLong(0L));
+    }
+
+    // Pre-create one AtomicLong per WAGED failure category so dashboards see a stable 0
+    // for categories that have not yet fired.
+    for (HelixRebalanceException.FailureCategory category :
+        HelixRebalanceException.FailureCategory.values()) {
+      _wagedFailureCategoryCounters.put(category, new AtomicLong(0L));
     }
   }
 
@@ -1201,6 +1217,31 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _rebalanceFailureCount.incrementAndGet();
   }
 
+  /**
+   * Record a WAGED rebalance failure with its classified category. Increments both the
+   * per-category counter and the matching rollup counter (customer-actionable vs internal).
+   * Safe to call from the controller pipeline thread.
+   */
+  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+    if (category == null) {
+      category = HelixRebalanceException.FailureCategory.UNKNOWN;
+    }
+    _wagedFailureCategoryCounters.get(category).incrementAndGet();
+    if (category.isCustomerActionable()) {
+      _wagedCustomerActionableFailureCount.incrementAndGet();
+    } else {
+      _wagedInternalFailureCount.incrementAndGet();
+    }
+  }
+
+  /**
+   * Flip the fallback gauge. Set to true when WAGED returns the last-known-good assignment
+   * instead of a freshly computed one; reset to false when a clean calculation succeeds.
+   */
+  public void setWagedFallbackInUseGauge(boolean inUse) {
+    _wagedFallbackInUse = inUse;
+  }
+
   public void reportContinuousResourceRebalanceFailureCount(long newValue) {
     _continuousResourceRebalanceFailureCount.set(newValue);
   }
@@ -1222,6 +1263,69 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getContinuousTaskRebalanceFailureCount() {
     return _continuousTaskRebalanceFailureCount.get();
+  }
+
+  @Override
+  public long getWagedCustomerActionableFailureCounter() {
+    return _wagedCustomerActionableFailureCount.get();
+  }
+
+  @Override
+  public long getWagedInternalFailureCounter() {
+    return _wagedInternalFailureCount.get();
+  }
+
+  @Override
+  public long getWagedFailureCapacityDeficitCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT).get();
+  }
+
+  @Override
+  public long getWagedFailureNoCandidateNodeCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE).get();
+  }
+
+  @Override
+  public long getWagedFailureInvalidResourceConfigCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.INVALID_RESOURCE_CONFIG).get();
+  }
+
+  @Override
+  public long getWagedFailureInvalidClusterConfigCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG).get();
+  }
+
+  @Override
+  public long getWagedFailureMetadataStoreIoCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.METADATA_STORE_IO).get();
+  }
+
+  @Override
+  public long getWagedFailureAlgorithmInternalCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL).get();
+  }
+
+  @Override
+  public long getWagedFailureAsyncExecutionCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.ASYNC_EXECUTION).get();
+  }
+
+  @Override
+  public long getWagedFailureUnknownCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.UNKNOWN).get();
+  }
+
+  @Override
+  public long getWagedFallbackInUseGauge() {
+    return _wagedFallbackInUse ? 1L : 0L;
   }
 
   @Override

@@ -837,4 +837,62 @@ public class TestClusterStatusMonitor {
 
     monitor.reset();
   }
+
+  @Test
+  public void testWagedFailureCategoryCountersStartAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedCategoriesCluster");
+    Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureNoCandidateNodeCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureInvalidResourceConfigCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureInvalidClusterConfigCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureMetadataStoreIoCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureAlgorithmInternalCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureAsyncExecutionCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureUnknownCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedInternalFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+  }
+
+  @Test
+  public void testWagedFailureCategoryReportRoutesToCorrectCountersAndRollup() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedRoutingCluster");
+
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.METADATA_STORE_IO);
+
+    Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 2L);
+    Assert.assertEquals(monitor.getWagedFailureNoCandidateNodeCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedFailureMetadataStoreIoCounter(), 1L);
+    // Rollup: 3 customer-actionable (2 capacity + 1 candidate-node), 1 internal (metadata store).
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 3L);
+    Assert.assertEquals(monitor.getWagedInternalFailureCounter(), 1L);
+    // Unrelated counters should be untouched.
+    Assert.assertEquals(monitor.getWagedFailureInvalidResourceConfigCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureAsyncExecutionCounter(), 0L);
+  }
+
+  @Test
+  public void testReportWagedFailureByCategoryHandlesNullAsUnknown() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedNullCategoryCluster");
+    monitor.reportWagedFailureByCategory(null);
+    Assert.assertEquals(monitor.getWagedFailureUnknownCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedInternalFailureCounter(), 1L);
+  }
+
+  @Test
+  public void testWagedFallbackInUseGaugeReflectsLatestSetter() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedFallbackGaugeCluster");
+    Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+    monitor.setWagedFallbackInUseGauge(true);
+    Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 1L);
+    monitor.setWagedFallbackInUseGauge(false);
+    Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+  }
 }
