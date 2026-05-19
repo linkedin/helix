@@ -25,10 +25,6 @@ export class HelixCtrl {
 
     const user = req.session.username;
     const method = req.method.toLowerCase();
-    if (method != 'get' && !req.session.isAdmin) {
-      res.status(403).send('Forbidden');
-      return;
-    }
 
     if (
       IDENTITY_TOKEN_SOURCE &&
@@ -36,6 +32,11 @@ export class HelixCtrl {
       !res.locals.cookie?.['helixui_identity.token']
     ) {
       res.status(401).send('Session expired. Please log in again.');
+      return;
+    }
+
+    if (method != 'get' && !req.session.isAdmin) {
+      res.status(403).send('Forbidden');
       return;
     }
 

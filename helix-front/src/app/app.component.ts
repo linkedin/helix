@@ -13,6 +13,7 @@ import { MatDialog } from '@angular/material/dialog';
 
 import { UserService } from './core/user.service';
 import { InputDialogComponent } from './shared/dialog/input-dialog/input-dialog.component';
+import { AlertDialogComponent } from './shared/dialog/alert-dialog/alert-dialog.component';
 import { HelperService } from './shared/helper.service';
 
 @Component({
@@ -26,6 +27,7 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
+  private sessionExpiredShown = false;
 
   constructor(
     // protected angulartics2Piwik: Angulartics2Piwik,
@@ -60,6 +62,36 @@ export class AppComponent implements OnInit {
         this.headerEnabled = this.footerEnabled = false;
       }
     });
+
+    this.watchTokenExpiry();
+  }
+
+  private hasIdentityToken(): boolean {
+    return document.cookie.includes('helixui_identity.token');
+  }
+
+  private watchTokenExpiry() {
+    if (!this.hasIdentityToken()) return;
+    const check = setInterval(() => {
+      if (!this.hasIdentityToken() && !this.sessionExpiredShown) {
+        this.sessionExpiredShown = true;
+        clearInterval(check);
+        this.dialog
+          .open(AlertDialogComponent, {
+            data: {
+              title: 'Session Expired',
+              message:
+                'Your session has expired. Please sign in again to continue.',
+            },
+          })
+          .afterClosed()
+          .subscribe(() => {
+            fetch('/api/user/logout', { method: 'POST' }).finally(() =>
+              window.location.reload()
+            );
+          });
+      }
+    }, 30000);
   }
 
   login() {

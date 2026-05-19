@@ -6,13 +6,14 @@ import {
   HttpEvent,
   HttpErrorResponse,
 } from '@angular/common/http';
-import { Observable, throwError } from 'rxjs';
+import { Observable, EMPTY } from 'rxjs';
 import { catchError } from 'rxjs/operators';
-import { MatSnackBar } from '@angular/material/snack-bar';
+import { MatDialog } from '@angular/material/dialog';
+import { AlertDialogComponent } from '../shared/dialog/alert-dialog/alert-dialog.component';
 
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
-  constructor(private snackBar: MatSnackBar) {}
+  constructor(private dialog: MatDialog) {}
 
   intercept(
     req: HttpRequest<any>,
@@ -21,14 +22,25 @@ export class AuthInterceptor implements HttpInterceptor {
     return next.handle(req).pipe(
       catchError((error: HttpErrorResponse) => {
         if (error.status === 401) {
-          this.snackBar
-            .open('Session expired. Please sign in again.', 'Sign In', {
-              duration: 10000,
+          this.dialog
+            .open(AlertDialogComponent, {
+              data: {
+                title: 'Session Expired',
+                message:
+                  'Your session has expired. Please sign in again to continue.',
+              },
             })
-            .onAction()
-            .subscribe(() => window.location.reload());
+            .afterClosed()
+            .subscribe(() => {
+              fetch('/api/user/logout', { method: 'POST' }).finally(() =>
+                window.location.reload()
+              );
+            });
+          return EMPTY;
         }
-        return throwError(error);
+        return new Observable<HttpEvent<any>>((subscriber) =>
+          subscriber.error(error)
+        );
       })
     );
   }

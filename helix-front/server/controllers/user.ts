@@ -17,8 +17,15 @@ export class UserCtrl {
     // uncomment the following line to use customized login
     // router.route('/user/authorize').get(this.authorize);
     router.route('/user/login').post(this.login.bind(this));
+    router.route('/user/logout').post(this.logout);
     router.route('/user/current').get(this.current);
     router.route('/user/can').get(this.can);
+  }
+
+  protected logout(req: HelixRequest, res: Response) {
+    res.clearCookie('helixui_identity.token');
+    req.session = null;
+    res.json(true);
   }
 
   //
