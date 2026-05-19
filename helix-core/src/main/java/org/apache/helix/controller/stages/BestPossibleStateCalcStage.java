@@ -382,9 +382,10 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       // The same marker-based subtraction is applied at MM exit in MaintenanceRecoveryStage
       // so a marker that lets an instance escape MM entry also lets the cluster recover
       // when the marker expires. The two stages' pre-subtraction baselines are not
-      // identical (entry counts EVACUATE/SWAP_OUT via !UNROUTABLE_INSTANCE_OPERATIONS;
-      // exit uses getAssignableInstances which excludes them); that asymmetry is
-      // pre-existing controller behavior and is not introduced here.
+      // identical: entry's !UNROUTABLE_INSTANCE_OPERATIONS filter includes EVACUATE in the
+      // count, while exit's getAssignableInstances (operations in ASSIGNABLE = {ENABLE,
+      // DISABLE}) does not. That EVACUATE asymmetry is pre-existing controller behavior
+      // and is not introduced here.
       Set<String> offlineBudgetInstances = cache.getInstanceConfigMap().entrySet().stream()
           .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
               instanceEntry.getValue().getInstanceOperation().getOperation()))

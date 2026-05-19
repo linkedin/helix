@@ -94,8 +94,11 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
       // Count offline-or-disabled assignable instances, then subtract those carrying a
       // valid instance-operation maintenance marker so a deploy window can't trap the
       // cluster in MM. The same marker-based subtraction runs at MM entry in
-      // BestPossibleStateCalcStage; the two stages use different pre-subtraction baselines
-      // (assignable here vs !UNROUTABLE there) but the marker handling is consistent.
+      // BestPossibleStateCalcStage. The two stages use different pre-subtraction
+      // baselines: assignable here (ENABLE/DISABLE only) vs !UNROUTABLE there (adds
+      // EVACUATE), so an EVACUATE+offline instance can trip MM entry but is not counted
+      // here at exit. That EVACUATE asymmetry is pre-existing; the marker handling is
+      // consistent across both stages.
       Set<String> assignable = cache.getAssignableInstances();
       Set<String> enabledLive = cache.getEnabledLiveInstances();
       long nowMs = System.currentTimeMillis();
