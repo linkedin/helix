@@ -621,13 +621,20 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the percentage (0-100) of cluster instances that may simultaneously carry an
-   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Pass {@code -1} to clear; the field is
-   * mutually exclusive with {@link #setInstanceOperationMaintenanceBudget(int)} and the
-   * setter throws when the other form is already set.
+   * Set the percentage of cluster instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Valid range is {@code [0, 100]}; pass
+   * {@code -1} to clear. The field is mutually exclusive with
+   * {@link #setInstanceOperationMaintenanceBudget(int)} and the setter throws when the
+   * other form is already set or the value is outside the valid range.
    */
   public void setInstanceOperationMaintenanceBudgetPercentage(
       int instanceOperationMaintenanceBudgetPercentage) throws HelixException {
+    if (instanceOperationMaintenanceBudgetPercentage < -1
+        || instanceOperationMaintenanceBudgetPercentage > 100) {
+      throw new HelixException(
+          "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE must be in the range [0, 100] "
+              + "or -1 to clear, got " + instanceOperationMaintenanceBudgetPercentage);
+    }
     if (instanceOperationMaintenanceBudgetPercentage >= 0
         && getInstanceOperationMaintenanceBudget() >= 0) {
       throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE and "

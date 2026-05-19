@@ -511,6 +511,33 @@ public class TestClusterConfig {
   }
 
   @Test
+  public void testInstanceOperationMaintenancePercentageRejectsOutOfRange() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    for (int outOfRange : new int[] {-2, -100, 101, 1000}) {
+      try {
+        clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(outOfRange);
+        Assert.fail("Out-of-range value " + outOfRange + " must be rejected");
+      } catch (HelixException expected) {
+        Assert.assertTrue(expected.getMessage().contains("[0, 100]"),
+            "Error message should explain the valid range, got: " + expected.getMessage());
+      }
+    }
+  }
+
+  @Test
+  public void testInstanceOperationMaintenancePercentageAcceptsBoundaryValues() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    // 0 and 100 are the valid endpoints.
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(0);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 0);
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(100);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 100);
+    // -1 is the clear sentinel and must be accepted.
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(-1);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), -1);
+  }
+
+  @Test
   public void testInstanceOperationMaintenanceFieldsClearWithSentinel() throws Exception {
     ClusterConfig clusterConfig = new ClusterConfig("testCluster");
     clusterConfig.setInstanceOperationMaintenanceBudget(20);

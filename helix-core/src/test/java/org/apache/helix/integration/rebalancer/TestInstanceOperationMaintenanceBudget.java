@@ -27,6 +27,7 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -159,6 +160,62 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
     Assert.assertTrue(enteredMM,
         "Expired markers must not exempt; cluster must enter MM as if the markers were absent");
 
+    restoreClusterState();
+  }
+
+  /**
+   * Covers the DISABLE operation: an instance with operation = DISABLE is in the MM-entry
+   * baseline (DISABLE is a member of {ENABLE, DISABLE, EVACUATE}) but absent from
+   * enabledLive (DISABLE removes it), so without a marker it counts toward
+   * MAX_OFFLINE_INSTANCES_ALLOWED. The marker should exempt it.
+   */
+  @Test(dependsOnMethods = "testExpiredMarkersDoNotExempt")
+  public void testMarkedDisabledInstanceDoesNotTripMM() throws Exception {
+    Assert.assertNull(_dataAccessor.getProperty(_dataAccessor.keyBuilder().maintenance()));
+
+    long futureExpiry = System.currentTimeMillis() + ONE_HOUR_MS;
+    String h0 = _participants.get(0).getInstanceName();
+    setMarker(h0, futureExpiry);
+    _gSetupTool.getClusterManagementTool().enableInstance(_clusterName, h0, false);
+
+    boolean stayedOutOfMM = TestHelper.verify(() -> {
+      MaintenanceSignal ms = _dataAccessor.getProperty(_dataAccessor.keyBuilder().maintenance());
+      return ms == null;
+    }, TestHelper.WAIT_DURATION);
+    Assert.assertTrue(stayedOutOfMM,
+        "Marker must exempt a DISABLE+offline instance from the offline budget at MM entry");
+
+    // Restore: re-enable h0 and clear the marker.
+    _gSetupTool.getClusterManagementTool().enableInstance(_clusterName, h0, true);
+    restoreClusterState();
+  }
+
+  /**
+   * Covers the EVACUATE operation: an instance with operation = EVACUATE is in the MM-entry
+   * baseline and not in enabledLive, so it counts toward the budget without a marker. The
+   * marker should exempt it. (Exit treats EVACUATE separately via getAssignableInstances;
+   * that's pre-existing controller behavior and is not what this test exercises.)
+   */
+  @Test(dependsOnMethods = "testMarkedDisabledInstanceDoesNotTripMM")
+  public void testMarkedEvacuatingInstanceDoesNotTripMM() throws Exception {
+    Assert.assertNull(_dataAccessor.getProperty(_dataAccessor.keyBuilder().maintenance()));
+
+    long futureExpiry = System.currentTimeMillis() + ONE_HOUR_MS;
+    String h0 = _participants.get(0).getInstanceName();
+    setMarker(h0, futureExpiry);
+    _gSetupTool.getClusterManagementTool().setInstanceOperation(_clusterName, h0,
+        InstanceConstants.InstanceOperation.EVACUATE);
+
+    boolean stayedOutOfMM = TestHelper.verify(() -> {
+      MaintenanceSignal ms = _dataAccessor.getProperty(_dataAccessor.keyBuilder().maintenance());
+      return ms == null;
+    }, TestHelper.WAIT_DURATION);
+    Assert.assertTrue(stayedOutOfMM,
+        "Marker must exempt an EVACUATE+offline instance from the offline budget at MM entry");
+
+    // Restore: return to ENABLE and clear the marker.
+    _gSetupTool.getClusterManagementTool().setInstanceOperation(_clusterName, h0,
+        InstanceConstants.InstanceOperation.ENABLE);
     restoreClusterState();
   }
 

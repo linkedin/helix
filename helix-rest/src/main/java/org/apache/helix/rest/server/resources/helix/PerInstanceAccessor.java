@@ -360,9 +360,17 @@ public class PerInstanceAccessor extends AbstractHelixResource {
         body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
         return JSONRepresentation(body);
       }
-      // Single-instance call cannot be partial; surface the per-instance reason as 400.
-      String rejectReason = result.getRejected().getOrDefault(instanceName, "rejected");
-      return badRequest(rejectReason);
+      String rejectReason = result.getRejected().get(instanceName);
+      if (rejectReason != null) {
+        // Single-instance call cannot be partial; surface the per-instance reason as 400.
+        return badRequest(rejectReason);
+      }
+      // The handler is supposed to return every input instance in exactly one of applied or
+      // rejected. Reaching here means the handler returned an inconsistent result; surface
+      // this as 500 instead of silently translating to a generic 400, since the latter
+      // would mask a real server-side bug as a client error.
+      return serverError(new IllegalStateException(
+          "Handler returned no outcome for instance " + instanceName));
     } catch (BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {
