@@ -11,17 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checks-out the repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node environment
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "14.x"
           cache: "yarn"
           cache-dependency-path: "helix-front/yarn.lock"
 
       - name: Install dependencies
-        run: yarn
+        run: yarn --frozen-lockfile
         working-directory: helix-front
 
       - name: Format check

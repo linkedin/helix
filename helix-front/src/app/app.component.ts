@@ -27,6 +27,7 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
+  currentYear = new Date().getFullYear();
   private sessionExpiredShown = false;
 
   constructor(
