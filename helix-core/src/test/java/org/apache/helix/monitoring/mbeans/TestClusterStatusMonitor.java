@@ -895,4 +895,41 @@ public class TestClusterStatusMonitor {
     monitor.setWagedFallbackInUseGauge(false);
     Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
   }
+
+  @Test
+  public void testWagedHardConstraintCountersStartAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintCluster");
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintNodeMaxPartitionLimitFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintReplicaActivateFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintSamePartitionOnInstanceFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintUnknownFailureCounter(), 0L);
+  }
+
+  @Test
+  public void testReportWagedHardConstraintFailureIncrementsCorrectCounter() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintReportingCluster");
+
+    monitor.reportWagedHardConstraintFailure(
+        org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint.Type.FAULT_ZONE);
+    monitor.reportWagedHardConstraintFailure(
+        org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint.Type.FAULT_ZONE);
+    monitor.reportWagedHardConstraintFailure(
+        org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint.Type.VALID_GROUP_TAG);
+
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 2L);
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagFailureCounter(), 1L);
+    // Unrelated buckets stay at zero.
+    Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityFailureCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintReplicaActivateFailureCounter(), 0L);
+  }
+
+  @Test
+  public void testReportWagedHardConstraintFailureHandlesNullAsUnknown() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintNullCluster");
+    monitor.reportWagedHardConstraintFailure(null);
+    Assert.assertEquals(monitor.getWagedHardConstraintUnknownFailureCounter(), 1L);
+  }
 }

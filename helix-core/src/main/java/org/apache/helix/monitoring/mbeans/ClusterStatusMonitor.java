@@ -41,6 +41,7 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.model.ExternalView;
@@ -101,6 +102,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private final AtomicLong _wagedInternalFailureCount = new AtomicLong(0L);
   private volatile boolean _wagedFallbackInUse = false;
 
+  // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
+  // reads return 0 instead of NPE for constraints that have not yet fired.
+  private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
+      new ConcurrentHashMap<>();
+
   // Cluster-level instance operation counts
   private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
       new ConcurrentHashMap<>();
@@ -140,6 +146,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     for (HelixRebalanceException.FailureCategory category :
         HelixRebalanceException.FailureCategory.values()) {
       _wagedFailureCategoryCounters.put(category, new AtomicLong(0L));
+    }
+    // Same for per-HardConstraint counters.
+    for (HardConstraint.Type type : HardConstraint.Type.values()) {
+      _wagedHardConstraintFailureCounters.put(type, new AtomicLong(0L));
     }
   }
 
@@ -1242,6 +1252,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _wagedFallbackInUse = inUse;
   }
 
+  /**
+   * Record that a partition failed placement because at least one candidate node was rejected
+   * by a hard constraint of the given type. Called once per partition per distinct constraint
+   * type that contributed to the failure -- the constraint dimension is unioned across nodes,
+   * not summed, so the counter reflects partition-level impact, not node-rejection counts.
+   */
+  public void reportWagedHardConstraintFailure(HardConstraint.Type type) {
+    if (type == null) {
+      type = HardConstraint.Type.UNKNOWN;
+    }
+    _wagedHardConstraintFailureCounters.get(type).incrementAndGet();
+  }
+
   public void reportContinuousResourceRebalanceFailureCount(long newValue) {
     _continuousResourceRebalanceFailureCount.set(newValue);
   }
@@ -1326,6 +1349,43 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedFallbackInUseGauge() {
     return _wagedFallbackInUse ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedHardConstraintFaultZoneFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.FAULT_ZONE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeCapacityFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.NODE_CAPACITY).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeMaxPartitionLimitFailureCounter() {
+    return _wagedHardConstraintFailureCounters
+        .get(HardConstraint.Type.NODE_MAX_PARTITION_LIMIT).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintReplicaActivateFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.REPLICA_ACTIVATE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintSamePartitionOnInstanceFailureCounter() {
+    return _wagedHardConstraintFailureCounters
+        .get(HardConstraint.Type.SAME_PARTITION_ON_INSTANCE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintValidGroupTagFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.VALID_GROUP_TAG).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintUnknownFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.UNKNOWN).get();
   }
 
   @Override

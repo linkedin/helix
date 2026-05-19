@@ -104,9 +104,12 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
     Map<String, IdealState> newIdealStates =
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
 
-    // Check that there exists a non-zero value in the metrics
+    // Check that there exists a non-zero value in the metrics. Metric value type is Number
+    // (Long for counters/latency, Double for ratio gauges), so go through Number.longValue() to
+    // avoid Double->Long ClassCastException when iteration order surfaces a Double-typed metric
+    // first (e.g. BaselineDivergenceGauge).
     Assert.assertTrue(_metricCollector.getMetricMap().values().stream()
-        .anyMatch(metric -> (long) metric.getLastEmittedMetricValue() > 0L));
+        .anyMatch(metric -> ((Number) metric.getLastEmittedMetricValue()).longValue() > 0L));
   }
 
   @Test

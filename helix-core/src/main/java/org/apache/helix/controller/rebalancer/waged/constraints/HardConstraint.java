@@ -26,8 +26,26 @@ import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 /**
  * Evaluate a partition allocation proposal and return YES or NO based on the cluster context.
  * Any proposal fails one or more hard constraints will be rejected.
+ *
+ * <p>The class is public so the metric-reporting layer can reference {@link Type}; the abstract
+ * surface and package-private subclasses keep the actual implementations internal.
  */
-abstract class HardConstraint {
+public abstract class HardConstraint {
+
+  /**
+   * Stable identifier for a hard constraint, used to key per-constraint failure metrics. The
+   * enum is decoupled from class names so refactors don't break metric continuity. Add a value
+   * here when introducing a new HardConstraint subclass.
+   */
+  public enum Type {
+    FAULT_ZONE,
+    NODE_CAPACITY,
+    NODE_MAX_PARTITION_LIMIT,
+    REPLICA_ACTIVATE,
+    SAME_PARTITION_ON_INSTANCE,
+    VALID_GROUP_TAG,
+    UNKNOWN
+  }
 
   protected boolean enableLogging = false;
 
@@ -45,6 +63,16 @@ abstract class HardConstraint {
    */
   String getDescription() {
     return getClass().getName();
+  }
+
+  /**
+   * @return A stable {@link Type} identifying this hard constraint for metric reporting.
+   *         Default is {@link Type#UNKNOWN}; subclasses should override to return their
+   *         specific type so dashboards can break down WagedFailureNoCandidateNodeCounter by
+   *         which constraint prevented placement.
+   */
+  Type getType() {
+    return Type.UNKNOWN;
   }
 
   /**

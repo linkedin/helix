@@ -42,7 +42,9 @@ import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
@@ -75,10 +77,13 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       NOT_CONFIGURED_PREFERENCE = ImmutableMap
       .of(ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS, -1,
           ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT, -1);
-  // The default algorithm to use when there is no preference configured.
-  private static final RebalanceAlgorithm DEFAULT_REBALANCE_ALGORITHM =
-      ConstraintBasedAlgorithmFactory
-          .getInstance(ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE);
+  // Default rebalance preference used when no per-cluster preference is configured. Each
+  // WagedRebalancer instance constructs its own algorithm from this preference so that per-
+  // instance state on the algorithm (e.g. the hard-constraint failure reporter wired to a
+  // specific cluster's ClusterStatusMonitor) is not shared across WagedRebalancer instances
+  // running in the same JVM.
+  private static final Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer>
+      DEFAULT_REBALANCE_PREFERENCE = ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE;
   // These failure types should be propagated to caller of computeNewIdealStates()
   private static final List<HelixRebalanceException.Type> FAILURE_TYPES_TO_PROPAGATE =
       ImmutableList.of(HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, HelixRebalanceException.Type.UNKNOWN_FAILURE);
@@ -120,7 +125,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     this(helixManager == null ? null
             : constructAssignmentStore(helixManager.getMetadataStoreConnectionString(),
                 helixManager.getClusterName()),
-        DEFAULT_REBALANCE_ALGORITHM,
+        ConstraintBasedAlgorithmFactory.getInstance(DEFAULT_REBALANCE_PREFERENCE),
         // Use DelayedAutoRebalancer as the mapping calculator for the final assignment output.
         // Mapping calculator will translate the best possible assignment into the applicable state
         // mapping based on the current states.
@@ -208,12 +213,32 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
    * replace the reference. May be null when WAGED is used outside the controller pipeline.
    *
    * Also propagates the reference to the async runners so their background-thread catch blocks
-   * can record failures that never reach the synchronous catch in computeNewIdealStates.
+   * can record failures that never reach the synchronous catch in computeNewIdealStates, and
+   * installs a per-HardConstraint failure reporter on the algorithm so the cluster-level
+   * hard-constraint sub-counters are populated.
    */
   public void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
     _clusterStatusMonitor = clusterStatusMonitor;
     _partialRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
     _globalRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
+    wireHardConstraintFailureReporter(_rebalanceAlgorithm, clusterStatusMonitor);
+  }
+
+  /**
+   * If the algorithm is a ConstraintBasedAlgorithm and a monitor is attached, install a reporter
+   * that ticks the cluster-level per-HardConstraint counter when a partition fails placement.
+   * No-op for other algorithm implementations or when the monitor is null. Called both when the
+   * monitor is attached and when the algorithm is replaced via updateRebalancePreference.
+   */
+  private static void wireHardConstraintFailureReporter(RebalanceAlgorithm algorithm,
+      ClusterStatusMonitor monitor) {
+    if (monitor == null) {
+      return;
+    }
+    if (algorithm instanceof ConstraintBasedAlgorithm) {
+      ((ConstraintBasedAlgorithm) algorithm).setHardConstraintFailureReporter(
+          (HardConstraint.Type type) -> monitor.reportWagedHardConstraintFailure(type));
+    }
   }
 
   // Update the global rebalance mode to be asynchronous or synchronous
@@ -233,6 +258,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     // 2. if the preference equals to the new preference, no need to update.
     if (!_preference.equals(NOT_CONFIGURED_PREFERENCE) && !_preference.equals(newPreference)) {
       _rebalanceAlgorithm = ConstraintBasedAlgorithmFactory.getInstance(newPreference);
+      // The previous algorithm instance is discarded; rewire the failure reporter onto the new
+      // one so per-HardConstraint counters keep flowing.
+      wireHardConstraintFailureReporter(_rebalanceAlgorithm, _clusterStatusMonitor);
       _preference = ImmutableMap.copyOf(newPreference);
     }
   }

@@ -145,6 +145,33 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getWagedFallbackInUseGauge();
 
+  // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
+  // When a partition cannot find any eligible node, every hard constraint that rejected at least
+  // one candidate gets its counter incremented once for that partition. These sub-dimensions let
+  // operators distinguish fault-zone failures from tag failures from capacity failures within the
+  // broader "no candidate node" bucket.
+
+  /** @return Partitions that failed placement because the fault-zone constraint rejected every node. */
+  long getWagedHardConstraintFaultZoneFailureCounter();
+
+  /** @return Partitions that failed placement because per-node capacity constraints rejected every node. */
+  long getWagedHardConstraintNodeCapacityFailureCounter();
+
+  /** @return Partitions that failed placement because the max-partitions-per-instance limit rejected every node. */
+  long getWagedHardConstraintNodeMaxPartitionLimitFailureCounter();
+
+  /** @return Partitions that failed placement because every candidate instance was inactive. */
+  long getWagedHardConstraintReplicaActivateFailureCounter();
+
+  /** @return Partitions that failed placement because the same-partition-on-instance rule rejected every node. */
+  long getWagedHardConstraintSamePartitionOnInstanceFailureCounter();
+
+  /** @return Partitions that failed placement because no instance had the required group tag. */
+  long getWagedHardConstraintValidGroupTagFailureCounter();
+
+  /** @return Partitions that failed placement due to a hard constraint with no specific type tag. */
+  long getWagedHardConstraintUnknownFailureCounter();
+
   /**
    * @return number of all resources in this cluster
    */
