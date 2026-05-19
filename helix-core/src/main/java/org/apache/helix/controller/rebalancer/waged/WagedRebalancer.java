@@ -22,6 +22,7 @@ package org.apache.helix.controller.rebalancer.waged;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -77,13 +78,6 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       NOT_CONFIGURED_PREFERENCE = ImmutableMap
       .of(ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS, -1,
           ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT, -1);
-  // Default rebalance preference used when no per-cluster preference is configured. Each
-  // WagedRebalancer instance constructs its own algorithm from this preference so that per-
-  // instance state on the algorithm (e.g. the hard-constraint failure reporter wired to a
-  // specific cluster's ClusterStatusMonitor) is not shared across WagedRebalancer instances
-  // running in the same JVM.
-  private static final Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer>
-      DEFAULT_REBALANCE_PREFERENCE = ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE;
   // These failure types should be propagated to caller of computeNewIdealStates()
   private static final List<HelixRebalanceException.Type> FAILURE_TYPES_TO_PROPAGATE =
       ImmutableList.of(HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, HelixRebalanceException.Type.UNKNOWN_FAILURE);
@@ -102,6 +96,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   private final AssignmentManager _assignmentManager;
   private final PartialRebalanceRunner _partialRebalanceRunner;
   private final GlobalRebalanceRunner _globalRebalanceRunner;
+  // Rebalancer-domain per-FailureCategory and per-HardConstraint counters. Pre-resolved at
+  // construction so the failure-reporting hot paths don't repeatedly look them up by name.
+  // ClusterStatusMonitor mirrors the same counts onto its own MBean for cluster-level dashboards.
+  private final EnumMap<HelixRebalanceException.FailureCategory, CountMetric>
+      _failureCategoryMetrics;
+  private final EnumMap<HardConstraint.Type, CountMetric> _hardConstraintFailureMetrics;
 
   // Note, the rebalance algorithm field is mutable so it should not be directly referred except for
   // the public method computeNewIdealStates.
@@ -125,7 +125,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     this(helixManager == null ? null
             : constructAssignmentStore(helixManager.getMetadataStoreConnectionString(),
                 helixManager.getClusterName()),
-        ConstraintBasedAlgorithmFactory.getInstance(DEFAULT_REBALANCE_PREFERENCE),
+        // Construct a per-instance algorithm rather than sharing a static singleton across
+        // WagedRebalancers, so the per-cluster hard-constraint failure reporter installed via
+        // setClusterStatusMonitor() does not race when multiple controllers coexist in the JVM.
+        // The shared ForkJoinPool inside the factory is still reused.
+        ConstraintBasedAlgorithmFactory.getInstance(
+            ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE),
         // Use DelayedAutoRebalancer as the mapping calculator for the final assignment output.
         // Mapping calculator will translate the best possible assignment into the applicable state
         // mapping based on the current states.
@@ -200,44 +205,104 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.StateReadLatencyGauge.name(),
         LatencyMetric.class));
 
+    _failureCategoryMetrics = new EnumMap<>(HelixRebalanceException.FailureCategory.class);
+    for (HelixRebalanceException.FailureCategory category :
+        HelixRebalanceException.FailureCategory.values()) {
+      _failureCategoryMetrics.put(category, _metricCollector.getMetric(
+          failureCategoryMetricName(category).name(), CountMetric.class));
+    }
+    _hardConstraintFailureMetrics = new EnumMap<>(HardConstraint.Type.class);
+    for (HardConstraint.Type type : HardConstraint.Type.values()) {
+      _hardConstraintFailureMetrics.put(type, _metricCollector.getMetric(
+          hardConstraintMetricName(type).name(), CountMetric.class));
+    }
+
     _partialRebalanceRunner = new PartialRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        _rebalanceFailureCount, isAsyncPartialRebalanceEnabled);
+        this::reportAsyncFailure, isAsyncPartialRebalanceEnabled);
     _globalRebalanceRunner = new GlobalRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        _writeLatency, _rebalanceFailureCount, isAsyncGlobalRebalanceEnabled);
+        _writeLatency, this::reportAsyncFailure, isAsyncGlobalRebalanceEnabled);
+  }
+
+  /**
+   * Map a FailureCategory to its WagedRebalancerMetricNames enum value. The two enums are kept
+   * in separate packages so the mapping lives here. Adding a new FailureCategory requires adding
+   * a matching WagedRebalancerMetricNames entry and the case below.
+   */
+  private static WagedRebalancerMetricCollector.WagedRebalancerMetricNames
+      failureCategoryMetricName(HelixRebalanceException.FailureCategory category) {
+    switch (category) {
+      case CAPACITY_DEFICIT:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryCapacityDeficitCounter;
+      case NO_CANDIDATE_NODE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryNoCandidateNodeCounter;
+      case INVALID_RESOURCE_CONFIG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryInvalidResourceConfigCounter;
+      case INVALID_CLUSTER_CONFIG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryInvalidClusterConfigCounter;
+      case METADATA_STORE_IO:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryMetadataStoreIoCounter;
+      case ALGORITHM_INTERNAL:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryAlgorithmInternalCounter;
+      case ASYNC_EXECUTION:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryAsyncExecutionCounter;
+      case UNKNOWN:
+      default:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryUnknownCounter;
+    }
+  }
+
+  /**
+   * Map a HardConstraint.Type to its WagedRebalancerMetricNames enum value. Same maintenance
+   * contract as {@link #failureCategoryMetricName}.
+   */
+  private static WagedRebalancerMetricCollector.WagedRebalancerMetricNames
+      hardConstraintMetricName(HardConstraint.Type type) {
+    switch (type) {
+      case FAULT_ZONE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintFaultZoneFailureCounter;
+      case NODE_CAPACITY:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintNodeCapacityFailureCounter;
+      case NODE_MAX_PARTITION_LIMIT:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintNodeMaxPartitionLimitFailureCounter;
+      case REPLICA_ACTIVATE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintReplicaActivateFailureCounter;
+      case SAME_PARTITION_ON_INSTANCE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintSamePartitionOnInstanceFailureCounter;
+      case VALID_GROUP_TAG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintValidGroupTagFailureCounter;
+      case UNKNOWN:
+      default:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintUnknownFailureCounter;
+    }
   }
 
   /**
    * Attach the cluster-level status monitor so per-{@link HelixRebalanceException.FailureCategory}
-   * counters get mirrored from the WagedRebalancerMetricCollector (Rebalancer JMX domain) onto
-   * ClusterStatusMonitor (ClusterStatus JMX domain). Safe to call multiple times; subsequent calls
-   * replace the reference. May be null when WAGED is used outside the controller pipeline.
+   * and per-{@link HardConstraint.Type} counters get mirrored from the
+   * WagedRebalancerMetricCollector (Rebalancer JMX domain) onto ClusterStatusMonitor (ClusterStatus
+   * JMX domain). Also installs the per-HardConstraint reporter on the algorithm so the
+   * hard-constraint sub-counters are populated on both MBeans. Safe to call multiple times;
+   * subsequent calls replace the reference. May be null when WAGED is used outside the controller
+   * pipeline (e.g. ReadOnlyWagedRebalancer for the REST partitionAssignment API).
    *
-   * Also propagates the reference to the async runners so their background-thread catch blocks
-   * can record failures that never reach the synchronous catch in computeNewIdealStates, and
-   * installs a per-HardConstraint failure reporter on the algorithm so the cluster-level
-   * hard-constraint sub-counters are populated.
+   * Async runners do not need a direct monitor reference -- they call back through
+   * {@link #reportAsyncFailure} which reads {@code _clusterStatusMonitor} lazily.
    */
   public void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
     _clusterStatusMonitor = clusterStatusMonitor;
-    _partialRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
-    _globalRebalanceRunner.setClusterStatusMonitor(clusterStatusMonitor);
-    wireHardConstraintFailureReporter(_rebalanceAlgorithm, clusterStatusMonitor);
+    installHardConstraintFailureReporter(_rebalanceAlgorithm);
   }
 
   /**
-   * If the algorithm is a ConstraintBasedAlgorithm and a monitor is attached, install a reporter
-   * that ticks the cluster-level per-HardConstraint counter when a partition fails placement.
-   * No-op for other algorithm implementations or when the monitor is null. Called both when the
-   * monitor is attached and when the algorithm is replaced via updateRebalancePreference.
+   * Install a per-HardConstraint failure reporter on the algorithm that ticks both the
+   * Rebalancer-domain and (when attached) the ClusterStatus-domain counters. No-op for
+   * algorithm implementations that are not {@link ConstraintBasedAlgorithm}. Called both when
+   * the monitor is attached and when the algorithm is replaced via updateRebalancePreference.
    */
-  private static void wireHardConstraintFailureReporter(RebalanceAlgorithm algorithm,
-      ClusterStatusMonitor monitor) {
-    if (monitor == null) {
-      return;
-    }
+  private void installHardConstraintFailureReporter(RebalanceAlgorithm algorithm) {
     if (algorithm instanceof ConstraintBasedAlgorithm) {
       ((ConstraintBasedAlgorithm) algorithm).setHardConstraintFailureReporter(
-          (HardConstraint.Type type) -> monitor.reportWagedHardConstraintFailure(type));
+          this::reportHardConstraintFailure);
     }
   }
 
@@ -260,7 +325,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       _rebalanceAlgorithm = ConstraintBasedAlgorithmFactory.getInstance(newPreference);
       // The previous algorithm instance is discarded; rewire the failure reporter onto the new
       // one so per-HardConstraint counters keep flowing.
-      wireHardConstraintFailureReporter(_rebalanceAlgorithm, _clusterStatusMonitor);
+      installHardConstraintFailureReporter(_rebalanceAlgorithm);
       _preference = ImmutableMap.copyOf(newPreference);
     }
   }
@@ -332,9 +397,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       }
     }
     // Reflect whether this run produced a fresh assignment or fell back. Always update so that
-    // a previously sticky "true" resets on the next clean run.
-    if (_clusterStatusMonitor != null) {
-      _clusterStatusMonitor.setWagedFallbackInUseGauge(usedFallback);
+    // a previously sticky "true" resets on the next clean run. Capture the volatile once to
+    // avoid racing with a concurrent setClusterStatusMonitor() between the null check and the
+    // method call.
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.setWagedFallbackInUseGauge(usedFallback);
     }
 
     // Construct the new best possible states according to the current state and target assignment.
@@ -446,19 +514,47 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   }
 
   /**
-   * Increment the per-{@link HelixRebalanceException.FailureCategory} counter on the cluster
-   * status monitor (when attached) so dashboards see the classified breakdown alongside the
-   * existing aggregate RebalanceFailureCounter.
+   * Increment the per-{@link HelixRebalanceException.FailureCategory} counter on both the
+   * Rebalancer-domain {@link WagedRebalancerMetricCollector} and the ClusterStatus-domain
+   * {@link ClusterStatusMonitor} (when attached). Both MBeans expose the same dimension so
+   * operators can scrape either domain.
    *
-   * Called from every catch site in {@link #computeNewIdealStates} and from the async-runner
-   * report path. Safe to call when the monitor is not attached -- a null check covers the
-   * ReadOnlyWagedRebalancer / unit-test cases.
+   * Called from every catch site in {@link #computeNewIdealStates}. The cluster-monitor side
+   * is null-tolerant for ReadOnlyWagedRebalancer / unit-test cases.
    */
   protected void reportFailureCategory(HelixRebalanceException ex) {
+    HelixRebalanceException.FailureCategory category = ex.getFailureCategory();
+    _failureCategoryMetrics.get(category).increment(1L);
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
-      monitor.reportWagedFailureByCategory(ex.getFailureCategory());
+      monitor.reportWagedFailureByCategory(category);
     }
+  }
+
+  /**
+   * Increment the per-{@link HardConstraint.Type} counter on both the Rebalancer-domain and
+   * ClusterStatus-domain MBeans. Called once per distinct constraint type that contributed to a
+   * partition's failure to find any eligible node (see {@link ConstraintBasedAlgorithm}
+   * partition-level set-union semantics).
+   */
+  void reportHardConstraintFailure(HardConstraint.Type type) {
+    _hardConstraintFailureMetrics.get(type).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.reportWagedHardConstraintFailure(type);
+    }
+  }
+
+  /**
+   * Full failure reporting for async-runner background threads: ticks the aggregate
+   * RebalanceFailureCounter plus both the Rebalancer-domain and ClusterStatus-domain
+   * per-FailureCategory counters. This is the path used when the async runner catches an
+   * exception that the synchronous WagedRebalancer.computeNewIdealStates catch never sees.
+   * Safe to call from any thread.
+   */
+  void reportAsyncFailure(HelixRebalanceException ex) {
+    _rebalanceFailureCount.increment(1L);
+    reportFailureCategory(ex);
   }
 
   /**

@@ -28,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.changedetector.ResourceChangeDetector;
@@ -40,7 +41,6 @@ import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
@@ -75,19 +75,21 @@ class GlobalRebalanceRunner implements AutoCloseable {
   private final LatencyMetric _writeLatency;
   private final CountMetric _baselineCalcCounter;
   private final LatencyMetric _baselineCalcLatency;
-  private final CountMetric _rebalanceFailureCount;
+  // Reporter that ticks the aggregate RebalanceFailureCounter plus the per-FailureCategory
+  // counters on both the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by
+  // WagedRebalancer; injected so the runner doesn't need a direct ClusterStatusMonitor reference.
+  private final Consumer<HelixRebalanceException> _asyncFailureReporter;
 
   private boolean _asyncGlobalRebalanceEnabled;
   // Captures the original exception thrown inside the executor task so we can preserve its
   // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
   private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
-  private volatile ClusterStatusMonitor _clusterStatusMonitor;
 
   public GlobalRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
       LatencyMetric writeLatency,
-      CountMetric rebalanceFailureCount,
+      Consumer<HelixRebalanceException> asyncFailureReporter,
       boolean isAsyncGlobalRebalanceEnabled) {
     _baselineCalculateExecutor = Executors.newSingleThreadExecutor();
     _assignmentManager = assignmentManager;
@@ -100,7 +102,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
     _baselineCalcLatency = metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcLatencyGauge.name(),
         LatencyMetric.class);
-    _rebalanceFailureCount = rebalanceFailureCount;
+    _asyncFailureReporter = asyncFailureReporter;
     _asyncGlobalRebalanceEnabled = isAsyncGlobalRebalanceEnabled;
   }
 
@@ -135,12 +137,11 @@ class GlobalRebalanceRunner implements AutoCloseable {
           // Always capture so the synchronous caller can re-throw with the original category.
           _lastAsyncFailure.set(e);
           if (_asyncGlobalRebalanceEnabled) {
-            // Async mode: synchronous caller will not see this exception. Increment metrics here
-            // so cluster-level dashboards still observe the failure. The per-category counter
-            // is the right signal for async-only failures -- we deliberately do NOT flip
-            // WagedFallbackInUseGauge here because that gauge reflects sync-path fallback only.
-            _rebalanceFailureCount.increment(1L);
-            reportFailureToClusterMonitor(e);
+            // Async mode: synchronous caller will not see this exception. Tick the aggregate
+            // RebalanceFailureCounter plus the per-FailureCategory counters on both MBeans via
+            // the injected reporter. The WagedFallbackInUseGauge is deliberately NOT flipped
+            // here because that gauge reflects sync-path fallback only.
+            _asyncFailureReporter.accept(e);
           }
           LOG.error("Failed to calculate baseline assignment! category={}",
               e.getFailureCategory(), e);
@@ -169,16 +170,6 @@ class GlobalRebalanceRunner implements AutoCloseable {
     }
   }
 
-  void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
-    _clusterStatusMonitor = clusterStatusMonitor;
-  }
-
-  private void reportFailureToClusterMonitor(HelixRebalanceException ex) {
-    ClusterStatusMonitor monitor = _clusterStatusMonitor;
-    if (monitor != null) {
-      monitor.reportWagedFailureByCategory(ex.getFailureCategory());
-    }
-  }
 
   /**
    * Calculate and update the Baseline assignment

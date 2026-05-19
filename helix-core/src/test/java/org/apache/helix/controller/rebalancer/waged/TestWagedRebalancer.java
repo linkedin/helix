@@ -459,9 +459,16 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Map<String, IdealState> newResult =
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
     Assert.assertEquals(newResult, result);
-    // Ensure failure has been recorded
+    // Ensure failure has been recorded on both the aggregate and per-FailureCategory counters.
+    // The mock algorithm throws via the legacy two-arg HelixRebalanceException constructor which
+    // defaults the category to UNKNOWN, so the FailureCategoryUnknownCounter is the one that
+    // should tick. This locks in that the Rebalancer-domain per-category counters are wired
+    // (they were registered-but-never-incremented before this PR).
     Assert.assertEquals(rebalancer.getMetricCollector().getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.RebalanceFailureCounter.name(),
+        CountMetric.class).getValue().longValue(), 1L);
+    Assert.assertEquals(rebalancer.getMetricCollector().getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryUnknownCounter.name(),
         CountMetric.class).getValue().longValue(), 1L);
   }
 

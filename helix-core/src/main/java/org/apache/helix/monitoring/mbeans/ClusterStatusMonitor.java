@@ -41,8 +41,8 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
@@ -852,6 +852,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _rebalanceFailureCount.set(0L);
       _continuousResourceRebalanceFailureCount.set(0L);
       _continuousTaskRebalanceFailureCount.set(0L);
+      // Zero the WAGED per-category and per-HardConstraint counters along with the rollup
+      // counters and the fallback gauge. Like the legacy rebalance counters above, these are
+      // reset on leadership change to avoid stale numbers from a prior controller leadership
+      // period being attributed to the new one.
+      _wagedFailureCategoryCounters.values().forEach(c -> c.set(0L));
+      _wagedHardConstraintFailureCounters.values().forEach(c -> c.set(0L));
+      _wagedCustomerActionableFailureCount.set(0L);
+      _wagedInternalFailureCount.set(0L);
+      _wagedFallbackInUse = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }

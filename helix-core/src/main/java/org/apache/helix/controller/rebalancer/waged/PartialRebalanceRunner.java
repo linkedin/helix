@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
@@ -35,7 +36,6 @@ import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.implementation.BaselineDivergenceGauge;
@@ -61,7 +61,10 @@ class PartialRebalanceRunner implements AutoCloseable {
   private final AssignmentManager _assignmentManager;
   private final AssignmentMetadataStore _assignmentMetadataStore;
   private final BaselineDivergenceGauge _baselineDivergenceGauge;
-  private final CountMetric _rebalanceFailureCount;
+  // Reporter that ticks the aggregate RebalanceFailureCounter plus the per-FailureCategory
+  // counters on both the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by
+  // WagedRebalancer; injected so the runner doesn't need a direct ClusterStatusMonitor reference.
+  private final Consumer<HelixRebalanceException> _asyncFailureReporter;
   private final CountMetric _partialRebalanceCounter;
   private final LatencyMetric _partialRebalanceLatency;
 
@@ -70,17 +73,16 @@ class PartialRebalanceRunner implements AutoCloseable {
   // Captures the original exception thrown inside the executor task so we can preserve its
   // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
   private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
-  private volatile ClusterStatusMonitor _clusterStatusMonitor;
 
   public PartialRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
-      CountMetric rebalanceFailureCount,
+      Consumer<HelixRebalanceException> asyncFailureReporter,
       boolean isAsyncPartialRebalanceEnabled) {
     _assignmentManager = assignmentManager;
     _assignmentMetadataStore = assignmentMetadataStore;
     _bestPossibleCalculateExecutor = Executors.newSingleThreadExecutor();
-    _rebalanceFailureCount = rebalanceFailureCount;
+    _asyncFailureReporter = asyncFailureReporter;
     _asyncPartialRebalanceEnabled = isAsyncPartialRebalanceEnabled;
 
     _partialRebalanceCounter = metricCollector.getMetric(
@@ -114,13 +116,11 @@ class PartialRebalanceRunner implements AutoCloseable {
         // Always capture so the synchronous caller can re-throw with the original category.
         _lastAsyncFailure.set(e);
         if (_asyncPartialRebalanceEnabled) {
-          // Async mode: synchronous caller will not see this exception. Increment metrics here
-          // so cluster-level dashboards still observe the failure. The per-category counter
-          // (e.g. WagedFailureAsyncExecutionCounter or the underlying category if we captured
-          // one) is the right signal for async-only failures -- we deliberately do NOT flip
-          // WagedFallbackInUseGauge here because that gauge reflects sync-path fallback only.
-          _rebalanceFailureCount.increment(1L);
-          reportFailureToClusterMonitor(e);
+          // Async mode: synchronous caller will not see this exception. Tick the aggregate
+          // RebalanceFailureCounter plus the per-FailureCategory counters on both MBeans via
+          // the injected reporter. The WagedFallbackInUseGauge is deliberately NOT flipped
+          // here because that gauge reflects sync-path fallback only.
+          _asyncFailureReporter.accept(e);
         }
         LOG.error("Failed to calculate best possible assignment! category={}",
             e.getFailureCategory(), e);
@@ -151,16 +151,6 @@ class PartialRebalanceRunner implements AutoCloseable {
     }
   }
 
-  void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
-    _clusterStatusMonitor = clusterStatusMonitor;
-  }
-
-  private void reportFailureToClusterMonitor(HelixRebalanceException ex) {
-    ClusterStatusMonitor monitor = _clusterStatusMonitor;
-    if (monitor != null) {
-      monitor.reportWagedFailureByCategory(ex.getFailureCategory());
-    }
-  }
 
   /**
    * Calculate and update the Best Possible assignment
