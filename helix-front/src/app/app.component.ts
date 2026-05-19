@@ -73,7 +73,11 @@ export class AppComponent implements OnInit {
   private watchTokenExpiry() {
     if (!this.hasIdentityToken()) return;
     const check = setInterval(() => {
-      if (!this.hasIdentityToken() && !this.sessionExpiredShown) {
+      if (
+        !this.hasIdentityToken() &&
+        !this.sessionExpiredShown &&
+        this.dialog.openDialogs.length === 0
+      ) {
         this.sessionExpiredShown = true;
         clearInterval(check);
         this.dialog

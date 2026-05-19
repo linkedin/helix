@@ -6,13 +6,15 @@ import {
   HttpEvent,
   HttpErrorResponse,
 } from '@angular/common/http';
-import { Observable, EMPTY } from 'rxjs';
+import { Observable, EMPTY, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { MatDialog } from '@angular/material/dialog';
 import { AlertDialogComponent } from '../shared/dialog/alert-dialog/alert-dialog.component';
 
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
+  private sessionExpiredShown = false;
+
   constructor(private dialog: MatDialog) {}
 
   intercept(
@@ -21,7 +23,8 @@ export class AuthInterceptor implements HttpInterceptor {
   ): Observable<HttpEvent<any>> {
     return next.handle(req).pipe(
       catchError((error: HttpErrorResponse) => {
-        if (error.status === 401) {
+        if (error.status === 401 && !this.sessionExpiredShown) {
+          this.sessionExpiredShown = true;
           this.dialog
             .open(AlertDialogComponent, {
               data: {
@@ -36,11 +39,11 @@ export class AuthInterceptor implements HttpInterceptor {
                 window.location.reload()
               );
             });
+        }
+        if (error.status === 401) {
           return EMPTY;
         }
-        return new Observable<HttpEvent<any>>((subscriber) =>
-          subscriber.error(error)
-        );
+        return throwError(error);
       })
     );
   }

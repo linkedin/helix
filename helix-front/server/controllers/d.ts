@@ -11,4 +11,5 @@ interface HelixSession {
   identityToken: any;
   username: string;
   isAdmin: boolean;
+  destroy(callback?: (err?: any) => void): void;
 }

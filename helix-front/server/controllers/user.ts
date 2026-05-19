@@ -41,8 +41,9 @@ export class UserCtrl {
 
   protected logout(req: HelixRequest, res: Response) {
     res.clearCookie('helixui_identity.token');
-    req.session = null;
-    res.json(true);
+    req.session.destroy(() => {
+      res.json(true);
+    });
   }
 
   //
