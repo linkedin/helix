@@ -66,9 +66,9 @@ import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
-import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler;
-import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
@@ -320,39 +320,39 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Set or clear the planned-maintenance budget-exemption marker on a single instance.
+   * Set or clear the instance-operation maintenance marker on a single instance. While the
+   * marker is unexpired, the instance is excluded from the cluster-wide offline budget
+   * (MAX_OFFLINE_INSTANCES_ALLOWED) that drives auto Maintenance Mode.
    *
-   * <p>Request body:
-   * <pre>{@code { "expiresAtMillis": 1776385800000, "reason": "...", "source": "AUTOMATION" }}</pre>
+   * <p>Request body: {@code { "expiresAtMillis": 1776385800000 }}.
    *
    * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) clears the marker. An
    * omitted or zero {@code expiresAtMillis} falls back to the cluster-level
-   * {@code DEFAULT_PLANNED_MAINTENANCE_DURATION_MS}; if neither is set, the call is rejected
-   * with 400. Per-instance failures (instance not found, cap exhausted) are surfaced as 400
-   * with the reason in the body so the single-endpoint contract stays binary; the batch
-   * endpoint at {@code POST /clusters/{c}/instances?command=plannedMaintenance} reports
+   * {@code DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS}; if neither is set, the call
+   * is rejected with 400. Per-instance failures (instance not found, cap exhausted) are
+   * surfaced as 400 with the reason in the body so the single-endpoint contract stays
+   * binary; the batch endpoint at
+   * {@code POST /clusters/{c}/instances?command=instanceOperationMaintenance} reports
    * per-instance results in a 200 response instead.
    */
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @POST
-  @Path("plannedMaintenance")
+  @Path("instanceOperationMaintenance")
   @Consumes(MediaType.APPLICATION_JSON)
-  public Response setPlannedMaintenance(String jsonContent,
+  public Response setInstanceOperationMaintenance(String jsonContent,
       @PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName) {
     try {
       JsonNode node = parseJsonOrEmpty(jsonContent);
       long expiresAtMillis = node.path("expiresAtMillis")
-          .asLong(PlannedMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
-      String reason = node.path("reason").asText(null);
-      String source = node.path("source").asText(null);
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
 
-      PlannedMaintenanceWriteHandler handler =
-          new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
-      PlannedMaintenanceWriteHandler.PlannedMaintenanceResult result =
-          handler.applyPlannedMaintenance(clusterId, Collections.singletonList(instanceName),
-              expiresAtMillis, reason, source, System.currentTimeMillis());
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, Collections.singletonList(instanceName), expiresAtMillis,
+              System.currentTimeMillis());
 
       if (result.getApplied().contains(instanceName)) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
@@ -366,8 +366,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     } catch (BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {
-      LOG.error("Failed to set planned maintenance for {} in cluster {}", instanceName, clusterId,
-          e);
+      LOG.error("Failed to set instance-operation maintenance for {} in cluster {}",
+          instanceName, clusterId, e);
       return serverError(e);
     }
   }

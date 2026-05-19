@@ -65,15 +65,13 @@ public class InstanceConfigTrimmer extends HelixPropertyTrimmer<InstanceConfig> 
   }
 
   /**
-   * Strip HELIX_INSTANCE_OPERATIONS and PLANNED_MAINTENANCE_METADATA from the change-detection
-   * snapshot entirely (keys and values). HELIX_INSTANCE_OPERATIONS is filtered upstream in
-   * BaseControllerDataProvider, so its presence on a snapshot would create false positives;
-   * PLANNED_MAINTENANCE_METADATA is purely audit data (reason/source/setAtMs) and writing it
-   * must not trigger a rebalance pipeline.
+   * Strip HELIX_INSTANCE_OPERATIONS from the change-detection snapshot entirely (key and
+   * value). The field is filtered upstream in BaseControllerDataProvider, so leaving it in
+   * the snapshot would create false positives.
    *
-   * <p>NOTE: {@code super.getNonTrimmableKeys} returns live {@code keySet()} views over the
-   * underlying ZNRecord maps. Removing from those views would mutate the caller's
-   * InstanceConfig. Copy into fresh {@link HashSet} instances before mutating.
+   * <p>NOTE: {@code super.getNonTrimmableKeys} returns a live {@code keySet()} view over the
+   * underlying ZNRecord listFields map. Removing from that view would mutate the caller's
+   * InstanceConfig. Copy into a fresh {@link HashSet} before mutating.
    *
    * @param property the instance config
    * @return a map containing all non-trimmable field keys that need to be kept.
@@ -83,10 +81,6 @@ public class InstanceConfigTrimmer extends HelixPropertyTrimmer<InstanceConfig> 
     Set<String> listKeys = new HashSet<>(nonTrimmableKeys.get(FieldType.LIST_FIELD));
     listKeys.remove(InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
     nonTrimmableKeys.put(FieldType.LIST_FIELD, listKeys);
-
-    Set<String> mapKeys = new HashSet<>(nonTrimmableKeys.get(FieldType.MAP_FIELD));
-    mapKeys.remove(InstanceConfigProperty.PLANNED_MAINTENANCE_METADATA.name());
-    nonTrimmableKeys.put(FieldType.MAP_FIELD, mapKeys);
     return nonTrimmableKeys;
   }
 

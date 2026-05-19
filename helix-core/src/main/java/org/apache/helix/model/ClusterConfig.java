@@ -81,18 +81,19 @@ public class ClusterConfig extends HelixProperty {
     MAX_OFFLINE_INSTANCES_ALLOWED,
     NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT, // For auto-exiting maintenance mode
 
-    // Planned-maintenance budget exemption. Instances carrying a valid
-    // PLANNED_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded from the
-    // MAX_OFFLINE_INSTANCES_ALLOWED count while the marker has not expired.
-    // Caps on the number of instances that can carry a planned-maintenance marker
-    // simultaneously. Either form may be set; if both are set the smaller resolved value
-    // wins. -1 means the cap is not configured.
-    MAX_PLANNED_MAINTENANCE_INSTANCES,
-    MAX_PLANNED_MAINTENANCE_PERCENTAGE,
-    // Fallback TTL (in millis) applied by the planned-maintenance write path when the
-    // caller omits expiresAtMillis. When unset (-1), callers must always supply an
+    // Instance-operation maintenance budget. Instances carrying a valid
+    // INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded
+    // from the MAX_OFFLINE_INSTANCES_ALLOWED count while the marker has not expired.
+    //
+    // The two fields below define the cap on simultaneous markers. They are mutually
+    // exclusive: setters reject writing one while the other is already set. -1 means the
+    // cap is not configured.
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET,
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE,
+    // Fallback TTL (in millis) applied by the instance-operation maintenance write path
+    // when the caller omits expiresAtMillis. When unset (-1), callers must always supply an
     // explicit expiresAtMillis; otherwise the write is rejected.
-    DEFAULT_PLANNED_MAINTENANCE_DURATION_MS,
+    DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
     @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
@@ -593,58 +594,78 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the maximum number of instances that may simultaneously carry a planned-maintenance
-   * marker. Pass {@code -1} to clear (matches the {@code MAX_OFFLINE_INSTANCES_ALLOWED}
-   * convention of inline {@code -1} for "not set").
+   * Set the absolute cap on the number of instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Pass {@code -1} to clear; the field is
+   * mutually exclusive with {@link #setInstanceOperationMaintenanceBudgetPercentage(int)}
+   * and the setter throws when the other form is already set.
    */
-  public void setMaxPlannedMaintenanceInstances(int maxPlannedMaintenanceInstances) {
-    _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
-        maxPlannedMaintenanceInstances);
+  public void setInstanceOperationMaintenanceBudget(int instanceOperationMaintenanceBudget)
+      throws HelixException {
+    if (instanceOperationMaintenanceBudget >= 0
+        && getInstanceOperationMaintenanceBudgetPercentage() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE are mutually exclusive; "
+          + "clear the percentage form before setting the absolute form.");
+    }
+    _record.setIntField(ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(),
+        instanceOperationMaintenanceBudget);
   }
 
   /**
-   * @return the configured absolute cap on planned-maintenance markers, or {@code -1} when
-   *     not set.
+   * @return the configured absolute cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
    */
-  public int getMaxPlannedMaintenanceInstances() {
-    return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_INSTANCES.name(),
-        -1);
+  public int getInstanceOperationMaintenanceBudget() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(), -1);
   }
 
   /**
-   * Set the maximum percentage (0-100) of cluster instances that may simultaneously carry a
-   * planned-maintenance marker. Pass {@code -1} to clear.
+   * Set the percentage (0-100) of cluster instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Pass {@code -1} to clear; the field is
+   * mutually exclusive with {@link #setInstanceOperationMaintenanceBudget(int)} and the
+   * setter throws when the other form is already set.
    */
-  public void setMaxPlannedMaintenancePercentage(int maxPlannedMaintenancePercentage) {
-    _record.setIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
-        maxPlannedMaintenancePercentage);
+  public void setInstanceOperationMaintenanceBudgetPercentage(
+      int instanceOperationMaintenanceBudgetPercentage) throws HelixException {
+    if (instanceOperationMaintenanceBudgetPercentage >= 0
+        && getInstanceOperationMaintenanceBudget() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET are mutually exclusive; clear the "
+          + "absolute form before setting the percentage form.");
+    }
+    _record.setIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(),
+        instanceOperationMaintenanceBudgetPercentage);
   }
 
   /**
-   * @return the configured percentage cap on planned-maintenance markers, or {@code -1} when
-   *     not set.
+   * @return the configured percentage cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
    */
-  public int getMaxPlannedMaintenancePercentage() {
-    return _record.getIntField(ClusterConfigProperty.MAX_PLANNED_MAINTENANCE_PERCENTAGE.name(),
-        -1);
+  public int getInstanceOperationMaintenanceBudgetPercentage() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(), -1);
   }
 
   /**
-   * Set the fallback duration (millis) applied by the planned-maintenance write path when the
-   * caller omits expiresAtMillis. Pass {@code -1L} to clear; when cleared, planned-maintenance
+   * Set the fallback duration (millis) applied by the instance-operation maintenance write
+   * path when the caller omits expiresAtMillis. Pass {@code -1L} to clear; when cleared,
    * writes that omit expiresAtMillis are rejected.
    */
-  public void setDefaultPlannedMaintenanceDurationMs(long defaultPlannedMaintenanceDurationMs) {
-    _record.setLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
-        defaultPlannedMaintenanceDurationMs);
+  public void setDefaultInstanceOperationMaintenanceDurationMs(
+      long defaultInstanceOperationMaintenanceDurationMs) {
+    _record.setLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(),
+        defaultInstanceOperationMaintenanceDurationMs);
   }
 
   /**
    * @return the configured fallback duration in millis, or {@code -1L} when not set.
    */
-  public long getDefaultPlannedMaintenanceDurationMs() {
-    return _record.getLongField(ClusterConfigProperty.DEFAULT_PLANNED_MAINTENANCE_DURATION_MS.name(),
-        -1L);
+  public long getDefaultInstanceOperationMaintenanceDurationMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(), -1L);
   }
 
   /**

@@ -50,9 +50,9 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
-import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler;
-import org.apache.helix.rest.clusterMaintenanceService.PlannedMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -245,8 +245,8 @@ public class InstancesAccessor extends AbstractHelixResource {
         case stoppable:
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
               skipHealthCheckCategorySet, random, includeDetails);
-        case plannedMaintenance:
-          return batchSetPlannedMaintenance(clusterId, node);
+        case instanceOperationMaintenance:
+          return batchSetInstanceOperationMaintenance(clusterId, node);
         default:
           _logger.error("Unsupported command :" + command);
           return badRequest("Unsupported command :" + command);
@@ -263,30 +263,28 @@ public class InstancesAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/plannedMaintenance}. Sets or
-   * clears the planned-maintenance budget-exemption marker on a list of instances. Mirrors
+   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/instanceOperationMaintenance}.
+   * Sets or clears the instance-operation maintenance marker on a list of instances. Mirrors
    * the partial-accept contract of the batch stoppable check: instances are processed in
-   * input order, instances that fit the cap quota (or that exist on a clear) are listed
-   * under {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs
-   * that invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
+   * input order, those that fit the cap quota (or that exist on a clear) are listed under
+   * {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs that
+   * invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
    * missing expiry with no cluster default) are still surfaced as 400.
    *
    * <p>Request body:
    * <pre>{@code
    * { "instances": ["h1", "h2", ...],
-   *   "expiresAtMillis": 1776385800000,
-   *   "reason": "...",
-   *   "source": "AUTOMATION" }
+   *   "expiresAtMillis": 1776385800000 }
    * }</pre>
    *
    * <p>Success response (HTTP 200):
    * <pre>{@code
    * { "applied":  ["h1", "h2"],
-   *   "rejected": { "h3": "would exceed MAX_PLANNED_MAINTENANCE_INSTANCES=2" },
+   *   "rejected": { "h3": "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=2" },
    *   "expiresAtMillis": 1776385800000 }
    * }</pre>
    */
-  private Response batchSetPlannedMaintenance(String clusterId, JsonNode node) {
+  private Response batchSetInstanceOperationMaintenance(String clusterId, JsonNode node) {
     try {
       JsonNode instancesNode = node.get(InstancesProperties.instances.name());
       if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
@@ -297,15 +295,12 @@ public class InstancesAccessor extends AbstractHelixResource {
         instances.add(element.asText());
       }
       long expiresAtMillis = node.path("expiresAtMillis")
-          .asLong(PlannedMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
-      String reason = node.path("reason").asText(null);
-      String source = node.path("source").asText(null);
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
 
-      PlannedMaintenanceWriteHandler handler =
-          new PlannedMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
-      PlannedMaintenanceWriteHandler.PlannedMaintenanceResult result =
-          handler.applyPlannedMaintenance(clusterId, instances, expiresAtMillis, reason, source,
-              System.currentTimeMillis());
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
 
       ObjectNode body = JsonNodeFactory.instance.objectNode();
       ArrayNode appliedArr = body.putArray("applied");
@@ -321,7 +316,8 @@ public class InstancesAccessor extends AbstractHelixResource {
     } catch (BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {
-      _logger.error("Failed to set planned maintenance batch in cluster {}", clusterId, e);
+      _logger.error("Failed to set instance-operation maintenance batch in cluster {}",
+          clusterId, e);
       return serverError(e);
     }
   }

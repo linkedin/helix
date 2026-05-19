@@ -42,11 +42,11 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 /**
- * End-to-end check that PLANNED_MAINTENANCE_UNTIL_MS markers exempt instances from the
- * cluster-wide offline budget that drives auto Maintenance Mode entry, while preserving the
- * trigger for unplanned losses.
+ * End-to-end check that INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS markers exempt instances
+ * from the cluster-wide offline budget that drives auto Maintenance Mode entry, while
+ * preserving the trigger for unplanned losses.
  */
-public class TestPlannedMaintenanceBudgetExemption extends ZkTestBase {
+public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
   private static final int NUM_NODE = 6;
   private static final int START_PORT = 13918;
   private static final int PARTITIONS = 4;
@@ -118,8 +118,8 @@ public class TestPlannedMaintenanceBudgetExemption extends ZkTestBase {
       return ms == null;
     }, TestHelper.WAIT_DURATION);
     Assert.assertTrue(stayedOutOfMM,
-        "Cluster entered MM despite both offline instances having valid planned-maintenance "
-            + "markers");
+        "Cluster entered MM despite both offline instances having valid instance-operation "
+            + "maintenance markers");
 
     // Now bring a third instance down without a marker. Unmarked count = 1, equal to the budget,
     // so still no MM. Bring a fourth instance down (also unmarked) -> unmarked count exceeds
@@ -164,13 +164,14 @@ public class TestPlannedMaintenanceBudgetExemption extends ZkTestBase {
 
   private void setMarker(String instanceName, long expiresAtMillis) {
     InstanceConfig cfg = _configAccessor.getInstanceConfig(_clusterName, instanceName);
-    cfg.setPlannedMaintenanceUntilMs(expiresAtMillis);
+    cfg.setInstanceOperationMaintenanceUntilMs(expiresAtMillis);
     _configAccessor.setInstanceConfig(_clusterName, instanceName, cfg);
   }
 
   private void clearMarker(String instanceName) {
     InstanceConfig cfg = _configAccessor.getInstanceConfig(_clusterName, instanceName);
-    cfg.setPlannedMaintenanceUntilMs(InstanceConfig.PLANNED_MAINTENANCE_NOT_SET);
+    cfg.setInstanceOperationMaintenanceUntilMs(
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
     _configAccessor.setInstanceConfig(_clusterName, instanceName, cfg);
   }
 

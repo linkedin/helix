@@ -376,10 +376,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       // Build the set of instances that currently count toward the offline budget:
       //   routable InstanceConfig minus the enabled-live set. We exclude UNROUTABLE
       //   operations (e.g. SWAP_IN, UNKNOWN) up front because those should not consume
-      //   cluster capacity. Then we drop instances carrying a valid planned-maintenance
-      //   marker, since they're intentionally offline within an operator-approved window.
-      // The filter is symmetric: the same expression gates both MM entry here and MM exit
-      // via MaintenanceRecoveryStage on the next pipeline tick.
+      //   cluster capacity. Then we drop instances carrying a valid instance-operation
+      //   maintenance marker, since they're inside an operator-approved window.
+      //
+      // The same marker-based subtraction is applied at MM exit in MaintenanceRecoveryStage
+      // so a marker that lets an instance escape MM entry also lets the cluster recover
+      // when the marker expires. The two stages' pre-subtraction baselines are not
+      // identical (entry counts EVACUATE/SWAP_OUT via !UNROUTABLE_INSTANCE_OPERATIONS;
+      // exit uses getAssignableInstances which excludes them); that asymmetry is
+      // pre-existing controller behavior and is not introduced here.
       Set<String> offlineBudgetInstances = cache.getInstanceConfigMap().entrySet().stream()
           .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
               instanceEntry.getValue().getInstanceOperation().getOperation()))
@@ -390,7 +395,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       long nowMs = System.currentTimeMillis();
       offlineBudgetInstances.removeIf(instanceName -> {
         InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
-        return cfg != null && cfg.isUnderPlannedMaintenance(nowMs);
+        return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
       });
       int instancesUnableToAcceptOnlineReplicas = offlineBudgetInstances.size();
       if (instancesUnableToAcceptOnlineReplicas > maxInstancesUnableToAcceptOnlineReplicas) {

@@ -91,25 +91,26 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
       if (numOfflineInstancesForAutoExit < 0) {
         return; // Config is not set, no auto-exit
       }
-      // Get the count of all instances that are either offline or disabled, symmetrically
-      // excluding planned-maintenance instances that are not currently live. This matches
-      // the filter applied at MM entry in BestPossibleStateCalcStage and keeps a deploy
-      // window from blocking auto-recovery.
+      // Count offline-or-disabled assignable instances, then subtract those carrying a
+      // valid instance-operation maintenance marker so a deploy window can't trap the
+      // cluster in MM. The same marker-based subtraction runs at MM entry in
+      // BestPossibleStateCalcStage; the two stages use different pre-subtraction baselines
+      // (assignable here vs !UNROUTABLE there) but the marker handling is consistent.
       Set<String> assignable = cache.getAssignableInstances();
       Set<String> enabledLive = cache.getEnabledLiveInstances();
       long nowMs = System.currentTimeMillis();
-      int plannedAndOfflineCount = 0;
+      int markedAndOfflineCount = 0;
       for (String instanceName : assignable) {
         if (enabledLive.contains(instanceName)) {
           continue;
         }
         InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
-        if (cfg != null && cfg.isUnderPlannedMaintenance(nowMs)) {
-          plannedAndOfflineCount++;
+        if (cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs)) {
+          markedAndOfflineCount++;
         }
       }
       int offlineDisabledCount =
-          assignable.size() - enabledLive.size() - plannedAndOfflineCount;
+          assignable.size() - enabledLive.size() - markedAndOfflineCount;
       shouldExitMaintenance = offlineDisabledCount <= numOfflineInstancesForAutoExit;
       reason = String.format(
           "Auto-exiting maintenance mode for cluster %s; Num. of offline/disabled instances is %d, less than or equal to the exit threshold %d",
