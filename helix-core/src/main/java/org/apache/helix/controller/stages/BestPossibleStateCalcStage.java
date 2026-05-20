@@ -33,7 +33,6 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixRebalanceException;
-import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractBaseStage;
@@ -373,28 +372,12 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     int maxInstancesUnableToAcceptOnlineReplicas =
         cache.getClusterConfig().getMaxOfflineInstancesAllowed();
     if (maxInstancesUnableToAcceptOnlineReplicas >= 0) {
-      // Build the set of instances that currently count toward the offline budget:
-      //   routable InstanceConfig minus the enabled-live set. We exclude UNROUTABLE
-      //   operations (e.g. SWAP_IN, UNKNOWN) up front because those should not consume
-      //   cluster capacity. Then we drop instances carrying a valid instance-operation
-      //   maintenance marker, since they're inside an operator-approved window.
-      //
-      // The same marker-based subtraction is applied at MM exit in MaintenanceRecoveryStage
-      // so a marker that lets an instance escape MM entry also lets the cluster recover
-      // when the marker expires.
-      Set<String> offlineBudgetInstances = cache.getInstanceConfigMap().entrySet().stream()
-          .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-              instanceEntry.getValue().getInstanceOperation().getOperation()))
-          .map(Map.Entry::getKey)
-          .collect(Collectors.toCollection(HashSet::new));
-      offlineBudgetInstances.removeAll(cache.getEnabledLiveInstances());
-
-      long nowMs = System.currentTimeMillis();
-      offlineBudgetInstances.removeIf(instanceName -> {
-        InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
-        return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
-      });
-      int instancesUnableToAcceptOnlineReplicas = offlineBudgetInstances.size();
+      // Delegate to the shared offline-budget accessor so MM entry and MM exit
+      // (MaintenanceRecoveryStage) observe the exact same population. See
+      // BaseControllerDataProvider#getInstancesUnableToAcceptOnlineReplicas for the
+      // membership rules (routable, not enabled-live, no valid maintenance marker).
+      int instancesUnableToAcceptOnlineReplicas = cache
+          .getInstancesUnableToAcceptOnlineReplicas(System.currentTimeMillis()).size();
       if (instancesUnableToAcceptOnlineReplicas > maxInstancesUnableToAcceptOnlineReplicas) {
         String errMsg = String.format(
             "Instances unable to take ONLINE replicas count %d greater than allowed count %d. Put cluster %s into "
