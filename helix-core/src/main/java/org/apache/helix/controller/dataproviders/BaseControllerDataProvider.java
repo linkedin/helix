@@ -755,6 +755,43 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
+   * Returns the set of instances that count toward the cluster-wide offline budget driving
+   * auto Maintenance Mode (MAX_OFFLINE_INSTANCES_ALLOWED at entry,
+   * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT at exit).
+   *
+   * <p>An instance counts when all three conditions hold:
+   * <ul>
+   *   <li>Its InstanceOperation is routable, i.e. not in
+   *       {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}.</li>
+   *   <li>It is not currently enabled-and-live.</li>
+   *   <li>It does not carry a valid (unexpired) instance-operation maintenance marker.</li>
+   * </ul>
+   * EVACUATE and DISABLE instances are included because they cannot accept new ONLINE
+   * replicas; ENABLE+offline instances are included for the same reason. SWAP_IN and
+   * UNKNOWN are excluded because they do not represent assignable cluster capacity.
+   *
+   * <p>Used by both BestPossibleStateCalcStage (MM entry) and MaintenanceRecoveryStage
+   * (MM exit) so that the same population is measured against each threshold.
+   *
+   * @param nowMs current wall-clock millis used for marker-expiry comparison.
+   * @return a fresh modifiable set of instance names.
+   */
+  public Set<String> getInstancesUnableToAcceptOnlineReplicas(long nowMs) {
+    Map<String, InstanceConfig> instanceConfigMap = getInstanceConfigMap();
+    Set<String> result = instanceConfigMap.entrySet().stream()
+        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+            e.getValue().getInstanceOperation().getOperation()))
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toCollection(HashSet::new));
+    result.removeAll(getEnabledLiveInstances());
+    result.removeIf(name -> {
+      InstanceConfig cfg = instanceConfigMap.get(name);
+      return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
+    });
+    return result;
+  }
+
+  /**
    * Return all the live nodes that are enabled and tagged with given instanceTag. If a node is
    * enabled, it is assignable.
    *
