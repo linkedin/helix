@@ -72,6 +72,7 @@ public class AbstractResource {
     add,
     delete,
     stoppable,
+    instanceOperationMaintenance,
     rebalance,
     reset,
     resetPartitions,

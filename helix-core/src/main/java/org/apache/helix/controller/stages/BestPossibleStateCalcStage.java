@@ -373,15 +373,28 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     int maxInstancesUnableToAcceptOnlineReplicas =
         cache.getClusterConfig().getMaxOfflineInstancesAllowed();
     if (maxInstancesUnableToAcceptOnlineReplicas >= 0) {
-      // Instead of only checking the offline instances, we consider how many instances in the cluster
-      // are not assignable and live. This is because some instances may be online but have an unassignable
-      // InstanceOperation such as EVACUATE, and DISABLE. We will exclude SWAP_IN and UNKNOWN instances from
-      // they should not account against the capacity of the cluster.
-      int instancesUnableToAcceptOnlineReplicas = cache.getInstanceConfigMap().entrySet().stream()
+      // Build the set of instances that currently count toward the offline budget:
+      //   routable InstanceConfig minus the enabled-live set. We exclude UNROUTABLE
+      //   operations (e.g. SWAP_IN, UNKNOWN) up front because those should not consume
+      //   cluster capacity. Then we drop instances carrying a valid instance-operation
+      //   maintenance marker, since they're inside an operator-approved window.
+      //
+      // The same marker-based subtraction is applied at MM exit in MaintenanceRecoveryStage
+      // so a marker that lets an instance escape MM entry also lets the cluster recover
+      // when the marker expires.
+      Set<String> offlineBudgetInstances = cache.getInstanceConfigMap().entrySet().stream()
           .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
               instanceEntry.getValue().getInstanceOperation().getOperation()))
-          .collect(Collectors.toSet())
-          .size() - cache.getEnabledLiveInstances().size();
+          .map(Map.Entry::getKey)
+          .collect(Collectors.toCollection(HashSet::new));
+      offlineBudgetInstances.removeAll(cache.getEnabledLiveInstances());
+
+      long nowMs = System.currentTimeMillis();
+      offlineBudgetInstances.removeIf(instanceName -> {
+        InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
+        return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
+      });
+      int instancesUnableToAcceptOnlineReplicas = offlineBudgetInstances.size();
       if (instancesUnableToAcceptOnlineReplicas > maxInstancesUnableToAcceptOnlineReplicas) {
         String errMsg = String.format(
             "Instances unable to take ONLINE replicas count %d greater than allowed count %d. Put cluster %s into "

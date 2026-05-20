@@ -26,6 +26,7 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixException;
 import org.apache.helix.controller.rebalancer.constraint.MockAbnormalStateResolver;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
@@ -443,5 +444,109 @@ public class TestClusterConfig {
     // Disable
     clusterConfig.setIntermediateStateCalcStageV2Enabled(false);
     Assert.assertFalse(clusterConfig.isIntermediateStateCalcStageV2Enabled());
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceFieldsUnsetByDefault() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), -1);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), -1);
+    Assert.assertEquals(clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs(), -1L);
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceAbsoluteBudgetRoundTrip() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudget(20);
+    clusterConfig.setDefaultInstanceOperationMaintenanceDurationMs(3_600_000L);
+
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), 20);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), -1);
+    Assert.assertEquals(clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs(),
+        3_600_000L);
+  }
+
+  @Test
+  public void testInstanceOperationMaintenancePercentageBudgetRoundTrip() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(25);
+
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), -1);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 25);
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceBudgetFormsAreMutuallyExclusive() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudget(20);
+    try {
+      clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(25);
+      Assert.fail("Setting the percentage form while absolute is set must throw");
+    } catch (HelixException expected) {
+      Assert.assertTrue(expected.getMessage().contains("mutually exclusive"));
+    }
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceBudgetFormsAreMutuallyExclusiveReverse()
+      throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(25);
+    try {
+      clusterConfig.setInstanceOperationMaintenanceBudget(20);
+      Assert.fail("Setting the absolute form while percentage is set must throw");
+    } catch (HelixException expected) {
+      Assert.assertTrue(expected.getMessage().contains("mutually exclusive"));
+    }
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceClearAllowsSwitchingForms() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudget(20);
+    clusterConfig.setInstanceOperationMaintenanceBudget(-1);
+    // After clearing the absolute form, setting the percentage form must succeed.
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(25);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 25);
+  }
+
+  @Test
+  public void testInstanceOperationMaintenancePercentageRejectsOutOfRange() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    for (int outOfRange : new int[] {-2, -100, 101, 1000}) {
+      try {
+        clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(outOfRange);
+        Assert.fail("Out-of-range value " + outOfRange + " must be rejected");
+      } catch (HelixException expected) {
+        Assert.assertTrue(expected.getMessage().contains("[0, 100]"),
+            "Error message should explain the valid range, got: " + expected.getMessage());
+      }
+    }
+  }
+
+  @Test
+  public void testInstanceOperationMaintenancePercentageAcceptsBoundaryValues() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    // 0 and 100 are the valid endpoints.
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(0);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 0);
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(100);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), 100);
+    // -1 is the clear sentinel and must be accepted.
+    clusterConfig.setInstanceOperationMaintenanceBudgetPercentage(-1);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudgetPercentage(), -1);
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceFieldsClearWithSentinel() throws Exception {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    clusterConfig.setInstanceOperationMaintenanceBudget(20);
+    clusterConfig.setDefaultInstanceOperationMaintenanceDurationMs(3_600_000L);
+
+    clusterConfig.setInstanceOperationMaintenanceBudget(-1);
+    clusterConfig.setDefaultInstanceOperationMaintenanceDurationMs(-1L);
+
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), -1);
+    Assert.assertEquals(clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs(), -1L);
   }
 }

@@ -20,6 +20,7 @@ package org.apache.helix.controller.changedetector.trimmer;
  */
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -64,17 +65,22 @@ public class InstanceConfigTrimmer extends HelixPropertyTrimmer<InstanceConfig> 
   }
 
   /**
-   * We should trim HELIX_INSTANCE_OPERATIONS field, it is used to filter instances in the
-   * BaseControllerDataProvider. That filtering will be used to determine if ResourceChangeSnapshot
-   * has changed as opposed to checking the actual value of the field.
+   * Strip HELIX_INSTANCE_OPERATIONS from the change-detection snapshot entirely (key and
+   * value). The field is filtered upstream in BaseControllerDataProvider, so leaving it in
+   * the snapshot would create false positives.
+   *
+   * <p>NOTE: {@code super.getNonTrimmableKeys} returns a live {@code keySet()} view over the
+   * underlying ZNRecord listFields map. Removing from that view would mutate the caller's
+   * InstanceConfig. Copy into a fresh {@link HashSet} before mutating.
    *
    * @param property the instance config
-   * @return a map contains all non-trimmable field keys that need to be kept.
+   * @return a map containing all non-trimmable field keys that need to be kept.
    */
   protected Map<FieldType, Set<String>> getNonTrimmableKeys(InstanceConfig property) {
     Map<FieldType, Set<String>> nonTrimmableKeys = super.getNonTrimmableKeys(property);
-    nonTrimmableKeys.get(FieldType.LIST_FIELD)
-        .remove(InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
+    Set<String> listKeys = new HashSet<>(nonTrimmableKeys.get(FieldType.LIST_FIELD));
+    listKeys.remove(InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
+    nonTrimmableKeys.put(FieldType.LIST_FIELD, listKeys);
     return nonTrimmableKeys;
   }
 

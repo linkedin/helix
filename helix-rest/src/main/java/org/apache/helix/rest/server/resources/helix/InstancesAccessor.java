@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -49,6 +50,8 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
@@ -242,6 +245,8 @@ public class InstancesAccessor extends AbstractHelixResource {
         case stoppable:
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
               skipHealthCheckCategorySet, random, includeDetails);
+        case instanceOperationMaintenance:
+          return batchSetInstanceOperationMaintenance(clusterId, node);
         default:
           _logger.error("Unsupported command :" + command);
           return badRequest("Unsupported command :" + command);
@@ -255,6 +260,66 @@ public class InstancesAccessor extends AbstractHelixResource {
       return badRequest(e.getMessage());
     }
     return OK();
+  }
+
+  /**
+   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/instanceOperationMaintenance}.
+   * Sets or clears the instance-operation maintenance marker on a list of instances. Mirrors
+   * the partial-accept contract of the batch stoppable check: instances are processed in
+   * input order, those that fit the cap quota (or that exist on a clear) are listed under
+   * {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs that
+   * invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
+   * missing expiry with no cluster default) are still surfaced as 400.
+   *
+   * <p>Request body:
+   * <pre>{@code
+   * { "instances": ["h1", "h2", ...],
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   *
+   * <p>Success response (HTTP 200):
+   * <pre>{@code
+   * { "applied":  ["h1", "h2"],
+   *   "rejected": { "h3": "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=2" },
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   */
+  private Response batchSetInstanceOperationMaintenance(String clusterId, JsonNode node) {
+    try {
+      JsonNode instancesNode = node.get(InstancesProperties.instances.name());
+      if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
+        return badRequest("Field 'instances' must be a non-empty array");
+      }
+      List<String> instances = new ArrayList<>(instancesNode.size());
+      for (JsonNode element : instancesNode) {
+        instances.add(element.asText());
+      }
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
+
+      ObjectNode body = JsonNodeFactory.instance.objectNode();
+      ArrayNode appliedArr = body.putArray("applied");
+      for (String name : result.getApplied()) {
+        appliedArr.add(name);
+      }
+      ObjectNode rejectedNode = body.putObject("rejected");
+      for (Map.Entry<String, String> entry : result.getRejected().entrySet()) {
+        rejectedNode.put(entry.getKey(), entry.getValue());
+      }
+      body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+      return JSONRepresentation(body);
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      _logger.error("Failed to set instance-operation maintenance batch in cluster {}",
+          clusterId, e);
+      return serverError(e);
+    }
   }
 
   private Response batchGetStoppableInstances(String clusterId, JsonNode node, boolean skipZKRead,
@@ -422,4 +487,5 @@ public class InstancesAccessor extends AbstractHelixResource {
       throw e;
     }
   }
+
 }

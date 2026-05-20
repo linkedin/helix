@@ -66,6 +66,8 @@ import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -315,6 +317,75 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       LOG.error("Failed to takeInstances:", e);
       return badRequest("Failed to takeInstances: " + e.getMessage());
     }
+  }
+
+  /**
+   * Set or clear the instance-operation maintenance marker on a single instance. While the
+   * marker is unexpired, the instance is excluded from the cluster-wide offline budget
+   * (MAX_OFFLINE_INSTANCES_ALLOWED) that drives auto Maintenance Mode.
+   *
+   * <p>Request body: {@code { "expiresAtMillis": 1776385800000 }}.
+   *
+   * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) clears the marker. An
+   * omitted or zero {@code expiresAtMillis} falls back to the cluster-level
+   * {@code DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS}; if neither is set, the call
+   * is rejected with 400. Per-instance failures (instance not found, cap exhausted) are
+   * surfaced as 400 with the reason in the body so the single-endpoint contract stays
+   * binary; the batch endpoint at
+   * {@code POST /clusters/{c}/instances?command=instanceOperationMaintenance} reports
+   * per-instance results in a 200 response instead.
+   */
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @POST
+  @Path("instanceOperationMaintenance")
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Response setInstanceOperationMaintenance(String jsonContent,
+      @PathParam("clusterId") String clusterId,
+      @PathParam("instanceName") String instanceName) {
+    try {
+      JsonNode node = parseJsonOrEmpty(jsonContent);
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, Collections.singletonList(instanceName), expiresAtMillis,
+              System.currentTimeMillis());
+
+      if (result.getApplied().contains(instanceName)) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("instance", instanceName);
+        body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+        return JSONRepresentation(body);
+      }
+      String rejectReason = result.getRejected().get(instanceName);
+      if (rejectReason != null) {
+        // Single-instance call cannot be partial; surface the per-instance reason as 400.
+        return badRequest(rejectReason);
+      }
+      // The handler is supposed to return every input instance in exactly one of applied or
+      // rejected. Reaching here means the handler returned an inconsistent result; surface
+      // this as 500 instead of silently translating to a generic 400, since the latter
+      // would mask a real server-side bug as a client error.
+      return serverError(new IllegalStateException(
+          "Handler returned no outcome for instance " + instanceName));
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      LOG.error("Failed to set instance-operation maintenance for {} in cluster {}",
+          instanceName, clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private static JsonNode parseJsonOrEmpty(String jsonContent) throws IOException {
+    if (jsonContent == null || jsonContent.isEmpty()) {
+      return JsonNodeFactory.instance.objectNode();
+    }
+    JsonNode parsed = OBJECT_MAPPER.readTree(jsonContent);
+    return parsed == null ? JsonNodeFactory.instance.objectNode() : parsed;
   }
 
   private MaintenanceOpInputFields readMaintenanceInputFromJson(String jsonContent) throws IOException {
