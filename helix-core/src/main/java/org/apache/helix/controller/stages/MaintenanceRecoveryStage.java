@@ -21,7 +21,6 @@ package org.apache.helix.controller.stages;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
@@ -32,7 +31,6 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.IdealState;
-import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Partition;
 import org.slf4j.Logger;
@@ -83,37 +81,30 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
     boolean shouldExitMaintenance;
     String reason;
     switch (internalReason) {
+    // MAX_OFFLINE_INSTANCES_EXCEEDED is the deprecated alias for
+    // MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS; no current code path writes it, but
+    // long-lived MM signals persisted before the rename can still carry it on disk. The
+    // two arms must stay collapsed for backward compatibility.
     case MAX_OFFLINE_INSTANCES_EXCEEDED:
     case MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS:
-      // Check on the number of offline/disabled instances
       int numOfflineInstancesForAutoExit =
           cache.getClusterConfig().getNumOfflineInstancesForAutoExit();
       if (numOfflineInstancesForAutoExit < 0) {
         return; // Config is not set, no auto-exit
       }
-      // Count offline-or-disabled assignable instances, then subtract those carrying a
-      // valid instance-operation maintenance marker so a deploy window can't trap the
-      // cluster in MM. The same marker-based subtraction runs at MM entry in
-      // BestPossibleStateCalcStage.
-      Set<String> assignable = cache.getAssignableInstances();
-      Set<String> enabledLive = cache.getEnabledLiveInstances();
-      long nowMs = System.currentTimeMillis();
-      int markedAndOfflineCount = 0;
-      for (String instanceName : assignable) {
-        if (enabledLive.contains(instanceName)) {
-          continue;
-        }
-        InstanceConfig cfg = cache.getInstanceConfigMap().get(instanceName);
-        if (cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs)) {
-          markedAndOfflineCount++;
-        }
-      }
-      int offlineDisabledCount =
-          assignable.size() - enabledLive.size() - markedAndOfflineCount;
-      shouldExitMaintenance = offlineDisabledCount <= numOfflineInstancesForAutoExit;
+      // Use the shared offline-budget accessor so MM exit measures against the same
+      // population MM entry uses in BestPossibleStateCalcStage. See
+      // BaseControllerDataProvider#getInstancesUnableToAcceptOnlineReplicas for the
+      // membership rules (routable, not enabled-live, no valid maintenance marker).
+      int instancesUnableToAcceptOnlineReplicas =
+          cache.getInstancesUnableToAcceptOnlineReplicas(System.currentTimeMillis()).size();
+      shouldExitMaintenance =
+          instancesUnableToAcceptOnlineReplicas <= numOfflineInstancesForAutoExit;
       reason = String.format(
-          "Auto-exiting maintenance mode for cluster %s; Num. of offline/disabled instances is %d, less than or equal to the exit threshold %d",
-          event.getClusterName(), offlineDisabledCount, numOfflineInstancesForAutoExit);
+          "Auto-exiting maintenance mode for cluster %s; instances unable to take ONLINE "
+              + "replicas count %d is less than or equal to the exit threshold %d",
+          event.getClusterName(), instancesUnableToAcceptOnlineReplicas,
+          numOfflineInstancesForAutoExit);
       break;
     case MAX_PARTITION_PER_INSTANCE_EXCEEDED:
       IntermediateStateOutput intermediateStateOutput =
