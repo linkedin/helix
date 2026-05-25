@@ -42,6 +42,7 @@ import com.google.common.collect.Sets;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
+import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
@@ -104,6 +105,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // phaseName -> eventMonitor
   protected final ConcurrentHashMap<String, ClusterEventMonitor> _clusterEventMonitorMap =
       new ConcurrentHashMap<>();
+
+  // ClusterEventType -> topologyChangeEventMonitor (one entry per topology event type)
+  protected final ConcurrentHashMap<ClusterEventType, TopologyChangeEventMonitor>
+      _topologyChangeEventMonitorMap = new ConcurrentHashMap<>();
 
   private CustomizedViewMonitor _customizedViewMonitor;
 
@@ -798,6 +803,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     LOG.info("Active ClusterStatusMonitor");
     try {
       register(this, getObjectName(clusterBeanName()));
+      // Register one MBean per topology-change event type up-front so dashboards see a
+      // stable schema (and OTel exporters discover all dimensions) before the first event
+      // of that type arrives. Each MBean starts at zero.
+      registerAllTopologyChangeEventMonitors();
     } catch (Exception e) {
       LOG.error("Fail to register ClusterStatusMonitor", e);
     }
@@ -811,6 +820,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       unregisterAllPerInstanceResources();
       unregister(getObjectName(clusterBeanName()));
       unregisterAllEventMonitors();
+      unregisterAllTopologyChangeEventMonitors();
       unregisterAllWorkflowsMonitor();
       unregisterAllJobs();
 
@@ -1052,6 +1062,61 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         monitor.unregister();
       }
       _clusterEventMonitorMap.clear();
+    }
+  }
+
+  /**
+   * Increment the per-{@link ClusterEventType} received counter for topology-change events.
+   * No-op for non-topology event types so callers don't need to filter.
+   */
+  public void incrementTopologyChangeEventReceived(ClusterEventType eventType) {
+    if (eventType == null || !eventType.isTopologyChange()) {
+      return;
+    }
+    TopologyChangeEventMonitor monitor = _topologyChangeEventMonitorMap.get(eventType);
+    if (monitor != null) {
+      monitor.incrementReceived();
+    }
+  }
+
+  /**
+   * Increment the per-{@link ClusterEventType} processed counter for topology-change events.
+   * No-op for non-topology event types so callers don't need to filter.
+   */
+  public void incrementTopologyChangeEventProcessed(ClusterEventType eventType) {
+    if (eventType == null || !eventType.isTopologyChange()) {
+      return;
+    }
+    TopologyChangeEventMonitor monitor = _topologyChangeEventMonitorMap.get(eventType);
+    if (monitor != null) {
+      monitor.incrementProcessed();
+    }
+  }
+
+  private void registerAllTopologyChangeEventMonitors() {
+    synchronized (_topologyChangeEventMonitorMap) {
+      for (ClusterEventType eventType : ClusterEventType.topologyChangeEventTypes()) {
+        if (_topologyChangeEventMonitorMap.containsKey(eventType)) {
+          continue;
+        }
+        try {
+          TopologyChangeEventMonitor monitor = new TopologyChangeEventMonitor(this, eventType);
+          monitor.register();
+          _topologyChangeEventMonitorMap.put(eventType, monitor);
+        } catch (JMException e) {
+          LOG.error("Failed to register TopologyChangeEventMonitor for cluster {} eventType {}",
+              _clusterName, eventType, e);
+        }
+      }
+    }
+  }
+
+  private void unregisterAllTopologyChangeEventMonitors() {
+    synchronized (_topologyChangeEventMonitorMap) {
+      for (TopologyChangeEventMonitor monitor : _topologyChangeEventMonitorMap.values()) {
+        monitor.unregister();
+      }
+      _topologyChangeEventMonitorMap.clear();
     }
   }
 

@@ -970,6 +970,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _clusterStatusMonitor
             .updateClusterEventDuration(ClusterEventMonitor.PhaseName.TotalProcessed.name(),
                 _lastPipelineEndTimestamp - startTime);
+        // Count topology-change events that completed the resource pipeline successfully.
+        // Paired with the received counter incremented in pushToEventQueues; the gap
+        // between the two reflects coalescing in the cluster event queue under load.
+        if (!rebalanceFail) {
+          _clusterStatusMonitor.incrementTopologyChangeEventProcessed(event.getEventType());
+        }
       }
       sb.append(String.format("InQueue time for event: %s took: %s ms\n", event.getEventType(),
           startTime - enqueueTime));
@@ -1286,6 +1292,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   private void pushToEventQueues(ClusterEventType eventType, NotificationContext changeContext,
       Map<String, Object> eventAttributes) {
+    // Count topology-change events received from ZK before they get coalesced in the
+    // cluster event queue. Counted once per logical event (not per pipeline fan-out into
+    // DEFAULT/TASK queues) so the metric reflects ZK-driven churn, not internal queueing.
+    if (_isMonitoring && _clusterStatusMonitor != null) {
+      _clusterStatusMonitor.incrementTopologyChangeEventReceived(eventType);
+    }
     // No need for completed UUID, prefixed should be fine
     String uid = UUID.randomUUID().toString().substring(0, 8);
     ClusterEvent event = new ClusterEvent(_clusterName, eventType,
