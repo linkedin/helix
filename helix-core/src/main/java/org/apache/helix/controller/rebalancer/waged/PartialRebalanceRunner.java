@@ -132,16 +132,16 @@ class PartialRebalanceRunner implements AutoCloseable {
       try {
         if (!_asyncPartialRebalanceResult.get()) {
           HelixRebalanceException original = _lastAsyncFailure.get();
-          // Re-throw preserving the original FailureCategory if we captured it; otherwise fall
-          // back to ASYNC_EXECUTION as a last resort (e.g. RuntimeException bypassed the inner
-          // catch).
-          if (original != null) {
-            throw new HelixRebalanceException("Failed to calculate for the new best possible.",
-                original.getFailureType(), original.getFailureCategory(), original);
-          }
+          // Preserve the original FailureCategory for metric attribution, but intentionally
+          // collapse Type to FAILED_TO_CALCULATE -- this matches the pre-PR behavior so the
+          // downstream fallback decision in WagedRebalancer.computeNewIdealStates' catch is
+          // unchanged. Category drives metrics; Type drives control flow; keeping them on
+          // separate tracks here preserves rebalancing semantics.
+          HelixRebalanceException.FailureCategory category = original != null
+              ? original.getFailureCategory()
+              : HelixRebalanceException.FailureCategory.ASYNC_EXECUTION;
           throw new HelixRebalanceException("Failed to calculate for the new best possible.",
-              HelixRebalanceException.Type.FAILED_TO_CALCULATE,
-              HelixRebalanceException.FailureCategory.ASYNC_EXECUTION);
+              HelixRebalanceException.Type.FAILED_TO_CALCULATE, category, original);
         }
       } catch (InterruptedException | ExecutionException e) {
         throw new HelixRebalanceException("Failed to execute new best possible calculation.",

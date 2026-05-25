@@ -378,16 +378,16 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
           clusterData.getEnabledLiveInstances(), new CurrentStateOutput(), _algorithm);
       Assert.fail("Rebalance shall fail.");
     } catch (HelixRebalanceException ex) {
-      // PartialRebalanceRunner now preserves the original FailureType and FailureCategory
-      // through the sync re-wrap (previously it lost both into the generic FAILED_TO_CALCULATE).
-      // The underlying cause here is a missing state model definition surfacing as
-      // INVALID_CLUSTER_STATUS / INVALID_CLUSTER_CONFIG.
+      // PartialRebalanceRunner's sync re-throw deliberately collapses Type back to
+      // FAILED_TO_CALCULATE to preserve the pre-PR fallback semantics in
+      // WagedRebalancer.computeNewIdealStates' catch (which keys on Type). The FailureCategory
+      // is preserved from the original exception so metric attribution still works.
       Assert.assertEquals(ex.getFailureType(),
-          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE);
       Assert.assertEquals(ex.getFailureCategory(),
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG);
       Assert.assertEquals(ex.getMessage(),
-          "Failed to calculate for the new best possible. Failure Type: INVALID_CLUSTER_STATUS Category: INVALID_CLUSTER_CONFIG");
+          "Failed to calculate for the new best possible. Failure Type: FAILED_TO_CALCULATE Category: INVALID_CLUSTER_CONFIG");
     }
 
     // The rebalance will be done with empty mapping result since there is no previously calculated

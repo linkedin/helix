@@ -153,13 +153,16 @@ class GlobalRebalanceRunner implements AutoCloseable {
         try {
           if (!result.get()) {
             HelixRebalanceException original = _lastAsyncFailure.get();
-            if (original != null) {
-              throw new HelixRebalanceException("Failed to calculate for the new Baseline.",
-                  original.getFailureType(), original.getFailureCategory(), original);
-            }
+            // Preserve the original FailureCategory for metric attribution, but intentionally
+            // collapse Type to FAILED_TO_CALCULATE -- this matches the pre-PR behavior so the
+            // downstream fallback decision in WagedRebalancer.computeNewIdealStates' catch is
+            // unchanged. Category drives metrics; Type drives control flow; keeping them on
+            // separate tracks here preserves rebalancing semantics.
+            HelixRebalanceException.FailureCategory category = original != null
+                ? original.getFailureCategory()
+                : HelixRebalanceException.FailureCategory.ASYNC_EXECUTION;
             throw new HelixRebalanceException("Failed to calculate for the new Baseline.",
-                HelixRebalanceException.Type.FAILED_TO_CALCULATE,
-                HelixRebalanceException.FailureCategory.ASYNC_EXECUTION);
+                HelixRebalanceException.Type.FAILED_TO_CALCULATE, category, original);
           }
         } catch (InterruptedException | ExecutionException e) {
           throw new HelixRebalanceException("Failed to execute new Baseline calculation.",
