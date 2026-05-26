@@ -40,8 +40,13 @@ export class UserCtrl {
   }
 
   protected logout(req: HelixRequest, res: Response) {
-    res.clearCookie('helixui_identity.token');
-    req.session.destroy(() => {
+    req.session.destroy((err) => {
+      if (err) {
+        res.status(500).json({ error: 'Logout failed' });
+        return;
+      }
+      res.clearCookie('connect.sid', { path: '/' });
+      res.clearCookie('helixui_identity.token');
       res.json(true);
     });
   }

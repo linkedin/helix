@@ -27,7 +27,6 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
-  private sessionExpiredShown = false;
 
   constructor(
     // protected angulartics2Piwik: Angulartics2Piwik,
@@ -67,7 +66,7 @@ export class AppComponent implements OnInit {
   }
 
   private hasIdentityToken(): boolean {
-    return document.cookie.includes('helixui_identity.token');
+    return document.cookie.split(';').some(c => c.trim().startsWith('helixui_identity.token='));
   }
 
   private watchTokenExpiry() {
@@ -75,10 +74,8 @@ export class AppComponent implements OnInit {
     const check = setInterval(() => {
       if (
         !this.hasIdentityToken() &&
-        !this.sessionExpiredShown &&
         this.dialog.openDialogs.length === 0
       ) {
-        this.sessionExpiredShown = true;
         clearInterval(check);
         this.dialog
           .open(AlertDialogComponent, {
@@ -130,6 +127,7 @@ export class AppComponent implements OnInit {
                   }
 
                   this.currentUser = this.service.getCurrentUser();
+                  this.watchTokenExpiry();
                 },
                 (error) => {
                   // since rest API simply throws 404 instead of empty config when config is not initialized yet

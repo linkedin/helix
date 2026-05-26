@@ -13,18 +13,19 @@ import { AlertDialogComponent } from '../shared/dialog/alert-dialog/alert-dialog
 
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
-  private sessionExpiredShown = false;
-
   constructor(private dialog: MatDialog) {}
 
   intercept(
     req: HttpRequest<any>,
     next: HttpHandler
   ): Observable<HttpEvent<any>> {
+    if (req.url.includes('/api/user/login') || req.url.includes('/api/user/logout')) {
+      return next.handle(req);
+    }
+
     return next.handle(req).pipe(
       catchError((error: HttpErrorResponse) => {
-        if (error.status === 401 && !this.sessionExpiredShown) {
-          this.sessionExpiredShown = true;
+        if (error.status === 401 && this.dialog.openDialogs.length === 0) {
           this.dialog
             .open(AlertDialogComponent, {
               data: {
