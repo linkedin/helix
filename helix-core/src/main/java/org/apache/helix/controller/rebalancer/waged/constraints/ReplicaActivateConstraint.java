@@ -63,4 +63,9 @@ class ReplicaActivateConstraint extends HardConstraint {
   String getDescription() {
     return "Cannot assign the inactive replica";
   }
+
+  @Override
+  Type getType() {
+    return Type.REPLICA_ACTIVATE;
+  }
 }

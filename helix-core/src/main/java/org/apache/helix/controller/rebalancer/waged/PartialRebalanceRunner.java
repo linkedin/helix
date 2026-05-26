@@ -26,6 +26,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
@@ -65,6 +66,9 @@ class PartialRebalanceRunner implements AutoCloseable {
 
   private boolean _asyncPartialRebalanceEnabled;
   private Future<Boolean> _asyncPartialRebalanceResult;
+  // Captures the original exception thrown inside the executor task so we can preserve its
+  // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
+  private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
 
   public PartialRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
@@ -99,15 +103,21 @@ class PartialRebalanceRunner implements AutoCloseable {
       return;
     }
 
+    _lastAsyncFailure.set(null);
     _asyncPartialRebalanceResult = _bestPossibleCalculateExecutor.submit(() -> {
       try {
         doPartialRebalance(clusterData, resourceMap, activeNodes, algorithm,
             currentStateOutput);
       } catch (HelixRebalanceException e) {
+        // Capture the original exception so the synchronous caller can preserve the
+        // FailureCategory when re-throwing. The Type is intentionally NOT preserved on the
+        // re-throw to keep WagedRebalancer.computeNewIdealStates' fallback decision unchanged.
+        _lastAsyncFailure.set(e);
         if (_asyncPartialRebalanceEnabled) {
           _rebalanceFailureCount.increment(1L);
         }
-        LOG.error("Failed to calculate best possible assignment!", e);
+        LOG.error("Failed to calculate best possible assignment! category={}",
+            e.getFailureCategory(), e);
         return false;
       }
       return true;
@@ -115,12 +125,20 @@ class PartialRebalanceRunner implements AutoCloseable {
     if (!_asyncPartialRebalanceEnabled) {
       try {
         if (!_asyncPartialRebalanceResult.get()) {
+          // Preserve the original FailureCategory for downstream attribution, but intentionally
+          // collapse Type to FAILED_TO_CALCULATE -- this matches the pre-FailureCategory
+          // behavior so WagedRebalancer.computeNewIdealStates' fallback decision is unchanged.
+          HelixRebalanceException original = _lastAsyncFailure.get();
+          HelixRebalanceException.FailureCategory category = original != null
+              ? original.getFailureCategory()
+              : HelixRebalanceException.FailureCategory.ASYNC_EXECUTION;
           throw new HelixRebalanceException("Failed to calculate for the new best possible.",
-              HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+              HelixRebalanceException.Type.FAILED_TO_CALCULATE, category, original);
         }
       } catch (InterruptedException | ExecutionException e) {
         throw new HelixRebalanceException("Failed to execute new best possible calculation.",
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.ASYNC_EXECUTION, e);
       }
     }
   }
@@ -159,7 +177,8 @@ class PartialRebalanceRunner implements AutoCloseable {
               currentBaseline, currentBestPossibleAssignment);
     } catch (Exception ex) {
       throw new HelixRebalanceException("Failed to generate cluster model for partial rebalance.",
-          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
     Map<String, ResourceAssignment> newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
 

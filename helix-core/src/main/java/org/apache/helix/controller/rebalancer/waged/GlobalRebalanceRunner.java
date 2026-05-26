@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.changedetector.ResourceChangeDetector;
@@ -76,6 +77,9 @@ class GlobalRebalanceRunner implements AutoCloseable {
   private final CountMetric _rebalanceFailureCount;
 
   private boolean _asyncGlobalRebalanceEnabled;
+  // Captures the original exception thrown inside the executor task so we can preserve its
+  // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
+  private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
 
   public GlobalRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
@@ -116,6 +120,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
 
     if (clusterChanges.keySet().stream().anyMatch(GLOBAL_REBALANCE_REQUIRED_CHANGE_TYPES::contains)) {
       final boolean waitForGlobalRebalance = !_asyncGlobalRebalanceEnabled;
+      _lastAsyncFailure.set(null);
       // Calculate the Baseline assignment for global rebalance.
       Future<Boolean> result = _baselineCalculateExecutor.submit(() -> {
         try {
@@ -125,10 +130,15 @@ class GlobalRebalanceRunner implements AutoCloseable {
           doGlobalRebalance(clusterData, resourceMap, allAssignableInstances, algorithm,
               currentStateOutput, !waitForGlobalRebalance, clusterChanges);
         } catch (HelixRebalanceException e) {
+          // Capture the original exception so the synchronous caller can preserve the
+          // FailureCategory when re-throwing. The Type is intentionally NOT preserved on the
+          // re-throw to keep WagedRebalancer.computeNewIdealStates' fallback decision unchanged.
+          _lastAsyncFailure.set(e);
           if (_asyncGlobalRebalanceEnabled) {
             _rebalanceFailureCount.increment(1L);
           }
-          LOG.error("Failed to calculate baseline assignment!", e);
+          LOG.error("Failed to calculate baseline assignment! category={}",
+              e.getFailureCategory(), e);
           return false;
         }
         return true;
@@ -136,12 +146,20 @@ class GlobalRebalanceRunner implements AutoCloseable {
       if (waitForGlobalRebalance) {
         try {
           if (!result.get()) {
+            // Preserve the original FailureCategory for downstream attribution, but
+            // intentionally collapse Type to FAILED_TO_CALCULATE -- this matches the
+            // pre-FailureCategory behavior so the downstream fallback decision is unchanged.
+            HelixRebalanceException original = _lastAsyncFailure.get();
+            HelixRebalanceException.FailureCategory category = original != null
+                ? original.getFailureCategory()
+                : HelixRebalanceException.FailureCategory.ASYNC_EXECUTION;
             throw new HelixRebalanceException("Failed to calculate for the new Baseline.",
-                HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+                HelixRebalanceException.Type.FAILED_TO_CALCULATE, category, original);
           }
         } catch (InterruptedException | ExecutionException e) {
           throw new HelixRebalanceException("Failed to execute new Baseline calculation.",
-              HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+              HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+              HelixRebalanceException.FailureCategory.ASYNC_EXECUTION, e);
         }
       }
     }
@@ -173,7 +191,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
           allAssignableInstances, clusterChanges, currentBaseline);
     } catch (Exception ex) {
       throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
-          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
 
     Map<String, ResourceAssignment> newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
@@ -187,7 +206,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
         _writeLatency.endMeasuringLatency();
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to persist the new baseline assignment.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     } else {
       LOG.debug("Assignment Metadata Store is null. Skip persisting the baseline assignment.");

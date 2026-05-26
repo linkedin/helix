@@ -55,4 +55,9 @@ class NodeCapacityConstraint extends HardConstraint {
   String getDescription() {
     return "Node has insufficient capacity";
   }
+
+  @Override
+  Type getType() {
+    return Type.NODE_CAPACITY;
+  }
 }

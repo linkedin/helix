@@ -49,4 +49,9 @@ class SamePartitionOnInstanceConstraint extends HardConstraint {
   String getDescription() {
     return "Same partition of different states cannot co-exist in one instance";
   }
+
+  @Override
+  Type getType() {
+    return Type.SAME_PARTITION_ON_INSTANCE;
+  }
 }
