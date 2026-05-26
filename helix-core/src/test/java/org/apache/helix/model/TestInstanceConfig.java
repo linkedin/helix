@@ -469,4 +469,216 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.ADMIN);
   }
+
+  @Test
+  public void testInstanceOperationStateField() {
+    // Test 1: New instance should have ENABLE state
+    InstanceConfig instanceConfig = new InstanceConfig("instance1");
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "ENABLE");
+
+    // Test 2: Setting DISABLE operation should update state field
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .setReason("test disable")
+        .build());
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "DISABLE");
+
+    // Test 3: Create a fresh instance and set EVACUATE operation
+    InstanceConfig instanceConfig2 = new InstanceConfig("instance2");
+    instanceConfig2.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.EVACUATE)
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION)
+        .build());
+    Assert.assertEquals(instanceConfig2.getInstanceOperationState(), "EVACUATE");
+    Assert.assertEquals(instanceConfig2.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "EVACUATE");
+
+    // Test 4: Create a fresh instance and set SWAP_IN operation
+    InstanceConfig instanceConfig3 = new InstanceConfig("instance3");
+    instanceConfig3.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+        .build());
+    Assert.assertEquals(instanceConfig3.getInstanceOperationState(), "SWAP_IN");
+    Assert.assertEquals(instanceConfig3.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "SWAP_IN");
+
+    // Test 5: Setting ENABLE operation should update state field back to ENABLE
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .build());
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "ENABLE");
+  }
+
+  @Test
+  public void testInstanceOperationStateBackwardCompatibility() {
+    // Test 1: Loading an old config without INSTANCE_OPERATION_STATE field should auto-populate it
+    ZNRecord znRecord = new ZNRecord("instance1");
+    znRecord.setSimpleField(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "false");
+    InstanceConfig instanceConfig = new InstanceConfig(znRecord);
+    
+    // Should compute state from HELIX_ENABLED field
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "DISABLE");
+
+    // Test 2: Config with HELIX_ENABLED=true
+    ZNRecord znRecord2 = new ZNRecord("instance2");
+    znRecord2.setSimpleField(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "true");
+    InstanceConfig instanceConfig2 = new InstanceConfig(znRecord2);
+    
+    Assert.assertEquals(instanceConfig2.getInstanceOperationState(), "ENABLE");
+    Assert.assertEquals(instanceConfig2.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "ENABLE");
+
+    // Test 3: Config with HELIX_INSTANCE_OPERATIONS but no INSTANCE_OPERATION_STATE
+    ZNRecord znRecord3 = new ZNRecord("instance3");
+    znRecord3.setListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name(),
+        List.of("{\"OPERATION\":\"EVACUATE\",\"TIMESTAMP\":\"1733518029415\",\"SOURCE\":\"AUTOMATION\",\"REASON\":\"migration\"}"));
+    InstanceConfig instanceConfig3 = new InstanceConfig(znRecord3);
+    
+    Assert.assertEquals(instanceConfig3.getInstanceOperationState(), "EVACUATE");
+    Assert.assertEquals(instanceConfig3.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "EVACUATE");
+  }
+
+  @Test
+  public void testInstanceOperationStateWithMultipleSources() {
+    InstanceConfig instanceConfig = new InstanceConfig("instance1");
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
+
+    // Set DISABLE from USER source
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.USER)
+        .setReason("user disabled")
+        .build());
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+
+    // Set DISABLE from AUTOMATION source (higher priority, should override)
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION)
+        .setReason("automation disabled")
+        .build());
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+
+    // Try to ENABLE from USER source (should not override AUTOMATION)
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.USER)
+        .build());
+    // State should still be DISABLE because AUTOMATION source takes precedence
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+
+    // ENABLE from AUTOMATION source (should work)
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION)
+        .build());
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
+  }
+
+  @Test
+  public void testInstanceOperationStateWithBuilder() {
+    // Test that Builder properly initializes the state field
+    InstanceConfig instanceConfig = new InstanceConfig.Builder()
+        .setHostName("testHost")
+        .setPort("1234")
+        .setInstanceOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .build("instance1");
+    
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "DISABLE");
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "DISABLE");
+
+    // Test Builder with EVACUATE
+    InstanceConfig instanceConfig2 = new InstanceConfig.Builder()
+        .setHostName("testHost2")
+        .setPort("5678")
+        .setInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE)
+        .build("instance2");
+    
+    Assert.assertEquals(instanceConfig2.getInstanceOperationState(), "EVACUATE");
+    Assert.assertEquals(instanceConfig2.getRecord().getSimpleField(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "EVACUATE");
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceUnsetByDefault() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceSetAndGet() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long expiresAt = System.currentTimeMillis() + 60_000L;
+    cfg.setInstanceOperationMaintenanceUntilMs(expiresAt);
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(), expiresAt);
+  }
+
+  @Test
+  public void testIsUnderInstanceOperationMaintenanceWindow() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long now = 1_000_000L;
+    cfg.setInstanceOperationMaintenanceUntilMs(now + 5_000L);
+
+    Assert.assertTrue(cfg.isUnderInstanceOperationMaintenance(now));
+    Assert.assertTrue(cfg.isUnderInstanceOperationMaintenance(now + 4_999L));
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(now + 5_000L),
+        "Boundary: nowMs == untilMs is no longer under maintenance");
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(now + 5_001L));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceClearViaNegativeValue() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+
+    cfg.setInstanceOperationMaintenanceUntilMs(
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertFalse(cfg.getRecord().getSimpleFields().containsKey(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name()));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceClearViaZero() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+    cfg.setInstanceOperationMaintenanceUntilMs(0L);
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET,
+        "Zero is treated as a clear sentinel alongside -1");
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceNotTransferredByOverwrite() {
+    InstanceConfig source = new InstanceConfig("source");
+    source.setHostName("source-host");
+    source.setPort("1234");
+    source.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+
+    InstanceConfig target = new InstanceConfig("target");
+    target.setHostName("target-host");
+    target.setPort("5678");
+
+    target.overwriteInstanceConfig(source);
+
+    Assert.assertEquals(target.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET,
+        "Instance-operation maintenance marker is tied to the source instance's operation "
+            + "window and must not transfer via overwriteInstanceConfig (e.g., during "
+            + "swap-in)");
+  }
 }

@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 
 import static org.mockito.Mockito.when;
@@ -67,9 +68,10 @@ public class ClusterModelTestHelper extends AbstractTestClusterModel {
     Set<AssignableReplica> assignableReplicas = generateReplicas(testCache);
     Set<AssignableNode> assignableNodes = generateNodes(testCache);
 
+    ClusterConfig clusterConfig = new ClusterConfig("TestCluster");
     ClusterContext context =
         new ClusterContext(assignableReplicas, assignableNodes, Collections.emptyMap(),
-            Collections.emptyMap());
+            Collections.emptyMap(), clusterConfig);
     return new ClusterModel(context, assignableReplicas, assignableNodes);
   }
 }

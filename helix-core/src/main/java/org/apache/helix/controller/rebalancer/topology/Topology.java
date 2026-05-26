@@ -30,10 +30,10 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.HelixException;
+import org.apache.helix.api.exceptions.InstanceConfigMismatchException;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -192,7 +192,8 @@ public class Topology {
       InstanceConfig insConfig = _instanceConfigMap.get(instanceName);
       try {
         LinkedHashMap<String, String> instanceTopologyMap =
-            computeInstanceTopologyMapHelper(_clusterTopologyConfig, instanceName, insConfig, null);
+            computeInstanceTopologyMapHelper(_clusterTopologyConfig, instanceName,
+                clusterConfig.getClusterName(), insConfig, null);
         int weight = insConfig.getWeight();
         if (weight < 0 || weight == InstanceConfig.WEIGHT_NOT_SET) {
           weight = DEFAULT_NODE_WEIGHT;
@@ -204,13 +205,16 @@ public class Topology {
           unnecessaryTopoKeys.forEach(instanceTopologyMap::remove);
         }
         addEndNode(root, instanceName, instanceTopologyMap, weight, _liveInstances);
+      } catch (InstanceConfigMismatchException e) {
+        logger.warn("Topology setting {} for instance {} is unset or invalid due to mismatch with cluster topology "
+                + "configuration. Instance will be ignored! Error: {}", insConfig.getDomainAsString(), instanceName,
+            e.getMessage());
       } catch (IllegalArgumentException e) {
         if (insConfig.getInstanceEnabled()) {
           throw e;
-        } else {
-          logger.warn("Topology setting {} for instance {} is unset or invalid, ignore the instance!",
-              insConfig.getDomainAsString(), instanceName);
         }
+        logger.warn("Topology setting {} for instance {} is unset or invalid, ignore the instance!",
+            insConfig.getDomainAsString(), instanceName);
       }
     }
     return root;
@@ -221,12 +225,14 @@ public class Topology {
    * The mapping is the cluster topology path name to its corresponding value.
    * @param clusterTopologyConfig
    * @param instanceName
+   * @param clusterName
    * @param instanceConfig
    * @param faultZoneForEarlyQuit  Nullable, if set to non-null value, the faultZone path will stop at the matched
    *                               faultZone value instead of constructing the whole path for the instance.
    */
   private static LinkedHashMap<String, String> computeInstanceTopologyMapHelper(
-      ClusterTopologyConfig clusterTopologyConfig, String instanceName, InstanceConfig instanceConfig,
+      ClusterTopologyConfig clusterTopologyConfig, String instanceName, String clusterName,
+      InstanceConfig instanceConfig,
       String faultZoneForEarlyQuit)
       throws IllegalArgumentException {
     LinkedHashMap<String, String> instanceTopologyMap = new LinkedHashMap<>();
@@ -255,25 +261,34 @@ public class Topology {
               .format("Domain for instance %s is not set, fail the topology-aware placement!",
                   instanceName));
         }
-        int numOfMatchedKeys = 0;
+        List<String> missingKeys = new ArrayList<>();
+        boolean missingRequiredFaultZoneKey = false;
         for (String key : clusterTopologyConfig.getTopologyKeyDefaultValue().keySet()) {
           // if a key does not exist in the instance domain config, using the default domain value.
           String value = domainAsMap.get(key);
-          if (value == null || value.length() == 0) {
+          if (value == null || value.isEmpty()) {
             value = clusterTopologyConfig.getTopologyKeyDefaultValue().get(key);
-          } else {
-            numOfMatchedKeys++;
+            if (key.equals(clusterTopologyConfig.getFaultZoneType())) {
+                missingRequiredFaultZoneKey = true;
+            }
+            missingKeys.add(key);
           }
           instanceTopologyMap.put(key, value);
           if (key.equals(faultZoneForEarlyQuit)) {
             return instanceTopologyMap;
           }
         }
-        if (numOfMatchedKeys < clusterTopologyConfig.getTopologyKeyDefaultValue().size()) {
-          logger.warn(
-              "Key-value pairs in InstanceConfig.Domain {} do not align with keys in ClusterConfig.Topology "
-                  + "{}, using default domain value instead", instanceConfig.getDomainAsString(),
-              clusterTopologyConfig.getTopologyKeyDefaultValue().keySet());
+        if (!missingKeys.isEmpty()) {
+          String errorMessage = String.format(
+              "Instance %s in cluster %s does not have all the keys in ClusterConfig. "
+                  + "Topology: %s, missing keys: %s", instanceName, clusterName,
+              clusterTopologyConfig.getTopologyKeyDefaultValue().keySet(), missingKeys);
+          logger.warn(errorMessage);
+          if (missingRequiredFaultZoneKey) {
+            throw new InstanceConfigMismatchException(
+                String.format("Instance %s in cluster %s has missing fault zone type key set %s",
+                    instanceName, clusterName, clusterTopologyConfig.getFaultZoneType()));
+          }
         }
       }
     } else {
@@ -303,7 +318,8 @@ public class Topology {
     ClusterTopologyConfig clusterTopologyConfig = ClusterTopologyConfig.createFromClusterConfig(clusterConfig);
     String faultZoneForEarlyQuit =
         earlyQuitForFaultZone ? clusterTopologyConfig.getFaultZoneType() : null;
-    return computeInstanceTopologyMapHelper(clusterTopologyConfig, instanceName, instanceConfig, faultZoneForEarlyQuit);
+    return computeInstanceTopologyMapHelper(clusterTopologyConfig, instanceName,
+        clusterConfig.getClusterName(), instanceConfig, faultZoneForEarlyQuit);
   }
 
   /**
@@ -323,8 +339,9 @@ public class Topology {
             liveInstances.contains(instanceName), pathNodes);
       } else if (path.equals(_clusterTopologyConfig.getEndNodeType())) {
         throw new HelixException(
-            "Failed to add topology node because duplicate leaf nodes are not allowed. Duplicate node name: "
-                + pathValue);
+            String.format(
+                "Failed to add topology node because duplicate leaf nodes are not allowed. " +
+                    "Duplicate node name: %s, Instance: %s", pathValue, instanceName));
       }
       current = current.getChild(pathValue);
     }

@@ -52,7 +52,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     ALL_PARTITIONS_DISABLED_GAUGE("AllPartitionsDisabled"),
     MAX_CAPACITY_USAGE_GAUGE("MaxCapacityUsageGauge"),
     MESSAGE_QUEUE_SIZE_GAUGE("MessageQueueSizeGauge"),
-    PASTDUE_MESSAGE_GAUGE("PastDueMessageGauge");
+    PASTDUE_MESSAGE_GAUGE("PastDueMessageGauge"),
+    ERROR_PARTITIONS_GAUGE("ErrorPartitions"),
+    INSTANCE_OPERATION_DURATION_ENABLE_GAUGE("InstanceOperationDuration_ENABLE"),
+    INSTANCE_OPERATION_DURATION_DISABLE_GAUGE("InstanceOperationDuration_DISABLE"),
+    INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE("InstanceOperationDuration_EVACUATE"),
+    INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
+    INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
+    PARTITION_COUNT_GAUGE("PartitionGauge"),
+    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge"),
+    DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge");
 
     private final String metricName;
 
@@ -82,6 +91,21 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Double> _maxCapacityUsageGauge;
   private SimpleDynamicMetric<Long> _messageQueueSizeGauge;
   private SimpleDynamicMetric<Long> _pastDueMessageGauge;
+  private SimpleDynamicMetric<Long> _errorPartitionsGauge;
+  private SimpleDynamicMetric<Long> _partitionCountGauge;
+  private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
+  private SimpleDynamicMetric<Long> _domainInfoValidGauge;
+
+  // Instance Operation Duration Gauges (in milliseconds)
+  private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationDisableGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationEvacuateGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationSwapInGauge;
+  private SimpleDynamicMetric<Long> _instanceOperationDurationUnknownGauge;
+
+  // Track current operation and start time for duration calculation
+  private InstanceConstants.InstanceOperation _currentOperation;
+  private long _currentOperationStartTime;
 
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
@@ -90,6 +114,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * Initialize the bean
    * @param clusterName the cluster to monitor
    * @param participantName the instance whose statistics this holds
+   * @param objectName the MBean object name
    */
   public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
     _clusterName = clusterName;
@@ -97,6 +122,10 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
+    _currentOperation = InstanceConstants.InstanceOperation.ENABLE;
+    // Initialize to 0 so that if we haven't received operation info yet, duration will be large
+    // and will be corrected when we receive the actual operation start time from InstanceConfig
+    _currentOperationStartTime = 0L;
 
     createMetrics();
   }
@@ -123,6 +152,30 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _pastDueMessageGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.PASTDUE_MESSAGE_GAUGE.metricName(),
             0L);
+    _errorPartitionsGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.ERROR_PARTITIONS_GAUGE.metricName(),
+            0L);
+    _partitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.PARTITION_COUNT_GAUGE.metricName(),
+            0L);
+    _topStatePartitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.TOP_STATE_PARTITION_COUNT_GAUGE.metricName(),
+            0L);
+
+    // Initialize instance operation duration gauges
+    _instanceOperationDurationEnableGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_ENABLE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationDisableGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_DISABLE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationEvacuateGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_EVACUATE_GAUGE.metricName(), 0L);
+    _instanceOperationDurationSwapInGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE.metricName(), 0L);
+    _instanceOperationDurationUnknownGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE.metricName(), 0L);
+
+    _domainInfoValidGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.DOMAIN_INFO_VALID_GAUGE.metricName(), 1L);
   }
 
   private List<DynamicMetric<?, ?>> buildAttributeList() {
@@ -134,7 +187,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _onlineStatusGauge,
         _maxCapacityUsageGauge,
         _messageQueueSizeGauge,
-        _pastDueMessageGauge
+        _pastDueMessageGauge,
+        _errorPartitionsGauge,
+        _partitionCountGauge,
+        _topStatePartitionCountGauge,
+        _instanceOperationDurationEnableGauge,
+        _instanceOperationDurationDisableGauge,
+        _instanceOperationDurationEvacuateGauge,
+        _instanceOperationDurationSwapInGauge,
+        _instanceOperationDurationUnknownGauge,
+        _domainInfoValidGauge
     );
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
@@ -169,6 +231,61 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
   protected long getPastDueMessageGauge() { return _pastDueMessageGauge.getValue(); }
 
+  protected long getErrorPartitions() { return _errorPartitionsGauge.getValue(); }
+  protected long getPartitionCount() { return _partitionCountGauge.getValue(); }
+
+  protected long getTopStatePartitionCount() { return _topStatePartitionCountGauge.getValue(); }
+
+  protected long getDomainInfoValid() { return _domainInfoValidGauge.getValue(); }
+
+  /**
+   * Updates whether this instance has valid domain info for the cluster's topology configuration.
+   * @param isValid true if domain info is correctly populated, false otherwise
+   */
+  public synchronized void updateDomainInfoValid(boolean isValid) {
+    _domainInfoValidGauge.updateValue(isValid ? 1L : 0L);
+  }
+
+  /**
+   * Get the current duration in ENABLE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in ENABLE state
+   */
+  protected long getInstanceOperationDurationEnable() {
+    return _instanceOperationDurationEnableGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in DISABLE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in DISABLE state
+   */
+  protected long getInstanceOperationDurationDisable() {
+    return _instanceOperationDurationDisableGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in EVACUATE operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in EVACUATE state
+   */
+  protected long getInstanceOperationDurationEvacuate() {
+    return _instanceOperationDurationEvacuateGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in SWAP_IN operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in SWAP_IN state
+   */
+  protected long getInstanceOperationDurationSwapIn() {
+    return _instanceOperationDurationSwapInGauge.getValue();
+  }
+
+  /**
+   * Get the current duration in UNKNOWN operation (in milliseconds)
+   * @return duration in milliseconds, or 0 if not in UNKNOWN state
+   */
+  protected long getInstanceOperationDurationUnknown() {
+    return _instanceOperationDurationUnknownGauge.getValue();
+  }
+
   /**
    * Get the name of the monitored instance
    * @return instance name as a string
@@ -187,10 +304,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * @param disabledPartitions current disabled partitions
    * @param isLive true if running, false otherwise
    * @param isEnabled true if enabled, false if disabled
+   * @param errorPartitionCount number of partitions in ERROR state on this instance
    */
   public synchronized void updateInstance(Set<String> tags,
       Map<String, List<String>> disabledPartitions, List<String> oldDisabledPartitions,
-      boolean isLive, boolean isEnabled) {
+      boolean isLive, boolean isEnabled, long errorPartitionCount) {
     if (tags == null || tags.isEmpty()) {
       _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     } else {
@@ -219,6 +337,92 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _enabledStatusGauge.updateValue(isEnabled ? 1L : 0L);
     _disabledPartitionsGauge.updateValue(numDisabledPartitions);
     _allPartitionsDisabledGauge.updateValue(allPartitionsDisabled ? 1L : 0L);
+    _errorPartitionsGauge.updateValue(errorPartitionCount);
+  }
+
+  /**
+   * Updates the duration gauge for a specific operation.
+   * @param operation the operation to update
+   * @param duration the duration value to set
+   */
+  private void updateOperationDurationGauge(InstanceConstants.InstanceOperation operation, long duration) {
+    switch (operation) {
+      case ENABLE:
+        _instanceOperationDurationEnableGauge.updateValue(duration);
+        break;
+      case DISABLE:
+        _instanceOperationDurationDisableGauge.updateValue(duration);
+        break;
+      case EVACUATE:
+        _instanceOperationDurationEvacuateGauge.updateValue(duration);
+        break;
+      case SWAP_IN:
+        _instanceOperationDurationSwapInGauge.updateValue(duration);
+        break;
+      case UNKNOWN:
+        _instanceOperationDurationUnknownGauge.updateValue(duration);
+        break;
+      default:
+        // Should not happen, but handle gracefully
+        _instanceOperationDurationUnknownGauge.updateValue(duration);
+        break;
+    }
+  }
+
+  /**
+   * Resets all operation duration gauges except the specified operations to 0.
+   * This method is typically called after a delay to ensure only the specified
+   * operations show a non-zero duration.
+   *
+   * @param operationsToExclude the set of operations to exclude from reset
+   */
+  private void resetAllExceptOperations(Set<InstanceConstants.InstanceOperation> operationsToExclude) {
+    // Reset all gauges except the ones for the excluded operations
+    for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
+      if (!operationsToExclude.contains(operation)) {
+        updateOperationDurationGauge(operation, 0L);
+      }
+    }
+  }
+
+  /**
+   * Update the instance operation and recalculate duration metrics.
+   * This method should be called whenever the instance operation changes or periodically
+   * to update the duration of the current operation.
+   *
+   * @param newOperation the current instance operation
+   * @param operationStartTime the timestamp (in milliseconds since epoch) when the operation started.
+   *                          This should come from InstanceConfig.InstanceOperation.getTimestamp()
+   *                          to survive controller restarts. Use -1 if timestamp is unknown
+   *                          (for backward compatibility with legacy HELIX_ENABLED field).
+   */
+  public synchronized void updateInstanceOperation(InstanceConstants.InstanceOperation newOperation,
+      long operationStartTime) {
+    if (newOperation == null) {
+      newOperation = InstanceConstants.InstanceOperation.ENABLE;
+    }
+
+    // Handle backward compatibility: if timestamp is -1 (unknown), use current time
+    // This happens when InstanceOperation is not set and we're using legacy HELIX_ENABLED field
+    // We capture current time ONCE to ensure consistency across calculations
+    long currentTime = System.currentTimeMillis();
+    if (operationStartTime == -1L) {
+      operationStartTime = currentTime;
+    }
+
+    // Check if operation changed
+    if (_currentOperation != newOperation) {
+      // Switch to the new operation
+      _currentOperation = newOperation;
+      _currentOperationStartTime = operationStartTime;
+
+      // Reset all gauges except the current (new) operation
+      resetAllExceptOperations(Collections.singleton(_currentOperation));
+    }
+
+    // Update the duration gauge for the current operation (called on every update)
+    long currentDuration = currentTime - _currentOperationStartTime;
+    updateOperationDurationGauge(_currentOperation, currentDuration);
   }
 
   /**
@@ -252,6 +456,22 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    */
   public synchronized void updatePastDueMessageGauge(long msgCount) {
     _pastDueMessageGauge.updateValue(msgCount);
+  }
+
+  /**
+   * Updates the total number of partitions assigned to this instance.
+   * @param partitionCount total number of partitions on this instance
+   */
+  public synchronized void updatePartitionCount(long partitionCount) {
+    _partitionCountGauge.updateValue(partitionCount);
+  }
+
+  /**
+   * Updates the number of partitions in top state assigned to this instance.
+   * @param topStatePartitionCount number of partitions in top state on this instance
+   */
+  public synchronized void updateTopStatePartitionCount(long topStatePartitionCount) {
+    _topStatePartitionCountGauge.updateValue(topStatePartitionCount);
   }
 
   /**

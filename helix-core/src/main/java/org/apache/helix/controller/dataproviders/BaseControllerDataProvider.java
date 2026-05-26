@@ -715,23 +715,80 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
+   * Return a set of all instances that have the EVACUATE InstanceOperation.
+   * Per InstanceOperation.EVACUATE semantics, replicas are moved off the node only after
+   * the (N+1) replacement replica has been bootstrapped, so existing replica states
+   * (e.g., MASTER) may still be hosted on these instances during the swap-out window.
+   *
+   * @return An unmodifiable set of instance names with EVACUATE operation
+   */
+  public Set<String> getEvacuatingInstances() {
+    return Collections.unmodifiableSet(
+        _derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
+            InstanceConstants.InstanceOperation.EVACUATE).keySet());
+  }
+
+  /**
    * Return all the live nodes that are enabled. If a node is enabled, it is assignable.
-   * @return A new set contains live instance name and that are marked enabled
+   * @return An unmodifiable set contains live instance name and that are marked enabled
    */
   public Set<String> getEnabledLiveInstances() {
-    Set<String> enabledLiveInstances = new HashSet<>(getLiveInstances().keySet());
-    enabledLiveInstances.retainAll(getEnabledInstances());
+    Set<String> liveInstances = getLiveInstances().keySet();
+    Set<String> enabledInstances = getEnabledInstances();
 
-    return enabledLiveInstances;
+    Set<String> enabledLiveInstances = new HashSet<>();
+    for (String instance : enabledInstances) {
+      if (liveInstances.contains(instance)) {
+        enabledLiveInstances.add(instance);
+      }
+    }
+    return Collections.unmodifiableSet(enabledLiveInstances);
   }
 
   /**
    * Return all nodes that are enabled. If a node is enabled, it is assignable.
-   * @return A new set contains instance name and that are marked enabled
+   * @return An unmodifiable set contains instance name and that are marked enabled
    */
   public Set<String> getEnabledInstances() {
-    return new HashSet<>(_derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
+    return Collections.unmodifiableSet(_derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
         InstanceConstants.InstanceOperation.ENABLE).keySet());
+  }
+
+  /**
+   * Returns the set of instances that count toward the cluster-wide offline budget driving
+   * auto Maintenance Mode (MAX_OFFLINE_INSTANCES_ALLOWED at entry,
+   * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT at exit).
+   *
+   * <p>An instance counts when all three conditions hold:
+   * <ul>
+   *   <li>Its InstanceOperation is routable, i.e. not in
+   *       {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}.</li>
+   *   <li>It is not currently enabled-and-live.</li>
+   *   <li>It does not carry a valid (unexpired) instance-operation maintenance marker.</li>
+   * </ul>
+   * EVACUATE and DISABLE instances are included because they cannot accept new ONLINE
+   * replicas; ENABLE+offline instances are included for the same reason. SWAP_IN and
+   * UNKNOWN are excluded because they do not represent assignable cluster capacity.
+   *
+   * <p>Used by both BestPossibleStateCalcStage (MM entry) and MaintenanceRecoveryStage
+   * (MM exit) so that the same population is measured against each threshold.
+   *
+   * @param nowMs current wall-clock millis used for marker-expiry comparison.
+   * @return a fresh modifiable set of instance names.
+   */
+  public Set<String> getInstancesUnableToAcceptOnlineReplicas(long nowMs) {
+    Map<String, InstanceConfig> instanceConfigMap = getInstanceConfigMap();
+    Set<String> result = instanceConfigMap.entrySet().stream()
+        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+            e.getValue().getInstanceOperation().getOperation()))
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toCollection(HashSet::new));
+    result.removeAll(getEnabledLiveInstances());
+    result.removeIf(name -> {
+      InstanceConfig cfg = instanceConfigMap.get(name);
+      return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
+    });
+    return result;
   }
 
   /**

@@ -22,12 +22,14 @@ package org.apache.helix;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConstraints;
@@ -42,6 +44,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.model.OperationCheckResult;
 
 /*
  * Helix cluster management
@@ -800,11 +803,38 @@ public interface HelixAdmin {
   /**
    * Return if instance operation 'Evacuate' is finished.
    * @param clusterName
-   * @param instancesNames
-   * @return Return true if there is no current state nor pending message on the instance.
+   * @param instancesName
+   * @return Return true if there is no FULL_AUTO or CUSTOMIZED resources in the current state nor
+   * any pending message on the instance.
    */
-  default boolean isEvacuateFinished(String clusterName, String instancesNames) {
+  default boolean isEvacuateFinished(String clusterName, String instancesName) {
     throw new UnsupportedOperationException("isEvacuateFinished is not implemented.");
+  }
+
+  /**
+   * Return if instance operation 'Evacuate' is finished with exclusions.
+   * This method allows certain resources or partitions to be excluded from blocking evacuation completion.
+   *
+   * @param clusterName The name of the cluster
+   * @param instancesName The name of the instance
+   * @param exclusionTypes Set of exclusion types to apply (e.g., DISABLED_RESOURCE, ERROR_PARTITIONS, DISABLED_PARTITION)
+   * @return Return true if there is no FULL_AUTO or CUSTOMIZED resources (after applying exclusions)
+   *         in the current state nor any pending message on the instance.
+   */
+  default boolean isEvacuateFinished(String clusterName, String instancesName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    throw new UnsupportedOperationException("isEvacuateFinished with exclusions is not implemented.");
+  }
+
+  /**
+   * Check to see if instance is drained.
+   * @param clusterName
+   * @param instanceName
+   * @return Return true if there is no FULL_AUTO or CUSTOMIZED resources in the current state nor
+   * any pending message on the instance.
+   */
+  default boolean isInstanceDrained(String clusterName, String instanceName) {
+    throw new UnsupportedOperationException("isInstanceDrained is not implemented.");
   }
 
   /**
@@ -816,6 +846,19 @@ public interface HelixAdmin {
    */
   default boolean canCompleteSwap(String clusterName, String instanceName) {
     throw new UnsupportedOperationException("canCompleteSwap is not implemented.");
+  }
+
+  /**
+   * Check to see if swapping between two instances can be completed and return detailed
+   * results including specific blockers if the swap cannot complete. Either the swapOut
+   * or swapIn instance can be passed in.
+   *
+   * @param clusterName  The cluster name
+   * @param instanceName The instance that is being swapped out or swapped in
+   * @return OperationCheckResult containing whether the swap can complete and any blockers.
+   */
+  default OperationCheckResult canCompleteSwapWithDetails(String clusterName, String instanceName) {
+    throw new UnsupportedOperationException("canCompleteSwapWithDetails is not implemented.");
   }
 
   /**
@@ -831,6 +874,21 @@ public interface HelixAdmin {
   default boolean completeSwapIfPossible(String clusterName, String instanceName,
       boolean forceComplete) {
     throw new UnsupportedOperationException("completeSwapIfPossible is not implemented.");
+  }
+
+  /**
+   * Check to see if swapping between two instances is ready to be completed and complete it if
+   * possible, returning detailed results including blockers if the swap cannot complete.
+   * Either the swapOut or swapIn instance can be passed in.
+   *
+   * @param clusterName  The cluster name
+   * @param instanceName The instance that is being swapped out or swapped in
+   * @param forceComplete Whether to force complete the swap without checking if it is ready
+   * @return OperationCheckResult containing whether the swap completed and any blockers.
+   */
+  default OperationCheckResult completeSwapIfPossibleWithDetails(String clusterName,
+      String instanceName, boolean forceComplete) {
+    throw new UnsupportedOperationException("completeSwapIfPossibleWithDetails is not implemented.");
   }
 
   /**

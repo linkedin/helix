@@ -554,7 +554,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       autoExitMaintenancePipeline.addStage(new MaintenanceRecoveryStage());
 
       registry.register(ClusterEventType.IdealStateChange, dataRefresh, dataPreprocess,
-          rebalancePipeline);
+          rebalancePipeline, externalViewPipeline);
       registry.register(ClusterEventType.CurrentStateChange, dataRefresh, dataPreprocess,
           externalViewPipeline, rebalancePipeline);
       registry.register(ClusterEventType.InstanceConfigChange, dataRefresh, dataPreprocess,
@@ -1473,6 +1473,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
+
+    // NOTE: StageThreadPoolHelper is a JVM-wide shared pool. Do not shutdown here to avoid
+    // cross-cluster interference when a single controller shuts down.
 
     enableClusterStatusMonitor(false);
 

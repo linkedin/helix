@@ -64,13 +64,23 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   @Override
   public void process(ClusterEvent event) throws Exception {
     _eventId = event.getEventId();
+
+    // Check if V2 is enabled via cluster config and delegate if so
+    ResourceControllerDataProvider cache =
+        event.getAttribute(AttributeName.ControllerDataProvider.name());
+    if (cache != null && cache.getClusterConfig() != null
+        && cache.getClusterConfig().isIntermediateStateCalcStageV2Enabled()) {
+      LogUtil.logInfo(logger, _eventId,
+          "IntermediateStateCalcStage V2 is enabled via cluster config. Delegating to V2.");
+      createV2Stage().process(event);
+      return;
+    }
+
     CurrentStateOutput currentStateOutput = event.getAttribute(AttributeName.CURRENT_STATE.name());
     BestPossibleStateOutput bestPossibleStateOutput =
         event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
     Map<String, Resource> resourceToRebalance =
         event.getAttribute(AttributeName.RESOURCES_TO_REBALANCE.name());
-    ResourceControllerDataProvider cache =
-        event.getAttribute(AttributeName.ControllerDataProvider.name());
     MessageOutput messageOutput = event.getAttribute(AttributeName.MESSAGES_SELECTED.name());
 
     if (currentStateOutput == null || bestPossibleStateOutput == null || resourceToRebalance == null
@@ -93,6 +103,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       validateMaxPartitionsPerInstance(event, cache, intermediateStateOutput,
           maxPartitionPerInstance);
     }
+  }
+
+  protected IntermediateStateCalcStageV2 createV2Stage() {
+    return new IntermediateStateCalcStageV2();
   }
 
   /**
@@ -146,6 +160,29 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         }
       }
       Collections.sort(prioritizedResourceList);
+    }
+
+    // Charge all pending transitions for all FULL_AUTO resources upfront before processing any
+    // resource. This ensures the throttle controller has an accurate picture of all in-flight
+    // transitions regardless of resource processing order. Only FULL_AUTO resources are charged
+    // because throttling is only applied to FULL_AUTO resources in computeIntermediatePartitionState.
+    for (String resourceName : resourceMap.keySet()) {
+      Resource resource = resourceMap.get(resourceName);
+      IdealState is = dataCache.getIdealState(resourceName);
+      if (is == null || !IdealState.RebalanceMode.FULL_AUTO.equals(is.getRebalanceMode())) {
+        continue;
+      }
+      StateModelDefinition stateModelDef = dataCache.getStateModelDef(is.getStateModelDefRef());
+      if (stateModelDef == null) {
+        continue;
+      }
+      Map<String, List<String>> preferenceLists =
+          bestPossibleStateOutput.getPreferenceLists(resourceName);
+      if (preferenceLists == null) {
+        preferenceLists = Collections.emptyMap();
+      }
+      chargePendingTransition(resource, currentStateOutput, throttleController, dataCache,
+          preferenceLists, stateModelDef);
     }
 
     ClusterStatusMonitor clusterStatusMonitor =
@@ -329,9 +366,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     int threshold = 1; // Default threshold for ErrorOrRecoveryPartitionThresholdForLoadBalance
     // Keep the error count as partition level. This logic only applies to downward state transition determination
     for (Partition partition : currentStateOutput.getCurrentStateMap(resourceName).keySet()) {
-      Map<String, String> entry =
-          currentStateOutput.getCurrentStateMap(resourceName).get(partition);
-      if (entry.values().stream().anyMatch(x -> x.contains(HelixDefinedState.ERROR.name()))) {
+      Map<String, String> entry = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
+      if (entry.containsValue(HelixDefinedState.ERROR.name())) {
         partitionsWithErrorStateReplica.add(partition);
       }
     }
@@ -350,8 +386,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // less than the threshold. Otherwise, only allow downward-transition load balance
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
 
-    chargePendingTransition(resource, currentStateOutput, throttleController, cache,
-        preferenceLists, stateModelDef);
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        clusterConfig.isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
 
     // Sort partitions in case of urgent partition need to take the quota first.
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
@@ -375,6 +411,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : messagesToThrottle) {
         RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredState, message, derivedCurrentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDef)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
 
         // Number of states required by StateModelDefinition are not satisfied, need recovery
         if (rebalanceType.equals(RebalanceType.RECOVERY_BALANCE)) {
@@ -465,6 +505,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       StateTransitionThrottleController throttleController, ResourceControllerDataProvider cache,
       Map<String, List<String>> preferenceLists, StateModelDefinition stateModelDefinition) {
     String resourceName = resource.getResourceName();
+    boolean recoveryRebalanceForTopStateDownwardTransition =
+        cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
     // check and charge pending transitions
     for (Partition partition : resource.getPartitions()) {
       // To clarify that custom mode does not apply recovery/load rebalance since user can define different number of
@@ -487,6 +529,10 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       for (Message message : pendingMessages) {
         StateTransitionThrottleConfig.RebalanceType rebalanceType =
             getRebalanceTypePerMessage(requiredStates, message, currentStateMap);
+        if (StateTransitionHelper.shouldReclassifyForTopStateHandOff(
+            recoveryRebalanceForTopStateDownwardTransition, message, stateModelDefinition)) {
+          rebalanceType = RebalanceType.RECOVERY_BALANCE;
+        }
         String currentState = currentStateMap.get(message.getTgtName());
         if (currentState == null) {
           currentState = stateModelDefinition.getInitialState();
@@ -777,6 +823,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     private final Map<Partition, Map<String, String>> _bestPossibleMap;
     private final Map<Partition, Map<String, String>> _currentStateMap;
     private final String _topState;
+    // Cache computation results to avoid duplicated computation
+    private final Map<Partition, Integer> _currentActiveReplicasCache = new HashMap<>();
+    private final Map<Partition, Integer> _idealStateMatchedCache = new HashMap<>();
 
     PartitionPriorityComparator(Map<Partition, Map<String, String>> bestPossibleMap,
         Map<Partition, Map<String, String>> currentStateMap, String topState) {
@@ -794,14 +843,14 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         return Integer.compare(missTopState1, missTopState2);
       }
       // Higher priority for the partition with fewer active replicas
-      int currentActiveReplicas1 = getCurrentActiveReplicas(p1);
-      int currentActiveReplicas2 = getCurrentActiveReplicas(p2);
+      int currentActiveReplicas1 = _currentActiveReplicasCache.computeIfAbsent(p1, this::getCurrentActiveReplicas);
+      int currentActiveReplicas2 = _currentActiveReplicasCache.computeIfAbsent(p2, this::getCurrentActiveReplicas);
       if (currentActiveReplicas1 != currentActiveReplicas2) {
         return Integer.compare(currentActiveReplicas1, currentActiveReplicas2);
       }
       // Higher priority for the partition with fewer replicas with states matching with IdealState
-      int idealStateMatched1 = getIdealStateMatched(p1);
-      int idealStateMatched2 = getIdealStateMatched(p2);
+      int idealStateMatched1 = _idealStateMatchedCache.computeIfAbsent(p1, this::getIdealStateMatched);
+      int idealStateMatched2 = _idealStateMatchedCache.computeIfAbsent(p2, this::getIdealStateMatched);
       if (idealStateMatched1 != idealStateMatched2) {
         return Integer.compare(idealStateMatched1, idealStateMatched2);
       }

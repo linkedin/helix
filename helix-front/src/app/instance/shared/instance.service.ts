@@ -1,7 +1,8 @@
 import { map } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
+import { HttpParams } from '@angular/common/http';
 
-import { Instance } from './instance.model';
+import { Instance, InstanceOperationState } from './instance.model';
 import { HelixService } from '../../core/helix.service';
 import { Node } from '../../shared/models/node.model';
 
@@ -10,20 +11,39 @@ export class InstanceService extends HelixService {
   public getAll(clusterName: string) {
     return this.request(`/clusters/${clusterName}/instances`).pipe(
       map((data) => {
-        const onlineInstances = data.online;
-        const disabledInstances = data.disabled;
+        const onlineInstances: string[] = data.online || [];
+        const enabledInstances: string[] = data.enabled || [];
+        const disabledInstances: string[] = data.disabled || [];
+        const evacuatedInstances: string[] = data.evacuated || [];
+        const swapInInstances: string[] = data.swap_in || [];
+        const unknownInstances: string[] = data.unknown || [];
 
         return data.instances
           .sort()
-          .map(
-            (name) =>
-              new Instance(
-                name,
-                clusterName,
-                disabledInstances.indexOf(name) < 0,
-                onlineInstances.indexOf(name) >= 0
-              )
-          );
+          .map((name) => {
+            let operationState: InstanceOperationState = 'ENABLE';
+            if (disabledInstances.indexOf(name) >= 0) {
+              operationState = 'DISABLE';
+            } else if (evacuatedInstances.indexOf(name) >= 0) {
+              operationState = 'EVACUATE';
+            } else if (swapInInstances.indexOf(name) >= 0) {
+              operationState = 'SWAP_IN';
+            } else if (unknownInstances.indexOf(name) >= 0) {
+              operationState = 'UNKNOWN';
+            } else if (enabledInstances.indexOf(name) >= 0) {
+              operationState = 'ENABLE';
+            }
+
+            return new Instance(
+              name,
+              clusterName,
+              operationState === 'ENABLE',
+              onlineInstances.indexOf(name) >= 0,
+              undefined,
+              undefined,
+              operationState
+            );
+          });
       })
     );
   }
@@ -35,23 +55,44 @@ export class InstanceService extends HelixService {
       map((data) => {
         const liveInstance = data.liveInstance;
         const config = data.config;
-        // there are two cases meaning enabled both:
-        //   HELIX_ENABLED: true or no such configuration
         const enabled =
           config &&
           config.simpleFields &&
           config.simpleFields.HELIX_ENABLED != 'false';
 
+        let operationState: InstanceOperationState = enabled
+          ? 'ENABLE'
+          : 'DISABLE';
+        if (
+          config &&
+          config.simpleFields &&
+          config.simpleFields.INSTANCE_OPERATION_STATE
+        ) {
+          const op = config.simpleFields.INSTANCE_OPERATION_STATE;
+          if (['ENABLE', 'DISABLE', 'EVACUATE', 'SWAP_IN', 'UNKNOWN'].includes(op)) {
+            operationState = op as InstanceOperationState;
+          }
+        }
+
         return liveInstance && liveInstance.simpleFields
           ? new Instance(
               data.id,
               clusterName,
-              enabled,
+              operationState === 'ENABLE',
               liveInstance.simpleFields.LIVE_INSTANCE,
               liveInstance.simpleFields.SESSION_ID,
-              liveInstance.simpleFields.HELIX_VERSION
+              liveInstance.simpleFields.HELIX_VERSION,
+              operationState
             )
-          : new Instance(data.id, clusterName, enabled, null);
+          : new Instance(
+              data.id,
+              clusterName,
+              operationState === 'ENABLE',
+              null,
+              undefined,
+              undefined,
+              operationState
+            );
       })
     );
   }
@@ -90,6 +131,24 @@ export class InstanceService extends HelixService {
     return this.post(
       `/clusters/${clusterName}/instances/${instanceName}?command=disable`,
       null
+    );
+  }
+
+  public setInstanceOperation(
+    clusterName: string,
+    instanceName: string,
+    operation: InstanceOperationState,
+    reason: string
+  ) {
+    const params = new HttpParams()
+      .set('command', 'setInstanceOperation')
+      .set('instanceOperation', operation)
+      .set('instanceOperationSource', 'USER')
+      .set('reason', reason);
+    return this.post(
+      `/clusters/${clusterName}/instances/${instanceName}`,
+      null,
+      params
     );
   }
 }

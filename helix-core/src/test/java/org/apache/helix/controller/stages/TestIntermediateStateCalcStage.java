@@ -19,10 +19,12 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
@@ -648,6 +650,621 @@ public class TestIntermediateStateCalcStage extends BaseStageTest {
           .getStateMap()
           .equals(expectedResult.getPartitionStateMap(resource).getStateMap()));
     }
+  }
+
+  @Test
+  public void testEnableRecoveryRebalanceForTopStateDownwardStateTransition() {
+    String[] resources = {"TestResource"};
+    String resource = resources[0];
+    int nReplica = 3;
+    int nPartition = 1;
+
+    setupIdealState(4, resources, nPartition, nReplica, IdealState.RebalanceMode.FULL_AUTO,
+        "MasterSlave", null, null, 2);
+    setupStateModel();
+    setupInstances(4);
+    setupLiveInstances(4);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "MasterSlave"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "MasterSlave"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    // Set load balance throttling to allow 0 load balance messages per instance so that
+    // a MASTER->SLAVE message classified as LOAD_BALANCE gets throttled
+    _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    _clusterConfig.setStateTransitionThrottleConfigs(ImmutableList.of(
+        new StateTransitionThrottleConfig(StateTransitionThrottleConfig.RebalanceType.LOAD_BALANCE,
+            StateTransitionThrottleConfig.ThrottleScope.INSTANCE, 0)));
+    setClusterConfig(_clusterConfig);
+
+    Partition partition = new Partition(resource + "_0");
+    Map<String, List<String>> partitionMap = new HashMap<>();
+    partitionMap.put(partition.getPartitionName(),
+        Arrays.asList("localhost_1", "localhost_2", "localhost_3"));
+    bestPossibleStateOutput.setPreferenceLists(resource, partitionMap);
+
+    bestPossibleStateOutput.setState(resource, partition, "localhost_1", "MASTER");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_2", "SLAVE");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_3", "SLAVE");
+
+    currentStateOutput.setCurrentState(resource, partition, "localhost_0", "MASTER");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_1", "SLAVE");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_2", "SLAVE");
+
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("MASTER", "SLAVE", "localhost_0"));
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    // Without the config, the MASTER->SLAVE message is classified as LOAD_BALANCE and gets throttled
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 0);
+    Assert.assertTrue(
+        output.getPartitionStateMap(resource).getPartitionMap(partition)
+            .equals(currentStateOutput.getCurrentStateMap(resource, partition)));
+
+    // Now enable the config to treat topState downward transition as recovery rebalance
+    _clusterConfig.setRecoveryRebalanceForTopStateDownwardTransitionEnabled(true);
+    setClusterConfig(_clusterConfig);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("MASTER", "SLAVE", "localhost_0"));
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    // With the config enabled, the MASTER->SLAVE message is now RECOVERY_REBALANCE and not throttled
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 1);
+    Assert.assertEquals(
+        messageSelectOutput.getMessages(resource, partition).get(0).getSTRebalanceType(),
+        Message.STRebalanceType.RECOVERY_REBALANCE);
+    Map<String, String> stateMap =
+        output.getPartitionStateMap(resource).getPartitionMap(partition);
+    Assert.assertTrue(
+        stateMap.values().stream().allMatch(state -> state.equals("SLAVE")),
+        "All hosts should be in SLAVE state after MASTER->SLAVE transition is allowed");
+  }
+
+  @Test
+  public void testNonTopStateDownwardTransitionNotReclassifiedAsRecovery() {
+    String[] resources = {"TestResource"};
+    String resource = resources[0];
+    int nReplica = 3;
+    int nPartition = 1;
+
+    setupIdealState(4, resources, nPartition, nReplica, IdealState.RebalanceMode.FULL_AUTO,
+        "MasterSlave", null, null, 2);
+    setupStateModel();
+    setupInstances(4);
+    setupLiveInstances(4);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "MasterSlave"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "MasterSlave"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    // Enable recovery rebalance for top state downward transition AND
+    // set load balance throttle to 0 so load balance messages get throttled
+    _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    _clusterConfig.setRecoveryRebalanceForTopStateDownwardTransitionEnabled(true);
+    _clusterConfig.setStateTransitionThrottleConfigs(ImmutableList.of(
+        new StateTransitionThrottleConfig(StateTransitionThrottleConfig.RebalanceType.LOAD_BALANCE,
+            StateTransitionThrottleConfig.ThrottleScope.INSTANCE, 0)));
+    setClusterConfig(_clusterConfig);
+
+    Partition partition = new Partition(resource + "_0");
+    Map<String, List<String>> partitionMap = new HashMap<>();
+    partitionMap.put(partition.getPartitionName(),
+        Arrays.asList("localhost_1", "localhost_2", "localhost_3"));
+    bestPossibleStateOutput.setPreferenceLists(resource, partitionMap);
+
+    bestPossibleStateOutput.setState(resource, partition, "localhost_1", "MASTER");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_2", "SLAVE");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_3", "SLAVE");
+
+    // localhost_0 is SLAVE and needs to go OFFLINE (non-top-state downward transition)
+    currentStateOutput.setCurrentState(resource, partition, "localhost_0", "SLAVE");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_1", "MASTER");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_2", "SLAVE");
+
+    // SLAVE->OFFLINE is NOT a top-state downward transition, should remain LOAD_BALANCE
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("SLAVE", "OFFLINE", "localhost_0"));
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    // SLAVE->OFFLINE should still be throttled because it is LOAD_BALANCE, not reclassified
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 0,
+        "SLAVE->OFFLINE should NOT be reclassified as RECOVERY_REBALANCE");
+  }
+
+  @Test
+  public void testRecoveryRebalanceForTopStateDownwardWithLeaderStandby() {
+    String[] resources = {"TestResource"};
+    String resource = resources[0];
+    int nReplica = 3;
+    int nPartition = 1;
+
+    setupIdealState(4, resources, nPartition, nReplica, IdealState.RebalanceMode.FULL_AUTO,
+        "LeaderStandby", null, null, 2);
+    setupStateModel();
+    setupInstances(4);
+    setupLiveInstances(4);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "LeaderStandby"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "LeaderStandby"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    // Enable recovery rebalance for top state downward transition AND
+    // set load balance throttle to 0 so load balance messages get throttled
+    _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    _clusterConfig.setRecoveryRebalanceForTopStateDownwardTransitionEnabled(true);
+    _clusterConfig.setStateTransitionThrottleConfigs(ImmutableList.of(
+        new StateTransitionThrottleConfig(StateTransitionThrottleConfig.RebalanceType.LOAD_BALANCE,
+            StateTransitionThrottleConfig.ThrottleScope.INSTANCE, 0)));
+    setClusterConfig(_clusterConfig);
+
+    Partition partition = new Partition(resource + "_0");
+    Map<String, List<String>> partitionMap = new HashMap<>();
+    partitionMap.put(partition.getPartitionName(),
+        Arrays.asList("localhost_1", "localhost_2", "localhost_3"));
+    bestPossibleStateOutput.setPreferenceLists(resource, partitionMap);
+
+    bestPossibleStateOutput.setState(resource, partition, "localhost_1", "LEADER");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_2", "STANDBY");
+    bestPossibleStateOutput.setState(resource, partition, "localhost_3", "STANDBY");
+
+    currentStateOutput.setCurrentState(resource, partition, "localhost_0", "LEADER");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_1", "STANDBY");
+    currentStateOutput.setCurrentState(resource, partition, "localhost_2", "STANDBY");
+
+    // LEADER->STANDBY is a top-state downward transition
+    messageSelectOutput.addMessage(resource, partition,
+        generateMessage("LEADER", "STANDBY", "localhost_0"));
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    // LEADER->STANDBY should be reclassified as RECOVERY_REBALANCE and not throttled
+    Assert.assertEquals(messageSelectOutput.getMessages(resource, partition).size(), 1,
+        "LEADER->STANDBY should be reclassified as RECOVERY_REBALANCE and not throttled");
+    Assert.assertEquals(
+        messageSelectOutput.getMessages(resource, partition).get(0).getSTRebalanceType(),
+        Message.STRebalanceType.RECOVERY_REBALANCE);
+    Map<String, String> stateMap =
+        output.getPartitionStateMap(resource).getPartitionMap(partition);
+    Assert.assertTrue(
+        stateMap.values().stream().allMatch(state -> state.equals("STANDBY")),
+        "All hosts should be in STANDBY state after LEADER->STANDBY transition is allowed");
+  }
+
+  @Test
+  public void testPendingMessagesExceedThresholdBlockNewResource() {
+    String existingResource = "existingResource";
+    String newResource = "newResource";
+    String[] resources = new String[]{existingResource, newResource};
+    int nPartition = 3;
+    int nInstances = 3;
+    int nReplica = 1;
+
+    preSetup(resources, nInstances, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    String instanceName = HOSTNAME_PREFIX + 0;
+
+    // existingResource: 3 partitions on localhost_0 with pending OFFLINE→ONLINE messages.
+    // These 3 pending messages will exhaust the instance-level RECOVERY_BALANCE quota of 3.
+    IdealState existingIs =
+        accessor.getProperty(accessor.keyBuilder().idealStates(existingResource));
+    setSingleIdealState(existingIs);
+    Map<String, List<String>> existingPartitionMap = new HashMap<>();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(existingResource + "_" + p);
+      existingPartitionMap
+          .put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      currentStateOutput.setCurrentState(existingResource, partition, instanceName, "OFFLINE");
+      bestPossibleStateOutput.setState(existingResource, partition, instanceName, "ONLINE");
+      Message pendingMessage = generateMessage("OFFLINE", "ONLINE", instanceName);
+      currentStateOutput
+          .setPendingMessage(existingResource, partition, instanceName, pendingMessage);
+    }
+    bestPossibleStateOutput.setPreferenceLists(existingResource, existingPartitionMap);
+
+    // newResource: 3 partitions on localhost_0 needing OFFLINE→ONLINE (recovery).
+    // Since the throttle quota on localhost_0 is already exhausted by existingResource's pending
+    // messages, all transitions for newResource should be throttled.
+    IdealState newIs = accessor.getProperty(accessor.keyBuilder().idealStates(newResource));
+    setSingleIdealState(newIs);
+    Map<String, List<String>> newPartitionMap = new HashMap<>();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      newPartitionMap.put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      currentStateOutput.setCurrentState(newResource, partition, instanceName, "OFFLINE");
+      bestPossibleStateOutput.setState(newResource, partition, instanceName, "ONLINE");
+      messageSelectOutput.addMessage(newResource, partition,
+          generateMessage("OFFLINE", "ONLINE", instanceName));
+    }
+    bestPossibleStateOutput.setPreferenceLists(newResource, newPartitionMap);
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    Map<Partition, Map<String, String>> newResourceStateMap =
+        output.getPartitionStateMap(newResource).getStateMap();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      Assert.assertEquals(newResourceStateMap.get(partition).get(instanceName), "OFFLINE",
+          "Partition " + partition.getPartitionName()
+              + " should be throttled because pending messages already exhausted the quota");
+    }
+  }
+
+  @Test
+  public void testPendingMessagesBelowThresholdPartiallyThrottleNewResource() {
+    String existingResource = "existingResource";
+    String newResource = "newResource";
+    String[] resources = new String[]{existingResource, newResource};
+    int nPartition = 3;
+    int nInstances = 3;
+    int nReplica = 1;
+
+    preSetup(resources, nInstances, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    String instanceName = HOSTNAME_PREFIX + 0;
+
+    // existingResource: 2 partitions with pending messages, 1 partition already ONLINE.
+    // This charges 2 of the 3 instance-level RECOVERY_BALANCE quota, leaving 1 remaining.
+    IdealState existingIs =
+        accessor.getProperty(accessor.keyBuilder().idealStates(existingResource));
+    setSingleIdealState(existingIs);
+    Map<String, List<String>> existingPartitionMap = new HashMap<>();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(existingResource + "_" + p);
+      existingPartitionMap
+          .put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      if (p < 2) {
+        currentStateOutput.setCurrentState(existingResource, partition, instanceName, "OFFLINE");
+        bestPossibleStateOutput.setState(existingResource, partition, instanceName, "ONLINE");
+        Message pendingMessage = generateMessage("OFFLINE", "ONLINE", instanceName);
+        currentStateOutput
+            .setPendingMessage(existingResource, partition, instanceName, pendingMessage);
+      } else {
+        currentStateOutput.setCurrentState(existingResource, partition, instanceName, "ONLINE");
+        bestPossibleStateOutput.setState(existingResource, partition, instanceName, "ONLINE");
+      }
+    }
+    bestPossibleStateOutput.setPreferenceLists(existingResource, existingPartitionMap);
+
+    // newResource: 3 partitions on localhost_0 needing OFFLINE→ONLINE (recovery).
+    // With 1 quota remaining, exactly 1 partition should transition and 2 should be throttled.
+    IdealState newIs = accessor.getProperty(accessor.keyBuilder().idealStates(newResource));
+    setSingleIdealState(newIs);
+    Map<String, List<String>> newPartitionMap = new HashMap<>();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      newPartitionMap.put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      currentStateOutput.setCurrentState(newResource, partition, instanceName, "OFFLINE");
+      bestPossibleStateOutput.setState(newResource, partition, instanceName, "ONLINE");
+      messageSelectOutput.addMessage(newResource, partition,
+          generateMessage("OFFLINE", "ONLINE", instanceName));
+    }
+    bestPossibleStateOutput.setPreferenceLists(newResource, newPartitionMap);
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    Map<Partition, Map<String, String>> newResourceStateMap =
+        output.getPartitionStateMap(newResource).getStateMap();
+    int onlineCount = 0;
+    int offlineCount = 0;
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      String state = newResourceStateMap.get(partition).get(instanceName);
+      if ("ONLINE".equals(state)) {
+        onlineCount++;
+      } else if ("OFFLINE".equals(state)) {
+        offlineCount++;
+      }
+    }
+    Assert.assertEquals(onlineCount, 1,
+        "Exactly 1 partition should have transitioned with the remaining quota");
+    Assert.assertEquals(offlineCount, 2,
+        "2 partitions should be throttled and remain OFFLINE");
+  }
+
+  @Test
+  public void testAnyTypeThrottleWithPendingMessagesBlockNewResource() {
+    String existingResource = "existingResource";
+    String newResource = "newResource";
+    String[] resources = new String[]{existingResource, newResource};
+    int nPartition = 4;
+    int nInstances = 3;
+    int nReplica = 1;
+
+    // Use a custom setup with RebalanceType.ANY at INSTANCE scope, limit 3.
+    // This directly reproduces the customer scenario where MAX_PARTITION_IN_TRANSITION
+    // is configured at INSTANCE scope regardless of rebalance type.
+    setupIdealState(nInstances, resources, nInstances, nReplica,
+        IdealState.RebalanceMode.FULL_AUTO, "OnlineOffline");
+    setupStateModel();
+    setupInstances(nInstances);
+    setupLiveInstances(nInstances);
+    _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    _clusterConfig.setStateTransitionThrottleConfigs(ImmutableList.of(
+        new StateTransitionThrottleConfig(StateTransitionThrottleConfig.RebalanceType.ANY,
+            StateTransitionThrottleConfig.ThrottleScope.INSTANCE, 3)));
+    setClusterConfig(_clusterConfig);
+
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    String instanceName = HOSTNAME_PREFIX + 0;
+
+    // existingResource: 3 partitions on localhost_0 with pending OFFLINE→ONLINE messages.
+    // These 3 pending messages exhaust the ANY quota of 3 on this instance.
+    IdealState existingIs =
+        accessor.getProperty(accessor.keyBuilder().idealStates(existingResource));
+    setSingleIdealState(existingIs);
+    Map<String, List<String>> existingPartitionMap = new HashMap<>();
+    for (int p = 0; p < 3; p++) {
+      Partition partition = new Partition(existingResource + "_" + p);
+      existingPartitionMap
+          .put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      currentStateOutput.setCurrentState(existingResource, partition, instanceName, "OFFLINE");
+      bestPossibleStateOutput.setState(existingResource, partition, instanceName, "ONLINE");
+      Message pendingMessage = generateMessage("OFFLINE", "ONLINE", instanceName);
+      currentStateOutput
+          .setPendingMessage(existingResource, partition, instanceName, pendingMessage);
+    }
+    // 4th partition is already ONLINE
+    Partition stablePartition = new Partition(existingResource + "_3");
+    existingPartitionMap
+        .put(stablePartition.getPartitionName(), Collections.singletonList(instanceName));
+    currentStateOutput.setCurrentState(existingResource, stablePartition, instanceName, "ONLINE");
+    bestPossibleStateOutput.setState(existingResource, stablePartition, instanceName, "ONLINE");
+    bestPossibleStateOutput.setPreferenceLists(existingResource, existingPartitionMap);
+
+    // newResource: 4 partitions on localhost_0 needing OFFLINE→ONLINE.
+    // Since the ANY quota on localhost_0 is fully exhausted, all messages should be throttled.
+    IdealState newIs = accessor.getProperty(accessor.keyBuilder().idealStates(newResource));
+    setSingleIdealState(newIs);
+    Map<String, List<String>> newPartitionMap = new HashMap<>();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      newPartitionMap.put(partition.getPartitionName(), Collections.singletonList(instanceName));
+      currentStateOutput.setCurrentState(newResource, partition, instanceName, "OFFLINE");
+      bestPossibleStateOutput.setState(newResource, partition, instanceName, "ONLINE");
+      messageSelectOutput.addMessage(newResource, partition,
+          generateMessage("OFFLINE", "ONLINE", instanceName));
+    }
+    bestPossibleStateOutput.setPreferenceLists(newResource, newPartitionMap);
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+
+    Map<Partition, Map<String, String>> newResourceStateMap =
+        output.getPartitionStateMap(newResource).getStateMap();
+    for (int p = 0; p < nPartition; p++) {
+      Partition partition = new Partition(newResource + "_" + p);
+      Assert.assertEquals(newResourceStateMap.get(partition).get(instanceName), "OFFLINE",
+          "Partition " + partition.getPartitionName()
+              + " should be throttled because ANY quota on the instance is exhausted");
+    }
+  }
+
+  @Test
+  public void testDelegatesToV2WhenEnabled() {
+    String resourcePrefix = "resource";
+    int nResource = 2;
+    int nPartition = 2;
+    int nReplica = 3;
+
+    String[] resources = new String[nResource];
+    for (int i = 0; i < nResource; i++) {
+      resources[i] = resourcePrefix + "_" + i;
+    }
+
+    preSetup(resources, nReplica, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    // Enable V2
+    _clusterConfig.setIntermediateStateCalcStageV2Enabled(true);
+    _clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(1);
+    setClusterConfig(_clusterConfig);
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    for (String resource : resources) {
+      IdealState is = accessor.getProperty(accessor.keyBuilder().idealStates(resource));
+      setSingleIdealState(is);
+
+      for (int p = 0; p < nPartition; p++) {
+        Partition partition = new Partition(resource + "_" + p);
+        for (int r = 0; r < nReplica; r++) {
+          String instanceName = HOSTNAME_PREFIX + r;
+          currentStateOutput.setCurrentState(resource, partition, instanceName, "ONLINE");
+          bestPossibleStateOutput.setState(resource, partition, instanceName, "ONLINE");
+        }
+      }
+    }
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+
+    // Run V1 stage -- it should delegate to V2
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
+
+    // Verify V2 was instantiated
+    Assert.assertTrue(v2Created.get(), "V2 stage should have been instantiated when enabled");
+  }
+
+  @Test
+  public void testUsesV1WhenV2Disabled() {
+    String resourcePrefix = "resource";
+    int nResource = 2;
+    int nPartition = 2;
+    int nReplica = 3;
+
+    String[] resources = new String[nResource];
+    for (int i = 0; i < nResource; i++) {
+      resources[i] = resourcePrefix + "_" + i;
+    }
+
+    preSetup(resources, nReplica, nReplica);
+    event.addAttribute(AttributeName.RESOURCES.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, nPartition, "OnlineOffline"));
+
+    // V2 not enabled (default false)
+    _clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(1);
+    setClusterConfig(_clusterConfig);
+
+    BestPossibleStateOutput bestPossibleStateOutput = new BestPossibleStateOutput();
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    MessageOutput messageSelectOutput = new MessageOutput();
+
+    for (String resource : resources) {
+      IdealState is = accessor.getProperty(accessor.keyBuilder().idealStates(resource));
+      setSingleIdealState(is);
+
+      for (int p = 0; p < nPartition; p++) {
+        Partition partition = new Partition(resource + "_" + p);
+        for (int r = 0; r < nReplica; r++) {
+          String instanceName = HOSTNAME_PREFIX + r;
+          currentStateOutput.setCurrentState(resource, partition, instanceName, "ONLINE");
+          bestPossibleStateOutput.setState(resource, partition, instanceName, "ONLINE");
+        }
+      }
+    }
+
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messageSelectOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+
+    // Run V1 stage -- it should use V1 logic, not delegate to V2
+    AtomicBoolean v2Created = new AtomicBoolean(false);
+    IntermediateStateCalcStage stage = new IntermediateStateCalcStage() {
+      @Override
+      protected IntermediateStateCalcStageV2 createV2Stage() {
+        v2Created.set(true);
+        return super.createV2Stage();
+      }
+    };
+    runStage(event, stage);
+
+    // Verify V2 was NOT instantiated
+    Assert.assertFalse(v2Created.get(), "V2 stage should NOT have been instantiated when disabled");
+    // Also verify V1 produced output
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+    Assert.assertNotNull(output, "V1 should have computed intermediate state output");
   }
 
   private void preSetup(String[] resources, int numOfLiveInstances, int numOfReplicas) {

@@ -5,9 +5,9 @@ import { Settings } from '../../core/settings';
 import { WorkflowService } from '../shared/workflow.service';
 import { DatatableComponent } from '@swimlane/ngx-datatable';
 
-type WorkflowRow = {
+interface WorkflowRow {
   name: string;
-};
+}
 
 @Component({
   selector: 'hi-workflow-list',

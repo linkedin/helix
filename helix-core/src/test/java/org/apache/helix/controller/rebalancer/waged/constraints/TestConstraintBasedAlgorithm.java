@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ForkJoinPool;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -45,6 +46,7 @@ import static org.mockito.Mockito.when;
 
 
 public class TestConstraintBasedAlgorithm {
+  private static final ForkJoinPool TEST_FORK_JOIN_POOL = new ForkJoinPool(4);
 
   @Test
   public void testCalculateNoValidAssignment() throws IOException {
@@ -54,7 +56,7 @@ public class TestConstraintBasedAlgorithm {
     when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
-            ImmutableMap.of(mockSoftConstraint, 1f));
+            ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
     try {
       algorithm.calculate(clusterModel);
@@ -76,7 +78,7 @@ public class TestConstraintBasedAlgorithm {
     when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
-            ImmutableMap.of(mockSoftConstraint, 1f));
+            ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
     try {
       algorithm.calculate(clusterModel);
@@ -100,7 +102,7 @@ public class TestConstraintBasedAlgorithm {
     when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
-            ImmutableMap.of(mockSoftConstraint, 1f));
+            ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
 
@@ -115,7 +117,7 @@ public class TestConstraintBasedAlgorithm {
     when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
-            ImmutableMap.of(mockSoftConstraint, 1f));
+            ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getMultiNodeClusterModel();
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
 
@@ -135,7 +137,7 @@ public class TestConstraintBasedAlgorithm {
     SoftConstraint soft2 = new InstancePartitionsCountConstraint();
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(nodeCapacityConstraint),
-            ImmutableMap.of(soft1, 1f, soft2, 1f));
+            ImmutableMap.of(soft1, 1f, soft2, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getMultiNodeClusterModel();
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
 
@@ -150,15 +152,17 @@ public class TestConstraintBasedAlgorithm {
     SoftConstraint soft2 = new InstancePartitionsCountConstraint();
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(nodeCapacityConstraint),
-            ImmutableMap.of(soft1, 1f, soft2, 1f));
+            ImmutableMap.of(soft1, 1f, soft2, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel =
         new ClusterModelTestHelper().getMultiNodeClusterModelNegativeSetup();
     try {
       OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
+      Assert.fail("Should have thrown HelixRebalanceException for insufficient capacity");
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
-      Assert.assertEquals(ex.getMessage(),
-          "The cluster does not have enough item1 capacity for all partitions.  Failure Type: FAILED_TO_CALCULATE");
+      String expectedPattern = "The cluster 'TestCluster' does not have enough item1 capacity for all partitions\\. Total capacity: \\d+, Required: \\d+, Deficit: \\d+ Failure Type: FAILED_TO_CALCULATE";
+      Assert.assertTrue(ex.getMessage().matches(expectedPattern),
+          "Expected message to match pattern: " + expectedPattern + ", but got: " + ex.getMessage());
     }
   }
 
@@ -169,7 +173,7 @@ public class TestConstraintBasedAlgorithm {
     SoftConstraint soft2 = new InstancePartitionsCountConstraint();
     ConstraintBasedAlgorithm algorithm =
         new ConstraintBasedAlgorithm(ImmutableList.of(nodeCapacityConstraint),
-            ImmutableMap.of(soft1, 1f, soft2, 1f));
+            ImmutableMap.of(soft1, 1f, soft2, 1f), TEST_FORK_JOIN_POOL);
     ClusterModel clusterModel = new ClusterModelTestHelper().getMultiNodeClusterModel();
     // increase the ask capacity of item 3, which will trigger the capacity constraint to fail.
     Map<String, Set<AssignableReplica>> assignableReplicaMap = new HashMap<>(clusterModel.getAssignableReplicaMap());

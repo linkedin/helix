@@ -133,27 +133,13 @@ public abstract class AbstractTestClusterModel {
     // Resource 2:
     // -------------- partition 3 - MASTER
     // -------------- partition 4 - SLAVE
-    CurrentState testCurrentStateResource1 = Mockito.mock(CurrentState.class);
-    Map<String, String> partitionStateMap1 = new HashMap<>();
-    partitionStateMap1.put(_partitionNames.get(0), "MASTER");
-    partitionStateMap1.put(_partitionNames.get(1), "SLAVE");
-    when(testCurrentStateResource1.getResourceName()).thenReturn(_resourceNames.get(0));
-    when(testCurrentStateResource1.getPartitionStateMap()).thenReturn(partitionStateMap1);
-    when(testCurrentStateResource1.getStateModelDefRef()).thenReturn("MasterSlave");
-    when(testCurrentStateResource1.getState(_partitionNames.get(0))).thenReturn("MASTER");
-    when(testCurrentStateResource1.getState(_partitionNames.get(1))).thenReturn("SLAVE");
-    when(testCurrentStateResource1.getSessionId()).thenReturn(_sessionId);
+    CurrentState testCurrentStateResource1 = buildCurrentState(
+        _resourceNames.get(0), _sessionId, "MasterSlave",
+        _partitionNames.get(0), "MASTER", _partitionNames.get(1), "SLAVE");
 
-    CurrentState testCurrentStateResource2 = Mockito.mock(CurrentState.class);
-    Map<String, String> partitionStateMap2 = new HashMap<>();
-    partitionStateMap2.put(_partitionNames.get(2), "MASTER");
-    partitionStateMap2.put(_partitionNames.get(3), "SLAVE");
-    when(testCurrentStateResource2.getResourceName()).thenReturn(_resourceNames.get(1));
-    when(testCurrentStateResource2.getPartitionStateMap()).thenReturn(partitionStateMap2);
-    when(testCurrentStateResource2.getStateModelDefRef()).thenReturn("MasterSlave");
-    when(testCurrentStateResource2.getState(_partitionNames.get(2))).thenReturn("MASTER");
-    when(testCurrentStateResource2.getState(_partitionNames.get(3))).thenReturn("SLAVE");
-    when(testCurrentStateResource2.getSessionId()).thenReturn(_sessionId);
+    CurrentState testCurrentStateResource2 = buildCurrentState(
+        _resourceNames.get(1), _sessionId, "MasterSlave",
+        _partitionNames.get(2), "MASTER", _partitionNames.get(3), "SLAVE");
 
     Map<String, CurrentState> currentStatemap = new HashMap<>();
     currentStatemap.put(_resourceNames.get(0), testCurrentStateResource1);
@@ -202,16 +188,9 @@ public abstract class AbstractTestClusterModel {
     _partitionNames.add("Partition6");
     ResourceControllerDataProvider testCache = setupClusterDataCache();
 
-    CurrentState testCurrentStateResource3 = Mockito.mock(CurrentState.class);
-    Map<String, String> partitionStateMap3 = new HashMap<>();
-    partitionStateMap3.put(_partitionNames.get(4), "MASTER");
-    partitionStateMap3.put(_partitionNames.get(5), "SLAVE");
-    when(testCurrentStateResource3.getResourceName()).thenReturn(_resourceNames.get(2));
-    when(testCurrentStateResource3.getPartitionStateMap()).thenReturn(partitionStateMap3);
-    when(testCurrentStateResource3.getStateModelDefRef()).thenReturn("MasterSlave");
-    when(testCurrentStateResource3.getState(_partitionNames.get(4))).thenReturn("MASTER");
-    when(testCurrentStateResource3.getState(_partitionNames.get(5))).thenReturn("SLAVE");
-    when(testCurrentStateResource3.getSessionId()).thenReturn(_sessionId);
+    CurrentState testCurrentStateResource3 = buildCurrentState(
+        _resourceNames.get(2), _sessionId, "MasterSlave",
+        _partitionNames.get(4), "MASTER", _partitionNames.get(5), "SLAVE");
 
     Map<String, CurrentState> currentStatemap = testCache.getCurrentState(_testInstanceId, _sessionId);
     currentStatemap.put(_resourceNames.get(2), testCurrentStateResource3);
@@ -240,16 +219,9 @@ public abstract class AbstractTestClusterModel {
     _partitionNames.add("Partition8");
     ResourceControllerDataProvider testCache = setupClusterDataCache();
 
-    CurrentState testCurrentStateResource4 = Mockito.mock(CurrentState.class);
-    Map<String, String> partitionStateMap4 = new HashMap<>();
-    partitionStateMap4.put(_partitionNames.get(4), "MASTER");
-    partitionStateMap4.put(_partitionNames.get(5), "SLAVE");
-    when(testCurrentStateResource4.getResourceName()).thenReturn(_resourceNames.get(2));
-    when(testCurrentStateResource4.getPartitionStateMap()).thenReturn(partitionStateMap4);
-    when(testCurrentStateResource4.getStateModelDefRef()).thenReturn("MasterSlave");
-    when(testCurrentStateResource4.getState(_partitionNames.get(4))).thenReturn("MASTER");
-    when(testCurrentStateResource4.getState(_partitionNames.get(5))).thenReturn("SLAVE");
-    when(testCurrentStateResource4.getSessionId()).thenReturn(_sessionId);
+    CurrentState testCurrentStateResource4 = buildCurrentState(
+        _resourceNames.get(2), _sessionId, "MasterSlave",
+        _partitionNames.get(4), "MASTER", _partitionNames.get(5), "SLAVE");
 
     Map<String, CurrentState> currentStatemap =
         testCache.getCurrentState(_testInstanceId, _sessionId);
@@ -293,5 +265,20 @@ public abstract class AbstractTestClusterModel {
     testCache.getAssignableInstanceConfigMap().values().forEach(config -> nodeSet
         .add(new AssignableNode(testCache.getClusterConfig(), config, config.getInstanceName())));
     return nodeSet;
+  }
+
+  /**
+   * Build a real CurrentState object with the given partition-state pairs.
+   * Real objects are used instead of mocks because HelixProperty.getRecord() is final.
+   */
+  protected static CurrentState buildCurrentState(String resourceName, String sessionId,
+      String stateModelDefRef, String... partitionStatePairs) {
+    CurrentState cs = new CurrentState(resourceName);
+    cs.setSessionId(sessionId);
+    cs.setStateModelDefRef(stateModelDefRef);
+    for (int i = 0; i < partitionStatePairs.length; i += 2) {
+      cs.setState(partitionStatePairs[i], partitionStatePairs[i + 1]);
+    }
+    return cs;
   }
 }

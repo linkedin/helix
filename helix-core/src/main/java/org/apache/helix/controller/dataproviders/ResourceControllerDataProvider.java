@@ -44,7 +44,7 @@ import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.controller.rebalancer.strategy.StickyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
-import org.apache.helix.controller.stages.CurrentStateOutput;
+import org.apache.helix.controller.stages.InProgressHandoffRecord;
 import org.apache.helix.controller.stages.MissingTopStateRecord;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
@@ -82,13 +82,21 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
 
   // maintain a cache of bestPossible assignment across pipeline runs
   // TODO: this is only for customRebalancer, remove it and merge it with _idealMappingCache.
+  // IMPORTANT: Must be ConcurrentHashMap — written by parallel rebalancer threads in
+  // BestPossibleStateCalcStage via setCachedResourceAssignment(). A plain HashMap is unsafe
+  // for concurrent puts and can corrupt internal state, causing clear() to silently fail.
   private Map<String, ResourceAssignment> _resourceAssignmentCache;
 
   // maintain a cache of idealmapping (preference list) for full-auto resource across pipeline runs
+  // IMPORTANT: Must be ConcurrentHashMap — written by parallel rebalancer threads in
+  // BestPossibleStateCalcStage via setCachedIdealMapping(). A plain HashMap is unsafe
+  // for concurrent puts and can corrupt internal state, causing clear() to silently fail.
   private Map<String, ZNRecord> _idealMappingCache;
 
   // records for top state handoff
   private Map<String, Map<String, MissingTopStateRecord>> _missingTopStateMap;
+  private Map<String, Map<String, InProgressHandoffRecord>> _inProgressHandoffMap;
+  private Map<String, Map<String, InProgressHandoffRecord>> _postDispatchHandoffMap;
   private Map<String, Map<String, String>> _lastTopStateLocationMap;
 
   // Maintain a set of all ChangeTypes for change detection
@@ -149,9 +157,11 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
         return obj.getResourceName();
       }
     }, true);
-    _resourceAssignmentCache = new HashMap<>();
-    _idealMappingCache = new HashMap<>();
+    _resourceAssignmentCache = new ConcurrentHashMap<>();
+    _idealMappingCache = new ConcurrentHashMap<>();
     _missingTopStateMap = new HashMap<>();
+    _inProgressHandoffMap = new HashMap<>();
+    _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
@@ -391,6 +401,14 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
 
   public Map<String, Map<String, MissingTopStateRecord>> getMissingTopStateMap() {
     return _missingTopStateMap;
+  }
+
+  public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
+    return _inProgressHandoffMap;
+  }
+
+  public Map<String, Map<String, InProgressHandoffRecord>> getPostDispatchHandoffMap() {
+    return _postDispatchHandoffMap;
   }
 
   public Map<String, Map<String, String>> getLastTopStateLocationMap() {

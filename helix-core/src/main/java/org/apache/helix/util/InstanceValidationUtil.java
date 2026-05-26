@@ -396,7 +396,7 @@ public class InstanceValidationUtil {
    */
   public static boolean siblingNodesActiveReplicaCheck(HelixDataAccessor dataAccessor,
       String instanceName) {
-    return siblingNodesActiveReplicaCheck(dataAccessor, instanceName, Collections.emptySet());
+    return siblingNodesActiveReplicaCheckWithDetails(dataAccessor, instanceName, Collections.emptySet()).isPassed();
   }
 
   /**
@@ -416,6 +416,29 @@ public class InstanceValidationUtil {
    */
   public static boolean siblingNodesActiveReplicaCheck(HelixDataAccessor dataAccessor,
       String instanceName, Set<String> toBeStoppedInstances) {
+    return siblingNodesActiveReplicaCheckWithDetails(dataAccessor, instanceName, toBeStoppedInstances).isPassed();
+  }
+
+  /**
+   * Check if sibling nodes of the instance meet min active replicas constraint with details
+   * Two instances are sibling of each other if they host the same partition. And sibling nodes
+   * that are in toBeStoppableInstances will be presumed to be stopped.
+   * WARNING: The check uses ExternalView to reduce network traffic but suffer from accuracy
+   * due to external view propagation latency
+   *
+   * This method returns detailed information about the first partition that fails the check,
+   * including resource name, partition name, current active replicas, and required minimum.
+   *
+   * TODO: Use in memory cache and query instance's currentStates
+   *
+   * @param dataAccessor A helper class to access the Helix data.
+   * @param instanceName An instance to be evaluated against this check.
+   * @param toBeStoppedInstances A set of instances presumed to be are already stopped. And it
+   *                             shouldn't contain the `instanceName`
+   * @return MinActiveReplicaCheckResult with pass/fail status and details of first failure
+   */
+  public static MinActiveReplicaCheckResult siblingNodesActiveReplicaCheckWithDetails(
+      HelixDataAccessor dataAccessor, String instanceName, Set<String> toBeStoppedInstances) {
     PropertyKey.Builder propertyKeyBuilder = dataAccessor.keyBuilder();
     List<String> resources = dataAccessor.getChildNames(propertyKeyBuilder.idealStates());
 
@@ -438,13 +461,10 @@ public class InstanceValidationUtil {
             resourceName);
         continue;
       }
-      String stateModeDef = externalView.getStateModelDefRef();
-      StateModelDefinition stateModelDefinition =
-          dataAccessor.getProperty(propertyKeyBuilder.stateModelDef(stateModeDef));
-      Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
-      if (stateModelDefinition != null) {
-        unhealthyStates.add(stateModelDefinition.getInitialState());
-      }
+      // Determine which states should be considered "unhealthy" (not active)
+      Set<String> unhealthyStates = getUnhealthyStates(dataAccessor, propertyKeyBuilder,
+          resourceName, idealState.getStateModelDefRef());
+
       for (String partition : externalView.getPartitionSet()) {
         Map<String, String> stateByInstanceMap = externalView.getStateMap(partition);
         // found the resource hosted on the instance
@@ -464,15 +484,84 @@ public class InstanceValidationUtil {
             }
           }
           if (numHealthySiblings < minActiveReplicas) {
-            _logger.info(
-                "Partition {} doesn't have enough active replicas in sibling nodes. NumHealthySiblings: {}, minActiveReplicas: {}",
-                partition, numHealthySiblings, minActiveReplicas);
-            return false;
+            _logger.warn(
+                "Instance {} min active replica check failed: Resource {} partition {} has {}/{} active replicas",
+                instanceName, resourceName, partition, numHealthySiblings, minActiveReplicas);
+            return MinActiveReplicaCheckResult.failed(resourceName, partition, numHealthySiblings, minActiveReplicas);
           }
         }
       }
     }
 
-    return true;
+    return MinActiveReplicaCheckResult.passed();
+  }
+
+  /**
+   * Returns the set of states considered unhealthy (not active) for min active replica checks,
+   * given pre-fetched resource configuration and state model definition objects.
+   *
+   * <p>Logic:
+   * <ol>
+   *   <li>If {@code resourceConfig} has ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK configured
+   *       with a non-empty list, all states not in that list (case-insensitive) are unhealthy.</li>
+   *   <li>Otherwise (default): {@link #UNHEALTHY_STATES} (DROPPED, ERROR) plus the model's
+   *       initial state (e.g. OFFLINE for MasterSlave) are unhealthy.</li>
+   * </ol>
+   *
+   * <p>An empty configured list falls back to default behavior — it does NOT mean "no states
+   * are active".
+   *
+   * <p>This overload performs no ZooKeeper reads, making it suitable for use in pipeline stages
+   * that already hold cached data.
+   *
+   * @param resourceConfig the resource configuration, or {@code null} if unavailable
+   * @param stateModelDef  the state model definition, or {@code null} if unavailable
+   * @return mutable set of state names considered unhealthy
+   */
+  public static Set<String> getUnhealthyStates(ResourceConfig resourceConfig,
+      StateModelDefinition stateModelDef) {
+    Set<String> unhealthyStates = new HashSet<>(UNHEALTHY_STATES);
+
+    List<String> customActiveStates = resourceConfig != null
+        ? resourceConfig.getActiveStatesForMinActiveReplicaCheck()
+        : null;
+
+    if (customActiveStates != null && !customActiveStates.isEmpty()) {
+      if (stateModelDef != null && stateModelDef.getStatesPriorityList() != null) {
+        unhealthyStates.addAll(stateModelDef.getStatesPriorityList());
+      }
+      unhealthyStates.removeIf(state ->
+          customActiveStates.stream().anyMatch(active -> active.equalsIgnoreCase(state)));
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceConfig.getResourceName(), unhealthyStates);
+      return unhealthyStates;
+    }
+
+    if (stateModelDef != null) {
+      unhealthyStates.add(stateModelDef.getInitialState());
+    }
+    if (_logger.isDebugEnabled()) {
+      String resourceName = resourceConfig != null ? resourceConfig.getResourceName() : "unknown";
+      _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+          resourceName, unhealthyStates);
+    }
+    return unhealthyStates;
+  }
+
+  /**
+   * Fetches ResourceConfig and StateModelDefinition via ZooKeeper and delegates to
+   * {@link #getUnhealthyStates(ResourceConfig, StateModelDefinition)}.
+   */
+  private static Set<String> getUnhealthyStates(HelixDataAccessor dataAccessor,
+      PropertyKey.Builder propertyKeyBuilder, String resourceName, String stateModelDefRef) {
+    StateModelDefinition stateModelDefinition = stateModelDefRef != null
+        ? dataAccessor.getProperty(propertyKeyBuilder.stateModelDef(stateModelDefRef))
+        : null;
+    ResourceConfig resourceConfig =
+        dataAccessor.getProperty(propertyKeyBuilder.resourceConfig(resourceName));
+    Set<String> unhealthyStates = getUnhealthyStates(resourceConfig, stateModelDefinition);
+    _logger.debug("Resource {} unhealthy states for min active replica check: {}",
+        resourceName, unhealthyStates);
+    return unhealthyStates;
   }
 }

@@ -80,6 +80,19 @@ public class TestDefaultMessagingService {
 
         return result;
       }
+
+      @Override
+      public List<String> getChildNames(PropertyKey key) {
+        PropertyType type = key.getType();
+        if (type == PropertyType.LIVEINSTANCES) {
+          List<String> names = new ArrayList<>();
+          for (ZNRecord record : _liveInstances) {
+            names.add(record.getId());
+          }
+          return names;
+        }
+        return super.getChildNames(key);
+      }
     }
 
     HelixDataAccessor _accessor = new MockDataAccessor();

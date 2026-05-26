@@ -95,30 +95,24 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       String instanceSessionId = instance.getEphemeralOwner();
       InstanceConfig instanceConfig = cache.getInstanceConfigMap().get(instanceName);
 
+      // Determine once whether this instance should be included in the UNKNOWN-excluding output,
+      // and resolve the secondary output to null for UNKNOWN instances
+      boolean isNotUnknown = instanceConfig == null || !instanceConfig.getInstanceOperation()
+          .getOperation()
+          .equals(InstanceConstants.InstanceOperation.UNKNOWN);
+      CurrentStateOutput secondaryOutput = isNotUnknown ? currentStateExcludingUnknown : null;
+
       Set<Message> existingStaleMessages = cache.getStaleMessagesByInstance(instanceName);
       Map<String, Message> messages = cache.getMessages(instanceName);
       Map<String, Message> relayMessages = cache.getRelayMessages(instanceName);
+      // Cache the getCurrentState result to avoid a duplicate cache lookup
+      Collection<CurrentState> currentStates =
+          cache.getCurrentState(instanceName, instanceSessionId, _isTaskFrameworkPipeline).values();
 
-      // update current states.
-      updateCurrentStates(instance,
-          cache.getCurrentState(instanceName, instanceSessionId, _isTaskFrameworkPipeline).values(),
-          currentStateOutput, resourceMap);
-      // update pending messages
+      // Single pass writes to both outputs simultaneously
+      updateCurrentStates(instance, currentStates, currentStateOutput, secondaryOutput, resourceMap);
       updatePendingMessages(instance, cache, messages.values(), relayMessages.values(),
-          existingStaleMessages, currentStateOutput, resourceMap);
-
-      // Only update the currentStateExcludingUnknown if the instance is not in UNKNOWN InstanceOperation.
-      if (instanceConfig == null || !instanceConfig.getInstanceOperation()
-          .getOperation()
-          .equals(InstanceConstants.InstanceOperation.UNKNOWN)) {
-        // update current states.
-        updateCurrentStates(instance,
-            cache.getCurrentState(instanceName, instanceSessionId, _isTaskFrameworkPipeline)
-                .values(), currentStateExcludingUnknown, resourceMap);
-        // update pending messages
-        updatePendingMessages(instance, cache, messages.values(), relayMessages.values(),
-            existingStaleMessages, currentStateExcludingUnknown, resourceMap);
-      }
+          existingStaleMessages, currentStateOutput, secondaryOutput, resourceMap);
     }
     event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateExcludingUnknown);
@@ -146,10 +140,11 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
   }
 
   // update all pending messages to CurrentStateOutput.
+  // secondaryOutput, when non-null, receives the same writes (used for currentStateExcludingUnknown).
   private void updatePendingMessages(LiveInstance instance, BaseControllerDataProvider cache,
       Collection<Message> pendingMessages, Collection<Message> pendingRelayMessages,
       Set<Message> existingStaleMessages, CurrentStateOutput currentStateOutput,
-      Map<String, Resource> resourceMap) {
+      CurrentStateOutput secondaryOutput, Map<String, Resource> resourceMap) {
     String instanceName = instance.getInstanceName();
     String instanceSessionId = instance.getEphemeralOwner();
 
@@ -184,6 +179,9 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
               instanceName);
           if (_isTaskFrameworkPipeline || !isStaleMessage(message, currentState)) {
             setMessageState(currentStateOutput, resourceName, partition, instanceName, message);
+            if (secondaryOutput != null) {
+              setMessageState(secondaryOutput, resourceName, partition, instanceName, message);
+            }
           } else {
             cache.addStaleMessage(instanceName, message);
           }
@@ -199,6 +197,9 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
             Partition partition = resource.getPartition(partitionName);
             if (partition != null) {
               setMessageState(currentStateOutput, resourceName, partition, instanceName, message);
+              if (secondaryOutput != null) {
+                setMessageState(secondaryOutput, resourceName, partition, instanceName, message);
+              }
             } else {
               LogUtil.logDebug(LOG, _eventId, String.format(
                   "Ignore a pending message %s for a non-exist resource %s and partition %s",
@@ -211,6 +212,9 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       // Add the state model into the map for lookup of Task Framework pending partitions
       if (resource.getStateModelDefRef() != null) {
         currentStateOutput.setResourceStateModelDef(resourceName, resource.getStateModelDefRef());
+        if (secondaryOutput != null) {
+          secondaryOutput.setResourceStateModelDef(resourceName, resource.getStateModelDefRef());
+        }
       }
     }
 
@@ -236,6 +240,9 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
         Partition partition = resource.getPartition(partitionName);
         if (partition != null) {
           currentStateOutput.setPendingRelayMessage(resourceName, partition, instanceName, message);
+          if (secondaryOutput != null) {
+            secondaryOutput.setPendingRelayMessage(resourceName, partition, instanceName, message);
+          }
         } else {
           LogUtil.logDebug(LOG, _eventId, String.format(
               "Ignore a pending relay message %s for a non-exist resource %s and partition %s",
@@ -258,7 +265,8 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
 
   // update current states in CurrentStateOutput
   private void updateCurrentStates(LiveInstance instance, Collection<CurrentState> currentStates,
-      CurrentStateOutput currentStateOutput, Map<String, Resource> resourceMap) {
+      CurrentStateOutput currentStateOutput, CurrentStateOutput secondaryOutput,
+      Map<String, Resource> resourceMap) {
     String instanceName = instance.getInstanceName();
     String instanceSessionId = instance.getEphemeralOwner();
 
@@ -274,27 +282,53 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       }
       if (stateModelDefName != null) {
         currentStateOutput.setResourceStateModelDef(resourceName, stateModelDefName);
+        if (secondaryOutput != null) {
+          secondaryOutput.setResourceStateModelDef(resourceName, stateModelDefName);
+        }
       }
 
-      currentStateOutput.setBucketSize(resourceName, currentState.getBucketSize());
+      int bucketSize = currentState.getBucketSize();
+      currentStateOutput.setBucketSize(resourceName, bucketSize);
+      if (secondaryOutput != null) {
+        secondaryOutput.setBucketSize(resourceName, bucketSize);
+      }
 
-      Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
-      for (String partitionName : partitionStateMap.keySet()) {
+      // Iterate the ZNRecord map fields directly rather than building an intermediate
+      // getPartitionStateMap() snapshot. This avoids allocating a new HashMap and eliminates
+      // the repeated per-property TreeMap lookups (getState/getEndTime/getInfo/getRequestedState
+      // each called getMapField separately). All four fields are read from the same map entry
+      // in a single pass
+      for (Map.Entry<String, Map<String, String>> partitionEntry :
+          currentState.getRecord().getMapFields().entrySet()) {
+        String partitionName = partitionEntry.getKey();
         Partition partition = resource.getPartition(partitionName);
-        if (partition != null) {
-          currentStateOutput.setCurrentState(resourceName, partition, instanceName,
-              currentState.getState(partitionName));
-          currentStateOutput.setEndTime(resourceName, partition, instanceName,
-              currentState.getEndTime(partitionName));
-          String info = currentState.getInfo(partitionName);
-          // This is to avoid null value entries in the map, and reduce memory usage by avoiding extra empty entries in the map.
+        if (partition == null) {
+          continue;
+        }
+        Map<String, String> fields = partitionEntry.getValue();
+        String state = fields.get(CurrentState.CurrentStateProperty.CURRENT_STATE.name());
+        String endTimeStr = fields.get(CurrentState.CurrentStateProperty.END_TIME.name());
+        long endTime = endTimeStr == null ? -1L : Long.parseLong(endTimeStr);
+        String info = fields.get(CurrentState.CurrentStateProperty.INFO.name());
+        String requestedState = fields.get(CurrentState.CurrentStateProperty.REQUESTED_STATE.name());
+
+        currentStateOutput.setCurrentState(resourceName, partition, instanceName, state);
+        currentStateOutput.setEndTime(resourceName, partition, instanceName, endTime);
+        // Avoid null value entries in the map to reduce memory usage (unchanged behaviour).
+        if (info != null) {
+          currentStateOutput.setInfo(resourceName, partition, instanceName, info);
+        }
+        if (requestedState != null) {
+          currentStateOutput.setRequestedState(resourceName, partition, instanceName, requestedState);
+        }
+        if (secondaryOutput != null) {
+          secondaryOutput.setCurrentState(resourceName, partition, instanceName, state);
+          secondaryOutput.setEndTime(resourceName, partition, instanceName, endTime);
           if (info != null) {
-            currentStateOutput.setInfo(resourceName, partition, instanceName, info);
+            secondaryOutput.setInfo(resourceName, partition, instanceName, info);
           }
-          String requestState = currentState.getRequestedState(partitionName);
-          if (requestState != null) {
-            currentStateOutput
-                .setRequestedState(resourceName, partition, instanceName, requestState);
+          if (requestedState != null) {
+            secondaryOutput.setRequestedState(resourceName, partition, instanceName, requestedState);
           }
         }
       }

@@ -21,7 +21,7 @@
   <parent>
     <groupId>org.apache.helix</groupId>
     <artifactId>helix</artifactId>
-    <version>1.4.4-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -43,11 +43,9 @@
   </organization>
 
   <properties>
-    <revision>1.4.4-SNAPSHOT</revision>
     <osgi.import>
       org.apache.helix*,
       org.apache.commons.cli*,
-      org.restlet*,
       org.slf4j*;version="[1.7,2)",
       org.apache.logging.log4j*;version="[2.17,3)",
       org.apache.logging.slf4j*;version="[2.17,3)",
@@ -62,7 +60,7 @@
     <dependency>
       <groupId>org.apache.helix</groupId>
       <artifactId>metadata-store-directory-common</artifactId>
-      <version>${revision}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.yaml</groupId>
@@ -121,7 +119,7 @@
     <dependency>
       <groupId>com.thoughtworks.xstream</groupId>
       <artifactId>xstream</artifactId>
-      <version>1.4.21</version>
+      <version>1.4.19</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>

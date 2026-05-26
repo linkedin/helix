@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 import javax.management.JMException;
 import javax.management.MBeanServer;
 import javax.management.MalformedObjectNameException;
@@ -38,6 +39,7 @@ import javax.management.ObjectName;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.model.ExternalView;
@@ -68,6 +70,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   static final String DEFAULT_WORKFLOW_JOB_TYPE = "DEFAULT";
   public static final String DEFAULT_TAG = "DEFAULT";
 
+  static final Pattern JMX_SPECIAL_CHARS = Pattern.compile("[,:=*?]");
+
   private final String _clusterName;
   private final MBeanServer _beanServer;
 
@@ -87,6 +91,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _rebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
+
+  // Cluster-level instance operation counts
+  private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
+      new ConcurrentHashMap<>();
 
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
@@ -112,6 +120,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   public ClusterStatusMonitor(String clusterName) {
     _clusterName = clusterName;
     _beanServer = ManagementFactory.getPlatformMBeanServer();
+
+    // Initialize the map with all operation types
+    for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
+      _perOperationInstanceCount.put(operation, new AtomicLong(0L));
+    }
   }
 
   public ObjectName getObjectName(String name) throws MalformedObjectNameException {
@@ -192,6 +205,36 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     return _totalPastDueMsgSize.get();
   }
 
+  @Override
+  public long getInstancesInOperationEnableGauge() {
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.ENABLE, new AtomicLong(0L)).get();
+  }
+
+  @Override
+  public long getInstancesInOperationDisableGauge() {
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.DISABLE, new AtomicLong(0L)).get();
+  }
+
+  @Override
+  public long getInstancesInOperationEvacuateGauge() {
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.EVACUATE, new AtomicLong(0L)).get();
+  }
+
+  @Override
+  public long getInstancesInOperationSwapInGauge() {
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.SWAP_IN, new AtomicLong(0L)).get();
+  }
+
+  @Override
+  public long getInstancesInOperationUnknownGauge() {
+    return _perOperationInstanceCount.getOrDefault(
+        InstanceConstants.InstanceOperation.UNKNOWN, new AtomicLong(0L)).get();
+  }
+
   private void register(Object bean, ObjectName name) {
     try {
       if (_beanServer.isRegistered(name)) {
@@ -228,11 +271,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param disabledPartitions a map of instance name to the set of partitions disabled on it
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
+   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation tracking)
+   * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
       Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
-      Map<String, Set<Message>> instanceMessageMap) {
+      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
+      Map<String, Long> errorPartitionCounts) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -247,9 +293,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         try {
           ObjectName objectName = getObjectName(getInstanceBeanName(instanceName));
           InstanceMonitor bean = new InstanceMonitor(_clusterName, instanceName, objectName);
+          long errorPartitionCount = errorPartitionCounts != null && errorPartitionCounts.containsKey(instanceName)
+              ? errorPartitionCounts.get(instanceName) : 0L;
           bean.updateInstance(tags.get(instanceName), disabledPartitions.get(instanceName),
               oldDisabledPartitions.get(instanceName), liveInstanceSet.contains(instanceName),
-              !disabledInstanceSet.contains(instanceName));
+              !disabledInstanceSet.contains(instanceName), errorPartitionCount);
           monitorsToRegister.add(bean);
         } catch (MalformedObjectNameException ex) {
           LOG.error("Failed to create instance monitor for instance: {}.", instanceName);
@@ -281,9 +329,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           // Update the bean
           InstanceMonitor bean = _instanceMonitorMap.get(instanceName);
           String oldSensorName = bean.getSensorName();
+          long errorPartitionCount = errorPartitionCounts != null && errorPartitionCounts.containsKey(instanceName)
+              ? errorPartitionCounts.get(instanceName) : 0L;
           bean.updateInstance(tags.get(instanceName), disabledPartitions.get(instanceName),
               oldDisabledPartitions.get(instanceName), liveInstanceSet.contains(instanceName),
-              !disabledInstanceSet.contains(instanceName));
+              !disabledInstanceSet.contains(instanceName), errorPartitionCount);
+
+          // Update instance operation duration metrics
+          if (instanceConfigMap != null && instanceConfigMap.containsKey(instanceName)) {
+            InstanceConfig.InstanceOperation instanceOperation =
+                instanceConfigMap.get(instanceName).getInstanceOperation();
+            bean.updateInstanceOperation(instanceOperation.getOperation(),
+                instanceOperation.getTimestamp());
+          }
 
           // calculate and update instance level message related gauges
           Set<Message> messages = instanceMessageMap.get(instanceName);
@@ -320,6 +378,51 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _maxInstanceMsgQueueSize.set(maxInstanceMsgQueueSize);
       _totalMsgQueueSize.set(totalMsgQueueSize);
       _totalPastDueMsgSize.set(totalPastDueMsgSize);
+
+      // Count instances by operation type (cluster-level metrics) using map
+      // First reset all counts to 0
+      for (AtomicLong count : _perOperationInstanceCount.values()) {
+        count.set(0L);
+      }
+
+      if (instanceConfigMap != null) {
+        for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
+          InstanceConfig config = entry.getValue();
+          InstanceConstants.InstanceOperation operation = InstanceConstants.InstanceOperation.ENABLE;
+
+          if (config != null && config.getInstanceOperation() != null) {
+            operation = config.getInstanceOperation().getOperation();
+          }
+
+          // Increment the count for this operation
+          AtomicLong count = _perOperationInstanceCount.get(operation);
+          if (count != null) {
+            count.incrementAndGet();
+          } else {
+            // If operation is not in the map (shouldn't happen), default to ENABLE
+            _perOperationInstanceCount.get(InstanceConstants.InstanceOperation.ENABLE).incrementAndGet();
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Updates the domain info validity gauge for each instance. Instances in the invalidInstances
+   * set will have their gauge set to 0 (invalid), all other registered instances will be set
+   * to 1 (valid).
+   *
+   * @param invalidInstances the set of instance names whose domain info is not correctly populated
+   */
+  public void updateInstanceDomainInfoValidity(Set<String> invalidInstances) {
+    if (invalidInstances == null) {
+      invalidInstances = Collections.emptySet();
+    }
+    synchronized (_instanceMonitorMap) {
+      for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
+        boolean isInvalid = invalidInstances.contains(entry.getKey());
+        entry.getValue().updateDomainInfoValid(!isInvalid);
+      }
     }
   }
 
@@ -449,10 +552,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
     // Convert to perInstanceResource beanName->partition->state
     Map<PerInstanceResourceMonitor.BeanName, Map<Partition, String>> beanMap = new HashMap<>();
+    // Track partition counts per instance: instance -> total partitions
+    Map<String, Long> instancePartitionCount = new HashMap<>();
+    // Track top state partition counts per instance: instance -> top state partitions
+    Map<String, Long> instanceTopStatePartitionCount = new HashMap<>();
+
     Set<String> resourceSet = new HashSet<>(bestPossibleStates.resourceSet());
     for (String resource : resourceSet) {
       Map<Partition, Map<String, String>> partitionStateMap =
           new HashMap<>(bestPossibleStates.getResourceMap(resource));
+      StateModelDefinition stateModelDef = stateModelDefMap.get(
+          resourceMap.get(resource).getStateModelDefRef());
+      String topState = stateModelDef.getTopState();
+
       for (Partition partition : partitionStateMap.keySet()) {
         Map<String, String> instanceStateMap = partitionStateMap.get(partition);
         for (String instance : instanceStateMap.keySet()) {
@@ -460,9 +572,31 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           PerInstanceResourceMonitor.BeanName beanName =
               new PerInstanceResourceMonitor.BeanName(_clusterName, instance, resource);
           beanMap.computeIfAbsent(beanName, k -> new HashMap<>()).put(partition, state);
+
+          // Count partitions per instance
+          instancePartitionCount.merge(instance, 1L, Long::sum);
+
+          // Count top state partitions per instance
+          if (topState != null && topState.equals(state)) {
+            instanceTopStatePartitionCount.merge(instance, 1L, Long::sum);
+          }
         }
       }
     }
+
+    // Update instance monitors with partition counts
+    synchronized (_instanceMonitorMap) {
+      for (String instanceName : _instanceMonitorMap.keySet()) {
+        InstanceMonitor instanceMonitor = _instanceMonitorMap.get(instanceName);
+        if (instanceMonitor != null) {
+          long partitionCount = instancePartitionCount.getOrDefault(instanceName, 0L);
+          long topStatePartitionCount = instanceTopStatePartitionCount.getOrDefault(instanceName, 0L);
+          instanceMonitor.updatePartitionCount(partitionCount);
+          instanceMonitor.updateTopStatePartitionCount(topStatePartitionCount);
+        }
+      }
+    }
+
     synchronized (_perInstanceResourceMonitorMap) {
       // Unregister beans for per-instance resources that no longer exist
       Set<PerInstanceResourceMonitor.BeanName> toUnregister =
@@ -588,6 +722,38 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
     if (resourceMonitor != null) {
       resourceMonitor.decrementMissingTopStateBeyondThresholdGauge();
+    }
+  }
+
+  public void incrementControllerHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.incrementControllerHandoffBeyondThresholdGauge();
+    }
+  }
+
+  public void decrementControllerHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.decrementControllerHandoffBeyondThresholdGauge();
+    }
+  }
+
+  public void incrementParticipantHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.incrementParticipantHandoffBeyondThresholdGauge();
+    }
+  }
+
+  public void decrementParticipantHandoffBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.decrementParticipantHandoffBeyondThresholdGauge();
     }
   }
 
@@ -968,7 +1134,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @return resource bean name
    */
   protected String getResourceBeanName(String resourceName) {
-    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, resourceName);
+    // JMX ObjectName values cannot contain ':', '=', ',', '*', or '?' unquoted.
+    // Quote the resource name only when it contains such characters to avoid
+    // MalformedObjectNameException (e.g. URN-style names like urn:li:foo:bar),
+    // while leaving normal resource names unchanged in the MBean key.
+    String safeResourceName = JMX_SPECIAL_CHARS.matcher(resourceName).find()
+        ? ObjectName.quote(resourceName) : resourceName;
+    return String.format("%s,%s=%s", clusterBeanName(), RESOURCE_DN_KEY, safeResourceName);
   }
 
   /**

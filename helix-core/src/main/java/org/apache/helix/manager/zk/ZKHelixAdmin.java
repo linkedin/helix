@@ -29,11 +29,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -51,6 +53,7 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixProperty;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
@@ -60,8 +63,12 @@ import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
+import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
+import org.apache.helix.manager.zk.evacuation.PartitionExclusionFilter;
+import org.apache.helix.manager.zk.evacuation.PartitionExclusionHelper;
+import org.apache.helix.manager.zk.evacuation.PartitionInfo;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.CloudConfig;
@@ -73,6 +80,7 @@ import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.CustomizedStateConfig;
+import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -88,6 +96,7 @@ import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.PauseSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.ConfigStringUtil;
@@ -460,29 +469,72 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
-    if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
-      InstanceConfig config = getInstanceConfig(clusterName, instanceName);
-      return config != null && config.getInstanceOperation().getOperation()
-          .equals(InstanceConstants.InstanceOperation.EVACUATE);
+    return isEvacuateFinished(clusterName, instanceName, Collections.emptySet());
+  }
+
+  @Override
+  public boolean isEvacuateFinished(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+    if (config == null || config.getInstanceOperation().getOperation() !=
+        InstanceConstants.InstanceOperation.EVACUATE ) {
+      return false;
     }
-    return false;
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes);
   }
 
   /**
-   * Check to see if swapping between two instances is ready to be completed. Checks: 1. Both
-   * instances must be alive. 2. Both instances must only have one session and not be carrying over
-   * from a previous session. 3. Both instances must have no pending messages. 4. Both instances
-   * cannot have partitions in the ERROR state 5. SwapIn instance must have correct state for all
-   * partitions that are currently assigned to the SwapOut instance.
-   * TODO: We may want to make this a public API in the future.
+   * Returns a detailed evacuation status for the given instance.
+   *
+   * This is used by the Helix REST {@code isEvacuateFinished} command to return an extendable JSON
+   * response (for example, remaining partition count) without changing the {@link HelixAdmin}
+   * public interface.
+   */
+  public EvacuationInfo getEvacuationStatus(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    EvacuationInfo result = new EvacuationInfo();
+
+    InstanceConfig config = getInstanceConfig(clusterName, instanceName);
+    if (config == null) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
+      result.setReason(EvacuationInfo.ReasonCode.INSTANCE_CONFIG_NOT_FOUND);
+      return result;
+    }
+    if (config.getInstanceOperation().getOperation() != InstanceConstants.InstanceOperation.EVACUATE) {
+      result.setState(EvacuationInfo.EvacuationState.NOT_EVACUATING);
+      result.setReason(EvacuationInfo.ReasonCode.NOT_IN_EVACUATE_OPERATION);
+      return result;
+    }
+
+    boolean hasBlocking = instanceHasCurrentStateOrMessage(
+        clusterName, instanceName, exclusionTypes, result);
+    result.setState(hasBlocking ? EvacuationInfo.EvacuationState.IN_PROGRESS
+        : EvacuationInfo.EvacuationState.COMPLETED);
+    return result;
+  }
+
+  @Override
+  public boolean isInstanceDrained(String clusterName, String instanceName) {
+    return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
+  }
+
+  /**
+   * Check to see if swapping between two instances is ready to be completed and return
+   * detailed results including specific blockers. Checks:
+   * 1. Both instances must be alive.
+   * 2. Both instances must only have one session and not be carrying over from a previous session.
+   * 3. Both instances must have no pending messages.
+   * 4. Both instances cannot have partitions in the ERROR state.
+   * 5. SwapIn instance must have correct state for all partitions assigned to SwapOut instance.
    *
    * @param clusterName         The cluster name
    * @param swapOutInstanceName The instance that is being swapped out
    * @param swapInInstanceName  The instance that is being swapped in
-   * @return True if the swap is ready to be completed, false otherwise.
+   * @return OperationCheckResult with completion status and any blockers.
    */
-  private boolean canCompleteSwap(String clusterName, String swapOutInstanceName,
+  private OperationCheckResult canCompleteSwap(String clusterName, String swapOutInstanceName,
       String swapInInstanceName) {
+    OperationCheckResult.Builder resultBuilder = new OperationCheckResult.Builder();
     BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, baseAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
@@ -495,53 +547,77 @@ public class ZKHelixAdmin implements HelixAdmin {
     InstanceConfig swapOutInstanceConfig = getInstanceConfig(clusterName, swapOutInstanceName);
     InstanceConfig swapInInstanceConfig = getInstanceConfig(clusterName, swapInInstanceName);
     if (swapInLiveInstance == null) {
-      logger.warn(
-          "SwapOutInstance {} is {} + {} and SwapInInstance {} is OFFLINE + {} for cluster {}. Swap will"
-              + " not complete unless SwapInInstance instance is ONLINE.",
+      String blocker = String.format(
+          "SwapOutInstance %s is %s (operation=%s) and SwapInInstance %s is OFFLINE (operation=%s)."
+              + " Swap will not complete unless SwapInInstance is ONLINE.",
           swapOutInstanceName, swapOutLiveInstance != null ? "ONLINE" : "OFFLINE",
-          swapOutInstanceConfig.getInstanceOperation().getOperation(), swapInInstanceName,
-          swapInInstanceConfig.getInstanceOperation().getOperation(), clusterName);
-      return false;
+          swapOutInstanceConfig.getInstanceOperation().getOperation(),
+          swapInInstanceName, swapInInstanceConfig.getInstanceOperation().getOperation());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+      // Cannot proceed with further checks if swap-in is offline
+      return resultBuilder.build();
     }
 
     // 2. Check that both instances only have one session and are not carrying any over.
     // count number of sessions under CurrentState folder. If it is carrying over from prv session,
     // then there are > 1 session ZNodes.
-    List<String> swapOutSessions = baseAccessor.getChildNames(
-        PropertyPathBuilder.instanceCurrentState(clusterName, swapOutInstanceName), 0);
-    List<String> swapInSessions = baseAccessor.getChildNames(
-        PropertyPathBuilder.instanceCurrentState(clusterName, swapInInstanceName), 0);
-    if (swapOutSessions.size() > 1 || swapInSessions.size() > 1) {
-      logger.warn(
-          "SwapOutInstance {} is carrying over from prev session and SwapInInstance {} is carrying over from prev session for cluster {}."
+    List<String> swapOutSessions = safeGetChildNames(baseAccessor,
+        PropertyPathBuilder.instanceCurrentState(clusterName, swapOutInstanceName));
+    List<String> swapInSessions = safeGetChildNames(baseAccessor,
+        PropertyPathBuilder.instanceCurrentState(clusterName, swapInInstanceName));
+    if (swapOutSessions.size() > 1) {
+      String blocker = String.format(
+          "SwapOutInstance %s is carrying over from a previous session (%d sessions found)."
               + " Swap will not complete unless both instances have only one session.",
-          swapOutInstanceName, swapInInstanceName, clusterName);
-      return false;
+          swapOutInstanceName, swapOutSessions.size());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (swapInSessions.size() > 1) {
+      String blocker = String.format(
+          "SwapInInstance %s is carrying over from a previous session (%d sessions found)."
+              + " Swap will not complete unless both instances have only one session.",
+          swapInInstanceName, swapInSessions.size());
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (resultBuilder.hasBlockers()) {
+      return resultBuilder.build();
     }
 
-    // 3. Check that the swapOutInstance has no pending messages.
+    // 3. Check that instances have no pending messages.
     List<Message> swapOutMessages =
         accessor.getChildValues(keyBuilder.messages(swapOutInstanceName), true);
     int swapOutPendingMessageCount = swapOutMessages != null ? swapOutMessages.size() : 0;
     List<Message> swapInMessages =
         accessor.getChildValues(keyBuilder.messages(swapInInstanceName), true);
     int swapInPendingMessageCount = swapInMessages != null ? swapInMessages.size() : 0;
-    if ((swapOutLiveInstance != null && swapOutPendingMessageCount > 0)
-        || swapInPendingMessageCount > 0) {
-      logger.warn(
-          "SwapOutInstance {} has {} pending messages and SwapInInstance {} has {} pending messages for cluster {}."
-              + " Swap will not complete unless both SwapOutInstance(only when live)"
-              + " and SwapInInstance have no pending messages unless.",
-          swapOutInstanceName, swapOutPendingMessageCount, swapInInstanceName,
-          swapInPendingMessageCount, clusterName);
-      return false;
+    if (swapOutLiveInstance != null && swapOutPendingMessageCount > 0) {
+      String blocker = String.format(
+          "SwapOutInstance %s has %d pending messages."
+              + " Swap will not complete unless SwapOutInstance (when live) has no pending messages.",
+          swapOutInstanceName, swapOutPendingMessageCount);
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (swapInPendingMessageCount > 0) {
+      String blocker = String.format(
+          "SwapInInstance %s has %d pending messages."
+              + " Swap will not complete unless SwapInInstance has no pending messages.",
+          swapInInstanceName, swapInPendingMessageCount);
+      logger.warn(blocker + " cluster={}", clusterName);
+      resultBuilder.addBlocker(blocker);
+    }
+    if (resultBuilder.hasBlockers()) {
+      return resultBuilder.build();
     }
 
-    // 4. If the swap-out instance is not alive or is disabled, we return true without checking
-    // the current states on the swap-in instance.
+    // 4. If the swap-out instance is not alive or is disabled, we can complete without
+    // checking current states on the swap-in instance.
     if (swapOutLiveInstance == null || swapOutInstanceConfig.getInstanceOperation().getOperation()
         .equals(InstanceConstants.InstanceOperation.DISABLE)) {
-      return true;
+      return resultBuilder.build();
     }
 
     // 5. Collect a list of all partitions that have a current state on swapOutInstance
@@ -549,41 +625,65 @@ public class ZKHelixAdmin implements HelixAdmin {
     String swapInActiveSession = swapInLiveInstance.getEphemeralOwner();
 
     // Iterate over all resources with current states on the swapOutInstance
-    List<String> swapOutResources = baseAccessor.getChildNames(
+    List<String> swapOutResources = safeGetChildNames(baseAccessor,
         PropertyPathBuilder.instanceCurrentState(clusterName, swapOutInstanceName,
-            swapOutLastActiveSession), 0);
+            swapOutLastActiveSession));
     for (String swapOutResource : swapOutResources) {
       // Get the topState and secondTopStates for the stateModelDef used by the resource.
       IdealState idealState = accessor.getProperty(keyBuilder.idealStates(swapOutResource));
+      if (idealState == null) {
+        // Resource may have been dropped; skip.
+        continue;
+      }
       StateModelDefinition stateModelDefinition =
           accessor.getProperty(keyBuilder.stateModelDef(idealState.getStateModelDefRef()));
+      if (stateModelDefinition == null) {
+        // State model missing; be conservative.
+        String blocker = String.format(
+            "StateModelDefinition is null for resource %s in cluster %s. Cannot verify swap correctness.",
+            swapOutResource, clusterName);
+        logger.warn(blocker);
+        resultBuilder.addBlocker(blocker);
+        continue;
+      }
       String topState = stateModelDefinition.getTopState();
       Set<String> secondTopStates = stateModelDefinition.getSecondTopStates();
 
       CurrentState swapOutResourceCurrentState = accessor.getProperty(
           keyBuilder.currentState(swapOutInstanceName, swapOutLastActiveSession, swapOutResource));
+      if (swapOutResourceCurrentState == null
+          || swapOutResourceCurrentState.getPartitionStateMap() == null) {
+        // No partitions to verify for this resource
+        continue;
+      }
       CurrentState swapInResourceCurrentState = accessor.getProperty(
           keyBuilder.currentState(swapInInstanceName, swapInActiveSession, swapOutResource));
 
       // Check to make sure swapInInstance has a current state for the resource
       if (swapInResourceCurrentState == null) {
-        logger.warn(
-            "SwapOutInstance {} has current state for resource {} but SwapInInstance {} does not for cluster {}."
+        String blocker = String.format(
+            "SwapOutInstance %s has current state for resource %s but SwapInInstance %s does not."
                 + " Swap will not complete unless both instances have current states for all resources.",
-            swapOutInstanceName, swapOutResource, swapInInstanceName, clusterName);
-        return false;
+            swapOutInstanceName, swapOutResource, swapInInstanceName);
+        logger.warn(blocker + " cluster={}", clusterName);
+        resultBuilder.addBlocker(blocker);
+        continue;
       }
 
       // Iterate over all partitions in the swapOutInstance's current state for the resource
       // and ensure that the swapInInstance has the correct state for the partition.
+      int mismatchCount = 0;
+      int totalPartitions = swapOutResourceCurrentState.getPartitionStateMap().size();
+      String firstMismatchExample = null;
       for (String partitionName : swapOutResourceCurrentState.getPartitionStateMap().keySet()) {
         String swapOutPartitionState = swapOutResourceCurrentState.getState(partitionName);
         String swapInPartitionState = swapInResourceCurrentState.getState(partitionName);
 
         // SwapInInstance should have the correct state for the partition.
-        // All states should match except for the case where the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES
-        // or the swap-out partition is ERROR state.
-        // When the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES, the swap-in partition should be in a secondTopStates.
+        // All states should match except for the case where the topState is not ALL_REPLICAS
+        // or ALL_CANDIDATE_NODES or the swap-out partition is ERROR state.
+        // When the topState is not ALL_REPLICAS or ALL_CANDIDATE_NODES, the swap-in partition
+        // should be in a secondTopStates.
         if (!(swapOutPartitionState.equals(HelixDefinedState.ERROR.name()) || (
             topState.equals(swapOutPartitionState) && (
                 swapOutPartitionState.equals(swapInPartitionState) ||
@@ -593,37 +693,55 @@ public class ZKHelixAdmin implements HelixAdmin {
                             stateModelDefinition.getTopState())) && secondTopStates.contains(
                         swapInPartitionState))) || swapOutPartitionState.equals(
             swapInPartitionState))) {
-          logger.warn(
-              "SwapOutInstance {} has partition {} in {} but SwapInInstance {} has partition {} in state {} for cluster {}."
-                  + " Swap will not complete unless SwapInInstance has partition in correct states.",
-              swapOutInstanceName, partitionName, swapOutPartitionState, swapInInstanceName,
-              partitionName, swapInPartitionState, clusterName);
-          return false;
+          mismatchCount++;
+          if (firstMismatchExample == null) {
+            firstMismatchExample = String.format("%s: expected %s, got %s",
+                partitionName, swapOutPartitionState,
+                swapInPartitionState != null ? swapInPartitionState : "MISSING");
+          }
         }
+      }
+      if (mismatchCount > 0) {
+        String blocker = String.format(
+            "SwapInInstance %s has %d/%d partitions in incorrect state for resource %s (e.g., %s)."
+                + " Swap will not complete unless SwapInInstance has all partitions in correct states.",
+            swapInInstanceName, mismatchCount, totalPartitions, swapOutResource,
+            firstMismatchExample);
+        logger.warn(blocker + " cluster={}", clusterName);
+        resultBuilder.addBlocker(blocker);
       }
     }
 
-    return true;
+    return resultBuilder.build();
+  }
+
+  private static List<String> safeGetChildNames(BaseDataAccessor<ZNRecord> baseAccessor,
+      String path) {
+    List<String> children = baseAccessor.getChildNames(path, 0);
+    return children != null ? children : Collections.emptyList();
   }
 
   @Override
   public boolean canCompleteSwap(String clusterName, String instanceName) {
+    return canCompleteSwapWithDetails(clusterName, instanceName).isSuccessful();
+  }
+
+  @Override
+  public OperationCheckResult canCompleteSwapWithDetails(String clusterName, String instanceName) {
     InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
     if (instanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} does not exist. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Instance %s does not exist in cluster %s.", instanceName, clusterName)));
     }
 
     List<InstanceConfig> swappingInstances =
         InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Instance %s in cluster %s is not swapping with exactly one other instance "
+              + "(found %d matching instances).", instanceName, clusterName,
+              swappingInstances.size())));
     }
 
     InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
@@ -633,13 +751,11 @@ public class ZKHelixAdmin implements HelixAdmin {
         .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
         : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(Collections.singletonList(
+          String.format("Could not determine swap-out/swap-in pair for instance %s in cluster %s.",
+              instanceName, clusterName)));
     }
 
-    // Check if the swap is ready to be completed.
     return canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
         swapInInstanceConfig.getInstanceName());
   }
@@ -647,22 +763,26 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean completeSwapIfPossible(String clusterName, String instanceName,
       boolean forceComplete) {
+    return completeSwapIfPossibleWithDetails(clusterName, instanceName, forceComplete).isSuccessful();
+  }
+
+  @Override
+  public OperationCheckResult completeSwapIfPossibleWithDetails(String clusterName,
+      String instanceName, boolean forceComplete) {
     InstanceConfig instanceConfig = getInstanceConfig(clusterName, instanceName);
     if (instanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} does not exist. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s does not exist. Cannot determine if the swap is complete.",
+          instanceName, clusterName));
     }
 
     List<InstanceConfig> swappingInstances =
         InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);
     if (swappingInstances.size() != 1) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s is not swapping with exactly one other instance (found %d matching instances).",
+          instanceName, clusterName, swappingInstances.size()));
     }
 
     InstanceConfig swapOutInstanceConfig = !instanceConfig.getInstanceOperation().getOperation()
@@ -672,16 +792,18 @@ public class ZKHelixAdmin implements HelixAdmin {
         .equals(InstanceConstants.InstanceOperation.SWAP_IN) ? instanceConfig
         : swappingInstances.get(0);
     if (swapOutInstanceConfig == null || swapInInstanceConfig == null) {
-      logger.warn(
-          "Instance {} in cluster {} is not swapping with any other instance. Cannot determine if the swap is complete.",
-          instanceName, clusterName);
-      return false;
+      return OperationCheckResult.failed(String.format(
+          "Instance %s in cluster %s is not swapping with any other instance.",
+          instanceName, clusterName));
     }
 
-    // Check if the swap is ready to be completed. If not, return false.
-    if (forceComplete || !canCompleteSwap(clusterName, swapOutInstanceConfig.getInstanceName(),
-        swapInInstanceConfig.getInstanceName())) {
-      return false;
+    // Skip the readiness check when forceComplete is true; otherwise require it to pass.
+    if (!forceComplete) {
+      OperationCheckResult swapCheck = canCompleteSwap(clusterName,
+          swapOutInstanceConfig.getInstanceName(), swapInInstanceConfig.getInstanceName());
+      if (!swapCheck.isSuccessful()) {
+        return swapCheck;
+      }
     }
 
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
@@ -716,12 +838,17 @@ public class ZKHelixAdmin implements HelixAdmin {
       return config.getRecord();
     });
 
-    return baseAccessor.multiSet(updaterMap);
+    if (!baseAccessor.multiSet(updaterMap)) {
+      return OperationCheckResult.failed(String.format(
+          "Failed to update instance configs for swap completion in cluster %s. "
+              + "The ZooKeeper update did not succeed.", clusterName));
+    }
+    return OperationCheckResult.success();
   }
 
   @Override
   public boolean isReadyForPreparingJoiningCluster(String clusterName, String instanceName) {
-    if (!instanceHasFullAutoCurrentStateOrMessage(clusterName, instanceName)) {
+    if (!instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet())) {
       InstanceConfig config = getInstanceConfig(clusterName, instanceName);
       return config != null && INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT.contains(
           config.getInstanceOperation().getOperation());
@@ -757,59 +884,207 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   /**
-   * Return true if Instance has any current state or pending message. Otherwise, return false if instance is offline,
-   * instance has no active session, or if instance is online but has no current state or pending message.
-   * @param clusterName
-   * @param instanceName
-   * @return
+   * Returns true if instance has more than one session or for online instance if it has messages or
+   * FULL_AUTO and CUSTOMIZED resources in current states, false otherwise. For offline instances,
+   * returns false if all CUSTOMIZED resources in current states are migrated to other instances
+   * in ideal state, true otherwise.
+   *
+   * This method follows below structure:
+   * 1. Collect all partitions from current states
+   * 2. Apply exclusion filters based on the exclusionTypes parameter
+   * 3. Check if any partitions remain after exclusions
+   *
+   * @param clusterName The cluster name
+   * @param instanceName The instance name
+   * @param exclusionTypes Set of exclusion types to filter out resources/partitions
+   * @return true if instance has current state or messages that block evacuation, false otherwise
    */
-  private boolean instanceHasFullAutoCurrentStateOrMessage(String clusterName,
-      String instanceName) {
+  private boolean instanceHasCurrentStateOrMessage(String clusterName,
+      String instanceName, Set<InstanceDrainExclusionType> exclusionTypes) {
+    return instanceHasCurrentStateOrMessage(clusterName, instanceName, exclusionTypes, null);
+  }
+
+  /**
+   * Same as {@link #instanceHasCurrentStateOrMessage(String, String, Set)} but optionally fills
+   * {@code evacuationInfo} with additional details for REST responses.
+   */
+  private boolean instanceHasCurrentStateOrMessage(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes, @Nullable EvacuationInfo evacuationInfo) {
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
-    // check the instance is alive
+    // Check the instance is alive
     LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
-    if (liveInstance == null) {
-      logger.warn("Instance {} in cluster {} is not alive. The instance can be removed anyway.", instanceName,
-          clusterName);
-      return false;
-    }
 
     BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
-    // count number of sessions under CurrentState folder. If it is carrying over from prv session,
+    // Count number of sessions under CurrentState folder. If it is carrying over from prev session,
     // then there are > 1 session ZNodes.
-    List<String> sessions = baseAccessor.getChildNames(PropertyPathBuilder.instanceCurrentState(clusterName, instanceName), 0);
+    List<String> sessions = baseAccessor.getChildNames(
+        PropertyPathBuilder.instanceCurrentState(clusterName, instanceName), 0);
+    if (sessions.isEmpty()) {
+      logger.info("Instance {} in cluster {} does not have any session. The instance can be removed.",
+          instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
+      return false;
+    }
     if (sessions.size() > 1) {
-      logger.warn("Instance {} in cluster {} is carrying over from prev session.", instanceName,
-          clusterName);
+      logger.info("Instance {} in cluster {} is carrying over from prev session.",
+          instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setReason(EvacuationInfo.ReasonCode.MULTIPLE_SESSIONS);
+      }
       return true;
     }
 
-    String sessionId = liveInstance.getEphemeralOwner();
-
-    String path = PropertyPathBuilder.instanceCurrentState(clusterName, instanceName, sessionId);
-    List<String> currentStates = baseAccessor.getChildNames(path, 0);
-    if (currentStates == null) {
-      logger.warn("Instance {} in cluster {} does not have live session.  The instance can be removed anyway.",
+    String sessionId = sessions.get(0);
+    List<CurrentState> currentStates = accessor.getChildValues(
+        keyBuilder.currentStates(instanceName, sessionId), true);
+    if (currentStates == null || currentStates.isEmpty()) {
+      logger.info("Instance {} in cluster {} does not have any current state.",
           instanceName, clusterName);
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(0);
+        evacuationInfo.setPendingMessageCount(0);
+      }
       return false;
     }
 
-    // see if instance has pending message.
-    List<String> messages = accessor.getChildNames(keyBuilder.messages(instanceName));
-    if (messages != null && !messages.isEmpty()) {
-      logger.warn("Instance {} in cluster {} has pending messages.", instanceName, clusterName);
-      return true;
+    // Calculate max mtime across all CurrentState ZNodes for lastActivityTimestamp
+    // note: getChildValues() that is used above to fetch currentStates, doesn't populate stat data,
+    // so we need to fetch stats separately, this is not a expensive zk op, as its a batch call.
+    if (evacuationInfo != null) {
+      List<PropertyKey> currentStateKeys = new ArrayList<>();
+      for (CurrentState cs : currentStates) {
+        currentStateKeys.add(keyBuilder.currentState(instanceName, sessionId, cs.getResourceName()));
+      }
+      accessor.getPropertyStats(currentStateKeys).stream()
+          .filter(Objects::nonNull)
+          .max(Comparator.comparingLong(HelixProperty.Stat::getModifiedTime))
+          .map(HelixProperty.Stat::getModifiedTime)
+          .filter(maxMtime -> maxMtime > 0)
+          .ifPresent(evacuationInfo::setLastActivityTimestamp);
     }
 
-    // Get set of FULL_AUTO resources
     List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
-    Set<String> fullAutoResources = idealStates != null ? idealStates.stream()
-        .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO)
-        .map(IdealState::getResourceName).collect(Collectors.toSet()) : Collections.emptySet();
 
-    return currentStates.stream().anyMatch(fullAutoResources::contains);
+    // Step 1: Get set of FULL_AUTO and CUSTOMIZED resources, except for excluded ones through exclusion list
+    Set<String> allowedResources = filterResourcesByModeAndExclusions(idealStates, exclusionTypes);
+
+    // Step 2: Create exclusion filters based on requested exclusion types
+    Map<InstanceDrainExclusionType, PartitionExclusionFilter> filters =
+        PartitionExclusionHelper.createExclusionFilters(exclusionTypes, accessor, instanceName);
+
+    // Handle offline instances - check if CUSTOMIZED resources are reassigned
+    if (liveInstance == null) {
+      List<PartitionInfo> partitionsStillOnInstance =
+          PartitionExclusionHelper.getCustomizedPartitionsStillOnInstance(
+              currentStates, idealStates, instanceName, allowedResources, filters);
+      boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
+      logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
+          instanceName, clusterName, partitionsStillOnInstance.size());
+      if (evacuationInfo != null) {
+        evacuationInfo.setRemainingPartitionCount(partitionsStillOnInstance.size());
+        evacuationInfo.setPendingMessageCount(0);
+      }
+      return hasPartitionsStillOnInstance;
+    }
+
+    // Handle online instances - also report pending messages
+    List<String> messages = accessor.getChildNames(keyBuilder.messages(instanceName));
+    int pendingMessageCount = messages != null ? messages.size() : 0;
+    if (evacuationInfo != null) {
+      evacuationInfo.setPendingMessageCount(pendingMessageCount);
+    }
+    if (pendingMessageCount > 0) {
+      logger.info("Instance {} in cluster {} has {} pending messages.",
+          instanceName, clusterName, pendingMessageCount);
+    }
+
+    // Step 4: Collect all partitions from current states (after resource-level exclusions)
+    List<PartitionInfo> allPartitions =
+        PartitionExclusionHelper.collectPartitions(currentStates, allowedResources);
+
+    // Step 5: Apply partition-level exclusions
+    List<PartitionInfo> remainingPartitions =
+        PartitionExclusionHelper.applyExclusions(allPartitions, filters);
+
+    boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
+    logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
+        instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    if (evacuationInfo != null) {
+      evacuationInfo.setRemainingPartitionCount(remainingPartitions.size());
+    }
+
+    return pendingMessageCount > 0 || hasRemainingPartitions;
+  }
+
+  /**
+   * Filters resources to only include FULL_AUTO and CUSTOMIZED mode resources,
+   * and applies DISABLED_RESOURCE exclusion if requested.
+   *
+   * @param idealStates List of ideal states to filter
+   * @param exclusionTypes Set of exclusion types to apply
+   * @return Set of resource names that match the criteria
+   */
+  private Set<String> filterResourcesByModeAndExclusions(List<IdealState> idealStates,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    if (idealStates == null) {
+      return Collections.emptySet();
+    }
+
+    return idealStates.stream()
+        .filter(idealState -> idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO ||
+            idealState.getRebalanceMode() == RebalanceMode.CUSTOMIZED)
+        .filter(idealState -> !exclusionTypes.contains(InstanceDrainExclusionType.DISABLED_RESOURCE) ||
+            idealState.isEnabled())
+        .map(IdealState::getResourceName)
+        .collect(Collectors.toSet());
+  }
+
+  /**
+   * Returns true if, for all customized resources present in the given current states every partition is now assigned
+   * to a different instance (i.e., not instanceName) in the IdealState.
+   *
+   * @param currentStates  list of CurrentState objects of instanceName representing the current assignment of
+   *                       resources on the instance
+   * @param idealStates    list of IdealState objects representing the desired assignment of resources
+   * @param instanceName   the instance from which resources are migrated
+   * @return
+   */
+  private boolean areAllCustomizedResourcesReassigned(List<CurrentState> currentStates,
+      List<IdealState> idealStates, String instanceName) {
+    // Step 1: Create a map of resourceName -> CurrentState
+    Map<String, CurrentState> currentStateMap = currentStates.stream()
+        .collect(Collectors.toMap(CurrentState::getResourceName, cs -> cs));
+
+    // Step 2: Filter ideal states that are CUSTOMIZED and present in currentStates
+    List<IdealState> customizedIdealStates = idealStates.stream()
+        .filter(is -> is.getRebalanceMode() == RebalanceMode.CUSTOMIZED &&
+            currentStateMap.containsKey(is.getResourceName()))
+        .collect(Collectors.toList());
+
+    // Step 3: Check if any partition of any customized resource is still assigned to the instance
+    for (IdealState idealState : customizedIdealStates) {
+      String resourceName = idealState.getResourceName();
+      CurrentState cs = currentStateMap.get(resourceName);
+
+      for (String partition : cs.getPartitionStateMap().keySet()) {
+        Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition);
+        if (instanceStateMap == null) {
+          continue;
+        }
+
+        for (String assignedInstance : instanceStateMap.keySet()) {
+          if (instanceName.equals(assignedInstance)) {
+            return false; // Partition still assigned to the given instance
+          }
+        }
+      }
+    }
+    return true; // All customized resource partitions have been migrated off this instance
   }
 
   @Override
@@ -1656,7 +1931,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           resourceName));
     }
     // Update by way of merge
-    ZKUtil.createOrUpdate(_zkClient, zkPath, idealState.getRecord(), true, true);
+    ZKUtil.upsertWithOptionalCreate(_zkClient, zkPath, idealState.getRecord(), true, true, false);
   }
 
   /**

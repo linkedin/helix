@@ -67,6 +67,8 @@ import org.apache.helix.rest.server.auditlog.AuditLog;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.AbstractResource.Command;
 import org.apache.helix.rest.server.resources.helix.ClusterAccessor;
+import org.apache.helix.rest.server.service.ClusterService;
+import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -80,6 +82,7 @@ import static org.apache.helix.cloud.azure.AzureConstants.AZURE_FAULT_ZONE_TYPE;
 public class TestClusterAccessor extends AbstractTestClass {
 
   private static final String VG_CLUSTER = "vgCluster";
+  private static final String TEST_CLUSTER = "TestCluster_1";
 
   @BeforeClass
   public void beforeClass() {
@@ -92,8 +95,7 @@ public class TestClusterAccessor extends AbstractTestClass {
   @Test
   public void testValidateClusterConfigChange() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    String cluster = "TestCluster_1";
-    ClusterConfig config = getClusterConfigFromRest(cluster);
+    ClusterConfig config = getClusterConfigFromRest(TEST_CLUSTER);
 
     // Enable the topology aware setting while the instance config does not have the DOMAIN info
     {
@@ -102,13 +104,13 @@ public class TestClusterAccessor extends AbstractTestClass {
       _auditLogger.clearupLogs();
       Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(newConfig.getRecord()),
           MediaType.APPLICATION_JSON_TYPE);
-      post("clusters/" + cluster + "/configs", ImmutableMap.of("command", Command.update.name()),
+      post("clusters/" + TEST_CLUSTER + "/configs", ImmutableMap.of("command", Command.update.name()),
           entity, Response.Status.INTERNAL_SERVER_ERROR.getStatusCode());
 
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + cluster + "/configs");
+      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
@@ -119,7 +121,7 @@ public class TestClusterAccessor extends AbstractTestClass {
       newConfig.setFaultZoneType("TestZoneId");
       newConfig.setTopology("/TestZoneId/instance");
       newConfig.setTopologyAwareEnabled(false);
-      updateClusterConfigFromRest(cluster, newConfig, Command.update);
+      updateClusterConfigFromRest(TEST_CLUSTER, newConfig, Command.update);
     }
 
     // Update the topology path string to NULL. This request should go through since the
@@ -129,7 +131,7 @@ public class TestClusterAccessor extends AbstractTestClass {
       newConfig.setTopology(null);
       newConfig.setFaultZoneType(null);
       newConfig.setTopologyAwareEnabled(false);
-      updateClusterConfigFromRest(cluster, newConfig, Command.update);
+      updateClusterConfigFromRest(TEST_CLUSTER, newConfig, Command.update);
     }
 
     // Now update the config while keeping the topology path and fault zone unchanged (it's still NULL)
@@ -139,18 +141,18 @@ public class TestClusterAccessor extends AbstractTestClass {
       _auditLogger.clearupLogs();
       Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(newConfig.getRecord()),
           MediaType.APPLICATION_JSON_TYPE);
-      post("clusters/" + cluster + "/configs", ImmutableMap.of("command", Command.update.name()),
+      post("clusters/" + TEST_CLUSTER + "/configs", ImmutableMap.of("command", Command.update.name()),
           entity, Response.Status.INTERNAL_SERVER_ERROR.getStatusCode());
 
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + cluster + "/configs");
+      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
     // Restore the cluster config
-    updateClusterConfigFromRest(cluster, config, Command.update);
+    updateClusterConfigFromRest(TEST_CLUSTER, config, Command.update);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
@@ -173,6 +175,27 @@ public class TestClusterAccessor extends AbstractTestClass {
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
     validateAuditLog(auditLog, HTTPMethods.GET.name(), "clusters",
         Response.Status.OK.getStatusCode(), body);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testAuditLogIncludesQueryParams() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    _auditLogger.clearupLogs();
+    String cluster = _clusters.iterator().next();
+    // Make a request with query parameters
+    Map<String, String> queryParams = ImmutableMap.of("command", "activate", "superCluster", _superCluster);
+    get("clusters/" + cluster, queryParams, Response.Status.OK.getStatusCode(), true);
+
+    validateAuditLogSize(1);
+    AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
+
+    // Verify that query parameters are included in the request path
+    String expectedPath = "clusters/" + cluster + "?command=activate&superCluster=" + _superCluster;
+    Assert.assertEquals(auditLog.getRequestPath(), expectedPath,
+        "Request path should include query parameters");
+
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -423,6 +446,72 @@ public class TestClusterAccessor extends AbstractTestClass {
       instances.add(instanceName);
     }
     startInstances(clusterName, instances, 10);
+  }
+
+  @Test
+  public void testImbalanceAlgorithmThrottling() {
+    // Write a test to verify the logics of virtual topology imbalance detection
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestImbalanceDetectionCluster";
+    setupClusterForVirtualTopology(clusterName);
+    // Verify that the imbalance detection algorithm is working as expected
+    HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
+    ClusterService service = new ClusterServiceImpl(dataAccessor, _configAccessor);
+
+    // Since we have 5 zones and 5 virtual groups, they will be evenly distributed
+    Map<String, Set<String>> virtualZoneMap = null;
+    String virtualZoneOfZone1 = null;
+    {
+      String requestParam = "{\"virtualTopologyGroupNumber\":\"5\",\"virtualTopologyGroupName\":\"vgTest\","
+          + "\"assignmentAlgorithmType\":\"ZONE_BASED\","
+          + "\"maxImbalanceThreshold\":\"1\","
+          + "\"imbalanceDetectionAlgorithmType\":\"INSTANCE_COUNT_BASED\""
+          + "}";
+
+      post("clusters/" + clusterName,
+          ImmutableMap.of("command", "addVirtualTopologyGroup"),
+          Entity.entity(requestParam, MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+
+      virtualZoneMap =
+          service.getTopologyOfVirtualCluster(clusterName, false).toZoneMapping();
+      Assert.assertEquals(virtualZoneMap.size(), 5);
+      for (Map.Entry<String, Set<String>> entry : virtualZoneMap.entrySet()) {
+        if (entry.getValue().contains(clusterName + "_localhost_12920")) {
+          virtualZoneOfZone1 = entry.getKey();
+        }
+        Assert.assertEquals(entry.getValue().size(), 2, "Each virtual group should have 2 instances");
+      }
+    }
+
+    // Add one more instance to zone 1, which will cause imbalance. However, since the forceRecompute
+    // can't solve the imbalance, the current faultZone -> virtualZone assignment should be retained.
+    {
+      String instanceName = clusterName + "_localhost_12930";
+      _gSetupTool.addInstanceToCluster(clusterName, instanceName);
+      InstanceConfig instanceConfig =
+          dataAccessor.getProperty(dataAccessor.keyBuilder().instanceConfig(instanceName));
+      instanceConfig.setDomain("faultDomain=1,hostname=" + instanceName);
+      dataAccessor.setProperty(dataAccessor.keyBuilder().instanceConfig(instanceName), instanceConfig);
+
+      String requestParam = "{\"virtualTopologyGroupNumber\":\"5\",\"virtualTopologyGroupName\":\"vgTest\","
+          + "\"assignmentAlgorithmType\":\"ZONE_BASED\","
+          + "\"maxImbalanceThreshold\":\"0\","
+          + "\"imbalanceDetectionAlgorithmType\":\"INSTANCE_COUNT_BASED\""
+          + "}";
+
+      post("clusters/" + clusterName,
+          ImmutableMap.of("command", "addVirtualTopologyGroup"),
+          Entity.entity(requestParam, MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+
+      // Verify that the imbalance detection algorithm detects the imbalance
+      virtualZoneMap = service.getTopologyOfVirtualCluster(clusterName, false).toZoneMapping();
+      Assert.assertEquals(virtualZoneMap.size(), 5);
+      Assert.assertTrue(virtualZoneMap.get(virtualZoneOfZone1).size() > 2,
+          "Zone 1 should have more than 2 instances now and it shouldn't be recomputed due to throttling");
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test(dependsOnMethods = "testGetClusterTopologyAndFaultZoneMap")
