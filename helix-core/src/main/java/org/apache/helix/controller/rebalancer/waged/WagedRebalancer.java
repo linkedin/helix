@@ -248,7 +248,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
           _rebalanceAlgorithm);
     } catch (HelixRebalanceException ex) {
-      LOG.error("Failed to calculate the new assignments.", ex);
+      LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
+          ex.getFailureCategory(), ex.isCustomerActionable(), ex);
       // Record the failure in metrics.
       _rebalanceFailureCount.increment(1L);
 
@@ -261,7 +262,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         // return the previously calculated assignment.
         LOG.warn(
             "Returning the last known-good best possible assignment from metadata store due to "
-                + "rebalance failure of type: {}", failureType);
+                + "rebalance failure of type: {} category: {}", failureType, ex.getFailureCategory());
         // Note that don't return an assignment based on the current state if there is no previously
         // calculated result in this fallback logic.
         Map<String, ResourceAssignment> assignmentRecord =
@@ -368,7 +369,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       } catch (Exception ex) {
         throw new HelixRebalanceException(
             "Failed to calculate the new IdealState for resource: " + resourceName,
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
     }
     return finalIdealStateMap;
@@ -425,7 +427,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     } catch (Exception e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
       throw new HelixRebalanceException("Failed to compute for delayed rebalance overwrites in cluster "
-          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, e);
+          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, e);
     } finally {
       _rebalanceOverwriteLatency.endMeasuringLatency();
     }
@@ -481,7 +484,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
                 currentBestPossibleAssignment);
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to generate cluster model for emergency rebalance.",
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
       newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
     } else {
@@ -549,7 +553,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (!nonCompatibleResources.isEmpty()) {
       throw new HelixRebalanceException(String.format(
           "Input contains invalid resource(s) that cannot be rebalanced by the WAGED rebalancer. %s",
-          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT);
+          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT,
+          HelixRebalanceException.FailureCategory.INVALID_RESOURCE_CONFIG);
     }
   }
 
@@ -582,7 +587,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         _writeLatency.endMeasuringLatency();
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to persist the new best possible assignment.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     } else {
       LOG.debug("Assignment Metadata Store is null. Skip persisting the best possible assignment.");
