@@ -89,22 +89,6 @@ export class UserCtrl {
     }
   }
 
-  protected logout(req: HelixRequest, res: Response) {
-    if (!req.session) {
-      res.json(true);
-      return;
-    }
-    req.session.destroy((err) => {
-      if (err) {
-        res.status(500).json({ error: 'Logout failed' });
-        return;
-      }
-      res.clearCookie('connect.sid', { path: '/' });
-      res.clearCookie('helixui_identity.token');
-      res.json(true);
-    });
-  }
-
   protected login(req: HelixRequest, res: Response) {
     const credential = req.body;
     if (!credential.username || !credential.password) {
