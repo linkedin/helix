@@ -26,8 +26,12 @@ import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 /**
  * Evaluate a partition allocation proposal and return YES or NO based on the cluster context.
  * Any proposal fails one or more hard constraints will be rejected.
+ *
+ * <p>The class is public so the metric-reporting layer (in {@code monitoring.mbeans}) can
+ * reference {@link Type}; concrete subclasses stay package-private so the actual hard-constraint
+ * implementations remain internal.
  */
-abstract class HardConstraint {
+public abstract class HardConstraint {
 
   /**
    * Stable identifier for a hard constraint. Decoupled from class names so refactors don't break

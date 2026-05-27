@@ -20,7 +20,9 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ForkJoinPool;
@@ -185,6 +187,70 @@ public class TestConstraintBasedAlgorithm {
       algorithm.calculate(clusterModel);
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+    }
+  }
+
+  @Test
+  public void testHardConstraintFailureReporterFiresOncePerPartitionAndConstraintType()
+      throws IOException {
+    // Use a real NodeCapacityConstraint forced to reject all candidates so the reporter sees
+    // its Type once per failed partition (set-union semantics across nodes).
+    HardConstraint nodeCapacityConstraint = new NodeCapacityConstraint();
+    SoftConstraint soft1 = new MaxCapacityUsageInstanceConstraint();
+    SoftConstraint soft2 = new InstancePartitionsCountConstraint();
+    ConstraintBasedAlgorithm algorithm = new ConstraintBasedAlgorithm(
+        ImmutableList.of(nodeCapacityConstraint),
+        ImmutableMap.of(soft1, 1f, soft2, 1f),
+        TEST_FORK_JOIN_POOL);
+
+    // Force a capacity overflow that NodeCapacityConstraint will reject on every node.
+    ClusterModel clusterModel = new ClusterModelTestHelper().getMultiNodeClusterModel();
+    Map<String, Set<AssignableReplica>> assignableReplicaMap =
+        new HashMap<>(clusterModel.getAssignableReplicaMap());
+    Set<AssignableReplica> replicas = assignableReplicaMap.get("Resource3");
+    AssignableReplica replica = replicas.iterator().next();
+    replica.getCapacity().put("item3", 40); // available: 30, requested: 40.
+
+    List<HardConstraint.Type> reported = new ArrayList<>();
+    algorithm.setHardConstraintFailureReporter(reported::add);
+
+    try {
+      algorithm.calculate(clusterModel);
+      Assert.fail("Expected HelixRebalanceException for capacity violation");
+    } catch (HelixRebalanceException ex) {
+      Assert.assertEquals(ex.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+    }
+    Assert.assertFalse(reported.isEmpty(), "Reporter should have fired at least once");
+    Assert.assertTrue(reported.contains(HardConstraint.Type.NODE_CAPACITY),
+        "Expected NODE_CAPACITY in reported types; got " + reported);
+    // Set-union semantics: each invocation per failed partition should yield NODE_CAPACITY at
+    // most once (a single distinct type rejected every node), not once per node-rejection.
+    long nodeCapacityCount = reported.stream()
+        .filter(t -> t == HardConstraint.Type.NODE_CAPACITY).count();
+    Assert.assertEquals(nodeCapacityCount, 1L,
+        "NODE_CAPACITY should fire exactly once per failed partition, not per node-rejection");
+  }
+
+  @Test
+  public void testHardConstraintFailureReporterIsNoOpWhenUnset() throws IOException {
+    HardConstraint mockHardConstraint = mock(HardConstraint.class);
+    SoftConstraint mockSoftConstraint = mock(SoftConstraint.class);
+    when(mockHardConstraint.isAssignmentValid(any(), any(), any())).thenReturn(false);
+    when(mockHardConstraint.getType()).thenReturn(HardConstraint.Type.UNKNOWN);
+    when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
+    ConstraintBasedAlgorithm algorithm = new ConstraintBasedAlgorithm(
+        ImmutableList.of(mockHardConstraint),
+        ImmutableMap.of(mockSoftConstraint, 1f),
+        TEST_FORK_JOIN_POOL);
+
+    // No reporter installed -- the failure path must not NPE.
+    ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
+    try {
+      algorithm.calculate(clusterModel);
+    } catch (HelixRebalanceException ex) {
+      Assert.assertEquals(ex.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
     }
   }
 }
