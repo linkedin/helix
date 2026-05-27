@@ -125,6 +125,7 @@ export class AppComponent implements OnInit {
   }
 
   logout() {
+    if (this.expiryCheckHandle) clearInterval(this.expiryCheckHandle);
     this.service.logout().subscribe(
       () => {
         this.currentUser = this.service.getCurrentUser().pipe(
