@@ -27,6 +27,7 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
+  private expiryCheckHandle?: ReturnType<typeof setInterval>;
 
   constructor(
     // protected angulartics2Piwik: Angulartics2Piwik,
@@ -70,13 +71,14 @@ export class AppComponent implements OnInit {
   }
 
   private watchTokenExpiry() {
+    if (this.expiryCheckHandle) clearInterval(this.expiryCheckHandle);
     if (!this.hasIdentityToken()) return;
-    const check = setInterval(() => {
+    this.expiryCheckHandle = setInterval(() => {
       if (
         !this.hasIdentityToken() &&
         this.dialog.openDialogs.length === 0
       ) {
-        clearInterval(check);
+        clearInterval(this.expiryCheckHandle!);
         this.dialog
           .open(AlertDialogComponent, {
             data: {
