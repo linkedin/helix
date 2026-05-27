@@ -1,4 +1,4 @@
-import { catchError } from 'rxjs/operators';
+import { catchError, shareReplay } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
 import { HttpHeaders, HttpClient, HttpResponse } from '@angular/common/http';
 import { Router } from '@angular/router';
@@ -13,7 +13,15 @@ export class UserService {
   public getCurrentUser(): Observable<unknown> {
     return this.http
       .get(`${Settings.userAPI}/current`, { headers: this.getHeaders() })
-      .pipe(catchError((_) => _));
+      .pipe(catchError((_) => _), shareReplay(1));
+  }
+
+  public logout(): Observable<any> {
+    return this.http.post(
+      `${Settings.userAPI}/logout`,
+      {},
+      { headers: this.getHeaders() }
+    );
   }
 
   public login(username: string, password: string): Observable<any> {

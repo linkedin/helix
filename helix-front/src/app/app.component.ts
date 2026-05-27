@@ -11,6 +11,8 @@ import { MatDialog } from '@angular/material/dialog';
 
 // import { Angulartics2Piwik } from 'angulartics2/piwik';
 
+import { tap } from 'rxjs/operators';
+
 import { UserService } from './core/user.service';
 import { InputDialogComponent } from './shared/dialog/input-dialog/input-dialog.component';
 import { AlertDialogComponent } from './shared/dialog/alert-dialog/alert-dialog.component';
@@ -27,6 +29,7 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
+  isLoggedIn = false;
   private expiryCheckHandle?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -55,7 +58,9 @@ export class AppComponent implements OnInit {
   }
 
   ngOnInit() {
-    this.currentUser = this.service.getCurrentUser();
+    this.currentUser = this.service.getCurrentUser().pipe(
+      tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+    );
 
     this.route.queryParams.subscribe((params) => {
       if (params['embed'] == 'true') {
@@ -128,7 +133,9 @@ export class AppComponent implements OnInit {
                     );
                   }
 
-                  this.currentUser = this.service.getCurrentUser();
+                  this.currentUser = this.service.getCurrentUser().pipe(
+                    tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+                  );
                   this.watchTokenExpiry();
                 },
                 (error) => {
@@ -151,5 +158,20 @@ export class AppComponent implements OnInit {
           this.isLoading = false;
         }
       );
+  }
+
+  logout() {
+    if (this.expiryCheckHandle) clearInterval(this.expiryCheckHandle);
+    this.service.logout().subscribe(
+      () => {
+        this.currentUser = this.service.getCurrentUser().pipe(
+          tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+        );
+        this.helper.showSnackBar('Signed out successfully.');
+      },
+      (error) => {
+        this.helper.showError(error);
+      }
+    );
   }
 }

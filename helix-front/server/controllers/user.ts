@@ -34,12 +34,16 @@ export class UserCtrl {
     // uncomment the following line to use customized login
     // router.route('/user/authorize').get(this.authorize);
     router.route('/user/login').post(this.login.bind(this));
-    router.route('/user/logout').post(this.logout);
+    router.route('/user/logout').post(this.logout.bind(this));
     router.route('/user/current').get(this.current);
     router.route('/user/can').get(this.can);
   }
 
   protected logout(req: HelixRequest, res: Response) {
+    if (!req.session) {
+      res.json(true);
+      return;
+    }
     req.session.destroy((err) => {
       if (err) {
         res.status(500).json({ error: 'Logout failed' });
