@@ -24,6 +24,7 @@ import java.util.Date;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
@@ -31,6 +32,8 @@ import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -140,7 +143,43 @@ public class TestTopologyChangeEventMetric extends ZkTestBase {
     admin.enableInstance(clusterName, participants[0].getInstanceName(), true);
     Assert.assertTrue(verifier.verifyByPolling(), "cluster did not converge after re-enable");
 
-    // 5) Sanity: non-topology event types never get an MBean registered for them.
+    // 5) ResourceConfigChange -- write a ResourceConfig and verify the counter advances.
+    long rcReceivedBefore = getCounter(server, clusterName,
+        ClusterEventType.ResourceConfigChange, "ReceivedCounter");
+    long rcProcessedBefore = getCounter(server, clusterName,
+        ClusterEventType.ResourceConfigChange, "ProcessedCounter");
+
+    ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+    ResourceConfig resourceConfig = new ResourceConfig.Builder(RESOURCE + "0")
+        .setMonitorDisabled(false)
+        .build();
+    configAccessor.setResourceConfig(clusterName, RESOURCE + "0", resourceConfig);
+    Assert.assertTrue(verifier.verifyByPolling(),
+        "cluster did not converge after ResourceConfig write");
+
+    awaitCounterAtLeast(server, clusterName, ClusterEventType.ResourceConfigChange,
+        "ReceivedCounter", rcReceivedBefore + 1);
+    awaitCounterAtLeast(server, clusterName, ClusterEventType.ResourceConfigChange,
+        "ProcessedCounter", rcProcessedBefore + 1);
+
+    // 6) ClusterConfigChange -- toggle a cluster config and verify the counter advances.
+    long ccReceivedBefore = getCounter(server, clusterName,
+        ClusterEventType.ClusterConfigChange, "ReceivedCounter");
+    long ccProcessedBefore = getCounter(server, clusterName,
+        ClusterEventType.ClusterConfigChange, "ProcessedCounter");
+
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setRebalanceTimePeriod(60_000L);
+    configAccessor.setClusterConfig(clusterName, clusterConfig);
+    Assert.assertTrue(verifier.verifyByPolling(),
+        "cluster did not converge after ClusterConfig write");
+
+    awaitCounterAtLeast(server, clusterName, ClusterEventType.ClusterConfigChange,
+        "ReceivedCounter", ccReceivedBefore + 1);
+    awaitCounterAtLeast(server, clusterName, ClusterEventType.ClusterConfigChange,
+        "ProcessedCounter", ccProcessedBefore + 1);
+
+    // 7) Sanity: non-topology event types never get an MBean registered for them.
     Assert.assertFalse(server.isRegistered(new ObjectName(
             "ClusterStatus:cluster=" + clusterName
                 + ",eventName=TopologyChangeEvent,eventType=MessageChange")),

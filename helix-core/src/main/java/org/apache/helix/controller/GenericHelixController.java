@@ -970,10 +970,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _clusterStatusMonitor
             .updateClusterEventDuration(ClusterEventMonitor.PhaseName.TotalProcessed.name(),
                 _lastPipelineEndTimestamp - startTime);
-        // Count topology-change events that completed the resource pipeline successfully.
-        // Paired with the received counter incremented in pushToEventQueues; the gap
-        // between the two reflects coalescing in the cluster event queue under load.
-        if (!rebalanceFail) {
+        if (shouldCountTopologyEventAsProcessed(rebalanceFail, dataProvider)) {
           _clusterStatusMonitor.incrementTopologyChangeEventProcessed(event.getEventType());
         }
       }
@@ -989,6 +986,19 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // So reset ClusterStatusMonitor according to it's status after all event handling.
     // TODO remove this once clusterStatusMonitor blocks any MBean register on isMonitoring = false.
     resetClusterStatusMonitor();
+  }
+
+  /**
+   * Gate for the topology-change "processed" counter increment in {@link #handleEvent}. Counts
+   * only resource-pipeline runs that completed without failure -- the management-mode and
+   * task-framework pipelines run their own logic (the management registry only handles
+   * {@code LiveInstanceChange} and short-circuits the other four topology types as empty
+   * pipeline lists, which would otherwise leave {@code rebalanceFail=false} and falsely credit
+   * those events as processed). Package-private for direct unit testing.
+   */
+  static boolean shouldCountTopologyEventAsProcessed(boolean rebalanceFail,
+      BaseControllerDataProvider dataProvider) {
+    return !rebalanceFail && dataProvider instanceof ResourceControllerDataProvider;
   }
 
   private void updateContinuousRebalancedFailureCount(boolean isTaskFrameworkPipeline,
@@ -1295,7 +1305,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // Count topology-change events received from ZK before they get coalesced in the
     // cluster event queue. Counted once per logical event (not per pipeline fan-out into
     // DEFAULT/TASK queues) so the metric reflects ZK-driven churn, not internal queueing.
-    if (_isMonitoring && _clusterStatusMonitor != null) {
+    if (_isMonitoring) {
       _clusterStatusMonitor.incrementTopologyChangeEventReceived(eventType);
     }
     // No need for completed UUID, prefixed should be fine
