@@ -46,6 +46,15 @@ export class HelixCtrl {
       return;
     }
 
+    if (
+      IDENTITY_TOKEN_SOURCE &&
+      method !== 'GET' &&
+      !res.locals.cookie?.['helixui_identity.token']
+    ) {
+      res.status(401).send('Session expired. Please log in again.');
+      return;
+    }
+
     let apiPrefix: string | null = null;
     if (HELIX_ENDPOINTS[group]) {
       HELIX_ENDPOINTS[group].forEach((section) => {
