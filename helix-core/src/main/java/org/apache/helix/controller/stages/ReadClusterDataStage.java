@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +28,7 @@ import java.util.concurrent.Callable;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
@@ -34,7 +36,9 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractBaseStage;
 import org.apache.helix.controller.pipeline.StageException;
+import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -80,8 +84,10 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, Set<String>> tags = Maps.newHashMap();
             Map<String, LiveInstance> liveInstanceMap = dataProvider.getLiveInstances();
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
-            for (Map.Entry<String, InstanceConfig> e : dataProvider.getInstanceConfigMap()
-                .entrySet()) {
+            Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+            Map<String, Long> instanceErrorPartitionCounts = Maps.newHashMap();
+            
+            for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
               InstanceConfig config = e.getValue();
               instanceSet.add(instanceName);
@@ -89,6 +95,10 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 liveInstanceSet.add(instanceName);
                 instanceMessageMap.put(instanceName,
                     Sets.newHashSet(dataProvider.getMessages(instanceName).values()));
+                
+                // Count ERROR partitions for this live instance
+                long errorCount = countErrorPartitions(dataProvider, instanceName);
+                instanceErrorPartitionCounts.put(instanceName, errorCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -103,9 +113,18 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             }
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
-                    disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap);
+                    disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
+                    instanceConfigMap, instanceErrorPartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
+          return null;
+        }
+      });
+
+      asyncExecute(dataProvider.getAsyncTasksThreadPool(), new Callable<Object>() {
+        @Override
+        public Object call() {
+          validateAndReportInstanceDomainInfo(clusterConfig, dataProvider, clusterStatusMonitor);
           return null;
         }
       });
@@ -120,5 +139,93 @@ public class ReadClusterDataStage extends AbstractBaseStage {
         }
       });
     }
+  }
+
+  /**
+   * Validates domain info for all instances against the cluster's topology configuration and
+   * updates the DomainInfoValidGauge metric. Only runs when allowParticipantAutoJoin is enabled.
+   *
+   * An instance is considered invalid if {@link InstanceConfig#validateTopologySettingInInstanceConfig}
+   * throws, which covers:
+   * - Empty or missing domain info on an instance when topology-aware is enabled
+   * - Missing fault zone type key in the domain map
+   * - Missing zone ID when using legacy (non-custom) topology
+   */
+  static void validateAndReportInstanceDomainInfo(ClusterConfig clusterConfig,
+      BaseControllerDataProvider dataProvider, ClusterStatusMonitor clusterStatusMonitor) {
+    if (clusterStatusMonitor == null || clusterConfig == null) {
+      return;
+    }
+
+    String autoJoin = clusterConfig.getRecord()
+        .getSimpleField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN);
+    if (!Boolean.parseBoolean(autoJoin)) {
+      return;
+    }
+
+    Set<String> invalidInstances = new HashSet<>();
+    Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+    for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
+      String instanceName = entry.getKey();
+      InstanceConfig instanceConfig = entry.getValue();
+      try {
+        instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+      } catch (Exception e) {
+        invalidInstances.add(instanceName);
+        logger.warn("Instance {} has invalid domain info for cluster topology configuration",
+            instanceName, e);
+      }
+    }
+
+    clusterStatusMonitor.updateInstanceDomainInfoValidity(invalidInstances);
+  }
+
+  /**
+   * Count the number of partitions in ERROR state for a given instance
+   * @param dataProvider the data provider containing current state information
+   * @param instanceName the name of the instance to check
+   * @return the count of partitions in ERROR state
+   */
+  private long countErrorPartitions(BaseControllerDataProvider dataProvider, String instanceName) {
+    long errorCount = 0L;
+    
+    try {
+      Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
+      LiveInstance liveInstance = liveInstances.get(instanceName);
+      
+      if (liveInstance == null) {
+        return errorCount;
+      }
+      
+      String sessionId = liveInstance.getEphemeralOwner();
+      Map<String, CurrentState> currentStateMap = 
+          dataProvider.getCurrentState(instanceName, sessionId, false);
+      
+      if (currentStateMap == null) {
+        return errorCount;
+      }
+      
+      for (CurrentState currentState : currentStateMap.values()) {
+        if (currentState == null) {
+          continue;
+        }
+        
+        Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
+        if (partitionStateMap == null) {
+          continue;
+        }
+        
+        for (String state : partitionStateMap.values()) {
+          if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
+            errorCount++;
+          }
+        }
+      }
+    } catch (Exception e) {
+      LogUtil.logWarn(logger, _eventId, 
+          "Failed to count error partitions for instance: " + instanceName, e);
+    }
+    
+    return errorCount;
   }
 }

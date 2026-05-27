@@ -15,6 +15,7 @@ import { tap } from 'rxjs/operators';
 
 import { UserService } from './core/user.service';
 import { InputDialogComponent } from './shared/dialog/input-dialog/input-dialog.component';
+import { AlertDialogComponent } from './shared/dialog/alert-dialog/alert-dialog.component';
 import { HelperService } from './shared/helper.service';
 
 @Component({
@@ -29,6 +30,7 @@ export class AppComponent implements OnInit {
   isLoading = true;
   currentUser: any;
   isLoggedIn = false;
+  private expiryCheckHandle?: ReturnType<typeof setInterval>;
 
   constructor(
     // protected angulartics2Piwik: Angulartics2Piwik,
@@ -65,6 +67,39 @@ export class AppComponent implements OnInit {
         this.headerEnabled = this.footerEnabled = false;
       }
     });
+
+    this.watchTokenExpiry();
+  }
+
+  private hasIdentityToken(): boolean {
+    return document.cookie.split(';').some(c => c.trim().startsWith('helixui_identity.token='));
+  }
+
+  private watchTokenExpiry() {
+    if (this.expiryCheckHandle) clearInterval(this.expiryCheckHandle);
+    if (!this.hasIdentityToken()) return;
+    this.expiryCheckHandle = setInterval(() => {
+      if (
+        !this.hasIdentityToken() &&
+        this.dialog.openDialogs.length === 0
+      ) {
+        clearInterval(this.expiryCheckHandle!);
+        this.dialog
+          .open(AlertDialogComponent, {
+            data: {
+              title: 'Session Expired',
+              message:
+                'Your session has expired. Please sign in again to continue.',
+            },
+          })
+          .afterClosed()
+          .subscribe(() => {
+            fetch('/api/user/logout', { method: 'POST' }).finally(() =>
+              window.location.reload()
+            );
+          });
+      }
+    }, 30000);
   }
 
   login() {
@@ -101,6 +136,7 @@ export class AppComponent implements OnInit {
                   this.currentUser = this.service.getCurrentUser().pipe(
                     tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
                   );
+                  this.watchTokenExpiry();
                 },
                 (error) => {
                   // since rest API simply throws 404 instead of empty config when config is not initialized yet

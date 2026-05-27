@@ -29,6 +29,21 @@ import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
  */
 abstract class HardConstraint {
 
+  /**
+   * Stable identifier for a hard constraint. Decoupled from class names so refactors don't break
+   * downstream consumers (logging, metric attribution). Add a value here when introducing a new
+   * HardConstraint subclass.
+   */
+  public enum Type {
+    FAULT_ZONE,
+    NODE_CAPACITY,
+    NODE_MAX_PARTITION_LIMIT,
+    REPLICA_ACTIVATE,
+    SAME_PARTITION_ON_INSTANCE,
+    VALID_GROUP_TAG,
+    UNKNOWN
+  }
+
   protected boolean enableLogging = false;
 
   /**
@@ -45,6 +60,14 @@ abstract class HardConstraint {
    */
   String getDescription() {
     return getClass().getName();
+  }
+
+  /**
+   * @return A stable {@link Type} identifying this hard constraint. Default is
+   *         {@link Type#UNKNOWN}; subclasses should override to return their specific type.
+   */
+  Type getType() {
+    return Type.UNKNOWN;
   }
 
   /**

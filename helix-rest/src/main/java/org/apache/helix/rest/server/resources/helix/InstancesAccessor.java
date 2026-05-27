@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -43,11 +44,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
@@ -72,6 +76,10 @@ public class InstancesAccessor extends AbstractHelixResource {
     instances,
     online,
     disabled,
+    enabled,
+    evacuated,
+    swap_in,
+    unknown,
     selection_base,
     skip_custom_check_if_instance_not_alive,
     zone_order,
@@ -112,25 +120,56 @@ public class InstancesAccessor extends AbstractHelixResource {
       ObjectNode root = JsonNodeFactory.instance.objectNode();
       root.put(Properties.id.name(), JsonNodeFactory.instance.textNode(clusterId));
 
+      // Initialize all arrays
       ArrayNode instancesNode =
           root.putArray(InstancesAccessor.InstancesProperties.instances.name());
       instancesNode.addAll((ArrayNode) OBJECT_MAPPER.valueToTree(instances));
+      
       ArrayNode onlineNode = root.putArray(InstancesAccessor.InstancesProperties.online.name());
+      ArrayNode enabledNode = root.putArray(InstancesAccessor.InstancesProperties.enabled.name());
       ArrayNode disabledNode = root.putArray(InstancesAccessor.InstancesProperties.disabled.name());
+      ArrayNode evacuatedNode = root.putArray(InstancesAccessor.InstancesProperties.evacuated.name());
+      ArrayNode swapInNode = root.putArray(InstancesAccessor.InstancesProperties.swap_in.name());
+      ArrayNode unknownNode = root.putArray(InstancesAccessor.InstancesProperties.unknown.name());
 
       List<String> liveInstances = accessor.getChildNames(accessor.keyBuilder().liveInstances());
-      ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
 
+      // Categorize each instance by its operation state
       for (String instanceName : instances) {
         InstanceConfig instanceConfig =
             accessor.getProperty(accessor.keyBuilder().instanceConfig(instanceName));
         if (instanceConfig != null) {
-          if (!InstanceValidationUtil.isInstanceEnabled(instanceConfig, clusterConfig)) {
-            disabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
-          }
+          // Get the instance operation
+          InstanceConfig.InstanceOperation instanceOperation = instanceConfig.getInstanceOperation();
+          InstanceConstants.InstanceOperation operation = instanceOperation.getOperation();
 
+          // Add to online list if live
           if (liveInstances.contains(instanceName)) {
             onlineNode.add(JsonNodeFactory.instance.textNode(instanceName));
+          }
+
+          // Categorize by operation state
+          switch (operation) {
+            case ENABLE:
+              enabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case DISABLE:
+              disabledNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case EVACUATE:
+              evacuatedNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case SWAP_IN:
+              swapInNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            case UNKNOWN:
+              unknownNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
+            default:
+              _logger.warn("Unknown instance operation {} for instance {}. Adding to unknown list.",
+                  operation, instanceName);
+              unknownNode.add(JsonNodeFactory.instance.textNode(instanceName));
+              break;
           }
         }
       }
@@ -159,7 +198,8 @@ public class InstancesAccessor extends AbstractHelixResource {
       @QueryParam("continueOnFailures") boolean continueOnFailures,
       @QueryParam("skipZKRead") boolean skipZKRead,
       @QueryParam("skipHealthCheckCategories") String skipHealthCheckCategories,
-      @DefaultValue("false") @QueryParam("random") boolean random, String content) {
+      @DefaultValue("false") @QueryParam("random") boolean random,
+      @DefaultValue("false") @QueryParam("includeDetails") boolean includeDetails, String content) {
     Command cmd;
     try {
       cmd = Command.valueOf(command);
@@ -204,7 +244,9 @@ public class InstancesAccessor extends AbstractHelixResource {
           break;
         case stoppable:
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
-              skipHealthCheckCategorySet, random);
+              skipHealthCheckCategorySet, random, includeDetails);
+        case instanceOperationMaintenance:
+          return batchSetInstanceOperationMaintenance(clusterId, node);
         default:
           _logger.error("Unsupported command :" + command);
           return badRequest("Unsupported command :" + command);
@@ -220,9 +262,69 @@ public class InstancesAccessor extends AbstractHelixResource {
     return OK();
   }
 
+  /**
+   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/instanceOperationMaintenance}.
+   * Sets or clears the instance-operation maintenance marker on a list of instances. Mirrors
+   * the partial-accept contract of the batch stoppable check: instances are processed in
+   * input order, those that fit the cap quota (or that exist on a clear) are listed under
+   * {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs that
+   * invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
+   * missing expiry with no cluster default) are still surfaced as 400.
+   *
+   * <p>Request body:
+   * <pre>{@code
+   * { "instances": ["h1", "h2", ...],
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   *
+   * <p>Success response (HTTP 200):
+   * <pre>{@code
+   * { "applied":  ["h1", "h2"],
+   *   "rejected": { "h3": "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=2" },
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   */
+  private Response batchSetInstanceOperationMaintenance(String clusterId, JsonNode node) {
+    try {
+      JsonNode instancesNode = node.get(InstancesProperties.instances.name());
+      if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
+        return badRequest("Field 'instances' must be a non-empty array");
+      }
+      List<String> instances = new ArrayList<>(instancesNode.size());
+      for (JsonNode element : instancesNode) {
+        instances.add(element.asText());
+      }
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
+
+      ObjectNode body = JsonNodeFactory.instance.objectNode();
+      ArrayNode appliedArr = body.putArray("applied");
+      for (String name : result.getApplied()) {
+        appliedArr.add(name);
+      }
+      ObjectNode rejectedNode = body.putObject("rejected");
+      for (Map.Entry<String, String> entry : result.getRejected().entrySet()) {
+        rejectedNode.put(entry.getKey(), entry.getValue());
+      }
+      body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+      return JSONRepresentation(body);
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      _logger.error("Failed to set instance-operation maintenance batch in cluster {}",
+          clusterId, e);
+      return serverError(e);
+    }
+  }
+
   private Response batchGetStoppableInstances(String clusterId, JsonNode node, boolean skipZKRead,
       boolean continueOnFailures, Set<StoppableCheck.Category> skipHealthCheckCategories,
-      boolean random) throws IOException {
+      boolean random, boolean includeDetails) throws IOException {
     try {
       // TODO: Process input data from the content
       // TODO: Implement the logic to automatically detect the selection base. https://github.com/apache/helix/issues/2968#issue-2691677799
@@ -354,6 +456,7 @@ public class InstancesAccessor extends AbstractHelixResource {
               .setMaintenanceService(maintenanceService)
               .setClusterTopology(clusterTopology)
               .setDataAccessor((ZKHelixDataAccessor) getDataAccssor(clusterId))
+              .setIncludeDetails(includeDetails)
               .build();
       ObjectNode result;
 
@@ -384,4 +487,5 @@ public class InstancesAccessor extends AbstractHelixResource {
       throw e;
     }
   }
+
 }

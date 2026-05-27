@@ -25,12 +25,12 @@ import { Settings } from '../../core/settings';
 import { InputDialogComponent } from '../dialog/input-dialog/input-dialog.component';
 import { ConfirmDialogComponent } from '../dialog/confirm-dialog/confirm-dialog.component';
 
-export type IdealState = {
+export interface IdealState {
   id: string;
   simpleFields?: { [key: string]: any };
   listFields?: { [key: string]: any };
   mapFields?: { [key: string]: any };
-};
+}
 
 config.set(
   'basePath',

@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.common.ResourcesStateMap;
@@ -33,7 +34,8 @@ import org.apache.helix.model.Partition;
  */
 public class BestPossibleStateOutput extends ResourcesStateMap {
   /* resource -> partition -> preference list */
-  private Map<String, Map<String, List<String>>> _preferenceLists;
+  // Initialize eagerly to avoid race condition during parallel resource computation
+  private final Map<String, Map<String, List<String>>> _preferenceLists = new ConcurrentHashMap<>();
   /**
    * Deprecated, use getResourceStatesMap instead.
    *
@@ -71,41 +73,27 @@ public class BestPossibleStateOutput extends ResourcesStateMap {
   }
 
   public Map<String, List<String>> getPreferenceLists(String resource) {
-    if (_preferenceLists != null && _preferenceLists.containsKey(resource)) {
-      return _preferenceLists.get(resource);
-    }
-
-    return null;
+    return _preferenceLists.get(resource);
   }
 
   public List<String> getPreferenceList(String resource, String partition) {
-    if (_preferenceLists != null && _preferenceLists.containsKey(resource) && _preferenceLists
-        .get(resource).containsKey(partition)) {
-      return _preferenceLists.get(resource).get(partition);
+    Map<String, List<String>> resourcePrefs = _preferenceLists.get(resource);
+    if (resourcePrefs != null) {
+      return resourcePrefs.get(partition);
     }
-
     return null;
   }
 
   public void setPreferenceList(String resource, String partition, List<String> list) {
-    if (_preferenceLists == null) {
-      _preferenceLists = new HashMap<>();
-    }
-    if (!_preferenceLists.containsKey(resource)) {
-      _preferenceLists.put(resource, new HashMap<String, List<String>>());
-    }
-    _preferenceLists.get(resource).put(partition, list);
+    _preferenceLists.computeIfAbsent(resource, k -> new ConcurrentHashMap<>()).put(partition, list);
   }
 
   public void setPreferenceLists(String resource,
       Map<String, List<String>> resourcePreferenceLists) {
-    if (_preferenceLists == null) {
-      _preferenceLists = new HashMap<>();
-    }
     _preferenceLists.put(resource, resourcePreferenceLists);
   }
 
   protected boolean containsResource(String resource) {
-    return _preferenceLists != null && _preferenceLists.containsKey(resource);
+    return _preferenceLists.containsKey(resource);
   }
 }

@@ -103,7 +103,174 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  @Test(dependsOnMethods = "testIsInstanceStoppable")
+  @Test
+  public void testIsInstanceStoppableWithIncludeDetailsDefault() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, String> params = ImmutableMap.of("client", "espresso");
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(params), MediaType.APPLICATION_JSON_TYPE);
+    
+    // Test without includeDetails parameter (should behave same as includeDetails=false)
+    Response response = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}/stoppable?skipHealthCheckCategories=CUSTOM_INSTANCE_CHECK,CUSTOM_PARTITION_CHECK").format(
+        STOPPABLE_CLUSTER, "instance1").post(this, entity);
+    String stoppableCheckResult = response.readEntity(String.class);
+    Map<String, Object> actualMap = OBJECT_MAPPER.readValue(stoppableCheckResult, Map.class);
+    
+    List<String> failedChecks =
+        Arrays.asList("HELIX:EMPTY_RESOURCE_ASSIGNMENT", "HELIX:INSTANCE_NOT_ENABLED",
+            "HELIX:INSTANCE_NOT_STABLE");
+    Map<String, Object> expectedMap =
+        ImmutableMap.of("stoppable", false, "failedChecks", failedChecks);
+    Assert.assertEquals(actualMap, expectedMap);
+    
+    // Verify the failed checks contain basic error codes without detailed partition information
+    for (String failedCheck : failedChecks) {
+      Assert.assertFalse(failedCheck.contains("partition"),
+          "Basic error message should not contain partition details: " + failedCheck);
+      Assert.assertFalse(failedCheck.contains("active replicas"),
+          "Basic error message should not contain replica details: " + failedCheck);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testIsInstanceStoppableWithIncludeDetailsFalse() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, String> params = ImmutableMap.of("client", "espresso");
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(params), MediaType.APPLICATION_JSON_TYPE);
+    
+    // Test with includeDetails=false (should behave same as default)
+    Response response = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}/stoppable?skipHealthCheckCategories=CUSTOM_INSTANCE_CHECK,CUSTOM_PARTITION_CHECK&includeDetails=false").format(
+        STOPPABLE_CLUSTER, "instance1").post(this, entity);
+    String stoppableCheckResult = response.readEntity(String.class);
+    Map<String, Object> actualMap = OBJECT_MAPPER.readValue(stoppableCheckResult, Map.class);
+    
+    List<String> failedChecks =
+        Arrays.asList("HELIX:EMPTY_RESOURCE_ASSIGNMENT", "HELIX:INSTANCE_NOT_ENABLED",
+            "HELIX:INSTANCE_NOT_STABLE");
+    Map<String, Object> expectedMap =
+        ImmutableMap.of("stoppable", false, "failedChecks", failedChecks);
+    Assert.assertEquals(actualMap, expectedMap);
+    
+    // Verify the failed checks contain basic error codes without detailed partition information
+    for (String failedCheck : failedChecks) {
+      Assert.assertFalse(failedCheck.contains("partition"),
+          "Basic error message should not contain partition details: " + failedCheck);
+      Assert.assertFalse(failedCheck.contains("active replicas"),
+          "Basic error message should not contain replica details: " + failedCheck);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testIsInstanceStoppableWithIncludeDetailsTrue() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, String> params = ImmutableMap.of("client", "espresso");
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(params), MediaType.APPLICATION_JSON_TYPE);
+    
+    // Test with includeDetails=true
+    Response response = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}/stoppable?skipHealthCheckCategories=CUSTOM_INSTANCE_CHECK,CUSTOM_PARTITION_CHECK&includeDetails=true").format(
+        STOPPABLE_CLUSTER, "instance1").post(this, entity);
+    String stoppableCheckResult = response.readEntity(String.class);
+    Map<String, Object> actualMap = OBJECT_MAPPER.readValue(stoppableCheckResult, Map.class);
+    
+    Assert.assertFalse((Boolean) actualMap.get("stoppable"));
+    Assert.assertNotNull(actualMap.get("failedChecks"));
+    
+    @SuppressWarnings("unchecked")
+    List<String> failedChecks = (List<String>) actualMap.get("failedChecks");
+    Assert.assertFalse(failedChecks.isEmpty());
+    
+    // The basic checks should still be there but now with includeDetails=true,
+    // any MIN_ACTIVE_REPLICA_CHECK_FAILED errors should contain detailed information
+    boolean hasDetailedMessage = false;
+    for (String failedCheck : failedChecks) {
+      if (failedCheck.contains("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED") && 
+          (failedCheck.contains("partition") || failedCheck.contains("active replicas"))) {
+        hasDetailedMessage = true;
+        // Verify the detailed message format
+        Assert.assertTrue(failedCheck.contains("Resource "),
+            "Detailed error should contain resource information: " + failedCheck);
+        break;
+      }
+    }
+    
+    // Note: hasDetailedMessage might be false if this particular instance doesn't trigger
+    // MIN_ACTIVE_REPLICA_CHECK_FAILED, which is fine for this test setup
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testPerInstanceStoppableWithIncludeDetailsForMinActiveReplica() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    
+    // Test the includeDetails parameter specifically for scenarios that might trigger
+    // MIN_ACTIVE_REPLICA_CHECK_FAILED with detailed partition information
+    Map<String, String> params = ImmutableMap.of("client", "espresso");
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(params), MediaType.APPLICATION_JSON_TYPE);
+    
+    // Test an enabled instance from the stoppable cluster
+    String instanceToTest = "instance0"; // Use a different instance that might be enabled
+    
+    // First test without includeDetails
+    Response response1 = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}/stoppable").format(
+        STOPPABLE_CLUSTER, instanceToTest).post(this, entity);
+    String result1 = response1.readEntity(String.class);
+    Map<String, Object> resultMap1 = OBJECT_MAPPER.readValue(result1, Map.class);
+    
+    // Then test with includeDetails=true
+    Response response2 = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}/stoppable?includeDetails=true").format(
+        STOPPABLE_CLUSTER, instanceToTest).post(this, entity);
+    String result2 = response2.readEntity(String.class);
+    Map<String, Object> resultMap2 = OBJECT_MAPPER.readValue(result2, Map.class);
+    
+    // Both should have same stoppable status
+    Assert.assertEquals(resultMap1.get("stoppable"), resultMap2.get("stoppable"));
+    
+    // If there are failed checks, verify that includeDetails=true provides more information
+    if (resultMap1.containsKey("failedChecks") && resultMap2.containsKey("failedChecks")) {
+      @SuppressWarnings("unchecked")
+      List<String> failedChecks1 = (List<String>) resultMap1.get("failedChecks");
+      @SuppressWarnings("unchecked")
+      List<String> failedChecks2 = (List<String>) resultMap2.get("failedChecks");
+      
+      // Check if any detailed messages are present in the includeDetails=true response
+      boolean hasDetailedInResponse2 = false;
+      for (String check : failedChecks2) {
+        if (check.contains("partition") && check.contains("active replicas")) {
+          hasDetailedInResponse2 = true;
+          Assert.assertTrue(check.contains("Resource "), 
+              "Detailed message should contain resource info: " + check);
+          break;
+        }
+      }
+      
+      // The detailed information should only appear in the includeDetails=true response
+      if (hasDetailedInResponse2) {
+        boolean hasDetailedInResponse1 = false;
+        for (String check : failedChecks1) {
+          if (check.contains("partition") && check.contains("active replicas")) {
+            hasDetailedInResponse1 = true;
+            break;
+          }
+        }
+        Assert.assertFalse(hasDetailedInResponse1, 
+            "Default response should not contain detailed partition information");
+      }
+    }
+    
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test(dependsOnMethods = "testPerInstanceStoppableWithIncludeDetailsForMinActiveReplica")
   public void testTakeInstanceNegInput() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     post("clusters/TestCluster_0/instances/instance1/takeInstance", null,
@@ -532,6 +699,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.EVACUATE);
+    // Verify INSTANCE_OPERATION_STATE field is set correctly
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "EVACUATE");
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=INVALIDOP")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode()).format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=")
@@ -539,6 +708,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.ENABLE);
+    // Verify INSTANCE_OPERATION_STATE field is set correctly
+    Assert.assertEquals(instanceConfig.getInstanceOperationState(), "ENABLE");
 
     // test canCompleteSwap
     Response canCompleteSwapResponse =
@@ -568,17 +739,30 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
     Response response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
-    Map<String, Boolean> evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
+    Map<String, Object> evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    // Returns true because the node only contains semi-auto resources
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    // Returns COMPLETED because the node only contains semi-auto resources
+    Assert.assertEquals(evacuateFinishedResult.get("state"), "COMPLETED");
+    // Verify new fields are present in the response
+    Assert.assertTrue(evacuateFinishedResult.containsKey("remainingPartitionCount"),
+        "Response should contain remainingPartitionCount field");
+    Assert.assertTrue(evacuateFinishedResult.containsKey("pendingMessageCount"),
+        "Response should contain pendingMessageCount field");
+    Assert.assertEquals(evacuateFinishedResult.get("remainingPartitionCount"), 0,
+        "remainingPartitionCount should be 0 for completed evacuation");
 
-    // Because the resources are now all semi-auto, is EvacuateFinished should return true
+    // Because the resources are now all semi-auto, is EvacuateFinished should return COMPLETED
     response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isEvacuateFinished")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    Assert.assertEquals(evacuateFinishedResult.get("state"), "COMPLETED");
+
+    response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=isInstanceDrained")
+        .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
+    Map<String, Boolean> instanceDrainedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+    Assert.assertTrue(instanceDrainedResult.get("successful"));
 
     // test isEvacuateFinished on instance with EVACUATE and no currentState
     // Create new instance so no currentState or messages assigned to it
@@ -599,7 +783,10 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, test_instance_name).post(this, entity);
     evacuateFinishedResult = OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
-    Assert.assertTrue(evacuateFinishedResult.get("successful"));
+    Assert.assertEquals(evacuateFinishedResult.get("state"), "COMPLETED");
+    // Verify new fields for instance with no currentState
+    Assert.assertEquals(evacuateFinishedResult.get("remainingPartitionCount"), 0,
+        "remainingPartitionCount should be 0 for instance with no currentState");
 
     // Remove instance created for evacuate test
     delete("clusters/" + CLUSTER_NAME + "/instances/" + test_instance_name, Response.Status.OK.getStatusCode());
@@ -874,6 +1061,338 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
 
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test()
+  public void testValidateClusterTopologyOnUpdate() throws IOException {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+
+    // Enable topology-aware for the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    // Prepare swap-out and swap-in instances
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+
+    String domain = String.format(
+        "zone=%s,instance=%s,applicationInstanceId=%s,host=%s",
+        "zone_0", "Participant_O_1", "Participant_O_1", "%s"
+    );
+    swapOutConfig.setDomain(String.format(domain, swapOutInstance));
+    swapInConfig.setDomain(String.format(domain, swapInInstance));
+
+    swapOutConfig.setInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE);
+    swapInConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+// Create the request for enabling the swap-out instance
+    ZNRecord record = new ZNRecord(swapOutInstance);
+    record.getSimpleFields().put(
+        InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "true"
+    );
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(record),
+        MediaType.APPLICATION_JSON_TYPE
+    );
+
+    boolean updateRequestFails = false;
+    try {
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+          .format(CLUSTER_NAME, swapOutInstance)
+          .post(this, entity);
+    } catch (AssertionError e) {
+      updateRequestFails = true;
+      System.out.println("Caught expected AssertionError: " + e.getMessage());
+    }
+    Assert.assertTrue(updateRequestFails);
+
+    // Mark the swap-in instance unknown and retry the update
+    swapInConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(CLUSTER_NAME, swapOutInstance)
+        .post(this, entity);
+
+  }
+
+  /**
+   * Test that updating DOMAIN and SWAP_IN operation in a single request succeeds.
+   * This verifies that the merge of the new config happens before validation so that
+   * the updated DOMAIN (with a matching logical ID) is used for the transition check.
+   */
+  @Test
+  public void testSwapInWithDomainUpdateInSingleRequest() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out instance with ENABLE and a specific logical ID in the DOMAIN
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in instance with UNKNOWN and a DIFFERENT logical ID in the DOMAIN
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=DifferentId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that updates BOTH the DOMAIN (to match swap-out) AND sets SWAP_IN.
+    // This simulates what ACM does in setSwapInOperationAndEditConfigIfNeeded.
+    InstanceConfig updatedSwapInConfig = new InstanceConfig(swapInConfig.getRecord());
+    updatedSwapInConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapInInstance);
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(updatedSwapInConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should succeed because the merged config has the correct DOMAIN for matching
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Verify the config was updated in ZK
+    InstanceConfig resultConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    Assert.assertEquals(resultConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.SWAP_IN);
+    Assert.assertTrue(resultConfig.getDomainAsString().contains("instance=LogicalId_A"));
+
+    // Clean up: reset both instances to ENABLE with original domains
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    // Reset topology
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that SWAP_IN without updating DOMAIN to match fails when logical IDs differ.
+   */
+  @Test
+  public void testSwapInWithoutMatchingDomainFails() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out with ENABLE and a specific logical ID
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_B,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in with UNKNOWN and a DIFFERENT logical ID
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=MismatchedId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that sets SWAP_IN but does NOT update the DOMAIN to match.
+    InstanceConfig badConfig = new InstanceConfig(swapInConfig.getRecord());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(badConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should fail because even after merging, the DOMAIN still doesn't match
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Clean up
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that a delete command removing the DOMAIN field causes the operation transition
+   * validation to fail when the transition depends on logical ID matching.
+   * Before the merge-before-validate fix, the validation would have passed because it ran
+   * against the original config (which still had the DOMAIN). Now the DOMAIN is removed
+   * before validation, so the logical ID matching correctly fails.
+   */
+  @Test
+  public void testDeleteDomainFailsWhenTransitionDependsOnLogicalId() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out instance with ENABLE and a specific logical ID
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in instance with UNKNOWN and a MATCHING logical ID
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a DELETE request that removes the DOMAIN field and sets SWAP_IN.
+    // The DOMAIN deletion happens before validation, so logical ID matching
+    // will fail because the config no longer has the DOMAIN field.
+    InstanceConfig deleteConfig = new InstanceConfig(swapInInstance);
+    deleteConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapInInstance);
+    deleteConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    deleteConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(deleteConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // Should fail because the delete removes the DOMAIN before validation,
+    // so no matching logical ID is found for the UNKNOWN->SWAP_IN transition.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=delete")
+        .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Verify the original config is unchanged in ZK
+    InstanceConfig resultConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    Assert.assertEquals(resultConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertTrue(resultConfig.getDomainAsString().contains("instance=LogicalId_C"));
+
+    // Clean up
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

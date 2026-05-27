@@ -26,6 +26,7 @@ import org.apache.helix.ClusterMessagingService;
 import org.apache.helix.Criteria;
 import org.apache.helix.InstanceType;
 import org.apache.helix.messaging.AsyncCallback;
+import org.apache.helix.messaging.ParticipantMessageOptions;
 import org.apache.helix.messaging.handling.MessageHandlerFactory;
 import org.apache.helix.model.Message;
 
@@ -80,6 +81,20 @@ public class MockClusterMessagingService implements ClusterMessagingService {
       Message messageTemplate) {
     // TODO Auto-generated method stub
     return null;
+  }
+
+  @Override
+  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      ParticipantMessageOptions options) {
+    // TODO Auto-generated method stub
+    return 0;
+  }
+
+  @Override
+  public int sendToAllParticipantInstances(String clusterName, Message message,
+      ParticipantMessageOptions options) {
+    // TODO Auto-generated method stub
+    return 0;
   }
 
 }

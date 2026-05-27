@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.ConfigAccessor;
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -56,11 +57,12 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
   private final Set<String> _resources;
   private final Set<String> _expectLiveInstances;
   private final boolean _isDeactivatedNodeAware;
+  private final boolean _isLenientMatch;
 
   @Deprecated
   public StrictMatchExternalViewVerifier(String zkAddr, String clusterName, Set<String> resources,
       Set<String> expectLiveInstances) {
-    this(zkAddr, clusterName, resources, expectLiveInstances, false, 0);
+    this(zkAddr, clusterName, resources, expectLiveInstances, false, false, 0);
   }
 
   @Deprecated
@@ -73,27 +75,30 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
     _expectLiveInstances =
         expectLiveInstances == null ? new HashSet<>() : new HashSet<>(expectLiveInstances);
     _isDeactivatedNodeAware = false;
+    _isLenientMatch = false;
   }
 
   @Deprecated
   private StrictMatchExternalViewVerifier(String zkAddr, String clusterName, Set<String> resources,
-      Set<String> expectLiveInstances, boolean isDeactivatedNodeAware, int waitTillVerify) {
+      Set<String> expectLiveInstances, boolean isDeactivatedNodeAware, boolean isLenientMatch,
+      int waitTillVerify) {
     super(zkAddr, clusterName, waitTillVerify);
     _resources = resources;
     _expectLiveInstances = expectLiveInstances;
     _isDeactivatedNodeAware = isDeactivatedNodeAware;
+    _isLenientMatch = isLenientMatch;
   }
 
   private StrictMatchExternalViewVerifier(RealmAwareZkClient zkClient, String clusterName,
       Set<String> resources, Set<String> expectLiveInstances, boolean isDeactivatedNodeAware,
-      int waitPeriodTillVerify, boolean usesExternalZkClient) {
-    // Initialize StrictMatchExternalViewVerifier with usesExternalZkClient = false so that
-    // StrictMatchExternalViewVerifier::close() would close ZkClient to prevent thread leakage
-    super(zkClient, clusterName, usesExternalZkClient, 0);
+      boolean isLenientMatch, int waitPeriodTillVerify, boolean usesExternalZkClient) {
+    // When usesExternalZkClient is false, close() will close the client to prevent thread leakage.
+    super(zkClient, clusterName, usesExternalZkClient, waitPeriodTillVerify);
     _resources = resources == null ? new HashSet<>() : new HashSet<>(resources);
     _expectLiveInstances =
         expectLiveInstances == null ? new HashSet<>() : new HashSet<>(expectLiveInstances);
     _isDeactivatedNodeAware = isDeactivatedNodeAware;
+    _isLenientMatch = isLenientMatch;
   }
 
   public static class Builder extends ZkHelixClusterVerifier.Builder<Builder> {
@@ -103,6 +108,9 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
     private RealmAwareZkClient _zkClient;
     // For backward compatibility, set the default isDeactivatedNodeAware to be false.
     private boolean _isDeactivatedNodeAware = false;
+    // For backward compatibility, set the default isLenientMatch to be false.
+    // When true, OFFLINE (initialState) and DROPPED entries are stripped before comparison.
+    private boolean _isLenientMatch = false;
     private boolean _usesExternalZkClient = false; // false by default
 
     public StrictMatchExternalViewVerifier build() {
@@ -112,22 +120,23 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
       if (_zkClient != null) {
         return new StrictMatchExternalViewVerifier(_zkClient, _clusterName, _resources,
-            _expectLiveInstances, _isDeactivatedNodeAware, _waitPeriodTillVerify,
-            _usesExternalZkClient);
+            _expectLiveInstances, _isDeactivatedNodeAware, _isLenientMatch,
+            _waitPeriodTillVerify, _usesExternalZkClient);
       }
 
       if (_realmAwareZkConnectionConfig == null || _realmAwareZkClientConfig == null) {
         // For backward-compatibility
         return new StrictMatchExternalViewVerifier(_zkAddress, _clusterName, _resources,
-            _expectLiveInstances, _isDeactivatedNodeAware, _waitPeriodTillVerify);
+            _expectLiveInstances, _isDeactivatedNodeAware, _isLenientMatch,
+            _waitPeriodTillVerify);
       }
 
       validate();
       return new StrictMatchExternalViewVerifier(
           createZkClient(RealmAwareZkClient.RealmMode.SINGLE_REALM, _realmAwareZkConnectionConfig,
               _realmAwareZkClientConfig, _zkAddress), _clusterName, _resources,
-          _expectLiveInstances, _isDeactivatedNodeAware, _waitPeriodTillVerify,
-          _usesExternalZkClient);
+          _expectLiveInstances, _isDeactivatedNodeAware, _isLenientMatch,
+          _waitPeriodTillVerify, _usesExternalZkClient);
     }
 
     public Builder(String clusterName) {
@@ -173,6 +182,15 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
     public Builder setDeactivatedNodeAwareness(boolean isDeactivatedNodeAware) {
       _isDeactivatedNodeAware = isDeactivatedNodeAware;
+      return this;
+    }
+
+    public boolean getLenientMatch() {
+      return _isLenientMatch;
+    }
+
+    public Builder setLenientMatch(boolean isLenientMatch) {
+      _isLenientMatch = isLenientMatch;
       return this;
     }
 
@@ -288,7 +306,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
   private boolean verifyExternalView(ResourceControllerDataProvider dataCache, ExternalView externalView,
       IdealState idealState) {
-    Map<String, Map<String, String>> mappingInExtview = externalView.getRecord().getMapFields();
+    Map<String, Map<String, String>> mappingInExternalView = externalView.getRecord().getMapFields();
     Map<String, Map<String, String>> idealPartitionState;
 
     switch (idealState.getRebalanceMode()) {
@@ -319,7 +337,60 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       return true;
     }
 
-    return mappingInExtview.equals(idealPartitionState);
+    if (!_isLenientMatch) {
+      return mappingInExternalView.equals(idealPartitionState);
+    }
+
+    StateModelDefinition stateModelDef =
+        dataCache.getStateModelDef(idealState.getStateModelDefRef());
+    return compareMappings(mappingInExternalView, idealPartitionState, stateModelDef);
+  }
+
+  private boolean compareMappings(Map<String, Map<String, String>> actualMappings,
+      Map<String, Map<String, String>> expectedMappings, StateModelDefinition stateModelDef) {
+    if (!_isLenientMatch || stateModelDef == null) {
+      return actualMappings.equals(expectedMappings);
+    }
+
+    Set<String> ignoredStates = new HashSet<>(
+        Arrays.asList(stateModelDef.getInitialState(), HelixDefinedState.DROPPED.toString()));
+    return copyWithoutIgnoredStates(actualMappings, ignoredStates)
+        .equals(copyWithoutIgnoredStates(expectedMappings, ignoredStates));
+  }
+
+  private static Map<String, Map<String, String>> copyWithoutIgnoredStates(
+      Map<String, Map<String, String>> original, Set<String> ignoredStates) {
+    Map<String, Map<String, String>> copiedMappings = deepCopyMapFields(original);
+    removeEntriesWithIgnoredStates(copiedMappings.entrySet().iterator(), ignoredStates);
+    return copiedMappings;
+  }
+
+  private static Map<String, Map<String, String>> deepCopyMapFields(
+      Map<String, Map<String, String>> original) {
+    Map<String, Map<String, String>> copy = new HashMap<>();
+    for (Map.Entry<String, Map<String, String>> entry : original.entrySet()) {
+      copy.put(entry.getKey(), new HashMap<>(entry.getValue()));
+    }
+    return copy;
+  }
+
+  private static void removeEntriesWithIgnoredStates(
+      Iterator<Map.Entry<String, Map<String, String>>> partitionInstanceStateMapIter,
+      Set<String> ignoredStates) {
+    while (partitionInstanceStateMapIter.hasNext()) {
+      Map.Entry<String, Map<String, String>> entry = partitionInstanceStateMapIter.next();
+      Map<String, String> instanceStateMap = entry.getValue();
+      Iterator<Map.Entry<String, String>> insIter = instanceStateMap.entrySet().iterator();
+      while (insIter.hasNext()) {
+        String state = insIter.next().getValue();
+        if (ignoredStates.contains(state)) {
+          insIter.remove();
+        }
+      }
+      if (instanceStateMap.isEmpty()) {
+        partitionInstanceStateMapIter.remove();
+      }
+    }
   }
 
   private Map<String, Map<String, String>> computeIdealPartitionState(

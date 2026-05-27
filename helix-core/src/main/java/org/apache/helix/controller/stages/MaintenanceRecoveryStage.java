@@ -81,21 +81,30 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
     boolean shouldExitMaintenance;
     String reason;
     switch (internalReason) {
+    // MAX_OFFLINE_INSTANCES_EXCEEDED is the deprecated alias for
+    // MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS; no current code path writes it, but
+    // long-lived MM signals persisted before the rename can still carry it on disk. The
+    // two arms must stay collapsed for backward compatibility.
     case MAX_OFFLINE_INSTANCES_EXCEEDED:
     case MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS:
-      // Check on the number of offline/disabled instances
       int numOfflineInstancesForAutoExit =
           cache.getClusterConfig().getNumOfflineInstancesForAutoExit();
       if (numOfflineInstancesForAutoExit < 0) {
         return; // Config is not set, no auto-exit
       }
-      // Get the count of all instances that are either offline or disabled
-      int offlineDisabledCount =
-          cache.getAssignableInstances().size() - cache.getEnabledLiveInstances().size();
-      shouldExitMaintenance = offlineDisabledCount <= numOfflineInstancesForAutoExit;
+      // Use the shared offline-budget accessor so MM exit measures against the same
+      // population MM entry uses in BestPossibleStateCalcStage. See
+      // BaseControllerDataProvider#getInstancesUnableToAcceptOnlineReplicas for the
+      // membership rules (routable, not enabled-live, no valid maintenance marker).
+      int instancesUnableToAcceptOnlineReplicas =
+          cache.getInstancesUnableToAcceptOnlineReplicas(System.currentTimeMillis()).size();
+      shouldExitMaintenance =
+          instancesUnableToAcceptOnlineReplicas <= numOfflineInstancesForAutoExit;
       reason = String.format(
-          "Auto-exiting maintenance mode for cluster %s; Num. of offline/disabled instances is %d, less than or equal to the exit threshold %d",
-          event.getClusterName(), offlineDisabledCount, numOfflineInstancesForAutoExit);
+          "Auto-exiting maintenance mode for cluster %s; instances unable to take ONLINE "
+              + "replicas count %d is less than or equal to the exit threshold %d",
+          event.getClusterName(), instancesUnableToAcceptOnlineReplicas,
+          numOfflineInstancesForAutoExit);
       break;
     case MAX_PARTITION_PER_INSTANCE_EXCEEDED:
       IntermediateStateOutput intermediateStateOutput =

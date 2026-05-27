@@ -72,6 +72,7 @@ public class AbstractResource {
     add,
     delete,
     stoppable,
+    instanceOperationMaintenance,
     rebalance,
     reset,
     resetPartitions,
@@ -90,6 +91,7 @@ public class AbstractResource {
     completeSwapIfPossible,
     onDemandRebalance,
     isEvacuateFinished,
+    isInstanceDrained,
     setPartitionsToError,
     forceKillInstance
   }

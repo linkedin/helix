@@ -225,7 +225,8 @@ public class TestClusterStatusMonitor {
     }
 
     monitor.setClusterInstanceStatus(liveInstanceSet, liveInstanceSet, Collections.emptySet(),
-        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceMessageMap);
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceMessageMap,
+        Collections.emptyMap(), Collections.emptyMap());
 
     Assert.assertEquals(monitor.getInstanceMessageQueueBacklog(), 25 * n);
     Assert.assertEquals(monitor.getTotalPastDueMessageGauge(), 15 * n);
@@ -445,7 +446,8 @@ public class TestClusterStatusMonitor {
     // Call setClusterInstanceStatus to register instance monitors.
     monitor.setClusterInstanceStatus(maxUsageMap.keySet(), maxUsageMap.keySet(),
         Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(),
-        Collections.emptyMap(), Collections.emptyMap());
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap());
 
     // Update instance capacity status.
     for (Map.Entry<String, Double> usageEntry : maxUsageMap.entrySet()) {
@@ -557,6 +559,78 @@ public class TestClusterStatusMonitor {
     Assert.assertEquals(_server.getAttribute(type2ObjectName, "AvailableThreadGauge"), 29L);
   }
 
+  @Test
+  public void testUpdateInstanceDomainInfoValidity() throws Exception {
+    String clusterName = "TestCluster_DomainInfo";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    int numInstances = 5;
+    Set<String> instanceSet = Sets.newHashSet();
+    for (int i = 0; i < numInstances; i++) {
+      instanceSet.add("instance_" + i);
+    }
+
+    // Register instance monitors via setClusterInstanceStatus
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    // All instances should default to valid (1)
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Assert.assertTrue(_server.isRegistered(objName));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      Assert.assertTrue(value instanceof Long);
+      Assert.assertEquals((long) value, 1L,
+          "Instance " + instance + " should default to valid domain info");
+    }
+
+    // Mark some instances as invalid
+    Set<String> invalidInstances = Sets.newHashSet();
+    invalidInstances.add("instance_1");
+    invalidInstances.add("instance_3");
+    monitor.updateInstanceDomainInfoValidity(invalidInstances);
+
+    // Verify invalid instances have gauge = 0, valid instances have gauge = 1
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      long expected = invalidInstances.contains(instance) ? 0L : 1L;
+      Assert.assertEquals((long) value, expected,
+          "Instance " + instance + " DomainInfoValidGauge mismatch");
+    }
+
+    // Update again with a different set of invalid instances
+    Set<String> newInvalidInstances = Sets.newHashSet();
+    newInvalidInstances.add("instance_0");
+    monitor.updateInstanceDomainInfoValidity(newInvalidInstances);
+
+    // instance_1 and instance_3 should now be valid (1), instance_0 should be invalid (0)
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      long expected = newInvalidInstances.contains(instance) ? 0L : 1L;
+      Assert.assertEquals((long) value, expected,
+          "Instance " + instance + " DomainInfoValidGauge mismatch after update");
+    }
+
+    // Update with empty set — all should be valid
+    monitor.updateInstanceDomainInfoValidity(Collections.emptySet());
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Object value = _server.getAttribute(objName, "DomainInfoValidGauge");
+      Assert.assertEquals((long) value, 1L,
+          "Instance " + instance + " should be valid when no invalid instances");
+    }
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName));
+  }
+
   private void verifyCapacityMetrics(ClusterStatusMonitor monitor, Map<String, Double> maxUsageMap,
       Map<String, Map<String, Integer>> instanceCapacityMap)
       throws MalformedObjectNameException, IOException, AttributeNotFoundException, MBeanException,
@@ -609,5 +683,158 @@ public class TestClusterStatusMonitor {
             (long) instanceCapacityMap.get(instance).get(capacityKey));
       }
     }
+  }
+
+  @Test
+  public void testClusterLevelInstanceOperationCounts() throws Exception {
+    String clusterName = "TestCluster";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+
+    // Create test instances with different operations
+    Map<String, org.apache.helix.model.InstanceConfig> instanceConfigMap = new HashMap<>();
+
+    // 3 instances in ENABLE
+    for (int i = 0; i < 3; i++) {
+      String instanceName = "instance_enable_" + i;
+      org.apache.helix.model.InstanceConfig config = new org.apache.helix.model.InstanceConfig(instanceName);
+      org.apache.helix.model.InstanceConfig.InstanceOperation enableOp =
+          new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+              .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.ENABLE)
+              .build();
+      config.setInstanceOperation(enableOp);
+      instanceConfigMap.put(instanceName, config);
+    }
+
+    // 2 instances in EVACUATE
+    for (int i = 0; i < 2; i++) {
+      String instanceName = "instance_evacuate_" + i;
+      org.apache.helix.model.InstanceConfig config = new org.apache.helix.model.InstanceConfig(instanceName);
+      org.apache.helix.model.InstanceConfig.InstanceOperation evacuateOp =
+          new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+              .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.EVACUATE)
+              .build();
+      config.setInstanceOperation(evacuateOp);
+      instanceConfigMap.put(instanceName, config);
+    }
+
+    // 1 instance in DISABLE
+    String instanceName = "instance_disable_0";
+    org.apache.helix.model.InstanceConfig config = new org.apache.helix.model.InstanceConfig(instanceName);
+    org.apache.helix.model.InstanceConfig.InstanceOperation disableOp =
+        new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+            .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.DISABLE)
+            .build();
+    config.setInstanceOperation(disableOp);
+    instanceConfigMap.put(instanceName, config);
+
+    // 1 instance in SWAP_IN
+    instanceName = "instance_swapin_0";
+    config = new org.apache.helix.model.InstanceConfig(instanceName);
+    org.apache.helix.model.InstanceConfig.InstanceOperation swapInOp =
+        new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+            .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.SWAP_IN)
+            .build();
+    config.setInstanceOperation(swapInOp);
+    instanceConfigMap.put(instanceName, config);
+
+    // 1 instance in UNKNOWN
+    instanceName = "instance_unknown_0";
+    config = new org.apache.helix.model.InstanceConfig(instanceName);
+    org.apache.helix.model.InstanceConfig.InstanceOperation unknownOp =
+        new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+            .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.UNKNOWN)
+            .build();
+    config.setInstanceOperation(unknownOp);
+    instanceConfigMap.put(instanceName, config);
+
+    // 2 instances with no operation set (should default to ENABLE)
+    for (int i = 0; i < 2; i++) {
+      instanceName = "instance_noOp_" + i;
+      config = new org.apache.helix.model.InstanceConfig(instanceName);
+      // Don't set any operation - should default to ENABLE
+      instanceConfigMap.put(instanceName, config);
+    }
+
+    // Update cluster status with these instances
+    monitor.setClusterInstanceStatus(
+        instanceConfigMap.keySet(),  // liveInstanceSet
+        instanceConfigMap.keySet(),  // instanceSet
+        Collections.emptySet(),      // disabledInstanceSet
+        Collections.emptyMap(),      // disabledPartitions
+        Collections.emptyMap(),      // oldDisabledPartitions
+        Collections.emptyMap(),      // tags
+        Collections.emptyMap(),      // instanceMessageMap
+        instanceConfigMap,           // instanceConfigMap
+        Collections.emptyMap()       // errorPartitionCounts
+    );
+
+    // Verify cluster-level counts
+    // ENABLE: 3 explicit + 2 with no operation = 5
+    Assert.assertEquals(monitor.getInstancesInOperationEnableGauge(), 5L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName, "InstancesInOperationEnableGauge"), 5L);
+
+    // EVACUATE: 2
+    Assert.assertEquals(monitor.getInstancesInOperationEvacuateGauge(), 2L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName, "InstancesInOperationEvacuateGauge"), 2L);
+
+    // DISABLE: 1
+    Assert.assertEquals(monitor.getInstancesInOperationDisableGauge(), 1L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName, "InstancesInOperationDisableGauge"), 1L);
+
+    // SWAP_IN: 1
+    Assert.assertEquals(monitor.getInstancesInOperationSwapInGauge(), 1L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName, "InstancesInOperationSwapInGauge"), 1L);
+
+    // UNKNOWN: 1
+    Assert.assertEquals(monitor.getInstancesInOperationUnknownGauge(), 1L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName, "InstancesInOperationUnknownGauge"), 1L);
+
+    // Now change some operations and verify counts update
+    instanceConfigMap.clear();
+
+    // Change to: 8 ENABLE, 1 EVACUATE, 0 others
+    for (int i = 0; i < 8; i++) {
+      instanceName = "instance_" + i;
+      config = new org.apache.helix.model.InstanceConfig(instanceName);
+      org.apache.helix.model.InstanceConfig.InstanceOperation enableOp =
+          new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+              .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.ENABLE)
+              .build();
+      config.setInstanceOperation(enableOp);
+      instanceConfigMap.put(instanceName, config);
+    }
+
+    instanceName = "instance_evacuate";
+    config = new org.apache.helix.model.InstanceConfig(instanceName);
+    org.apache.helix.model.InstanceConfig.InstanceOperation evacuateOp =
+        new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+            .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.EVACUATE)
+            .build();
+    config.setInstanceOperation(evacuateOp);
+    instanceConfigMap.put(instanceName, config);
+
+    monitor.setClusterInstanceStatus(
+        instanceConfigMap.keySet(),
+        instanceConfigMap.keySet(),
+        Collections.emptySet(),
+        Collections.emptyMap(),
+        Collections.emptyMap(),
+        Collections.emptyMap(),
+        Collections.emptyMap(),
+        instanceConfigMap,
+        Collections.emptyMap()
+    );
+
+    // Verify updated counts
+    Assert.assertEquals(monitor.getInstancesInOperationEnableGauge(), 8L);
+    Assert.assertEquals(monitor.getInstancesInOperationEvacuateGauge(), 1L);
+    Assert.assertEquals(monitor.getInstancesInOperationDisableGauge(), 0L);
+    Assert.assertEquals(monitor.getInstancesInOperationSwapInGauge(), 0L);
+    Assert.assertEquals(monitor.getInstancesInOperationUnknownGauge(), 0L);
+
+    monitor.reset();
   }
 }

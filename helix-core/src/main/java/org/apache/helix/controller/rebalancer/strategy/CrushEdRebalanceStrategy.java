@@ -26,7 +26,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
  * This gives even partition distribution, but number of partitions to be reshuffled during node outage could be high.
  */
 public class CrushEdRebalanceStrategy extends AbstractEvenDistributionRebalanceStrategy {
-  private final RebalanceStrategy<ResourceControllerDataProvider> _baseStrategy =
+  protected RebalanceStrategy<ResourceControllerDataProvider> _baseStrategy =
       new CrushRebalanceStrategy();
 
   protected RebalanceStrategy<ResourceControllerDataProvider> getBaseRebalanceStrategy() {

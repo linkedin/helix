@@ -64,6 +64,7 @@ public class ClusterConfig extends HelixProperty {
     STATE_TRANSITION_THROTTLE_CONFIGS,
     STATE_TRANSITION_CANCELLATION_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
+    TOP_STATE_HANDOFF_DURATION_THRESHOLD,
     RESOURCE_PRIORITY_FIELD,
     REBALANCE_TIMER_PERIOD,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
@@ -79,6 +80,20 @@ public class ClusterConfig extends HelixProperty {
     //     to make it clear that it includes both offline and non-assignable instances
     MAX_OFFLINE_INSTANCES_ALLOWED,
     NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT, // For auto-exiting maintenance mode
+
+    // Instance-operation maintenance budget. Instances carrying a valid
+    // INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded
+    // from the MAX_OFFLINE_INSTANCES_ALLOWED count while the marker has not expired.
+    //
+    // The two fields below define the cap on simultaneous markers. They are mutually
+    // exclusive: setters reject writing one while the other is already set. -1 means the
+    // cap is not configured.
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET,
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE,
+    // Fallback TTL (in millis) applied by the instance-operation maintenance write path
+    // when the caller omits expiresAtMillis. When unset (-1), callers must always supply an
+    // explicit expiresAtMillis; otherwise the write is rejected.
+    DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
     @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
@@ -167,7 +182,24 @@ public class ClusterConfig extends HelixProperty {
     // List of Preferred scoring keys used in evenness score computation
     PREFERRED_SCORING_KEYS,
     // How long offline nodes will stay in the cluster before they are automatically purged, in milliseconds
-    PARTICIPANT_DEREGISTRATION_TIMEOUT
+    PARTICIPANT_DEREGISTRATION_TIMEOUT,
+
+    // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
+    RELAXED_DISABLED_PARTITION_CONSTRAINT,
+
+    // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
+    // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
+    ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION,
+
+    // Enable availability-aware cross-resource prioritization for state transitions.
+    // When enabled, messages are prioritized based on availability impact score across all resources,
+    // rather than processing resources in priority order.
+    AVAILABILITY_AWARE_PRIORITIZATION_ENABLED,
+
+    // Enable the refactored IntermediateStateCalcStage (V2) which uses a strategy pattern
+    // for message ordering and extracted throttle logic. When disabled (default), the original
+    // IntermediateStateCalcStage (V1) is used for backward compatibility.
+    INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -205,6 +237,7 @@ public class ClusterConfig extends HelixProperty {
   private static final int OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
+  private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
 
   /**
    * Instantiate for a specific cluster
@@ -561,6 +594,88 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
+   * Set the absolute cap on the number of instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Pass {@code -1} to clear; the field is
+   * mutually exclusive with {@link #setInstanceOperationMaintenanceBudgetPercentage(int)}
+   * and the setter throws when the other form is already set.
+   */
+  public void setInstanceOperationMaintenanceBudget(int instanceOperationMaintenanceBudget)
+      throws HelixException {
+    if (instanceOperationMaintenanceBudget >= 0
+        && getInstanceOperationMaintenanceBudgetPercentage() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE are mutually exclusive; "
+          + "clear the percentage form before setting the absolute form.");
+    }
+    _record.setIntField(ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(),
+        instanceOperationMaintenanceBudget);
+  }
+
+  /**
+   * @return the configured absolute cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
+   */
+  public int getInstanceOperationMaintenanceBudget() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(), -1);
+  }
+
+  /**
+   * Set the percentage of cluster instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Valid range is {@code [0, 100]}; pass
+   * {@code -1} to clear. The field is mutually exclusive with
+   * {@link #setInstanceOperationMaintenanceBudget(int)} and the setter throws when the
+   * other form is already set or the value is outside the valid range.
+   */
+  public void setInstanceOperationMaintenanceBudgetPercentage(
+      int instanceOperationMaintenanceBudgetPercentage) throws HelixException {
+    if (instanceOperationMaintenanceBudgetPercentage < -1
+        || instanceOperationMaintenanceBudgetPercentage > 100) {
+      throw new HelixException(
+          "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE must be in the range [0, 100] "
+              + "or -1 to clear, got " + instanceOperationMaintenanceBudgetPercentage);
+    }
+    if (instanceOperationMaintenanceBudgetPercentage >= 0
+        && getInstanceOperationMaintenanceBudget() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET are mutually exclusive; clear the "
+          + "absolute form before setting the percentage form.");
+    }
+    _record.setIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(),
+        instanceOperationMaintenanceBudgetPercentage);
+  }
+
+  /**
+   * @return the configured percentage cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
+   */
+  public int getInstanceOperationMaintenanceBudgetPercentage() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(), -1);
+  }
+
+  /**
+   * Set the fallback duration (millis) applied by the instance-operation maintenance write
+   * path when the caller omits expiresAtMillis. Pass {@code -1L} to clear; when cleared,
+   * writes that omit expiresAtMillis are rejected.
+   */
+  public void setDefaultInstanceOperationMaintenanceDurationMs(
+      long defaultInstanceOperationMaintenanceDurationMs) {
+    _record.setLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(),
+        defaultInstanceOperationMaintenanceDurationMs);
+  }
+
+  /**
+   * @return the configured fallback duration in millis, or {@code -1L} when not set.
+   */
+  public long getDefaultInstanceOperationMaintenanceDurationMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(), -1L);
+  }
+
+  /**
    * Sets the number of offline instances for auto-exit threshold so that MaintenanceRecoveryStage
    * could use this number to determine whether the cluster could auto-exit maintenance mode.
    * Values less than 0 will disable auto-exit.
@@ -701,6 +816,24 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
+   * Set the top state handoff duration threshold in milliseconds
+   * @param durationThreshold
+   */
+  public void setTopStateHandoffDurationThreshold(long durationThreshold) {
+    _record.setLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
+        durationThreshold);
+  }
+
+  /**
+   * Get the top state handoff duration threshold. If not configured, defaults to 300000ms (5 minutes).
+   * @return the threshold in milliseconds
+   */
+  public long getTopStateHandoffDurationThreshold() {
+    return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
+        DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD);
+  }
+
+  /**
    * Set cluster level state transition time out
    * @param stateTransitionTimeoutConfig
    */
@@ -805,6 +938,49 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
+   * Enable or disable availability-aware cross-resource prioritization for state transitions.
+   * When enabled, messages are prioritized based on availability impact score across all resources,
+   * rather than processing resources in priority order. This ensures that partitions with fewer
+   * active replicas get prioritized over partitions that are closer to their target replica count.
+   * By default, this is DISABLED if not set.
+   * @param enabled true to enable availability-aware prioritization
+   */
+  public void setAvailabilityAwarePrioritizationEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Check whether availability-aware cross-resource prioritization is enabled for state transitions.
+   * By default, it is DISABLED.
+   * @return true if availability-aware prioritization is enabled
+   */
+  public boolean isAvailabilityAwarePrioritizationEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the refactored IntermediateStateCalcStage (V2).
+   * When enabled, the controller uses IntermediateStateCalcStageV2 which features a strategy
+   * pattern for message ordering and extracted throttle logic. When disabled (default), the
+   * original IntermediateStateCalcStage (V1) is used for backward compatibility.
+   * @param enabled true to enable V2, false to use V1 (default)
+   */
+  public void setIntermediateStateCalcStageV2Enabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Check whether the refactored IntermediateStateCalcStage (V2) is enabled.
+   * By default, it is DISABLED (V1 is used).
+   * @return true if V2 is enabled
+   */
+  public boolean isIntermediateStateCalcStageV2Enabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), false);
+  }
+
+  /**
    * Set the disabled instance list
    * @param disabledInstances
    */
@@ -864,6 +1040,27 @@ public class ClusterConfig extends HelixProperty {
    */
   public void enableP2PMessage(boolean enabled) {
     _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the relaxed disabled partition constraint is enabled for this cluster.
+   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE
+   * instead of being immediately reassigned, making behavior consistent with CrushEd.
+   * By default it is disabled if not set.
+   * @return true if relaxed disabled partition constraint is enabled, false otherwise
+   */
+  public boolean isRelaxedDisabledPartitionConstraintEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), false);
+  }
+
+  /**
+   * Enable/disable relaxed disabled partition constraint for this cluster.
+   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE
+   * instead of being immediately reassigned, making behavior consistent with CrushEd.
+   * @param enabled true to enable relaxed constraint, false for strict constraint (default)
+   */
+  public void setRelaxedDisabledPartitionConstraint(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
   }
 
   /**
@@ -1284,5 +1481,26 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  /**
+   * @return true if top state downward transitions (e.g., MASTER->SLAVE, LEADER->STANDBY)
+   *         should be classified as RECOVERY_REBALANCE instead of LOAD_BALANCE
+   */
+  public boolean isRecoveryRebalanceForTopStateDownwardTransitionEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        false);
+  }
+
+  /**
+   * Enable or disable classifying top state downward transitions as RECOVERY_REBALANCE.
+   *
+   * @param enabled true to classify top state downward transitions as RECOVERY_REBALANCE
+   */
+  public void setRecoveryRebalanceForTopStateDownwardTransitionEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        enabled);
   }
 }
