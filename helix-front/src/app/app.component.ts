@@ -11,6 +11,8 @@ import { MatDialog } from '@angular/material/dialog';
 
 // import { Angulartics2Piwik } from 'angulartics2/piwik';
 
+import { tap } from 'rxjs/operators';
+
 import { UserService } from './core/user.service';
 import { InputDialogComponent } from './shared/dialog/input-dialog/input-dialog.component';
 import { HelperService } from './shared/helper.service';
@@ -26,6 +28,7 @@ export class AppComponent implements OnInit {
   footerEnabled = true;
   isLoading = true;
   currentUser: any;
+  isLoggedIn = false;
 
   constructor(
     // protected angulartics2Piwik: Angulartics2Piwik,
@@ -53,7 +56,9 @@ export class AppComponent implements OnInit {
   }
 
   ngOnInit() {
-    this.currentUser = this.service.getCurrentUser();
+    this.currentUser = this.service.getCurrentUser().pipe(
+      tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+    );
 
     this.route.queryParams.subscribe((params) => {
       if (params['embed'] == 'true') {
@@ -93,7 +98,9 @@ export class AppComponent implements OnInit {
                     );
                   }
 
-                  this.currentUser = this.service.getCurrentUser();
+                  this.currentUser = this.service.getCurrentUser().pipe(
+                    tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+                  );
                 },
                 (error) => {
                   // since rest API simply throws 404 instead of empty config when config is not initialized yet
@@ -120,7 +127,9 @@ export class AppComponent implements OnInit {
   logout() {
     this.service.logout().subscribe(
       () => {
-        this.currentUser = this.service.getCurrentUser();
+        this.currentUser = this.service.getCurrentUser().pipe(
+          tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
+        );
         this.helper.showSnackBar('Signed out successfully.');
       },
       (error) => {

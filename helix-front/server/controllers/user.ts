@@ -58,6 +58,10 @@ export class UserCtrl {
   }
 
   protected logout(req: HelixRequest, res: Response) {
+    if (!req.session) {
+      res.json(true);
+      return;
+    }
     req.session.destroy((err) => {
       if (err) {
         res.status(500).json({ error: 'Logout failed' });
