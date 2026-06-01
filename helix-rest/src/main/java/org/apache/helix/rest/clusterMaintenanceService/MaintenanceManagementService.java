@@ -966,8 +966,6 @@ public class MaintenanceManagementService {
         String errorMessage = String.format("Failed to get StoppableChecks in parallel. Instances: %s",
             futureStoppableCheckByInstance.values());
         LOG.error(errorMessage, e);
-        // Preserve the underlying cause so callers (and test failures) can see why the
-        // parallel check failed, instead of having to dig through controller logs.
         throw new HelixException(errorMessage, e);
       }
     }

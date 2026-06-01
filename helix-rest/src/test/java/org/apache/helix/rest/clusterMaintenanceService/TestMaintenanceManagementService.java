@@ -121,10 +121,6 @@ public class TestMaintenanceManagementService {
       return Collections.emptyMap();
     }
 
-    // The 5-arg overload was added by PR #63 (improve stoppable check APIs to include
-    // failure details) and is called directly from addMinActiveReplicaChecks. Without
-    // this override, the production implementation runs against a Mockito-stubbed
-    // _dataAccessor and crashes inside InstanceValidationUtil.siblingNodesActiveReplicaCheck.
     @Override
     protected Map<String, Boolean> getInstanceHealthStatus(String clusterId, String instanceName,
         List<HealthCheck> healthChecks, Set<String> toBeStoppedInstances,
