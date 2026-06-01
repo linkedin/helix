@@ -60,6 +60,11 @@ import org.slf4j.LoggerFactory;
 class GlobalRebalanceRunner implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(GlobalRebalanceRunner.class);
 
+  // Thread name prefix used while the baseline calculation task is running, suffixed with the
+  // cluster name. Makes failure logs correlatable to a specific cluster when a single controller
+  // JVM hosts multiple WAGED-managed clusters.
+  private static final String GLOBAL_REBALANCE_THREAD_NAME_PREFIX = "WagedGlobalRebalance-";
+
   // When any of the following change happens, the rebalancer needs to do a global rebalance which
   // contains 1. baseline recalculate, 2. partial rebalance that is based on the new baseline.
   private static final Set<HelixConstants.ChangeType> GLOBAL_REBALANCE_REQUIRED_CHANGE_TYPES =
@@ -125,8 +130,12 @@ class GlobalRebalanceRunner implements AutoCloseable {
     if (clusterChanges.keySet().stream().anyMatch(GLOBAL_REBALANCE_REQUIRED_CHANGE_TYPES::contains)) {
       final boolean waitForGlobalRebalance = !_asyncGlobalRebalanceEnabled;
       _lastAsyncFailure.set(null);
+      final String clusterName = clusterData.getClusterName();
       // Calculate the Baseline assignment for global rebalance.
       Future<Boolean> result = _baselineCalculateExecutor.submit(() -> {
+        final Thread currentThread = Thread.currentThread();
+        final String originalThreadName = currentThread.getName();
+        currentThread.setName(GLOBAL_REBALANCE_THREAD_NAME_PREFIX + clusterName);
         try {
           // If the synchronous thread does not wait for the baseline to be calculated, the synchronous thread should
           // be triggered again after baseline is finished.
@@ -144,9 +153,11 @@ class GlobalRebalanceRunner implements AutoCloseable {
             // the injected reporter.
             _asyncFailureReporter.accept(e);
           }
-          LOG.error("Failed to calculate baseline assignment! category={}",
-              e.getFailureCategory(), e);
+          LOG.error("Failed to calculate baseline assignment for cluster {}! category={}",
+              clusterName, e.getFailureCategory(), e);
           return false;
+        } finally {
+          currentThread.setName(originalThreadName);
         }
         return true;
       });

@@ -57,6 +57,11 @@ class PartialRebalanceRunner implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(PartialRebalanceRunner.class);
 
+  // Thread name prefix used while the best-possible calculation task is running, suffixed with the
+  // cluster name. Makes failure logs correlatable to a specific cluster when a single controller
+  // JVM hosts multiple WAGED-managed clusters.
+  private static final String PARTIAL_REBALANCE_THREAD_NAME_PREFIX = "WagedPartialRebalance-";
+
   private final ExecutorService _bestPossibleCalculateExecutor;
   private final AssignmentManager _assignmentManager;
   private final AssignmentMetadataStore _assignmentMetadataStore;
@@ -108,7 +113,11 @@ class PartialRebalanceRunner implements AutoCloseable {
     }
 
     _lastAsyncFailure.set(null);
+    final String clusterName = clusterData.getClusterName();
     _asyncPartialRebalanceResult = _bestPossibleCalculateExecutor.submit(() -> {
+      final Thread currentThread = Thread.currentThread();
+      final String originalThreadName = currentThread.getName();
+      currentThread.setName(PARTIAL_REBALANCE_THREAD_NAME_PREFIX + clusterName);
       try {
         doPartialRebalance(clusterData, resourceMap, activeNodes, algorithm,
             currentStateOutput);
@@ -123,9 +132,11 @@ class PartialRebalanceRunner implements AutoCloseable {
           // the injected reporter.
           _asyncFailureReporter.accept(e);
         }
-        LOG.error("Failed to calculate best possible assignment! category={}",
-            e.getFailureCategory(), e);
+        LOG.error("Failed to calculate best possible assignment for cluster {}! category={}",
+            clusterName, e.getFailureCategory(), e);
         return false;
+      } finally {
+        currentThread.setName(originalThreadName);
       }
       return true;
     });
