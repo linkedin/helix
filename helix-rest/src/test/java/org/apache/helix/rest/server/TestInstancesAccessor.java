@@ -922,7 +922,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     // Restore the changes on instance 1
     instanceConfig1.setDomain(domain);
-    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER3, instance1, instanceConfig1);
+    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
