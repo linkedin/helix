@@ -31,6 +31,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -56,18 +57,32 @@ import org.slf4j.LoggerFactory;
  * The goal is to accumulate the most points(rewards) from "soft constraints" while avoiding any
  * "hard constraints"
  */
-class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
+public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   private static final float DIV_GUARD = 0.01f;
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithm.class);
   private final List<HardConstraint> _hardConstraints;
   private final Map<SoftConstraint, Float> _softConstraints;
   private final ForkJoinPool _constraintEvaluationPool;
+  // Optional listener invoked when a partition fails to find any eligible node. Fires once per
+  // distinct HardConstraint.Type that contributed to the failure (set union, not sum), so
+  // observers get partition-level attribution rather than node-rejection counts. May be null
+  // when the algorithm runs outside a pipeline that wants metric attribution.
+  private volatile Consumer<HardConstraint.Type> _hardConstraintFailureReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
     _hardConstraints = hardConstraints;
     _softConstraints = softConstraints;
     _constraintEvaluationPool = constraintEvaluationPool;
+  }
+
+  /**
+   * Attach a per-partition-failure reporter that fires once per distinct {@link HardConstraint.Type}
+   * that prevented placement. Safe to call from any thread; subsequent calls replace the
+   * reference. May be null to disable reporting.
+   */
+  public void setHardConstraintFailureReporter(Consumer<HardConstraint.Type> reporter) {
+    _hardConstraintFailureReporter = reporter;
   }
 
   @Override
@@ -163,6 +178,18 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     if (candidateNodes.isEmpty()) {
       LOG.info("Found no eligible candidate nodes. Enabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
       enableFullLoggingForCluster();
+      // Report each distinct constraint type that contributed to this partition's failure
+      // exactly once -- partition-level attribution, not per-node-rejection. Computed before
+      // recording the failure so a constraint that rejected many nodes still fires +1 per
+      // failed partition rather than +N.
+      Consumer<HardConstraint.Type> reporter = _hardConstraintFailureReporter;
+      if (reporter != null) {
+        hardConstraintFailures.values().stream()
+            .flatMap(List::stream)
+            .map(HardConstraint::getType)
+            .distinct()
+            .forEach(reporter);
+      }
       optimalAssignment.recordAssignmentFailure(replica,
           Maps.transformValues(hardConstraintFailures, this::convertFailureReasons));
       return Optional.empty();

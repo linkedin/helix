@@ -39,8 +39,10 @@ import javax.management.ObjectName;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Sets;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.model.ExternalView;
@@ -93,6 +95,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
 
+  // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
+  // enum value so reads on never-incremented categories return 0 instead of NPE.
+  private final Map<HelixRebalanceException.FailureCategory, AtomicLong> _wagedFailureCategoryCounters =
+      new ConcurrentHashMap<>();
+  private final AtomicLong _wagedCustomerActionableFailureCount = new AtomicLong(0L);
+  private final AtomicLong _wagedInternalFailureCount = new AtomicLong(0L);
+  private volatile boolean _wagedFallbackInUse = false;
+
+  // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
+  // reads return 0 instead of NPE for constraints that have not yet fired.
+  private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
+      new ConcurrentHashMap<>();
+
   // Cluster-level instance operation counts
   private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
       new ConcurrentHashMap<>();
@@ -129,6 +144,17 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     // Initialize the map with all operation types
     for (InstanceConstants.InstanceOperation operation : InstanceConstants.InstanceOperation.values()) {
       _perOperationInstanceCount.put(operation, new AtomicLong(0L));
+    }
+
+    // Pre-create one AtomicLong per WAGED failure category so dashboards see a stable 0
+    // for categories that have not yet fired.
+    for (HelixRebalanceException.FailureCategory category :
+        HelixRebalanceException.FailureCategory.values()) {
+      _wagedFailureCategoryCounters.put(category, new AtomicLong(0L));
+    }
+    // Same for per-HardConstraint counters.
+    for (HardConstraint.Type type : HardConstraint.Type.values()) {
+      _wagedHardConstraintFailureCounters.put(type, new AtomicLong(0L));
     }
   }
 
@@ -836,6 +862,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _rebalanceFailureCount.set(0L);
       _continuousResourceRebalanceFailureCount.set(0L);
       _continuousTaskRebalanceFailureCount.set(0L);
+      // Zero the WAGED per-category and per-HardConstraint counters along with the rollup
+      // counters and the fallback gauge. Like the legacy rebalance counters above, these are
+      // reset on leadership change to avoid stale numbers from a prior controller leadership
+      // period being attributed to the new one.
+      _wagedFailureCategoryCounters.values().forEach(c -> c.set(0L));
+      _wagedHardConstraintFailureCounters.values().forEach(c -> c.set(0L));
+      _wagedCustomerActionableFailureCount.set(0L);
+      _wagedInternalFailureCount.set(0L);
+      _wagedFallbackInUse = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1266,6 +1301,43 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _rebalanceFailureCount.incrementAndGet();
   }
 
+  /**
+   * Record a WAGED rebalance failure with its classified category. Increments both the
+   * per-category counter and the matching rollup counter (customer-actionable vs internal).
+   * Safe to call from the controller pipeline thread.
+   */
+  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+    if (category == null) {
+      category = HelixRebalanceException.FailureCategory.UNKNOWN;
+    }
+    _wagedFailureCategoryCounters.get(category).incrementAndGet();
+    if (category.isCustomerActionable()) {
+      _wagedCustomerActionableFailureCount.incrementAndGet();
+    } else {
+      _wagedInternalFailureCount.incrementAndGet();
+    }
+  }
+
+  /**
+   * Record that a partition failed placement because at least one candidate node was rejected
+   * by a hard constraint of the given type. Called once per partition per distinct constraint
+   * type that contributed to the failure (set-union across nodes, not summed).
+   */
+  public void reportWagedHardConstraintFailure(HardConstraint.Type type) {
+    if (type == null) {
+      type = HardConstraint.Type.UNKNOWN;
+    }
+    _wagedHardConstraintFailureCounters.get(type).incrementAndGet();
+  }
+
+  /**
+   * Flip the fallback gauge. Set to true when WAGED returns the last-known-good assignment
+   * instead of a freshly computed one; reset to false when a clean calculation succeeds.
+   */
+  public void setWagedFallbackInUseGauge(boolean inUse) {
+    _wagedFallbackInUse = inUse;
+  }
+
   public void reportContinuousResourceRebalanceFailureCount(long newValue) {
     _continuousResourceRebalanceFailureCount.set(newValue);
   }
@@ -1287,6 +1359,106 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getContinuousTaskRebalanceFailureCount() {
     return _continuousTaskRebalanceFailureCount.get();
+  }
+
+  @Override
+  public long getWagedCustomerActionableFailureCounter() {
+    return _wagedCustomerActionableFailureCount.get();
+  }
+
+  @Override
+  public long getWagedInternalFailureCounter() {
+    return _wagedInternalFailureCount.get();
+  }
+
+  @Override
+  public long getWagedFailureCapacityDeficitCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT).get();
+  }
+
+  @Override
+  public long getWagedFailureNoCandidateNodeCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE).get();
+  }
+
+  @Override
+  public long getWagedFailureInvalidResourceConfigCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.INVALID_RESOURCE_CONFIG).get();
+  }
+
+  @Override
+  public long getWagedFailureInvalidClusterConfigCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG).get();
+  }
+
+  @Override
+  public long getWagedFailureMetadataStoreIoCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.METADATA_STORE_IO).get();
+  }
+
+  @Override
+  public long getWagedFailureAlgorithmInternalCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL).get();
+  }
+
+  @Override
+  public long getWagedFailureAsyncExecutionCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.ASYNC_EXECUTION).get();
+  }
+
+  @Override
+  public long getWagedFailureUnknownCounter() {
+    return _wagedFailureCategoryCounters
+        .get(HelixRebalanceException.FailureCategory.UNKNOWN).get();
+  }
+
+  @Override
+  public long getWagedFallbackInUseGauge() {
+    return _wagedFallbackInUse ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedHardConstraintFaultZoneFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.FAULT_ZONE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeCapacityFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.NODE_CAPACITY).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeMaxPartitionLimitFailureCounter() {
+    return _wagedHardConstraintFailureCounters
+        .get(HardConstraint.Type.NODE_MAX_PARTITION_LIMIT).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintReplicaActivateFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.REPLICA_ACTIVATE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintSamePartitionOnInstanceFailureCounter() {
+    return _wagedHardConstraintFailureCounters
+        .get(HardConstraint.Type.SAME_PARTITION_ON_INSTANCE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintValidGroupTagFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.VALID_GROUP_TAG).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintUnknownFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.UNKNOWN).get();
   }
 
   @Override

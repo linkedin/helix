@@ -28,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.changedetector.ResourceChangeDetector;
@@ -74,7 +75,10 @@ class GlobalRebalanceRunner implements AutoCloseable {
   private final LatencyMetric _writeLatency;
   private final CountMetric _baselineCalcCounter;
   private final LatencyMetric _baselineCalcLatency;
-  private final CountMetric _rebalanceFailureCount;
+  // Reporter that ticks RebalanceFailureCounter plus the per-FailureCategory counters on both
+  // the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by WagedRebalancer; injected
+  // so the runner doesn't need a direct ClusterStatusMonitor reference.
+  private final Consumer<HelixRebalanceException> _asyncFailureReporter;
 
   private boolean _asyncGlobalRebalanceEnabled;
   // Captures the original exception thrown inside the executor task so we can preserve its
@@ -85,7 +89,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
       LatencyMetric writeLatency,
-      CountMetric rebalanceFailureCount,
+      Consumer<HelixRebalanceException> asyncFailureReporter,
       boolean isAsyncGlobalRebalanceEnabled) {
     _baselineCalculateExecutor = Executors.newSingleThreadExecutor();
     _assignmentManager = assignmentManager;
@@ -98,7 +102,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
     _baselineCalcLatency = metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcLatencyGauge.name(),
         LatencyMetric.class);
-    _rebalanceFailureCount = rebalanceFailureCount;
+    _asyncFailureReporter = asyncFailureReporter;
     _asyncGlobalRebalanceEnabled = isAsyncGlobalRebalanceEnabled;
   }
 
@@ -135,7 +139,10 @@ class GlobalRebalanceRunner implements AutoCloseable {
           // re-throw to keep WagedRebalancer.computeNewIdealStates' fallback decision unchanged.
           _lastAsyncFailure.set(e);
           if (_asyncGlobalRebalanceEnabled) {
-            _rebalanceFailureCount.increment(1L);
+            // Async mode: synchronous caller will not see this exception. Tick the aggregate
+            // RebalanceFailureCounter plus the per-FailureCategory counters on both MBeans via
+            // the injected reporter.
+            _asyncFailureReporter.accept(e);
           }
           LOG.error("Failed to calculate baseline assignment! category={}",
               e.getFailureCategory(), e);

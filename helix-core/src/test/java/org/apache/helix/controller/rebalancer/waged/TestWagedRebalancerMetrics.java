@@ -106,7 +106,7 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
 
     // Check that there exists a non-zero value in the metrics
     Assert.assertTrue(_metricCollector.getMetricMap().values().stream()
-        .anyMatch(metric -> (long) metric.getLastEmittedMetricValue() > 0L));
+        .anyMatch(metric -> ((Number) metric.getLastEmittedMetricValue()).longValue() > 0L));
   }
 
   @Test

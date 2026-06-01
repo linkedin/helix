@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
@@ -60,7 +61,10 @@ class PartialRebalanceRunner implements AutoCloseable {
   private final AssignmentManager _assignmentManager;
   private final AssignmentMetadataStore _assignmentMetadataStore;
   private final BaselineDivergenceGauge _baselineDivergenceGauge;
-  private final CountMetric _rebalanceFailureCount;
+  // Reporter that ticks RebalanceFailureCounter plus the per-FailureCategory counters on both
+  // the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by WagedRebalancer; injected
+  // so the runner doesn't need a direct ClusterStatusMonitor reference.
+  private final Consumer<HelixRebalanceException> _asyncFailureReporter;
   private final CountMetric _partialRebalanceCounter;
   private final LatencyMetric _partialRebalanceLatency;
 
@@ -73,12 +77,12 @@ class PartialRebalanceRunner implements AutoCloseable {
   public PartialRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
-      CountMetric rebalanceFailureCount,
+      Consumer<HelixRebalanceException> asyncFailureReporter,
       boolean isAsyncPartialRebalanceEnabled) {
     _assignmentManager = assignmentManager;
     _assignmentMetadataStore = assignmentMetadataStore;
     _bestPossibleCalculateExecutor = Executors.newSingleThreadExecutor();
-    _rebalanceFailureCount = rebalanceFailureCount;
+    _asyncFailureReporter = asyncFailureReporter;
     _asyncPartialRebalanceEnabled = isAsyncPartialRebalanceEnabled;
 
     _partialRebalanceCounter = metricCollector.getMetric(
@@ -114,7 +118,10 @@ class PartialRebalanceRunner implements AutoCloseable {
         // re-throw to keep WagedRebalancer.computeNewIdealStates' fallback decision unchanged.
         _lastAsyncFailure.set(e);
         if (_asyncPartialRebalanceEnabled) {
-          _rebalanceFailureCount.increment(1L);
+          // Async mode: synchronous caller will not see this exception. Tick the aggregate
+          // RebalanceFailureCounter plus the per-FailureCategory counters on both MBeans via
+          // the injected reporter.
+          _asyncFailureReporter.accept(e);
         }
         LOG.error("Failed to calculate best possible assignment! category={}",
             e.getFailureCategory(), e);

@@ -61,6 +61,28 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     // compute failure. And this fallback logic won't impact this counting.
     RebalanceFailureCounter,
 
+    // Per-category breakdown of RebalanceFailureCounter. Each WAGED failure increments exactly one
+    // of these in addition to RebalanceFailureCounter. See HelixRebalanceException.FailureCategory.
+    FailureCategoryCapacityDeficitCounter,
+    FailureCategoryNoCandidateNodeCounter,
+    FailureCategoryInvalidResourceConfigCounter,
+    FailureCategoryInvalidClusterConfigCounter,
+    FailureCategoryMetadataStoreIoCounter,
+    FailureCategoryAlgorithmInternalCounter,
+    FailureCategoryAsyncExecutionCounter,
+    FailureCategoryUnknownCounter,
+
+    // Per-HardConstraint sub-dimension of FailureCategoryNoCandidateNodeCounter. When a partition
+    // fails to find any eligible node, every hard constraint that rejected at least one candidate
+    // gets its counter ticked once for that partition. See HardConstraint.Type.
+    HardConstraintFaultZoneFailureCounter,
+    HardConstraintNodeCapacityFailureCounter,
+    HardConstraintNodeMaxPartitionLimitFailureCounter,
+    HardConstraintReplicaActivateFailureCounter,
+    HardConstraintSamePartitionOnInstanceFailureCounter,
+    HardConstraintValidGroupTagFailureCounter,
+    HardConstraintUnknownFailureCounter,
+
     // Waged rebalance counters.
     GlobalBaselineCalcCounter,
     PartialRebalanceCounter,
@@ -117,6 +139,36 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
         new BaselineDivergenceGauge(WagedRebalancerMetricNames.BaselineDivergenceGauge.name());
     CountMetric calcFailureCount =
         new RebalanceFailureCount(WagedRebalancerMetricNames.RebalanceFailureCounter.name());
+    CountMetric failureCategoryCapacityDeficitCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryCapacityDeficitCounter.name());
+    CountMetric failureCategoryNoCandidateNodeCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryNoCandidateNodeCounter.name());
+    CountMetric failureCategoryInvalidResourceConfigCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryInvalidResourceConfigCounter.name());
+    CountMetric failureCategoryInvalidClusterConfigCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryInvalidClusterConfigCounter.name());
+    CountMetric failureCategoryMetadataStoreIoCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryMetadataStoreIoCounter.name());
+    CountMetric failureCategoryAlgorithmInternalCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryAlgorithmInternalCounter.name());
+    CountMetric failureCategoryAsyncExecutionCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryAsyncExecutionCounter.name());
+    CountMetric failureCategoryUnknownCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.FailureCategoryUnknownCounter.name());
+    CountMetric hardConstraintFaultZoneFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintFaultZoneFailureCounter.name());
+    CountMetric hardConstraintNodeCapacityFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintNodeCapacityFailureCounter.name());
+    CountMetric hardConstraintNodeMaxPartitionLimitFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintNodeMaxPartitionLimitFailureCounter.name());
+    CountMetric hardConstraintReplicaActivateFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintReplicaActivateFailureCounter.name());
+    CountMetric hardConstraintSamePartitionOnInstanceFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintSamePartitionOnInstanceFailureCounter.name());
+    CountMetric hardConstraintValidGroupTagFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintValidGroupTagFailureCounter.name());
+    CountMetric hardConstraintUnknownFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintUnknownFailureCounter.name());
     CountMetric globalBaselineCalcCounter =
         new RebalanceCounter(WagedRebalancerMetricNames.GlobalBaselineCalcCounter.name());
     CountMetric partialRebalanceCounter =
@@ -135,6 +187,21 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     addMetric(stateWriteLatencyGauge);
     addMetric(baselineDivergenceGauge);
     addMetric(calcFailureCount);
+    addMetric(failureCategoryCapacityDeficitCounter);
+    addMetric(failureCategoryNoCandidateNodeCounter);
+    addMetric(failureCategoryInvalidResourceConfigCounter);
+    addMetric(failureCategoryInvalidClusterConfigCounter);
+    addMetric(failureCategoryMetadataStoreIoCounter);
+    addMetric(failureCategoryAlgorithmInternalCounter);
+    addMetric(failureCategoryAsyncExecutionCounter);
+    addMetric(failureCategoryUnknownCounter);
+    addMetric(hardConstraintFaultZoneFailureCounter);
+    addMetric(hardConstraintNodeCapacityFailureCounter);
+    addMetric(hardConstraintNodeMaxPartitionLimitFailureCounter);
+    addMetric(hardConstraintReplicaActivateFailureCounter);
+    addMetric(hardConstraintSamePartitionOnInstanceFailureCounter);
+    addMetric(hardConstraintValidGroupTagFailureCounter);
+    addMetric(hardConstraintUnknownFailureCounter);
     addMetric(globalBaselineCalcCounter);
     addMetric(partialRebalanceCounter);
     addMetric(emergencyRebalanceCounter);
