@@ -110,7 +110,11 @@ public class TestClusterAccessor extends AbstractTestClass {
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
+      // AuditLogFilter now records the full request path including the query string
+      // (commit be35c8931 / "Refactored and added more test scenarios"); update the
+      // assertion to match.
+      Assert.assertEquals(auditLog.getRequestPath(),
+          "clusters/" + TEST_CLUSTER + "/configs?command=" + Command.update.name());
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
@@ -147,7 +151,10 @@ public class TestClusterAccessor extends AbstractTestClass {
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
+      // AuditLogFilter now records the full request path including the query string
+      // (commit be35c8931); update the assertion to match.
+      Assert.assertEquals(auditLog.getRequestPath(),
+          "clusters/" + TEST_CLUSTER + "/configs?command=" + Command.update.name());
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
@@ -1715,7 +1722,10 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     validateAuditLogSize(1);
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
-    validateAuditLog(auditLog, HTTPMethods.POST.name(), "clusters/" + cluster + "/configs",
+    // AuditLogFilter now records the full request path including the query string
+    // (commit be35c8931); update the assertion to match.
+    validateAuditLog(auditLog, HTTPMethods.POST.name(),
+        "clusters/" + cluster + "/configs?command=" + command.name(),
         Response.Status.OK.getStatusCode(), null);
   }
 

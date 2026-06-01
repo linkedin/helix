@@ -41,6 +41,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.view.dataprovider.SourceClusterDataProvider;
 import org.apache.helix.view.mock.MockSourceClusterDataProvider;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -315,7 +316,14 @@ public class TestViewClusterRefresher extends ZkTestBase {
       for (int j = 0; j < numInstancePerSourceCluster; j++) {
         String instanceName = String.format("%s-instance%s", sourceClusterName, j);
         liveInstanceList.add(new LiveInstance(instanceName));
-        instanceConfigList.add(new InstanceConfig(instanceName));
+        // Use the ZNRecord constructor so InstanceConfig auto-populates the
+        // INSTANCE_OPERATION_STATE field. The view cluster's accessor reads back
+        // InstanceConfigs through the same constructor, so without this, the source-side
+        // cached InstanceConfigs would be missing INSTANCE_OPERATION_STATE while the
+        // view-cluster cached InstanceConfigs would have it -- making the diff in
+        // ViewClusterRefresher.calculatePropertyDiff fire on every refresh and inflating
+        // setCount on no-op refreshes.
+        instanceConfigList.add(new InstanceConfig(new ZNRecord(instanceName)));
       }
       provider.setLiveInstances(liveInstanceList);
       provider.setInstanceConfigs(instanceConfigList);
