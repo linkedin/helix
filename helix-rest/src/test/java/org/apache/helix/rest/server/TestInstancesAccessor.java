@@ -793,6 +793,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
     _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance0, instanceConfig);
     instanceConfig1.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
     _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
+    _configAccessor.deleteRESTConfig(STOPPABLE_CLUSTER2);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
