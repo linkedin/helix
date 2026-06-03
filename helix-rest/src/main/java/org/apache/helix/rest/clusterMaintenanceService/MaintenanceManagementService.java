@@ -699,7 +699,7 @@ public class MaintenanceManagementService {
         String errorMessage =
             String.format("Failed to get StoppableChecks in parallel. Instance: %s", instance);
         LOG.error(errorMessage, e);
-        throw new HelixException(errorMessage);
+        throw new HelixException(errorMessage, e);
       }
     }
 
@@ -966,7 +966,7 @@ public class MaintenanceManagementService {
         String errorMessage = String.format("Failed to get StoppableChecks in parallel. Instances: %s",
             futureStoppableCheckByInstance.values());
         LOG.error(errorMessage, e);
-        throw new HelixException(errorMessage);
+        throw new HelixException(errorMessage, e);
       }
     }
   }
