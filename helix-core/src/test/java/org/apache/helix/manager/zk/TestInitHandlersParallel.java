@@ -21,14 +21,14 @@ public class TestInitHandlersParallel {
   @Test
   public void testInitHandlersWithNullList() {
     ZKHelixManager manager = mock(ZKHelixManager.class);
-    // Should not throw
+    doCallRealMethod().when(manager).initHandlers(any());
     manager.initHandlers(null);
   }
 
   @Test
   public void testInitHandlersWithEmptyList() {
     ZKHelixManager manager = mock(ZKHelixManager.class);
-    // Should not throw
+    doCallRealMethod().when(manager).initHandlers(any());
     manager.initHandlers(new ArrayList<>());
   }
 
