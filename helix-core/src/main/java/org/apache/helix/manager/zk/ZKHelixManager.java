@@ -1180,50 +1180,55 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   }
 
   // Each handler.init() is a ZK roundtrip (~200ms). With 1200 handlers sequentially: ~240 sec.
-  // 20 parallel threads: ~12 sec. Too many threads could overload the ZK ensemble with
-  // concurrent reads.
+  // 20 parallel threads: ~12 sec. All threads share one ZkClient connection. Too many threads
+  // could overload the ZK ensemble with concurrent reads on that connection.
   private static final int INIT_HANDLERS_PARALLELISM = 20;
 
   void initHandlers(List<CallbackHandler> handlers) {
+    // Copy the handler list under the lock to protect against concurrent modification.
+    // Release the lock before calling handler.init() because init() -> invoke() acquires
+    // synchronized(_manager) which is the same lock as synchronized(this).
+    List<CallbackHandler> tmpHandlers;
     synchronized (this) {
       if (handlers == null || handlers.isEmpty()) {
         return;
       }
-      List<CallbackHandler> tmpHandlers = new ArrayList<>(handlers);
-      if (tmpHandlers.size() == 1) {
-        tmpHandlers.get(0).init();
-        LOG.info("init handler: " + tmpHandlers.get(0).getPath() + ", "
-            + tmpHandlers.get(0).getListener());
-        return;
+      tmpHandlers = new ArrayList<>(handlers);
+    }
+
+    if (tmpHandlers.size() == 1) {
+      tmpHandlers.get(0).init();
+      LOG.info("init handler: " + tmpHandlers.get(0).getPath() + ", "
+          + tmpHandlers.get(0).getListener());
+      return;
+    }
+    int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
+    ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
+      Thread t = new Thread(r, "initHandler-" + _clusterName);
+      t.setDaemon(true);
+      return t;
+    });
+    List<Future<?>> futures = new ArrayList<>(tmpHandlers.size());
+    try {
+      for (CallbackHandler handler : tmpHandlers) {
+        futures.add(executor.submit(() -> {
+          handler.init();
+          LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
+        }));
       }
-      int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
-      ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
-        Thread t = new Thread(r, "initHandler-" + _clusterName);
-        t.setDaemon(true);
-        return t;
-      });
-      List<Future<?>> futures = new ArrayList<>(tmpHandlers.size());
-      try {
-        for (CallbackHandler handler : tmpHandlers) {
-          futures.add(executor.submit(() -> {
-            handler.init();
-            LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
-          }));
+      for (Future<?> future : futures) {
+        try {
+          future.get();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          LOG.error("Interrupted while initializing callback handlers", e);
+          break;
+        } catch (ExecutionException e) {
+          LOG.error("Failed to initialize callback handler", e.getCause());
         }
-        for (Future<?> future : futures) {
-          try {
-            future.get();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            LOG.error("Interrupted while initializing callback handlers", e);
-            break;
-          } catch (ExecutionException e) {
-            LOG.error("Failed to initialize callback handler", e.getCause());
-          }
-        }
-      } finally {
-        executor.shutdownNow();
       }
+    } finally {
+      executor.shutdownNow();
     }
   }
 
