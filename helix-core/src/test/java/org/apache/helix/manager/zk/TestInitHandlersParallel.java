@@ -7,7 +7,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -37,8 +39,7 @@ public class TestInitHandlersParallel {
     when(handler.getPath()).thenReturn("/test/path");
     when(handler.getListener()).thenReturn("testListener");
 
-    // Call real method since we are testing the actual initHandlers logic
-    org.mockito.Mockito.doCallRealMethod().when(manager).initHandlers(org.mockito.ArgumentMatchers.any());
+    doCallRealMethod().when(manager).initHandlers(any());
 
     List<CallbackHandler> handlers = new ArrayList<>();
     handlers.add(handler);
@@ -50,7 +51,7 @@ public class TestInitHandlersParallel {
   @Test
   public void testInitHandlersRunsInParallel() throws Exception {
     ZKHelixManager manager = mock(ZKHelixManager.class);
-    org.mockito.Mockito.doCallRealMethod().when(manager).initHandlers(org.mockito.ArgumentMatchers.any());
+    doCallRealMethod().when(manager).initHandlers(any());
 
     int handlerCount = 50;
     AtomicInteger maxConcurrency = new AtomicInteger(0);
@@ -94,7 +95,7 @@ public class TestInitHandlersParallel {
   @Test
   public void testInitHandlersContinuesOnException() {
     ZKHelixManager manager = mock(ZKHelixManager.class);
-    org.mockito.Mockito.doCallRealMethod().when(manager).initHandlers(org.mockito.ArgumentMatchers.any());
+    doCallRealMethod().when(manager).initHandlers(any());
 
     AtomicInteger initCount = new AtomicInteger(0);
 
