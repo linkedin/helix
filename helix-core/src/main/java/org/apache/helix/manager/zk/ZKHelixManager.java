@@ -29,6 +29,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Timer;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.management.JMException;
@@ -1175,16 +1179,43 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         + ", instanceTye: " + _instanceType + ", cluster: " + _clusterName);
   }
 
+  private static final int INIT_HANDLERS_PARALLELISM = 20;
+
   void initHandlers(List<CallbackHandler> handlers) {
     synchronized (this) {
-      if (handlers != null) {
-        // get a copy of the list and iterate over the copy list
-        // in case handler.init() modifies the original handler list
-        List<CallbackHandler> tmpHandlers = new ArrayList<>(handlers);
+      if (handlers == null || handlers.isEmpty()) {
+        return;
+      }
+      List<CallbackHandler> tmpHandlers = new ArrayList<>(handlers);
+      if (tmpHandlers.size() == 1) {
+        tmpHandlers.get(0).init();
+        LOG.info("init handler: " + tmpHandlers.get(0).getPath() + ", "
+            + tmpHandlers.get(0).getListener());
+        return;
+      }
+      int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
+      ExecutorService executor = Executors.newFixedThreadPool(poolSize);
+      List<Future<?>> futures = new ArrayList<>(tmpHandlers.size());
+      try {
         for (CallbackHandler handler : tmpHandlers) {
-          handler.init();
-          LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
+          futures.add(executor.submit(() -> {
+            handler.init();
+            LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
+          }));
         }
+        for (Future<?> future : futures) {
+          try {
+            future.get();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.error("Interrupted while initializing callback handlers", e);
+            break;
+          } catch (ExecutionException e) {
+            LOG.error("Failed to initialize callback handler", e.getCause());
+          }
+        }
+      } finally {
+        executor.shutdownNow();
       }
     }
   }
