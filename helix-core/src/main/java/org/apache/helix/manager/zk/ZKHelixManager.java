@@ -1180,8 +1180,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   }
 
   // Each handler.init() is a ZK roundtrip (~200ms). With 1200 handlers sequentially: ~240 sec.
-  // 20 parallel threads: ~12 sec. All threads share one ZkClient connection. Too many threads
-  // could overload the ZK ensemble with concurrent reads on that connection.
+  // 20 parallel threads: ~12 sec. All threads share one ZkClient (one ZK connection, no new
+  // connections created). Too many concurrent reads on one connection could slow it down.
   private static final int INIT_HANDLERS_PARALLELISM = 20;
 
   void initHandlers(List<CallbackHandler> handlers) {
