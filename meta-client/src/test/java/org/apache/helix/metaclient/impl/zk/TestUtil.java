@@ -65,9 +65,11 @@ public class TestUtil {
     ZkConnection connection = ((ZkConnection) zkClient.getConnection());
     ZooKeeper zk = connection.getZookeeper();
 
-    java.lang.reflect.Field field = getField(zk.getClass(), "watchManager");
-    field.setAccessible(true);
-    Object watchManager = field.get(zk);
+    // ZooKeeper 3.7+ moved the watch manager from a `watchManager` field to a
+    // package-private getWatchManager() method on ZooKeeper.
+    java.lang.reflect.Method method = zk.getClass().getDeclaredMethod("getWatchManager");
+    method.setAccessible(true);
+    Object watchManager = method.invoke(zk);
 
     java.lang.reflect.Field field2 = getField(watchManager.getClass(), "dataWatches");
     field2.setAccessible(true);

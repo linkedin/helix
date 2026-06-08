@@ -64,7 +64,7 @@
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-      <version>3.6.3</version>
+      <version>3.8.6</version>
       <exclusions>
         <exclusion>
           <groupId>junit</groupId>
@@ -78,6 +78,17 @@
           <groupId>log4j</groupId>
           <artifactId>log4j</artifactId>
         </exclusion>
+        <!-- ZK 3.8.x defaults to logback for logging; Helix routes SLF4J through
+             log4j2 (log4j-slf4j-impl), so exclude logback to avoid a dual binding
+             and the logback-core CVEs (CVE-2025-11226, CVE-2026-1225). -->
+        <exclusion>
+          <groupId>ch.qos.logback</groupId>
+          <artifactId>logback-classic</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>ch.qos.logback</groupId>
+          <artifactId>logback-core</artifactId>
+        </exclusion>
       </exclusions>
     </dependency>
     <dependency>
@@ -88,7 +99,7 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <version>2.12.7.1</version>
+      <version>2.15.4</version>
     </dependency>
     <dependency>
       <groupId>commons-codec</groupId>
