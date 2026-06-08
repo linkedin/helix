@@ -1194,7 +1194,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         return;
       }
       int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
-      ExecutorService executor = Executors.newFixedThreadPool(poolSize);
+      ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
+        Thread t = new Thread(r, "initHandler-" + _clusterName);
+        t.setDaemon(true);
+        return t;
+      });
       List<Future<?>> futures = new ArrayList<>(tmpHandlers.size());
       try {
         for (CallbackHandler handler : tmpHandlers) {
