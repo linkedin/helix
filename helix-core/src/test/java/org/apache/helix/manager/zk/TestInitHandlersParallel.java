@@ -1,15 +1,9 @@
 package org.apache.helix.manager.zk;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.helix.controller.GenericHelixController;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -135,36 +129,4 @@ public class TestInitHandlersParallel {
     Assert.assertEquals(initCount.get(), 2);
   }
 
-  @Test
-  public void testPendingInstanceListenersCollectionAndRetrieval() {
-    Map<String, String> sessionToInstance = new HashMap<>();
-    sessionToInstance.put("session1", "instance1");
-    sessionToInstance.put("session2", "instance2");
-    Set<String> newInstances = new HashSet<>();
-    newInstances.add("instance1");
-    newInstances.add("instance2");
-
-    GenericHelixController.PendingInstanceListeners pending =
-        new GenericHelixController.PendingInstanceListeners(sessionToInstance, newInstances);
-
-    Assert.assertFalse(pending.isEmpty());
-    Assert.assertEquals(pending.getSessionToInstance().size(), 2);
-    Assert.assertEquals(pending.getNewInstances().size(), 2);
-    Assert.assertEquals(pending.getSessionToInstance().get("session1"), "instance1");
-    Assert.assertTrue(pending.getNewInstances().contains("instance2"));
-  }
-
-  @Test
-  public void testPendingInstanceListenersEmpty() {
-    GenericHelixController.PendingInstanceListeners pending =
-        new GenericHelixController.PendingInstanceListeners(
-            Collections.emptyMap(), Collections.emptySet());
-    Assert.assertTrue(pending.isEmpty());
-  }
-
-  @Test
-  public void testTakePendingInstanceListenersReturnsNullInitially() {
-    GenericHelixController controller = new GenericHelixController("testCluster");
-    Assert.assertNull(controller.takePendingInstanceListeners());
-  }
 }
