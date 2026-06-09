@@ -1,15 +1,12 @@
 package org.apache.helix.manager.zk;
 
 import java.lang.management.ManagementFactory;
-import java.util.Collections;
 import java.util.Date;
 
 import org.apache.helix.InstanceType;
-import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkUnitTestBase;
-import org.apache.helix.controller.GenericHelixController;
 import org.apache.helix.model.LiveInstance;
 import org.testng.Assert;
 import org.testng.annotations.Test;

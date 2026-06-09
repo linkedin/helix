@@ -1432,8 +1432,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
       if (isInit) {
         // During initial controller setup, defer per-instance listener registration.
-        // These will be registered in parallel by ControllerManagerHelper after
-        // addListenersToController() returns and all locks are released.
+        // These will be registered in parallel in ZKHelixManager.handleNewSession()
+        // after handleNewSessionAsController() returns and invoke() releases the lock.
         Map<String, String> sessionToInstance = new HashMap<>();
         Set<String> newInstances = new HashSet<>();
 

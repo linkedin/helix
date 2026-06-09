@@ -2,8 +2,8 @@ package org.apache.helix.manager.zk;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -137,10 +137,10 @@ public class TestInitHandlersParallel {
 
   @Test
   public void testPendingInstanceListenersCollectionAndRetrieval() {
-    Map<String, String> sessionToInstance = new LinkedHashMap<>();
+    Map<String, String> sessionToInstance = new HashMap<>();
     sessionToInstance.put("session1", "instance1");
     sessionToInstance.put("session2", "instance2");
-    Set<String> newInstances = new LinkedHashSet<>();
+    Set<String> newInstances = new HashSet<>();
     newInstances.add("instance1");
     newInstances.add("instance2");
 
