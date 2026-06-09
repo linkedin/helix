@@ -23,6 +23,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -148,6 +150,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   final AtomicReference<Map<String, LiveInstance>> _lastSeenInstances;
   final AtomicReference<Map<String, LiveInstance>> _lastSeenSessions;
+
+  // Pending per-instance listener registrations collected during INIT for parallel registration.
+  // Maps session -> instanceName for current-state/task-current-state listeners,
+  // and a set of instance names for message/customized-state-root listeners.
+  private volatile PendingInstanceListeners _pendingInstanceListeners;
 
   // map that stores the mapping between instance and the customized state types available on that
   //instance
@@ -1423,34 +1430,56 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         }
       }
 
-      for (String session : curSessions.keySet()) {
-        if (lastSessions == null || !lastSessions.containsKey(session)) {
-          String instanceName = curSessions.get(session).getInstanceName();
-          try {
-            // add current-state listeners for new sessions
-            manager.addCurrentStateChangeListener(this, instanceName, session);
-            manager.addTaskCurrentStateChangeListener(this, instanceName, session);
-            logger.info(manager.getInstanceName() + " added current-state listener for instance: "
-                + instanceName + ", session: " + session + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add current state listener for instance: " + instanceName
-                + " with session: " + session, e);
-          }
-        }
-      }
+      boolean isInit = changeContext.getType() == NotificationContext.Type.INIT;
 
-      for (String instance : curInstances.keySet()) {
-        if (lastInstances == null || !lastInstances.containsKey(instance)) {
-          try {
-            // add message listeners for new instances
-            manager.addMessageListener(this, instance);
-            logger.info(manager.getInstanceName() + " added message listener for " + instance
-                + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add message listener for instance: " + instance, e);
+      if (isInit) {
+        // During initial controller setup, defer per-instance listener registration.
+        // These will be registered in parallel by ControllerManagerHelper after
+        // addListenersToController() returns and all locks are released.
+        Map<String, String> sessionToInstance = new LinkedHashMap<>();
+        Set<String> newInstances = new LinkedHashSet<>();
+
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            sessionToInstance.put(session, curSessions.get(session).getInstanceName());
           }
         }
-      }
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            newInstances.add(instance);
+          }
+        }
+        _pendingInstanceListeners = new PendingInstanceListeners(sessionToInstance, newInstances);
+        logger.info("Deferred {} session listeners and {} instance listeners for parallel registration",
+            sessionToInstance.size(), newInstances.size());
+      } else {
+        // Incremental path: register inline (typically 0-1 new instances per event)
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            String instanceName = curSessions.get(session).getInstanceName();
+            try {
+              manager.addCurrentStateChangeListener(this, instanceName, session);
+              manager.addTaskCurrentStateChangeListener(this, instanceName, session);
+              logger.info(manager.getInstanceName() + " added current-state listener for instance: "
+                  + instanceName + ", session: " + session + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add current state listener for instance: " + instanceName
+                  + " with session: " + session, e);
+            }
+          }
+        }
+
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            try {
+              manager.addMessageListener(this, instance);
+              logger.info(manager.getInstanceName() + " added message listener for " + instance
+                  + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add message listener for instance: " + instance, e);
+            }
+          }
+        }
 
         for (String instance : curInstances.keySet()) {
           if (lastInstances == null || !lastInstances.containsKey(instance)) {
@@ -1463,6 +1492,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
                   "Fail to add root path listener for customized state change for instance: "
                       + instance, e);
             }
+          }
         }
       }
 
@@ -1666,5 +1696,38 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _rebalancer = null;
       }
     }
+  }
+
+  /**
+   * Per-instance listener registrations deferred during initial controller setup.
+   * Collected by {@link #checkLiveInstancesObservation} during INIT for parallel
+   * registration by {@link org.apache.helix.manager.zk.ControllerManagerHelper}.
+   */
+  public static class PendingInstanceListeners {
+    private final Map<String, String> _sessionToInstance;
+    private final Set<String> _newInstances;
+
+    public PendingInstanceListeners(Map<String, String> sessionToInstance, Set<String> newInstances) {
+      _sessionToInstance = sessionToInstance;
+      _newInstances = newInstances;
+    }
+
+    public Map<String, String> getSessionToInstance() {
+      return _sessionToInstance;
+    }
+
+    public Set<String> getNewInstances() {
+      return _newInstances;
+    }
+
+    public boolean isEmpty() {
+      return _sessionToInstance.isEmpty() && _newInstances.isEmpty();
+    }
+  }
+
+  public PendingInstanceListeners takePendingInstanceListeners() {
+    PendingInstanceListeners result = _pendingInstanceListeners;
+    _pendingInstanceListeners = null;
+    return result;
   }
 }

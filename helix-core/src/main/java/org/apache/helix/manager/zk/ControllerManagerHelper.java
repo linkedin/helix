@@ -19,7 +19,13 @@ package org.apache.helix.manager.zk;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixTimerTask;
@@ -36,6 +42,11 @@ import org.slf4j.LoggerFactory;
  */
 public class ControllerManagerHelper {
   private static Logger LOG = LoggerFactory.getLogger(ControllerManagerHelper.class);
+
+  // Each per-instance listener init involves ZK roundtrips for watch subscription (~200ms).
+  // With 300 instances * 4 listener types = 1200 sequential registrations: ~240 sec.
+  // 20 parallel threads: ~12 sec. All threads share one ZkClient (one ZK connection).
+  private static final int INSTANCE_LISTENER_PARALLELISM = 20;
 
   final HelixManager _manager;
   final DefaultMessagingService _messagingService;
@@ -85,12 +96,98 @@ public class ControllerManagerHelper {
       _manager.addCustomizedStateConfigChangeListener(controller);
       _manager.addLiveInstanceChangeListener(controller);
       _manager.addIdealStateChangeListener(controller);
+
+      // Register per-instance listeners (current-state, message, customized-state-root) in parallel.
+      // These were deferred during the INIT callback in checkLiveInstancesObservation() to avoid
+      // sequential ZK roundtrips while holding the manager lock.
+      GenericHelixController.PendingInstanceListeners pending =
+          controller.takePendingInstanceListeners();
+      if (pending != null && !pending.isEmpty()) {
+        registerInstanceListenersInParallel(controller, pending);
+      }
     } catch (ZkInterruptedException e) {
       LOG.warn("zk connection is interrupted during HelixManagerMain.addListenersToController(). "
           + e);
     } catch (Exception e) {
       LOG.error("Error when creating HelixManagerContollerMonitor", e);
     }
+  }
+
+  private void registerInstanceListenersInParallel(GenericHelixController controller,
+      GenericHelixController.PendingInstanceListeners pending) {
+    long start = System.currentTimeMillis();
+    int sessionCount = pending.getSessionToInstance().size();
+    int instanceCount = pending.getNewInstances().size();
+    LOG.info("Registering per-instance listeners in parallel for cluster: {} "
+            + "(sessions: {}, instances: {})",
+        _manager.getClusterName(), sessionCount, instanceCount);
+
+    List<Runnable> tasks = new ArrayList<>();
+
+    for (Map.Entry<String, String> entry : pending.getSessionToInstance().entrySet()) {
+      String session = entry.getKey();
+      String instanceName = entry.getValue();
+      tasks.add(() -> {
+        try {
+          _manager.addCurrentStateChangeListener(controller, instanceName, session);
+          _manager.addTaskCurrentStateChangeListener(controller, instanceName, session);
+          LOG.info(_manager.getInstanceName() + " added current-state listener for instance: "
+              + instanceName + ", session: " + session + ", listener: " + controller);
+        } catch (Exception e) {
+          LOG.error("Failed to register current-state listeners for instance: " + instanceName
+              + " with session: " + session, e);
+        }
+      });
+    }
+
+    for (String instance : pending.getNewInstances()) {
+      tasks.add(() -> {
+        try {
+          _manager.addMessageListener(controller, instance);
+          _manager.addCustomizedStateRootChangeListener(controller, instance);
+          LOG.info(_manager.getInstanceName() + " added message/customizedStateRoot listener for "
+              + instance + ", listener: " + controller);
+        } catch (Exception e) {
+          LOG.error("Failed to register message/customizedStateRoot listeners for instance: "
+              + instance, e);
+        }
+      });
+    }
+
+    if (tasks.size() == 1) {
+      tasks.get(0).run();
+    } else {
+      int poolSize = Math.min(tasks.size(), INSTANCE_LISTENER_PARALLELISM);
+      ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
+        Thread t = new Thread(r, "registerInstanceListener-" + _manager.getClusterName());
+        t.setDaemon(true);
+        return t;
+      });
+      try {
+        List<Future<?>> futures = new ArrayList<>(tasks.size());
+        for (Runnable task : tasks) {
+          futures.add(executor.submit(task));
+        }
+        for (Future<?> future : futures) {
+          try {
+            future.get();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.error("Interrupted while registering per-instance listeners", e);
+            break;
+          } catch (ExecutionException e) {
+            LOG.error("Failed to register per-instance listener", e.getCause());
+          }
+        }
+      } finally {
+        executor.shutdownNow();
+      }
+    }
+
+    LOG.info("Registered per-instance listeners in parallel for cluster: {}, "
+            + "sessions: {}, instances: {}, took: {}ms",
+        _manager.getClusterName(), sessionCount, instanceCount,
+        System.currentTimeMillis() - start);
   }
 
   public void removeListenersFromController(GenericHelixController controller) {

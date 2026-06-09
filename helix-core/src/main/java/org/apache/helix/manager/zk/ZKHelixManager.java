@@ -433,6 +433,10 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
     PropertyType type = propertyKey.getType();
 
+    // Create handler with deferred init under the lock, then init outside the lock.
+    // This reduces lock hold time from ~200ms (ZK roundtrip in init) to ~1ms (handler creation).
+    // Critical for parallel per-instance listener registration during controller leadership.
+    CallbackHandler newHandler;
     synchronized (this) {
       for (CallbackHandler handler : _handlers) {
         // compare property-key path and listener reference
@@ -445,14 +449,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         }
       }
 
-      CallbackHandler newHandler =
+      newHandler =
           new CallbackHandler(this, _zkclient, propertyKey, listener, eventType, changeType,
-              _callbackMonitors.get(changeType));
+              _callbackMonitors.get(changeType), true);
 
       _handlers.add(newHandler);
       LOG.info("Added listener: " + listener + " for type: " + type + " to path: "
           + newHandler.getPath());
     }
+    newHandler.init();
   }
 
   @Override
