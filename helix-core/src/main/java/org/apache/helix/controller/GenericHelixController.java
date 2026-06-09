@@ -23,8 +23,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1436,8 +1434,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         // During initial controller setup, defer per-instance listener registration.
         // These will be registered in parallel by ControllerManagerHelper after
         // addListenersToController() returns and all locks are released.
-        Map<String, String> sessionToInstance = new LinkedHashMap<>();
-        Set<String> newInstances = new LinkedHashSet<>();
+        Map<String, String> sessionToInstance = new HashMap<>();
+        Set<String> newInstances = new HashSet<>();
 
         for (String session : curSessions.keySet()) {
           if (lastSessions == null || !lastSessions.containsKey(session)) {
@@ -1701,7 +1699,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   /**
    * Per-instance listener registrations deferred during initial controller setup.
    * Collected by {@link #checkLiveInstancesObservation} during INIT for parallel
-   * registration by {@link org.apache.helix.manager.zk.ControllerManagerHelper}.
+   * registration in {@link org.apache.helix.manager.zk.ZKHelixManager#handleNewSession}.
    */
   public static class PendingInstanceListeners {
     private final Map<String, String> _sessionToInstance;
