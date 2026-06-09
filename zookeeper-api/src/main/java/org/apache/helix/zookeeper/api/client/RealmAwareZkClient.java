@@ -32,6 +32,7 @@ import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.IZkChildListener;
 import org.apache.helix.zookeeper.zkclient.IZkDataListener;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
+import org.apache.helix.zookeeper.zkclient.RecursivePersistListener;
 import org.apache.helix.zookeeper.zkclient.callback.ZkAsyncCallbacks;
 import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
@@ -129,6 +130,32 @@ public interface RealmAwareZkClient {
   void unsubscribeDataChanges(String path, IZkDataListener listener);
 
   void unsubscribeAll();
+
+  /**
+   * Subscribe a single PERSISTENT_RECURSIVE watch (ZooKeeper 3.6+) that covers all data and child
+   * changes under the entire subtree rooted at {@code path}. Unlike the per-node child/data watches,
+   * this installs ONE server-side watch for the whole subtree and does not need to be re-armed after
+   * each event. The owning client must be built with {@code usePersistWatcher=true}.
+   *
+   * Default implementation throws {@link UnsupportedOperationException}; only clients that support a
+   * persistent watcher (e.g. the dedicated single-realm client) override it.
+   *
+   * @param path the subtree root to watch
+   * @param listener invoked for every add/remove/data change anywhere under {@code path}
+   */
+  default void subscribePersistRecursiveListener(String path, RecursivePersistListener listener) {
+    throw new UnsupportedOperationException(
+        "subscribePersistRecursiveListener is not supported by this RealmAwareZkClient implementation");
+  }
+
+  /**
+   * Remove a recursive persistent watch previously installed via
+   * {@link #subscribePersistRecursiveListener(String, RecursivePersistListener)}.
+   */
+  default void unsubscribePersistRecursiveListener(String path, RecursivePersistListener listener) {
+    throw new UnsupportedOperationException(
+        "unsubscribePersistRecursiveListener is not supported by this RealmAwareZkClient implementation");
+  }
 
   // data access
   void createPersistent(String path);
@@ -472,6 +499,9 @@ public interface RealmAwareZkClient {
     protected String _monitorKey;
     protected String _monitorInstanceName = null;
     protected boolean _monitorRootPathOnly = true;
+    // When true, the client registers PERSISTENT / PERSISTENT_RECURSIVE watches instead of one-shot
+    // watches, enabling subscribePersistRecursiveListener. Off by default for backward compatibility.
+    protected boolean _usePersistWatcher = false;
 
     public RealmAwareZkClientConfig setZkSerializer(PathBasedZkSerializer zkSerializer) {
       this._zkSerializer = zkSerializer;
@@ -516,6 +546,15 @@ public interface RealmAwareZkClient {
     public RealmAwareZkClientConfig setMonitorRootPathOnly(Boolean monitorRootPathOnly) {
       this._monitorRootPathOnly = monitorRootPathOnly;
       return this;
+    }
+
+    public RealmAwareZkClientConfig setUsePersistWatcher(boolean usePersistWatcher) {
+      this._usePersistWatcher = usePersistWatcher;
+      return this;
+    }
+
+    public boolean isUsePersistWatcher() {
+      return _usePersistWatcher;
     }
 
     public RealmAwareZkClientConfig setOperationRetryTimeout(Long operationRetryTimeout) {
@@ -568,7 +607,8 @@ public interface RealmAwareZkClient {
           .setMonitorType(_monitorType).setMonitorKey(_monitorKey)
           .setMonitorInstanceName(_monitorInstanceName).setMonitorRootPathOnly(_monitorRootPathOnly)
           .setOperationRetryTimeout(_operationRetryTimeout)
-          .setConnectInitTimeout(_connectInitTimeout);
+          .setConnectInitTimeout(_connectInitTimeout)
+          .setUsePersistWatcher(_usePersistWatcher);
     }
   }
 

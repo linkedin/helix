@@ -97,4 +97,15 @@ public class SystemPropertyKeys {
 
   // Stage thread pool size for parallel stage execution
   public static final String STAGE_THREAD_POOL_SIZE = "helix.stage.threadpool.size";
+
+  // When enabled, the controller subscribes a single PERSISTENT_RECURSIVE ZooKeeper watch per
+  // participant current-state subtree (CURRENTSTATES and TASKCURRENTSTATES) instead of one child watch
+  // + one data watch per partition. This collapses the per-handoff watch footprint and the cold-start
+  // subscribe cost from O(N*M) to O(1) re-arm. Requires the controller's ZkClient to run with
+  // usePersistWatcher=true (wired automatically when this flag is set). Off by default for backward
+  // compatibility. The recursive watch is intentionally scoped to current-state/task-current-state;
+  // all other change types (e.g. CUSTOMIZEDSTATES) keep per-node watches, which operate correctly in
+  // persist mode and continue to drive customized-view aggregation.
+  public static final String PARTICIPANT_STATE_PERSIST_RECURSIVE_WATCH_ENABLED =
+      "helix.controller.participantState.persistRecursiveWatch.enabled";
 }

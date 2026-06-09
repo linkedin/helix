@@ -79,6 +79,7 @@ import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.IZkChildListener;
 import org.apache.helix.zookeeper.zkclient.IZkDataListener;
+import org.apache.helix.zookeeper.zkclient.RecursivePersistListener;
 import org.apache.helix.zookeeper.zkclient.annotation.PreFetchChangedData;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.zookeeper.Watcher.Event.EventType;
@@ -105,7 +106,7 @@ import static org.apache.helix.HelixConstants.ChangeType.TARGET_EXTERNAL_VIEW;
 import static org.apache.helix.HelixConstants.ChangeType.TASK_CURRENT_STATE;
 
 @PreFetchChangedData(enabled = false)
-public class CallbackHandler implements IZkChildListener, IZkDataListener {
+public class CallbackHandler implements IZkChildListener, IZkDataListener, RecursivePersistListener {
   private static Logger logger = LoggerFactory.getLogger(CallbackHandler.class);
   private static final AtomicLong CALLBACK_HANDLER_UID = new AtomicLong();
 
@@ -137,6 +138,19 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
   private AtomicReference<CallbackEventExecutor> _batchCallbackExecutorRef = new AtomicReference<>();
   private boolean _watchChild = true; // Whether we should subscribe to the child znode's data
   // change.
+
+  // When true (controller CURRENT_STATE/TASK_CURRENT_STATE/CUSTOMIZED_STATE handler + flag enabled +
+  // persist-watcher client), this handler installs ONE PERSISTENT_RECURSIVE watch covering its whole
+  // subtree instead of one child watch plus one data watch per partition.
+  private final boolean _useRecursivePersistWatch;
+  // Whether the single recursive watch is currently installed on the server. A PERSISTENT_RECURSIVE
+  // watch is installed once per session and never re-armed, so it must be (re)installed only on INIT
+  // and removed exactly once on reset. Guards against re-subscribing on every callback / on FINALIZE,
+  // and makes reset's unsubscribe accurate. Volatile: read/written from the ZkEventThread and resets.
+  private volatile boolean _recursiveWatchInstalled = false;
+  // Set if the underlying zk client does not support persistent recursive watches (should not happen
+  // when the flag is on, but kept defensive): once set, the handler permanently uses per-node watches.
+  private volatile boolean _recursiveWatchUnsupported = false;
 
   // indicated whether this CallbackHandler is ready to serve event callback from ZkClient.
   private boolean _ready = false;
@@ -185,6 +199,10 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
     }
 
     parseListenerProperties();
+
+    _useRecursivePersistWatch =
+        Boolean.getBoolean(SystemPropertyKeys.PARTICIPANT_STATE_PERSIST_RECURSIVE_WATCH_ENABLED)
+            && (_changeType == CURRENT_STATE || _changeType == TASK_CURRENT_STATE);
 
     init();
   }
@@ -563,6 +581,31 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
         _uid, path, callbackType, _eventTypes, _listener, watchChild);
 
     long start = System.currentTimeMillis();
+
+    if (_useRecursivePersistWatch && !_recursiveWatchUnsupported) {
+      // A PERSISTENT_RECURSIVE watch covers all data + child changes under the entire subtree and is
+      // NEVER re-armed. Install it once, on INIT only: CALLBACK re-entries (handleZNodeChange sets
+      // isChildChange=true) and FINALIZE (reset) must NOT re-subscribe, otherwise (a) we would issue a
+      // redundant addWatch on every event and (b) reset() -> invoke(FINALIZE) would re-install the
+      // watch right after unsubscribing it, leaking it. For all these change types we then skip the
+      // per-node child/data subscribe loop below.
+      if (callbackType == Type.INIT && !_recursiveWatchInstalled) {
+        try {
+          _zkClient.subscribePersistRecursiveListener(path, this);
+          _recursiveWatchInstalled = true;
+          logger.info("CallbackHandler {} installed ONE persistent recursive watch on path: {} "
+              + "(replaces per-child data watches for change type {})", _uid, path, _changeType);
+        } catch (UnsupportedOperationException e) {
+          logger.warn("CallbackHandler {} persist recursive watch unsupported by zk client; falling "
+              + "back to per-node watches on path: {}", _uid, path);
+          _recursiveWatchUnsupported = true;
+        }
+      }
+      if (!_recursiveWatchUnsupported) {
+        return;
+      }
+      // else: client does not support it -> fall through to the per-node subscribe below.
+    }
     if (_eventTypes.contains(EventType.NodeDataChanged)
         || _eventTypes.contains(EventType.NodeCreated)
         || _eventTypes.contains(EventType.NodeDeleted)) {
@@ -752,6 +795,33 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
     }
   }
 
+  @Override
+  public void handleZNodeChange(String dataPath, EventType eventType) {
+    // A single PERSISTENT_RECURSIVE watch fired for a change to some node anywhere under _path.
+    // Route it to the same CALLBACK path that the per-node child/data watches would have used so the
+    // controller pipeline reacts identically (it re-reads current state regardless of which node).
+    try {
+      updateNotificationTime(System.nanoTime());
+      if (dataPath != null && dataPath.startsWith(_path)) {
+        if (!isReady()) {
+          logger.info("CallbackHandler {} is in reset state; skip recursive {} event on path: {}",
+              _uid, eventType, dataPath);
+          return;
+        }
+        NotificationContext changeContext = new NotificationContext(_manager);
+        changeContext.setType(NotificationContext.Type.CALLBACK);
+        changeContext.setPathChanged(dataPath);
+        changeContext.setChangeType(_changeType);
+        changeContext.setIsChildChange(true);
+        enqueueTask(changeContext);
+      }
+    } catch (Exception e) {
+      String msg = "exception in handling recursive znode-change. path: " + dataPath + ", listener: "
+          + _listener;
+      ZKExceptionHandler.getInstance().handle(msg, e);
+    }
+  }
+
   /**
    * Invoke the listener for the last time so that the listener could clean up resources
    */
@@ -764,6 +834,19 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
     logger.info("Resetting CallbackHandler: {}. Is resetting for shutdown: {}.", _uid, isShutdown);
     try {
       _ready = false;
+      if (_recursiveWatchInstalled) {
+        // The recursive watch is persistent, so it must be explicitly removed (one call) on reset /
+        // session change, otherwise it would leak. Only attempt removal if we actually installed it;
+        // init() re-installs the single watch on the next INIT. Cleared even if removal throws (e.g.
+        // session already expired) so a subsequent INIT re-installs cleanly.
+        try {
+          _zkClient.unsubscribePersistRecursiveListener(_path, this);
+        } catch (Exception e) {
+          logger.warn("CallbackHandler {} failed to unsubscribe recursive watch on path: {}, {}",
+              _uid, _path, e.toString());
+        }
+        _recursiveWatchInstalled = false;
+      }
       CallbackEventExecutor callbackExecutor = _batchCallbackExecutorRef.get();
       if (callbackExecutor != null) {
         if (isShutdown) {
