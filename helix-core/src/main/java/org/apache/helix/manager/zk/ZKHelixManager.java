@@ -1269,6 +1269,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tmpHandlers = new ArrayList<>(handlers);
     }
 
+    // Skip handlers already initialized (e.g. by registerPendingInstanceListeners earlier
+    // in handleNewSession). Calling init() again would produce spurious WARN logs because
+    // _expectTypes no longer contains INIT after the first init().
+    tmpHandlers.removeIf(CallbackHandler::isReady);
+    if (tmpHandlers.isEmpty()) {
+      return;
+    }
+
     long startTime = System.currentTimeMillis();
     if (tmpHandlers.size() == 1) {
       tmpHandlers.get(0).init();
