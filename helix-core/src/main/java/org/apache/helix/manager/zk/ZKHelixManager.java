@@ -1196,10 +1196,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tmpHandlers = new ArrayList<>(handlers);
     }
 
+    long startTime = System.currentTimeMillis();
     if (tmpHandlers.size() == 1) {
       tmpHandlers.get(0).init();
-      LOG.info("init handler: " + tmpHandlers.get(0).getPath() + ", "
-          + tmpHandlers.get(0).getListener());
+      LOG.info("initHandlers completed for cluster: " + _clusterName + ", handlers: 1, took: "
+          + (System.currentTimeMillis() - startTime) + " ms");
       return;
     }
     int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
@@ -1230,6 +1231,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     } finally {
       executor.shutdownNow();
     }
+    LOG.info("initHandlers completed for cluster: " + _clusterName + ", handlers: "
+        + tmpHandlers.size() + ", took: " + (System.currentTimeMillis() - startTime) + " ms");
   }
 
   void resetHandlers(boolean isShutdown) {
