@@ -1184,10 +1184,78 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         + ", instanceTye: " + _instanceType + ", cluster: " + _clusterName);
   }
 
-  // Each handler.init() is a ZK roundtrip (~200ms). With 1200 handlers sequentially: ~240 sec.
-  // 20 parallel threads: ~12 sec. All threads share one ZkClient (one ZK connection, no new
-  // connections created). Too many concurrent reads on one connection could slow it down.
+  // Each handler.init() or addXxxListener() is a ZK roundtrip (~200ms).
+  // With 1200 handlers sequentially: ~240 sec. 20 parallel threads: ~12 sec.
+  // All threads share one ZkClient (one ZK connection, no new connections created).
   private static final int INIT_HANDLERS_PARALLELISM = 20;
+
+  private void registerPendingInstanceListeners(
+      GenericHelixController.PendingInstanceListeners pending) {
+    long start = System.currentTimeMillis();
+    int sessionCount = pending.getSessionToInstance().size();
+    int instanceCount = pending.getNewInstances().size();
+    LOG.info("Registering per-instance listeners in parallel for cluster: {} "
+        + "(sessions: {}, instances: {})", _clusterName, sessionCount, instanceCount);
+
+    List<Runnable> tasks = new ArrayList<>();
+    for (Map.Entry<String, String> entry : pending.getSessionToInstance().entrySet()) {
+      String session = entry.getKey();
+      String instanceName = entry.getValue();
+      tasks.add(() -> {
+        try {
+          addCurrentStateChangeListener(_controller, instanceName, session);
+          addTaskCurrentStateChangeListener(_controller, instanceName, session);
+        } catch (Exception e) {
+          LOG.error("Failed to register current-state listeners for instance: " + instanceName
+              + " with session: " + session, e);
+        }
+      });
+    }
+    for (String instance : pending.getNewInstances()) {
+      tasks.add(() -> {
+        try {
+          addMessageListener(_controller, instance);
+          addCustomizedStateRootChangeListener(_controller, instance);
+        } catch (Exception e) {
+          LOG.error("Failed to register message/customizedStateRoot listeners for instance: "
+              + instance, e);
+        }
+      });
+    }
+
+    if (tasks.size() <= 1) {
+      tasks.forEach(Runnable::run);
+    } else {
+      int poolSize = Math.min(tasks.size(), INIT_HANDLERS_PARALLELISM);
+      ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
+        Thread t = new Thread(r, "registerInstanceListener-" + _clusterName);
+        t.setDaemon(true);
+        return t;
+      });
+      try {
+        List<Future<?>> futures = new ArrayList<>(tasks.size());
+        for (Runnable task : tasks) {
+          futures.add(executor.submit(task));
+        }
+        for (Future<?> future : futures) {
+          try {
+            future.get();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.error("Interrupted while registering per-instance listeners", e);
+            break;
+          } catch (ExecutionException e) {
+            LOG.error("Failed to register per-instance listener", e.getCause());
+          }
+        }
+      } finally {
+        executor.shutdownNow();
+      }
+    }
+    LOG.info("Registered per-instance listeners in parallel for cluster: {}, "
+        + "sessions: {}, instances: {}, took: {}ms",
+        _clusterName, sessionCount, instanceCount, System.currentTimeMillis() - start);
+  }
 
   void initHandlers(List<CallbackHandler> handlers) {
     // Copy the handler list under the lock to protect against concurrent modification.
@@ -1456,6 +1524,18 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     case SPECTATOR:
     default:
       break;
+    }
+
+    // Register deferred per-instance listeners in parallel. During INIT,
+    // checkLiveInstancesObservation() defers per-instance registration to avoid sequential
+    // ZK roundtrips while synchronized(_manager) is held by invoke(). Now that invoke() has
+    // returned and the lock is released, parallel worker threads can acquire it.
+    if (_controller != null) {
+      GenericHelixController.PendingInstanceListeners pending =
+          _controller.takePendingInstanceListeners();
+      if (pending != null && !pending.isEmpty()) {
+        registerPendingInstanceListeners(pending);
+      }
     }
 
     startTimerTasks();
