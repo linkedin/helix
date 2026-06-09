@@ -70,6 +70,67 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
     zkClient.close();
   }
 
+  /*
+   * Regression test for the persist-watcher listener-routing bug. A listener that implements BOTH
+   * IZkChildListener and IZkDataListener (as Helix's CallbackHandler does) must still receive
+   * NodeDataChanged callbacks when it subscribes for data changes under persist-watcher mode.
+   * Previously addPersistListener inferred the listener kind via `instanceof` and matched
+   * IZkChildListener first, so a data subscription on such a listener was misrouted into the
+   * child-listener map and its data-change events were silently dropped.
+   */
+  @Test
+  void testDualInterfaceListenerDataChangeUnderPersistWatcher() throws Exception {
+    org.apache.helix.zookeeper.impl.client.ZkClient.Builder builder =
+        new org.apache.helix.zookeeper.impl.client.ZkClient.Builder();
+    builder.setZkServer(ZkTestBase.ZK_ADDR).setMonitorRootPathOnly(false).setUsePersistWatcher(true);
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient = builder.build();
+    zkClient.setZkSerializer(new BasicZkSerializer(new SerializableSerializer()));
+
+    int count = 50;
+    String path = "/testDualInterfaceListenerDataChange";
+    CountDownLatch dataLatch = new CountDownLatch(count);
+    CountDownLatch childLatch = new CountDownLatch(count);
+
+    // A single listener implementing BOTH interfaces, mirroring Helix's CallbackHandler.
+    class DualListener implements IZkDataListener, IZkChildListener {
+      @Override
+      public void handleDataChange(String dataPath, Object data) {
+        dataLatch.countDown();
+      }
+
+      @Override
+      public void handleDataDeleted(String dataPath) {
+      }
+
+      @Override
+      public void handleChildChange(String parentPath, List<String> currentChilds) {
+        childLatch.countDown();
+      }
+    }
+    DualListener dualListener = new DualListener();
+
+    zkClient.create(path, "data", CreateMode.PERSISTENT);
+    zkClient.subscribeDataChanges(path, dualListener);
+    zkClient.subscribeChildChanges(path, dualListener);
+
+    // Data updates must reach handleDataChange (the regression that this test guards).
+    for (int i = 0; i < count; ++i) {
+      zkClient.writeData(path, "data" + i, -1);
+    }
+    Assert.assertTrue(dataLatch.await(15000, TimeUnit.MILLISECONDS),
+        "Data-change events were not delivered to a dual-interface listener under persist mode");
+
+    // Child changes must also reach handleChildChange for the same listener.
+    for (int i = 0; i < count; ++i) {
+      zkClient.create(path + "/c" + i, "data", CreateMode.PERSISTENT);
+    }
+    Assert.assertTrue(childLatch.await(15000, TimeUnit.MILLISECONDS),
+        "Child-change events were not delivered to a dual-interface listener under persist mode");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
   @Test(dependsOnMethods = "testZkClientDataChange")
   void testZkClientChildChange() throws Exception {
     org.apache.helix.zookeeper.impl.client.ZkClient.Builder builder =
