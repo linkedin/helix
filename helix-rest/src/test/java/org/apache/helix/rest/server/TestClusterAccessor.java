@@ -516,6 +516,32 @@ public class TestClusterAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testAddVirtualTopologyGroupSurfacesValidationReason() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "VgErrorReasonCluster";
+    setupClusterForVirtualTopology(clusterName);
+
+    // The cluster has 5 fault zones; requesting 6 ZONE_BASED virtual groups must fail the
+    // "numGroups <= zones" validation and return a 400.
+    String requestParam = "{\"virtualTopologyGroupNumber\":\"6\",\"virtualTopologyGroupName\":\"vgTest\","
+        + "\"assignmentAlgorithmType\":\"ZONE_BASED\"}";
+
+    Response response = post("clusters/" + clusterName,
+        ImmutableMap.of("command", "addVirtualTopologyGroup"),
+        Entity.entity(requestParam, MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode(), true);
+
+    // The validation reason must be surfaced in the response body, not only in the server log, so
+    // callers (for example ACM) can report the actual cause instead of an opaque "Illegal input"
+    // message.
+    String body = response.readEntity(String.class);
+    Assert.assertTrue(
+        body.contains("Number of virtual groups cannot be greater than the number of zones"),
+        "Expected the validation reason in the response body but got: " + body);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testGetClusterTopologyAndFaultZoneMap")
   public void testAddConfigFields() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());

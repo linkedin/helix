@@ -279,7 +279,13 @@ public class ClusterAccessor extends AbstractHelixResource {
           return badRequest("Invalid payload json body: " + content);
         } catch (IllegalArgumentException ex) {
           LOG.error("Illegal input {} for command {}.", content, command, ex);
-          return badRequest(String.format("Illegal input %s for command %s", content, command));
+          // Surface the validation reason (for example "Number of virtual groups cannot be greater
+          // than the number of zones.") in the response body, not just the echoed payload, so
+          // callers like ACM can report the actual cause instead of an opaque "Illegal input"
+          // message that only lives in this server's log.
+          String reason = (ex.getMessage() == null) ? "" : (": " + ex.getMessage());
+          return badRequest(
+              String.format("Illegal input %s for command %s%s", content, command, reason));
         } catch (Exception ex) {
           LOG.error("Failed to add virtual topology group to cluster {}", clusterId, ex);
           return serverError(ex);
