@@ -89,6 +89,15 @@
           <groupId>ch.qos.logback</groupId>
           <artifactId>logback-core</artifactId>
         </exclusion>
+        <!-- ZooKeeper 3.8.x's parent pins slf4j.version to 2.0.13. SLF4J 1.8+/2.x
+             is disallowed by LinkedIn build enforcement (go/slf4j-1.8), and Helix
+             binds SLF4J via log4j-slf4j-impl (the 1.7 binding). Exclude ZK's
+             transitive slf4j-api so the slf4j-api:1.7.32 declared directly by the
+             Helix modules is the only version on the classpath. -->
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-api</artifactId>
+        </exclusion>
       </exclusions>
     </dependency>
     <dependency>
