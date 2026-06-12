@@ -1185,9 +1185,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   }
 
   // Each handler.init() or addXxxListener() is a ZK roundtrip (~200ms).
-  // With 1200 handlers sequentially: ~240 sec. 20 parallel threads: ~12 sec.
+  // With 1200 handlers sequentially: ~240 sec. 10 parallel threads: ~24 sec.
   // All threads share one ZkClient (one ZK connection, no new connections created).
-  private static final int INIT_HANDLERS_PARALLELISM = 20;
+  // Kept at 10 (not higher) to bound concurrent in-flight requests on the shared ZK
+  // ensemble, especially when many controllers acquire leadership at once.
+  private static final int INIT_HANDLERS_PARALLELISM = 10;
 
   private void registerPendingInstanceListeners(
       GenericHelixController.PendingInstanceListeners pending) {

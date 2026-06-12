@@ -86,7 +86,7 @@ public class TestInitHandlersParallel {
         "Expected parallel execution but max concurrency was " + maxConcurrency.get());
 
     // With 50 handlers at 50ms each, sequential would take 2500ms.
-    // Parallel with 20 threads should take ~150ms (50/20 * 50ms).
+    // Parallel with 10 threads should take ~250ms (50/10 * 50ms).
     // Allow generous margin but should be well under sequential time.
     Assert.assertTrue(elapsed < 1500,
         "Expected parallel execution to be faster than sequential. Took " + elapsed + "ms");
