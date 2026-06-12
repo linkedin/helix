@@ -434,8 +434,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     PropertyType type = propertyKey.getType();
 
     // Create handler with deferred init under the lock, then init outside the lock.
-    // This reduces lock hold time from ~200ms (ZK roundtrip in init) to ~1ms (handler creation).
-    // Critical for parallel per-instance listener registration during controller leadership.
+    // This keeps the lock held only for the cheap handler creation, not the ZK roundtrip in
+    // init(). Critical for parallel per-instance listener registration during controller leadership.
     CallbackHandler newHandler;
     synchronized (this) {
       for (CallbackHandler handler : _handlers) {
@@ -1184,11 +1184,10 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         + ", instanceTye: " + _instanceType + ", cluster: " + _clusterName);
   }
 
-  // Each handler.init() or addXxxListener() is a ZK roundtrip (~200ms).
-  // With 1200 handlers sequentially: ~240 sec. 10 parallel threads: ~24 sec.
-  // All threads share one ZkClient (one ZK connection, no new connections created).
-  // Kept at 10 (not higher) to bound concurrent in-flight requests on the shared ZK
-  // ensemble, especially when many controllers acquire leadership at once.
+  // Per-instance listener registration does one ZK roundtrip per handler. The pool is
+  // capped at 10: all threads share one ZkClient (one ZK connection, no new connections),
+  // so this bounds concurrent in-flight requests on the shared ZK ensemble, which matters
+  // when many controllers acquire leadership at the same time.
   private static final int INIT_HANDLERS_PARALLELISM = 10;
 
   private void registerPendingInstanceListeners(
