@@ -40,6 +40,7 @@ import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.model.CurrentState;
@@ -359,6 +360,12 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
           clusterStatusMonitor
               .updateInstanceCapacityStatus(instanceName, usage, node.getMaxCapacity());
         }
+
+        // Cluster-wide near-capacity signal: surface the aggregate estimated max utilization so
+        // operators can alert before WAGED exhausts capacity. Computed from the same current-state
+        // cluster model used for the per-instance gauges above.
+        clusterStatusMonitor.updateClusterCapacityUsage(
+            computeClusterCapacityUsage(clusterModel.getContext()));
       } catch (Exception ex) {
         LOG.error("Failed to report instance capacity metrics. Exception message: {}",
             ex.getMessage());
@@ -366,6 +373,26 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
 
       return null;
     });
+  }
+
+  /**
+   * Computes the cluster-wide capacity-usage gauge value from a WAGED cluster context.
+   * <p>
+   * Returns {@link ClusterContext#getEstimatedMaxUtilization()} - the aggregate
+   * {@code sum(usage) / sum(capacity)} maxed across capacity keys - when capacity is configured.
+   * When no capacity is configured, {@code ClusterContext} reports a "treat as fully utilized"
+   * {@code 1.0} sentinel that would surface as a false near-capacity reading, so this returns
+   * {@code 0.0} instead: with no capacity model there is no near-capacity concern to signal.
+   *
+   * @param clusterContext WAGED cluster context built from the current assignment
+   * @return cluster-wide estimated max capacity utilization, or {@code 0.0} when no WAGED capacity
+   *         is configured
+   */
+  static double computeClusterCapacityUsage(ClusterContext clusterContext) {
+    if (clusterContext == null || clusterContext.getEstimateUtilizationMap().isEmpty()) {
+      return 0.0d;
+    }
+    return clusterContext.getEstimatedMaxUtilization();
   }
 
   private void reportResourcePartitionCapacityMetrics(ExecutorService executorService,
