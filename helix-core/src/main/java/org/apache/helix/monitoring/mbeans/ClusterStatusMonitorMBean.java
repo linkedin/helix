@@ -173,6 +173,24 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedHardConstraintUnknownFailureCounter();
 
   /**
+   * Cluster-wide estimated max capacity utilization for WAGED-managed resources, derived from the
+   * current assignment as {@code max} over capacity keys of
+   * {@code sum(replica usage) / sum(node capacity)}.
+   * <ul>
+   *   <li>{@code 0.0} - cluster is empty, or no WAGED capacity is configured (no signal).</li>
+   *   <li>{@code 1.0} - the most-constrained capacity dimension is exactly full.</li>
+   *   <li>{@code > 1.0} - the cluster is over-subscribed on at least one capacity dimension.</li>
+   * </ul>
+   * This is a cluster aggregate ({@code sum(usage) / sum(capacity)}), NOT the maximum of the
+   * per-instance {@code MaxCapacityUsageGauge} values, so a few hot instances can be averaged out
+   * by idle ones. Use it as an early near-capacity signal that ramps up before WAGED begins
+   * failing placement with capacity-deficit / node-capacity errors.
+   *
+   * @return cluster-wide estimated max capacity utilization ({@code >= 0.0})
+   */
+  double getEstimatedMaxClusterCapacityUsageGauge();
+
+  /**
    * @return number of all resources in this cluster
    */
   long getTotalResourceGauge();

@@ -932,4 +932,44 @@ public class TestClusterStatusMonitor {
     monitor.reportWagedHardConstraintFailure(null);
     Assert.assertEquals(monitor.getWagedHardConstraintUnknownFailureCounter(), 1L);
   }
+
+  @Test
+  public void testClusterCapacityUsageGauge() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    // Before any update the gauge is 0.0 and is exposed over JMX as a Double attribute.
+    Object initial =
+        _server.getAttribute(clusterMonitorObjName, "EstimatedMaxClusterCapacityUsageGauge");
+    Assert.assertTrue(initial instanceof Double);
+    Assert.assertEquals((double) initial, 0.0d, 0.0d);
+
+    // A normal near-capacity reading round-trips through both the getter and the MBean attribute.
+    monitor.updateClusterCapacityUsage(0.83d);
+    Assert.assertEquals(monitor.getEstimatedMaxClusterCapacityUsageGauge(), 0.83d, 0.0d);
+    Object usage =
+        _server.getAttribute(clusterMonitorObjName, "EstimatedMaxClusterCapacityUsageGauge");
+    Assert.assertTrue(usage instanceof Double);
+    Assert.assertEquals((double) usage, 0.83d, 0.0d);
+
+    // Over-subscription (> 1.0) is preserved, not clamped, so operators see how far over capacity.
+    monitor.updateClusterCapacityUsage(1.25d);
+    Object oversubscribed =
+        _server.getAttribute(clusterMonitorObjName, "EstimatedMaxClusterCapacityUsageGauge");
+    Assert.assertEquals((double) oversubscribed, 1.25d, 0.0d);
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName),
+        "Cluster monitor should be unregistered after reset");
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
 }
