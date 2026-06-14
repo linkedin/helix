@@ -22,6 +22,7 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -94,6 +95,48 @@ public class TestConstraintBasedAlgorithm {
     // calling again for recovery (no exception)
     algorithm.calculate(clusterModel);
     verify(mockHardConstraint, atLeastOnce()).setEnableLogging(eq(false));
+  }
+
+  @Test
+  public void testBlockingSnapshotReporterIsReversiblePerRun()
+      throws IOException, HelixRebalanceException {
+    HardConstraint mockHardConstraint = mock(HardConstraint.class);
+    SoftConstraint mockSoftConstraint = mock(SoftConstraint.class);
+    when(mockHardConstraint.isAssignmentValid(any(), any(), any()))
+        .thenReturn(false)  // run 1: blocks placement
+        .thenReturn(true);  // run 2: recovers
+    when(mockHardConstraint.getType()).thenReturn(HardConstraint.Type.FAULT_ZONE);
+    when(mockSoftConstraint.getAssignmentNormalizedScore(any(), any(), any())).thenReturn(1.0);
+    ConstraintBasedAlgorithm algorithm =
+        new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
+            ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
+
+    // Capture the per-run blocking snapshot the algorithm publishes (one per calculate run).
+    List<Set<HardConstraint.Type>> snapshots = new ArrayList<>();
+    algorithm.setBlockingSnapshotReporter(snapshot -> snapshots.add(new HashSet<>(snapshot)));
+
+    ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
+
+    // Run 1: placement fails -> the run's snapshot flags the blocking constraint type.
+    try {
+      algorithm.calculate(clusterModel);
+      Assert.fail("Expected the run to fail with no candidate node");
+    } catch (HelixRebalanceException expected) {
+      Assert.assertEquals(expected.getFailureType(),
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+    }
+    Assert.assertEquals(snapshots.size(), 1);
+    Assert.assertEquals(snapshots.get(0).size(), 1);
+    Assert.assertTrue(snapshots.get(0).contains(HardConstraint.Type.FAULT_ZONE),
+        "Run-1 snapshot should flag the blocking type, got: " + snapshots.get(0));
+
+    // Run 2: placement succeeds -> snapshot resets to empty. This reversibility is the whole point:
+    // a transient blocker drops back to 0 on the next clean run, so it is distinguishable from a
+    // persistent one by value.
+    algorithm.calculate(clusterModel);
+    Assert.assertEquals(snapshots.size(), 2);
+    Assert.assertTrue(snapshots.get(1).isEmpty(),
+        "Blocking snapshot must reset to empty on a clean run, got: " + snapshots.get(1));
   }
 
   @Test

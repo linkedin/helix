@@ -296,6 +296,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (algorithm instanceof ConstraintBasedAlgorithm) {
       ((ConstraintBasedAlgorithm) algorithm).setHardConstraintFailureReporter(
           this::reportHardConstraintFailure);
+      ((ConstraintBasedAlgorithm) algorithm).setBlockingSnapshotReporter(
+          this::reportHardConstraintBlockingSnapshot);
     }
   }
 
@@ -322,6 +324,19 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.reportWagedHardConstraintFailure(type);
+    }
+  }
+
+  /**
+   * Publish the reversible per-run "currently blocking" snapshot onto ClusterStatusMonitor: for each
+   * HardConstraint.Type, set its blocking gauge to 1 if it blocked placement in the most recent WAGED
+   * computation, 0 otherwise. An empty set (a clean run) resets every gauge to 0, so the signal tells
+   * a transient blip apart from a persistent failure by value. Null-tolerant.
+   */
+  void reportHardConstraintBlockingSnapshot(Set<HardConstraint.Type> currentlyBlocking) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedHardConstraintBlocking(currentlyBlocking);
     }
   }
 
@@ -432,6 +447,11 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.setWagedFallbackInUseGauge(usedFallback);
+      if (!usedFallback) {
+        // A clean computation: clear the reversible rollup failure gauges so a prior customer/internal
+        // "currently failing" reading resets on recovery. The monotonic rollup counters are untouched.
+        monitor.resetWagedFailureRollupGauges();
+      }
     }
 
     // Construct the new best possible states according to the current state and target assignment.

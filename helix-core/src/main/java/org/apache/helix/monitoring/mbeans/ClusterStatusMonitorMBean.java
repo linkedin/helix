@@ -145,6 +145,23 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getWagedFallbackInUseGauge();
 
+  /**
+   * Reversible rollup of {@link #getWagedCustomerActionableFailureCounter()}: 1 while WAGED's most
+   * recent computation failed for a customer-controlled reason (capacity / candidate-node / resource
+   * or cluster config), 0 once a later computation succeeds. Unlike the counter, this resets on
+   * recovery -- alert on {@code == 1 for Xm} to page the customer while it is persistently failing.
+   * @return 1 if WAGED is currently failing for a customer-actionable reason; 0 otherwise.
+   */
+  long getWagedCustomerActionableFailureGauge();
+
+  /**
+   * Reversible rollup of {@link #getWagedInternalFailureCounter()}: 1 while WAGED's most recent
+   * computation failed for a Helix-controlled reason (metadata store / algorithm / async / unknown),
+   * 0 once a later computation succeeds. Alert on {@code == 1 for Xm} to page Helix oncall.
+   * @return 1 if WAGED is currently failing for a Helix-internal reason; 0 otherwise.
+   */
+  long getWagedInternalFailureGauge();
+
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least
   // one candidate gets its counter incremented once for that partition. These sub-dimensions let
@@ -171,6 +188,34 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /** @return Partitions that failed placement due to a hard constraint with no specific type tag. */
   long getWagedHardConstraintUnknownFailureCounter();
+
+  // ---- WAGED per-HardConstraint "currently blocking" gauges (reversible) ----
+  // Each is 1 while that hard constraint blocked placement in the most recent WAGED computation and
+  // 0 once a later computation places everything. Unlike the monotonic counters above, these reset
+  // on recovery, so a value sustained at 1 means the reason is *currently and persistently* blocking
+  // (alert on `== 1 for Xm`), while a transient blip falls back to 0 on the next clean run -- the
+  // per-reason transient-vs-persistent discriminator the cumulative counters cannot provide.
+
+  /** @return 1 if the fault-zone constraint is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintFaultZoneBlockingGauge();
+
+  /** @return 1 if per-node capacity is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintNodeCapacityBlockingGauge();
+
+  /** @return 1 if the max-partitions-per-instance limit is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintNodeMaxPartitionLimitBlockingGauge();
+
+  /** @return 1 if replica-activation (inactive instances) is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintReplicaActivateBlockingGauge();
+
+  /** @return 1 if the same-partition-on-instance rule is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintSamePartitionOnInstanceBlockingGauge();
+
+  /** @return 1 if the required-group-tag constraint is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintValidGroupTagBlockingGauge();
+
+  /** @return 1 if a hard constraint with no specific type tag is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintUnknownBlockingGauge();
 
   /**
    * @return number of all resources in this cluster

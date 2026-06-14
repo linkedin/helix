@@ -102,10 +102,24 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private final AtomicLong _wagedCustomerActionableFailureCount = new AtomicLong(0L);
   private final AtomicLong _wagedInternalFailureCount = new AtomicLong(0L);
   private volatile boolean _wagedFallbackInUse = false;
+  // Reversible rollup gauges: 1 while WAGED's most recent computation failed for a customer-actionable
+  // reason (capacity / candidate-node / resource-config / cluster-config) vs a Helix-internal reason
+  // (metadata-store / algorithm / async / unknown); reset to 0 on the next clean computation. Drives
+  // "who to page right now" and self-clears on recovery. The *Count fields above stay the monotonic
+  // "how often" tally.
+  private volatile boolean _wagedCustomerActionableFailure = false;
+  private volatile boolean _wagedInternalFailure = false;
 
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
   private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
+      new ConcurrentHashMap<>();
+
+  // WAGED per-HardConstraint "currently blocking" gauges (0/1). Unlike the cumulative counters
+  // above, these are reversible: 1 while a constraint blocked placement in the most recent WAGED
+  // computation, reset to 0 on the next clean computation. Lets a transient blip be told apart from
+  // a persistent failure by value, per reason. Pre-populated for every type to avoid NPE.
+  private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintBlockingGauges =
       new ConcurrentHashMap<>();
 
   // Cluster-level instance operation counts
@@ -152,9 +166,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         HelixRebalanceException.FailureCategory.values()) {
       _wagedFailureCategoryCounters.put(category, new AtomicLong(0L));
     }
-    // Same for per-HardConstraint counters.
+    // Same for per-HardConstraint counters and the reversible per-HardConstraint blocking gauges.
     for (HardConstraint.Type type : HardConstraint.Type.values()) {
       _wagedHardConstraintFailureCounters.put(type, new AtomicLong(0L));
+      _wagedHardConstraintBlockingGauges.put(type, new AtomicLong(0L));
     }
   }
 
@@ -868,9 +883,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       // period being attributed to the new one.
       _wagedFailureCategoryCounters.values().forEach(c -> c.set(0L));
       _wagedHardConstraintFailureCounters.values().forEach(c -> c.set(0L));
+      _wagedHardConstraintBlockingGauges.values().forEach(g -> g.set(0L));
       _wagedCustomerActionableFailureCount.set(0L);
       _wagedInternalFailureCount.set(0L);
       _wagedFallbackInUse = false;
+      _wagedCustomerActionableFailure = false;
+      _wagedInternalFailure = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1313,9 +1331,20 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _wagedFailureCategoryCounters.get(category).incrementAndGet();
     if (category.isCustomerActionable()) {
       _wagedCustomerActionableFailureCount.incrementAndGet();
+      _wagedCustomerActionableFailure = true;
     } else {
       _wagedInternalFailureCount.incrementAndGet();
+      _wagedInternalFailure = true;
     }
+  }
+
+  /**
+   * Reset the reversible rollup failure gauges to 0. Called on a clean WAGED computation so a prior
+   * "currently failing" reading clears on recovery. The monotonic rollup counters are untouched.
+   */
+  public void resetWagedFailureRollupGauges() {
+    _wagedCustomerActionableFailure = false;
+    _wagedInternalFailure = false;
   }
 
   /**
@@ -1328,6 +1357,23 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       type = HardConstraint.Type.UNKNOWN;
     }
     _wagedHardConstraintFailureCounters.get(type).incrementAndGet();
+  }
+
+  /**
+   * Publish the reversible per-HardConstraint "currently blocking" snapshot from the most recent
+   * WAGED computation: each type in {@code currentlyBlocking} is set to 1, every other type to 0.
+   * An empty (or null) set -- a clean computation -- resets all gauges to 0, so the signal tells a
+   * transient blip apart from a persistent failure by value. See
+   * {@link ClusterStatusMonitorMBean#getWagedHardConstraintFaultZoneBlockingGauge()}.
+   * @param currentlyBlocking HardConstraint.Types that blocked placement in the latest computation
+   */
+  public void updateWagedHardConstraintBlocking(Set<HardConstraint.Type> currentlyBlocking) {
+    Set<HardConstraint.Type> blocking =
+        currentlyBlocking == null ? Collections.emptySet() : currentlyBlocking;
+    for (Map.Entry<HardConstraint.Type, AtomicLong> entry : _wagedHardConstraintBlockingGauges
+        .entrySet()) {
+      entry.getValue().set(blocking.contains(entry.getKey()) ? 1L : 0L);
+    }
   }
 
   /**
@@ -1369,6 +1415,16 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedInternalFailureCounter() {
     return _wagedInternalFailureCount.get();
+  }
+
+  @Override
+  public long getWagedCustomerActionableFailureGauge() {
+    return _wagedCustomerActionableFailure ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedInternalFailureGauge() {
+    return _wagedInternalFailure ? 1L : 0L;
   }
 
   @Override
@@ -1459,6 +1515,41 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedHardConstraintUnknownFailureCounter() {
     return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.UNKNOWN).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintFaultZoneBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.FAULT_ZONE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeCapacityBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.NODE_CAPACITY).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeMaxPartitionLimitBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.NODE_MAX_PARTITION_LIMIT).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintReplicaActivateBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.REPLICA_ACTIVATE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintSamePartitionOnInstanceBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.SAME_PARTITION_ON_INSTANCE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintValidGroupTagBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.VALID_GROUP_TAG).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintUnknownBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.UNKNOWN).get();
   }
 
   @Override
