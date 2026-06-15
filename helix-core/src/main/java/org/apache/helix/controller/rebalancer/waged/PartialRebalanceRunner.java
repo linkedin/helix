@@ -75,7 +75,7 @@ class PartialRebalanceRunner implements AutoCloseable {
   // rollup gauges. Owned by WagedRebalancer. Driving the reset from the partial outcome (not the
   // synchronous fallback path) is what keeps the rollup reversible under async mode, where partial
   // failures never reach WagedRebalancer.computeNewIdealStates' synchronous catch.
-  private final Runnable _partialSuccessReporter;
+  private final Runnable _partialRebalanceSuccessReporter;
   private final CountMetric _partialRebalanceCounter;
   private final LatencyMetric _partialRebalanceLatency;
 
@@ -89,13 +89,13 @@ class PartialRebalanceRunner implements AutoCloseable {
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
       Consumer<HelixRebalanceException> asyncFailureReporter,
-      Runnable partialSuccessReporter,
+      Runnable partialRebalanceSuccessReporter,
       boolean isAsyncPartialRebalanceEnabled) {
     _assignmentManager = assignmentManager;
     _assignmentMetadataStore = assignmentMetadataStore;
     _bestPossibleCalculateExecutor = Executors.newSingleThreadExecutor();
     _asyncFailureReporter = asyncFailureReporter;
-    _partialSuccessReporter = partialSuccessReporter;
+    _partialRebalanceSuccessReporter = partialRebalanceSuccessReporter;
     _asyncPartialRebalanceEnabled = isAsyncPartialRebalanceEnabled;
 
     _partialRebalanceCounter = metricCollector.getMetric(
@@ -147,7 +147,7 @@ class PartialRebalanceRunner implements AutoCloseable {
         currentThread.setName(originalThreadName);
       }
       // Partial (serving) computation succeeded -- reset the reversible serving rollup gauges.
-      _partialSuccessReporter.run();
+      _partialRebalanceSuccessReporter.run();
       return true;
     });
     if (!_asyncPartialRebalanceEnabled) {
