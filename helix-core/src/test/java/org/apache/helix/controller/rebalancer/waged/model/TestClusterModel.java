@@ -45,7 +45,8 @@ public class TestClusterModel extends AbstractTestClusterModel {
     ClusterContext context =
         new ClusterContext(assignableReplicas, assignableNodes, Collections.emptyMap(),
             Collections.emptyMap());
-    ClusterModel clusterModel = new ClusterModel(context, assignableReplicas, assignableNodes);
+    ClusterModel clusterModel = new ClusterModel(context, assignableReplicas, assignableNodes,
+        ClusterModel.RebalanceScopeType.PARTIAL);
 
     Assert.assertTrue(clusterModel.getContext().getAssignmentForFaultZoneMap().values().stream()
         .allMatch(resourceMap -> resourceMap.values().isEmpty()));

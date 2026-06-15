@@ -52,19 +52,9 @@ import org.slf4j.LoggerFactory;
 public class ClusterModelProvider {
   private static Logger logger = LoggerFactory.getLogger(ClusterModelProvider.class);
 
-  private enum RebalanceScopeType {
-    // Set the rebalance scope to cover the difference between the current assignment and the
-    // Baseline assignment only.
-    PARTIAL,
-    // Set the rebalance scope to cover all replicas that need relocation based on the cluster
-    // changes.
-    GLOBAL_BASELINE,
-    // Set the rebalance scope to cover only replicas that are assigned to downed instances.
-    EMERGENCY,
-    // A temporary overwrites for partition replicas on downed instance but still within the delayed window but missing
-    // minActiveReplicas
-    DELAYED_REBALANCE_OVERWRITES
-  }
+  // The rebalance scope enum now lives on ClusterModel so the produced model can carry its own
+  // scope (see ClusterModel.RebalanceScopeType). Referenced here to determine the to-be-assigned
+  // replica set per phase.
 
   /**
    * TODO: On integration with WAGED, have to integrate with counter and latency metrics -- qqu
@@ -85,7 +75,7 @@ public class ClusterModelProvider {
       Map<String, ResourceAssignment> resourceAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
         Collections.emptyMap(), resourceAssignment,
-        RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES);
+        ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES);
   }
 
   /**
@@ -107,7 +97,7 @@ public class ClusterModelProvider {
       Map<String, Resource> resourceMap, Set<String> activeInstances,
       Map<String, ResourceAssignment> bestPossibleAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
-        Collections.emptyMap(), bestPossibleAssignment, RebalanceScopeType.EMERGENCY);
+        Collections.emptyMap(), bestPossibleAssignment, ClusterModel.RebalanceScopeType.EMERGENCY);
   }
 
   /**
@@ -131,7 +121,7 @@ public class ClusterModelProvider {
       Set<String> activeInstances, Map<String, ResourceAssignment> baselineAssignment,
       Map<String, ResourceAssignment> bestPossibleAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
-        baselineAssignment, bestPossibleAssignment, RebalanceScopeType.PARTIAL);
+        baselineAssignment, bestPossibleAssignment, ClusterModel.RebalanceScopeType.PARTIAL);
   }
 
   /**
@@ -151,7 +141,7 @@ public class ClusterModelProvider {
       Set<String> allInstances, Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
       Map<String, ResourceAssignment> baselineAssignment) {
     return generateClusterModel(dataProvider, resourceMap, allInstances, clusterChanges,
-        Collections.emptyMap(), baselineAssignment, RebalanceScopeType.GLOBAL_BASELINE);
+        Collections.emptyMap(), baselineAssignment, ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
   }
 
   /**
@@ -170,7 +160,7 @@ public class ClusterModelProvider {
     return generateClusterModel(dataProvider, resourceMap,
         dataProvider.getEnabledLiveInstances(), Collections.emptyMap(),
         Collections.emptyMap(), currentStateAssignment,
-        RebalanceScopeType.GLOBAL_BASELINE);
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
   }
 
   /**
@@ -192,7 +182,8 @@ public class ClusterModelProvider {
       Map<String, Resource> resourceMap, Set<String> activeInstances,
       Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
       Map<String, ResourceAssignment> idealAssignment,
-      Map<String, ResourceAssignment> currentAssignment, RebalanceScopeType scopeType) {
+      Map<String, ResourceAssignment> currentAssignment,
+      ClusterModel.RebalanceScopeType scopeType) {
     Map<String, InstanceConfig> assignableInstanceConfigMap = dataProvider.getAssignableInstanceConfigMap();
     // Construct all the assignable nodes and initialize with the allocated replicas.
     Set<AssignableNode> assignableNodes =
@@ -278,7 +269,7 @@ public class ClusterModelProvider {
     // Initial the cluster context with the allocated assignments.
     context.setAssignmentForFaultZoneMap(mapAssignmentToFaultZone(assignableNodes));
 
-    return new ClusterModel(context, toBeAssignedReplicas, assignableNodes);
+    return new ClusterModel(context, toBeAssignedReplicas, assignableNodes, scopeType);
   }
 
   private static Map<String, ResourceAssignment> generateResourceAssignmentMapLogicalIdView(

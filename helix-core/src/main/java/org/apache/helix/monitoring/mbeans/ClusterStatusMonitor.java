@@ -109,6 +109,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // "how often" tally.
   private volatile boolean _wagedCustomerActionableFailure = false;
   private volatile boolean _wagedInternalFailure = false;
+  // Reversible gauge: 1 while WAGED's most recent Baseline (global) computation failed, reset to 0
+  // when a Baseline computation next succeeds. Owned exclusively by the GLOBAL_BASELINE phase. This
+  // is the latent signal -- serving may be fine (partial succeeds off the last-good baseline) while
+  // WAGED can no longer recompute the ideal target. Distinct from the serving rollup gauges above,
+  // which are owned by the PARTIAL phase.
+  private volatile boolean _wagedBaselineComputeFailing = false;
 
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
@@ -889,6 +895,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedFallbackInUse = false;
       _wagedCustomerActionableFailure = false;
       _wagedInternalFailure = false;
+      _wagedBaselineComputeFailing = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1320,31 +1327,68 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Record a WAGED rebalance failure with its classified category. Increments both the
-   * per-category counter and the matching rollup counter (customer-actionable vs internal).
-   * Safe to call from the controller pipeline thread.
+   * Increment the monotonic WAGED failure counters (per-category plus the customer-actionable /
+   * internal rollup counter) for a classified failure. This is the scope-agnostic "how often" tally
+   * -- every failing computation counts, whether baseline, partial, or emergency. It does NOT touch
+   * the reversible rollup gauges; see {@link #setWagedFailureRollupGauge}. Safe to call from any
+   * rebalance thread.
    */
-  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+  public void incrementWagedFailureCategoryCount(HelixRebalanceException.FailureCategory category) {
     if (category == null) {
       category = HelixRebalanceException.FailureCategory.UNKNOWN;
     }
     _wagedFailureCategoryCounters.get(category).incrementAndGet();
     if (category.isCustomerActionable()) {
       _wagedCustomerActionableFailureCount.incrementAndGet();
-      _wagedCustomerActionableFailure = true;
     } else {
       _wagedInternalFailureCount.incrementAndGet();
+    }
+  }
+
+  /**
+   * Light the reversible rollup failure gauge (customer-actionable vs internal) for a classified
+   * failure. This is the "is serving failing right now" signal and is owned by the SERVING (partial
+   * / emergency) phase only -- baseline failures must not light it, since serving can be healthy
+   * while the baseline is stale. Reset on a clean partial via {@link #resetWagedFailureRollupGauges}.
+   */
+  public void setWagedFailureRollupGauge(HelixRebalanceException.FailureCategory category) {
+    if (category == null) {
+      category = HelixRebalanceException.FailureCategory.UNKNOWN;
+    }
+    if (category.isCustomerActionable()) {
+      _wagedCustomerActionableFailure = true;
+    } else {
       _wagedInternalFailure = true;
     }
   }
 
   /**
-   * Reset the reversible rollup failure gauges to 0. Called on a clean WAGED computation so a prior
-   * "currently failing" reading clears on recovery. The monotonic rollup counters are untouched.
+   * Record a serving-scope WAGED rebalance failure with its classified category: ticks the
+   * monotonic counters and lights the reversible rollup gauge. Convenience for callers on the
+   * serving path (partial failure, synchronous emergency / overwrite). Baseline failures should call
+   * {@link #incrementWagedFailureCategoryCount} only.
+   */
+  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+    incrementWagedFailureCategoryCount(category);
+    setWagedFailureRollupGauge(category);
+  }
+
+  /**
+   * Reset the reversible rollup failure gauges to 0. Called when the SERVING (partial) computation
+   * succeeds so a prior "currently failing" reading clears on recovery. The monotonic rollup
+   * counters are untouched.
    */
   public void resetWagedFailureRollupGauges() {
     _wagedCustomerActionableFailure = false;
     _wagedInternalFailure = false;
+  }
+
+  /**
+   * Flip the reversible Baseline-compute-failing gauge. Set true when the Baseline (global)
+   * computation fails, false when it next succeeds. Owned exclusively by the GLOBAL_BASELINE phase.
+   */
+  public void updateWagedBaselineComputeFailing(boolean failing) {
+    _wagedBaselineComputeFailing = failing;
   }
 
   /**
@@ -1425,6 +1469,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedInternalFailureGauge() {
     return _wagedInternalFailure ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedBaselineComputeFailingGauge() {
+    return _wagedBaselineComputeFailing ? 1L : 0L;
   }
 
   @Override

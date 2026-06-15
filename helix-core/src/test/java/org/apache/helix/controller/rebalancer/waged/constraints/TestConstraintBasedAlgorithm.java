@@ -111,9 +111,14 @@ public class TestConstraintBasedAlgorithm {
         new ConstraintBasedAlgorithm(ImmutableList.of(mockHardConstraint),
             ImmutableMap.of(mockSoftConstraint, 1f), TEST_FORK_JOIN_POOL);
 
-    // Capture the per-run blocking snapshot the algorithm publishes (one per calculate run).
+    // Capture the per-run blocking snapshot the algorithm publishes (one per calculate run). The
+    // reporter also receives the model's rebalance scope -- assert it is plumbed through so a
+    // consumer can route the snapshot to a single owning phase.
     List<Set<HardConstraint.Type>> snapshots = new ArrayList<>();
-    algorithm.setBlockingSnapshotReporter(snapshot -> snapshots.add(new HashSet<>(snapshot)));
+    algorithm.setBlockingSnapshotReporter((scope, snapshot) -> {
+      Assert.assertEquals(scope, ClusterModel.RebalanceScopeType.PARTIAL);
+      snapshots.add(new HashSet<>(snapshot));
+    });
 
     ClusterModel clusterModel = new ClusterModelTestHelper().getDefaultClusterModel();
 

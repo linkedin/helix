@@ -994,4 +994,39 @@ public class TestClusterStatusMonitor {
     Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 1L);
     Assert.assertEquals(monitor.getWagedInternalFailureCounter(), 1L);
   }
+
+  @Test
+  public void testWagedBaselineComputeFailingGaugeIsReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineGaugeCluster");
+
+    // Starts at 0.
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 0L);
+
+    // A failed Baseline computation flips it to 1.
+    monitor.updateWagedBaselineComputeFailing(true);
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 1L);
+
+    // A later successful Baseline computation resets it to 0 -- reversible, like the serving gauges.
+    monitor.updateWagedBaselineComputeFailing(false);
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 0L);
+  }
+
+  @Test
+  public void testIncrementWagedFailureCategoryCountDoesNotLightRollupGauge() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineScopeCluster");
+
+    // Counter-only path (used by the Baseline phase): ticks the counters but must NOT light the
+    // reversible serving rollup gauge -- a stale baseline must not page the customer while serving
+    // (partial) is healthy.
+    monitor.incrementWagedFailureCategoryCount(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+
+    // The combined serving-scope path (partial / emergency) ticks the counter AND lights the gauge.
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 2L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 1L);
+  }
 }

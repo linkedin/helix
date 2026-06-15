@@ -67,9 +67,15 @@ class PartialRebalanceRunner implements AutoCloseable {
   private final AssignmentMetadataStore _assignmentMetadataStore;
   private final BaselineDivergenceGauge _baselineDivergenceGauge;
   // Reporter that ticks RebalanceFailureCounter plus the per-FailureCategory counters on both
-  // the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by WagedRebalancer; injected
-  // so the runner doesn't need a direct ClusterStatusMonitor reference.
+  // the Rebalancer-domain and ClusterStatus-domain MBeans, and lights the reversible serving rollup
+  // gauge. Owned by WagedRebalancer; injected so the runner doesn't need a direct
+  // ClusterStatusMonitor reference.
   private final Consumer<HelixRebalanceException> _asyncFailureReporter;
+  // Reporter invoked when a partial (serving) computation succeeds, to reset the reversible serving
+  // rollup gauges. Owned by WagedRebalancer. Driving the reset from the partial outcome (not the
+  // synchronous fallback path) is what keeps the rollup reversible under async mode, where partial
+  // failures never reach WagedRebalancer.computeNewIdealStates' synchronous catch.
+  private final Runnable _partialSuccessReporter;
   private final CountMetric _partialRebalanceCounter;
   private final LatencyMetric _partialRebalanceLatency;
 
@@ -83,11 +89,13 @@ class PartialRebalanceRunner implements AutoCloseable {
       AssignmentMetadataStore assignmentMetadataStore,
       MetricCollector metricCollector,
       Consumer<HelixRebalanceException> asyncFailureReporter,
+      Runnable partialSuccessReporter,
       boolean isAsyncPartialRebalanceEnabled) {
     _assignmentManager = assignmentManager;
     _assignmentMetadataStore = assignmentMetadataStore;
     _bestPossibleCalculateExecutor = Executors.newSingleThreadExecutor();
     _asyncFailureReporter = asyncFailureReporter;
+    _partialSuccessReporter = partialSuccessReporter;
     _asyncPartialRebalanceEnabled = isAsyncPartialRebalanceEnabled;
 
     _partialRebalanceCounter = metricCollector.getMetric(
@@ -138,6 +146,8 @@ class PartialRebalanceRunner implements AutoCloseable {
       } finally {
         currentThread.setName(originalThreadName);
       }
+      // Partial (serving) computation succeeded -- reset the reversible serving rollup gauges.
+      _partialSuccessReporter.run();
       return true;
     });
     if (!_asyncPartialRebalanceEnabled) {

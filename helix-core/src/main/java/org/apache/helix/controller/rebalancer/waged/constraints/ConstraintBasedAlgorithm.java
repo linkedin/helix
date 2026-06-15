@@ -31,6 +31,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -68,12 +69,15 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // observers get partition-level attribution rather than node-rejection counts. May be null
   // when the algorithm runs outside a pipeline that wants metric attribution.
   private volatile Consumer<HardConstraint.Type> _hardConstraintFailureReporter;
-  // Optional listener invoked once per calculate() run with the complete set of HardConstraint.Types
-  // that blocked placement that run (empty when the run placed everything). Unlike the cumulative
-  // _hardConstraintFailureReporter, this is a reversible per-run snapshot, so observers can drive a
-  // "currently blocking" gauge that resets to 0 on the next clean run -- letting a transient blip be
-  // told apart from a persistent failure by value. May be null.
-  private volatile Consumer<Set<HardConstraint.Type>> _blockingSnapshotReporter;
+  // Optional listener invoked once per calculate() run with the rebalance scope that produced the
+  // model plus the complete set of HardConstraint.Types that blocked placement that run (empty when
+  // the run placed everything). Unlike the cumulative _hardConstraintFailureReporter, this is a
+  // reversible per-run snapshot, so observers can drive a "currently blocking" gauge that resets to
+  // 0 on the next clean run -- letting a transient blip be told apart from a persistent failure by
+  // value. The scope lets the observer attribute the snapshot to a single rebalance phase (e.g.
+  // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
+  private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
+      _blockingSnapshotReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -93,12 +97,14 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
   /**
    * Attach a per-run blocking-snapshot reporter. It fires exactly once per {@link #calculate} run
-   * with the complete set of {@link HardConstraint.Type}s that blocked placement that run -- empty
-   * when the run placed everything. This is a reversible "currently blocking" view (resets on the
-   * next clean run), complementing the monotonic per-type counters from
-   * {@link #setHardConstraintFailureReporter}. Safe to call from any thread; null disables it.
+   * with the rebalance scope and the complete set of {@link HardConstraint.Type}s that blocked
+   * placement that run -- empty when the run placed everything. This is a reversible "currently
+   * blocking" view (resets on the next clean run), complementing the monotonic per-type counters
+   * from {@link #setHardConstraintFailureReporter}. The scope lets observers route the snapshot to a
+   * single owning phase. Safe to call from any thread; null disables it.
    */
-  public void setBlockingSnapshotReporter(Consumer<Set<HardConstraint.Type>> reporter) {
+  public void setBlockingSnapshotReporter(
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> reporter) {
     _blockingSnapshotReporter = reporter;
   }
 
@@ -110,9 +116,10 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     try {
       return calculateInternal(clusterModel, blockingTypes);
     } finally {
-      Consumer<Set<HardConstraint.Type>> snapshotReporter = _blockingSnapshotReporter;
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshotReporter =
+          _blockingSnapshotReporter;
       if (snapshotReporter != null) {
-        snapshotReporter.accept(blockingTypes);
+        snapshotReporter.accept(clusterModel.getRebalanceScopeType(), blockingTypes);
       }
     }
   }

@@ -147,20 +147,34 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /**
    * Reversible rollup of {@link #getWagedCustomerActionableFailureCounter()}: 1 while WAGED's most
-   * recent computation failed for a customer-controlled reason (capacity / candidate-node / resource
-   * or cluster config), 0 once a later computation succeeds. Unlike the counter, this resets on
-   * recovery -- alert on {@code == 1 for Xm} to page the customer while it is persistently failing.
-   * @return 1 if WAGED is currently failing for a customer-actionable reason; 0 otherwise.
+   * recent SERVING (partial) computation failed for a customer-controlled reason (capacity /
+   * candidate-node / resource or cluster config), 0 once a later partial computation succeeds.
+   * Scoped to the serving phase so a stale-baseline-only failure does not page the customer. Unlike
+   * the counter, this resets on recovery -- alert on {@code == 1 for Xm} to page the customer while
+   * serving is persistently failing.
+   * @return 1 if WAGED serving is currently failing for a customer-actionable reason; 0 otherwise.
    */
   long getWagedCustomerActionableFailureGauge();
 
   /**
    * Reversible rollup of {@link #getWagedInternalFailureCounter()}: 1 while WAGED's most recent
-   * computation failed for a Helix-controlled reason (metadata store / algorithm / async / unknown),
-   * 0 once a later computation succeeds. Alert on {@code == 1 for Xm} to page Helix oncall.
-   * @return 1 if WAGED is currently failing for a Helix-internal reason; 0 otherwise.
+   * SERVING (partial) computation failed for a Helix-controlled reason (metadata store / algorithm /
+   * async / unknown), 0 once a later partial computation succeeds. Alert on {@code == 1 for Xm} to
+   * page Helix oncall.
+   * @return 1 if WAGED serving is currently failing for a Helix-internal reason; 0 otherwise.
    */
   long getWagedInternalFailureGauge();
+
+  /**
+   * Reversible gauge for the Baseline (global) computation: 1 while WAGED's most recent Baseline
+   * computation failed, 0 once a later Baseline computation succeeds. Owned by the GLOBAL_BASELINE
+   * phase. This is the latent signal -- serving can be healthy (partial succeeds off the last-good
+   * baseline) while WAGED can no longer recompute the ideal target, which will bite on the next
+   * disruption. Lower urgency than the serving gauges: alert on {@code == 1 for 1h} as a ticket, not
+   * a page. The specific blocking reason is available from the per-HardConstraint counters.
+   * @return 1 if WAGED Baseline computation is currently failing; 0 otherwise.
+   */
+  long getWagedBaselineComputeFailingGauge();
 
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least
