@@ -121,6 +121,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // emergency). This is the temporary min-active-replica top-up applied during the delayed window.
   private volatile boolean _wagedRebalanceOverwriteFailing = false;
 
+  // Cluster-wide estimated max capacity utilization for WAGED resources (see
+  // ClusterStatusMonitorMBean#getEstimatedMaxClusterCapacityUsageGauge). Refreshed every pipeline
+  // run from the current assignment; stays 0.0 when no WAGED capacity is configured.
+  private volatile double _estimatedMaxClusterCapacityUsage = 0.0d;
+
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
   private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
@@ -595,6 +600,17 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
     monitor.updateMaxCapacityUsage(maxUsage);
     monitor.updateCapacity(capacityMap);
+  }
+
+  /**
+   * Updates the cluster-wide estimated max capacity utilization gauge for WAGED resources. See
+   * {@link ClusterStatusMonitorMBean#getEstimatedMaxClusterCapacityUsageGauge()} for the value
+   * semantics and range.
+   *
+   * @param estimatedMaxClusterCapacityUsage cluster aggregate utilization ({@code >= 0.0})
+   */
+  public void updateClusterCapacityUsage(double estimatedMaxClusterCapacityUsage) {
+    _estimatedMaxClusterCapacityUsage = estimatedMaxClusterCapacityUsage;
   }
 
   /**
@@ -1619,6 +1635,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedHardConstraintUnknownBlockingGauge() {
     return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.UNKNOWN).get();
+  }
+
+  @Override
+  public double getEstimatedMaxClusterCapacityUsageGauge() {
+    return _estimatedMaxClusterCapacityUsage;
   }
 
   @Override
