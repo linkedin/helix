@@ -145,6 +145,49 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getWagedFallbackInUseGauge();
 
+  /**
+   * Reversible rollup of {@link #getWagedCustomerActionableFailureCounter()}: 1 while WAGED's most
+   * recent SERVING (partial) computation failed for a customer-controlled reason (capacity /
+   * candidate-node / resource or cluster config), 0 once a later partial computation succeeds.
+   * Scoped to the serving phase so a stale-baseline-only failure does not page the customer. Unlike
+   * the counter, this resets on recovery -- alert on {@code == 1 for Xm} to page the customer while
+   * serving is persistently failing.
+   * @return 1 if WAGED serving is currently failing for a customer-actionable reason; 0 otherwise.
+   */
+  long getWagedCustomerActionableFailureGauge();
+
+  /**
+   * Reversible rollup of {@link #getWagedInternalFailureCounter()}: 1 while WAGED's most recent
+   * SERVING (partial) computation failed for a Helix-controlled reason (metadata store / algorithm /
+   * async / unknown), 0 once a later partial computation succeeds. Alert on {@code == 1 for Xm} to
+   * page Helix oncall.
+   * @return 1 if WAGED serving is currently failing for a Helix-internal reason; 0 otherwise.
+   */
+  long getWagedInternalFailureGauge();
+
+  /**
+   * Reversible gauge for the Baseline (global) computation: 1 while WAGED's most recent Baseline
+   * computation failed, 0 once a later Baseline computation succeeds. Owned by the GLOBAL_BASELINE
+   * phase. This is the latent signal -- serving can be healthy (partial succeeds off the last-good
+   * baseline) while WAGED can no longer recompute the ideal target, which will bite on the next
+   * disruption. Lower urgency than the serving gauges: alert on {@code == 1 for 1h} as a ticket, not
+   * a page. The specific blocking reason is available from the per-HardConstraint counters.
+   * @return 1 if WAGED Baseline computation is currently failing; 0 otherwise.
+   */
+  long getWagedBaselineComputeFailingGauge();
+
+  /**
+   * Reversible gauge for the delayed-rebalance-overwrite phase: 1 while the most recent overwrite
+   * computation failed, 0 once a later one succeeds or is not needed. Owned by the
+   * DELAYED_REBALANCE_OVERWRITES phase -- its only dedicated reversible signal (it otherwise shares
+   * getWagedFallbackInUseGauge() with emergency). This phase is the temporary, non-persisted
+   * min-active-replica top-up applied during the delayed window, so a sustained 1 means partitions
+   * below minActiveReplicas cannot be topped up while their instances are offline-yet-active. The
+   * specific blocking reason is available from the per-HardConstraint counters.
+   * @return 1 if the WAGED delayed-rebalance-overwrite computation is currently failing; 0 otherwise.
+   */
+  long getWagedRebalanceOverwriteFailingGauge();
+
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least
   // one candidate gets its counter incremented once for that partition. These sub-dimensions let
@@ -171,6 +214,52 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /** @return Partitions that failed placement due to a hard constraint with no specific type tag. */
   long getWagedHardConstraintUnknownFailureCounter();
+
+  // ---- WAGED per-HardConstraint "currently blocking" gauges (reversible) ----
+  // Each is 1 while that hard constraint blocked placement in the most recent WAGED computation and
+  // 0 once a later computation places everything. Unlike the monotonic counters above, these reset
+  // on recovery, so a value sustained at 1 means the reason is *currently and persistently* blocking
+  // (alert on `== 1 for Xm`), while a transient blip falls back to 0 on the next clean run -- the
+  // per-reason transient-vs-persistent discriminator the cumulative counters cannot provide.
+  //
+  // SCOPE: these gauges reflect the SERVING phases -- PARTIAL and EMERGENCY -- which produce the
+  // assignment that is actually persisted and served. WAGED runs calculate() up to four times per
+  // pipeline (baseline, emergency, delayed-overwrite, partial); a reversible gauge must not be shared
+  // with a phase whose health it does not represent, or a clean run of one phase would clobber (mask)
+  // a failing run of another. Partial and emergency do not race: within a pass emergency runs first
+  // and, when it fails, throws before partial is reached -- so partial does not run, making emergency
+  // the sole serving writer exactly when it is the phase that failed (its per-reason attribution would
+  // otherwise be lost, since node-down-can't-reassign is precisely an emergency failure). The
+  // non-serving phases are intentionally NOT wired to these gauges:
+  //   - Baseline (global) runs concurrently with partial on a separate executor and computes the
+  //     from-scratch ideal, not the served assignment; its failures surface via the binary
+  //     getWagedBaselineComputeFailingGauge() (no per-reason breakdown) plus the per-HardConstraint
+  //     counters above.
+  //   - Delayed-overwrite is a temporary, non-persisted top-up; its failures surface via
+  //     getWagedFallbackInUseGauge() plus the per-HardConstraint counters above.
+  // So to attribute a per-reason failure outside the serving path, read the monotonic counters; these
+  // reversible gauges answer specifically "which reason is blocking the *served* assignment right now".
+
+  /** @return 1 if the fault-zone constraint is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintFaultZoneBlockingGauge();
+
+  /** @return 1 if per-node capacity is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintNodeCapacityBlockingGauge();
+
+  /** @return 1 if the max-partitions-per-instance limit is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintNodeMaxPartitionLimitBlockingGauge();
+
+  /** @return 1 if replica-activation (inactive instances) is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintReplicaActivateBlockingGauge();
+
+  /** @return 1 if the same-partition-on-instance rule is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintSamePartitionOnInstanceBlockingGauge();
+
+  /** @return 1 if the required-group-tag constraint is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintValidGroupTagBlockingGauge();
+
+  /** @return 1 if a hard constraint with no specific type tag is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintUnknownBlockingGauge();
 
   /**
    * Cluster-wide estimated max capacity utilization for WAGED-managed resources, derived from the

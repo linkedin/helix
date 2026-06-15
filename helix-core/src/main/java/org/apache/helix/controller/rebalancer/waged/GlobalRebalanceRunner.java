@@ -82,8 +82,14 @@ class GlobalRebalanceRunner implements AutoCloseable {
   private final LatencyMetric _baselineCalcLatency;
   // Reporter that ticks RebalanceFailureCounter plus the per-FailureCategory counters on both
   // the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by WagedRebalancer; injected
-  // so the runner doesn't need a direct ClusterStatusMonitor reference.
+  // so the runner doesn't need a direct ClusterStatusMonitor reference. For the Baseline phase this
+  // reporter is counter-only: it must NOT light the serving rollup gauges (serving can be healthy
+  // while the baseline is stale).
   private final Consumer<HelixRebalanceException> _asyncFailureReporter;
+  // Reporter invoked with the Baseline computation outcome (true = success, false = failure) to
+  // drive the reversible WagedBaselineComputeFailingGauge. Owned by WagedRebalancer. Fires in both
+  // async and sync modes so the gauge reflects baseline health regardless of mode.
+  private final Consumer<Boolean> _baselineComputeStatusReporter;
 
   private boolean _asyncGlobalRebalanceEnabled;
   // Captures the original exception thrown inside the executor task so we can preserve its
@@ -95,6 +101,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
       MetricCollector metricCollector,
       LatencyMetric writeLatency,
       Consumer<HelixRebalanceException> asyncFailureReporter,
+      Consumer<Boolean> baselineComputeStatusReporter,
       boolean isAsyncGlobalRebalanceEnabled) {
     _baselineCalculateExecutor = Executors.newSingleThreadExecutor();
     _assignmentManager = assignmentManager;
@@ -108,6 +115,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcLatencyGauge.name(),
         LatencyMetric.class);
     _asyncFailureReporter = asyncFailureReporter;
+    _baselineComputeStatusReporter = baselineComputeStatusReporter;
     _asyncGlobalRebalanceEnabled = isAsyncGlobalRebalanceEnabled;
   }
 
@@ -147,10 +155,13 @@ class GlobalRebalanceRunner implements AutoCloseable {
           // FailureCategory when re-throwing. The Type is intentionally NOT preserved on the
           // re-throw to keep WagedRebalancer.computeNewIdealStates' fallback decision unchanged.
           _lastAsyncFailure.set(e);
+          // Light the reversible baseline gauge in both modes -- the gauge reflects baseline health
+          // independent of whether the failure also propagates synchronously.
+          _baselineComputeStatusReporter.accept(false);
           if (_asyncGlobalRebalanceEnabled) {
             // Async mode: synchronous caller will not see this exception. Tick the aggregate
             // RebalanceFailureCounter plus the per-FailureCategory counters on both MBeans via
-            // the injected reporter.
+            // the injected (counter-only, baseline-scoped) reporter.
             _asyncFailureReporter.accept(e);
           }
           LOG.error("Failed to calculate baseline assignment for cluster {}! category={}",
@@ -159,6 +170,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
         } finally {
           currentThread.setName(originalThreadName);
         }
+        // Baseline computation succeeded -- clear the reversible baseline gauge.
+        _baselineComputeStatusReporter.accept(true);
         return true;
       });
       if (waitForGlobalRebalance) {

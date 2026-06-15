@@ -219,9 +219,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     }
 
     _partialRebalanceRunner = new PartialRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        this::reportAsyncFailure, isAsyncPartialRebalanceEnabled);
+        this::reportAsyncFailure, this::reportPartialRebalanceSuccess, isAsyncPartialRebalanceEnabled);
     _globalRebalanceRunner = new GlobalRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        _writeLatency, this::reportAsyncFailure, isAsyncGlobalRebalanceEnabled);
+        _writeLatency, this::reportBaselineAsyncFailure, this::reportBaselineComputeStatus,
+        isAsyncGlobalRebalanceEnabled);
   }
 
   /**
@@ -296,6 +297,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (algorithm instanceof ConstraintBasedAlgorithm) {
       ((ConstraintBasedAlgorithm) algorithm).setHardConstraintFailureReporter(
           this::reportHardConstraintFailure);
+      ((ConstraintBasedAlgorithm) algorithm).setBlockingSnapshotReporter(
+          this::reportHardConstraintBlockingSnapshot);
     }
   }
 
@@ -326,13 +329,102 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   }
 
   /**
-   * Full failure reporting for async-runner background threads: ticks RebalanceFailureCounter
-   * plus both the Rebalancer-domain and ClusterStatus-domain per-FailureCategory counters. Used
-   * when the async runner catches an exception that the synchronous catch never sees.
+   * Publish the reversible per-run "currently blocking" snapshot onto ClusterStatusMonitor: for each
+   * HardConstraint.Type, set its blocking gauge to 1 if it blocked placement in the most recent WAGED
+   * computation, 0 otherwise. An empty set (a clean run) resets every gauge to 0, so the signal tells
+   * a transient blip apart from a persistent failure by value.
+   *
+   * <p>Scoped to the serving phases: PARTIAL and EMERGENCY. Both produce the assignment that is
+   * actually persisted and served, so both own these gauges. Crucially they do not race: within a
+   * pass emergency runs first and, when it fails, throws before partial is reached -- so partial does
+   * not run, making emergency the sole serving writer exactly when it is the phase that failed (and
+   * its per-reason attribution would otherwise be lost). GLOBAL_BASELINE and DELAYED_REBALANCE_OVERWRITES
+   * snapshots are intentionally dropped here: baseline has its own reversible gauge
+   * ({@link ClusterStatusMonitor#updateWagedBaselineComputeFailing}) and runs concurrently with partial
+   * on a separate executor (so without this gate a baseline run would clobber the serving gauges -- the
+   * masking the per-reason gauges are meant to avoid), and the delayed-overwrite branch is a temporary,
+   * non-persisted top-up that surfaces via WagedFallbackInUseGauge. Null-tolerant.
+   */
+  void reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType scope,
+      Set<HardConstraint.Type> currentlyBlocking) {
+    if (scope != ClusterModel.RebalanceScopeType.PARTIAL
+        && scope != ClusterModel.RebalanceScopeType.EMERGENCY) {
+      return;
+    }
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedHardConstraintBlocking(currentlyBlocking);
+    }
+  }
+
+  /**
+   * Full failure reporting for the partial (serving) async runner: ticks RebalanceFailureCounter
+   * plus both the Rebalancer-domain and ClusterStatus-domain per-FailureCategory counters, and
+   * lights the reversible serving rollup gauge (via reportFailureCategory). Used when the async
+   * partial runner catches an exception that the synchronous catch never sees.
    */
   void reportAsyncFailure(HelixRebalanceException ex) {
     _rebalanceFailureCount.increment(1L);
     reportFailureCategory(ex);
+  }
+
+  /**
+   * Counter-only failure reporting for the Baseline (global) async runner. Ticks
+   * RebalanceFailureCounter, the per-FailureCategory counters on both MBeans, and the monotonic
+   * customer/internal rollup counters -- but does NOT light the reversible serving rollup gauges,
+   * which are owned by the partial phase (serving can be healthy while the baseline is stale). The
+   * Baseline phase's reversible signal is the separate WagedBaselineComputeFailingGauge, driven by
+   * {@link #reportBaselineComputeStatus}.
+   */
+  void reportBaselineAsyncFailure(HelixRebalanceException ex) {
+    _rebalanceFailureCount.increment(1L);
+    HelixRebalanceException.FailureCategory category = ex.getFailureCategory();
+    _failureCategoryMetrics.get(category).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.incrementWagedFailureCategoryCount(category);
+    }
+  }
+
+  /**
+   * Drive the reversible WagedBaselineComputeFailingGauge from the Baseline phase outcome: clear it
+   * when a Baseline computation succeeds, set it when one fails. Owned exclusively by the
+   * GLOBAL_BASELINE phase, so it is reversible regardless of async mode. Null-tolerant.
+   */
+  void reportBaselineComputeStatus(boolean clean) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedBaselineComputeFailing(!clean);
+    }
+  }
+
+  /**
+   * Drive the reversible WagedRebalanceOverwriteFailingGauge from the delayed-rebalance-overwrite
+   * phase outcome: clear it when the overwrite computation succeeds or is not needed, set it when one
+   * fails. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES phase -- this is the only reversible
+   * signal for that phase, which otherwise shares WagedFallbackInUseGauge with emergency.
+   * Null-tolerant.
+   */
+  void reportOverwriteComputeStatus(boolean clean) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedRebalanceOverwriteFailing(!clean);
+    }
+  }
+
+  /**
+   * Reset the reversible serving rollup gauges when the partial (serving) computation succeeds. The
+   * per-reason serving blocking gauges already reset via the empty snapshot; this clears the
+   * customer/internal rollup that {@link #reportAsyncFailure} sets on a partial failure. Driving the
+   * reset from the partial outcome -- not the synchronous fallback path -- is what makes the rollup
+   * reversible under async mode, where partial failures never reach the synchronous catch.
+   * Null-tolerant.
+   */
+  void reportPartialRebalanceSuccess() {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.resetWagedFailureRollupGauges();
+    }
   }
 
   // Update the global rebalance mode to be asynchronous or synchronous
@@ -429,6 +521,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     // a previously sticky "true" resets on the next clean run. Capture the volatile once to
     // avoid racing with a concurrent setClusterStatusMonitor() between the null check and the
     // method call.
+    //
+    // Note: the reversible rollup failure gauges are intentionally NOT reset here. In production
+    // (async global + partial), partial failures never reach this synchronous path, so resetting on
+    // a clean synchronous compute would clear a rollup that a still-failing async partial had set --
+    // the gauge would flicker to 0 while serving is broken. The rollup reset is therefore driven by
+    // the partial (serving) computation succeeding; see reportPartialRebalanceSuccess.
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.setWagedFallbackInUseGauge(usedFallback);
@@ -568,12 +666,16 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     final Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
 
     if (activeNodes.equals(enabledLiveInstances) || !requireRebalanceOverwrite(clusterData, currentResourceAssignment)) {
-      // no need for additional process, return the current resource assignment
+      // no need for additional process -- the overwrite phase is not failing, so clear its gauge.
+      reportOverwriteComputeStatus(true);
       return currentResourceAssignment;
     }
     _rebalanceOverwriteCounter.increment(1L);
     _rebalanceOverwriteLatency.startMeasuringLatency();
     LOG.info("Start delayed rebalance overwrites in emergency rebalance.");
+    // Drive the reversible overwrite gauge from this phase's outcome. Reported once in finally so
+    // both catch blocks are covered: false (failing) unless we reach the success point below.
+    boolean overwriteClean = false;
     try {
       // use the "real" live and enabled instances for calculation
       ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(
@@ -582,6 +684,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       // keep only the resource entries requiring changes for minActiveReplica
       assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
       DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
+      overwriteClean = true;
       return currentResourceAssignment;
     } catch (HelixRebalanceException e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
@@ -593,6 +696,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, e);
     } finally {
       _rebalanceOverwriteLatency.endMeasuringLatency();
+      reportOverwriteComputeStatus(overwriteClean);
     }
   }
 

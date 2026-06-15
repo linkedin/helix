@@ -45,6 +45,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.caches.TaskDataCache;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.task.AssignableInstanceManager;
@@ -931,6 +932,119 @@ public class TestClusterStatusMonitor {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintNullCluster");
     monitor.reportWagedHardConstraintFailure(null);
     Assert.assertEquals(monitor.getWagedHardConstraintUnknownFailureCounter(), 1L);
+  }
+
+  @Test
+  public void testWagedHardConstraintBlockingGaugesAreReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBlockingCluster");
+
+    // All blocking gauges start at 0.
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagBlockingGauge(), 0L);
+
+    // A failed run flags its blocking reason; unrelated reasons stay 0.
+    monitor.updateWagedHardConstraintBlocking(Collections.singleton(HardConstraint.Type.FAULT_ZONE));
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
+    Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagBlockingGauge(), 0L);
+
+    // A subsequent clean run resets every gauge to 0 -- the reversibility that distinguishes a
+    // transient blocker from a persistent one (the whole point of this signal).
+    monitor.updateWagedHardConstraintBlocking(Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
+
+    // The snapshot replaces (not accumulates): a new reason flips on while the prior one flips off.
+    monitor.updateWagedHardConstraintBlocking(
+        Collections.singleton(HardConstraint.Type.VALID_GROUP_TAG));
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagBlockingGauge(), 1L);
+    Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
+
+    // null is treated as a clean run (reset all).
+    monitor.updateWagedHardConstraintBlocking(null);
+    Assert.assertEquals(monitor.getWagedHardConstraintValidGroupTagBlockingGauge(), 0L);
+  }
+
+  @Test
+  public void testWagedFailureRollupGaugesAreReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedRollupGaugeCluster");
+
+    // Both rollup gauges start at 0.
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedInternalFailureGauge(), 0L);
+
+    // A customer-actionable failure flips only the customer gauge to 1.
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 1L);
+    Assert.assertEquals(monitor.getWagedInternalFailureGauge(), 0L);
+
+    // A Helix-internal failure flips the internal gauge (both can be "currently failing" at once).
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.METADATA_STORE_IO);
+    Assert.assertEquals(monitor.getWagedInternalFailureGauge(), 1L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 1L);
+
+    // A clean computation resets both gauges to 0 -- the reversibility the counters lack.
+    monitor.resetWagedFailureRollupGauges();
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedInternalFailureGauge(), 0L);
+
+    // The monotonic rollup counters are NOT touched by the gauge reset -- they keep the lifetime tally.
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedInternalFailureCounter(), 1L);
+  }
+
+  @Test
+  public void testWagedBaselineComputeFailingGaugeIsReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineGaugeCluster");
+
+    // Starts at 0.
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 0L);
+
+    // A failed Baseline computation flips it to 1.
+    monitor.updateWagedBaselineComputeFailing(true);
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 1L);
+
+    // A later successful Baseline computation resets it to 0 -- reversible, like the serving gauges.
+    monitor.updateWagedBaselineComputeFailing(false);
+    Assert.assertEquals(monitor.getWagedBaselineComputeFailingGauge(), 0L);
+  }
+
+  @Test
+  public void testWagedRebalanceOverwriteFailingGaugeIsReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedOverwriteGaugeCluster");
+
+    // Starts at 0 -- gives the delayed-rebalance-overwrite phase its own alertable signal instead of
+    // sharing the fallback gauge with emergency.
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 0L);
+
+    // A failed overwrite computation flips it to 1.
+    monitor.updateWagedRebalanceOverwriteFailing(true);
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 1L);
+
+    // A later successful (or not-needed) overwrite computation resets it to 0.
+    monitor.updateWagedRebalanceOverwriteFailing(false);
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 0L);
+  }
+
+  @Test
+  public void testIncrementWagedFailureCategoryCountDoesNotLightRollupGauge() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineScopeCluster");
+
+    // Counter-only path (used by the Baseline phase): ticks the counters but must NOT light the
+    // reversible serving rollup gauge -- a stale baseline must not page the customer while serving
+    // (partial) is healthy.
+    monitor.incrementWagedFailureCategoryCount(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+
+    // The combined serving-scope path (partial / emergency) ticks the counter AND lights the gauge.
+    monitor.reportWagedFailureByCategory(
+        org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureCounter(), 2L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 1L);
   }
 
   @Test

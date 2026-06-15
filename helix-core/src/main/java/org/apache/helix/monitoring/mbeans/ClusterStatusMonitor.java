@@ -102,6 +102,24 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private final AtomicLong _wagedCustomerActionableFailureCount = new AtomicLong(0L);
   private final AtomicLong _wagedInternalFailureCount = new AtomicLong(0L);
   private volatile boolean _wagedFallbackInUse = false;
+  // Reversible rollup gauges: 1 while WAGED's most recent computation failed for a customer-actionable
+  // reason (capacity / candidate-node / resource-config / cluster-config) vs a Helix-internal reason
+  // (metadata-store / algorithm / async / unknown); reset to 0 on the next clean computation. Drives
+  // "who to page right now" and self-clears on recovery. The *Count fields above stay the monotonic
+  // "how often" tally.
+  private volatile boolean _wagedCustomerActionableFailure = false;
+  private volatile boolean _wagedInternalFailure = false;
+  // Reversible gauge: 1 while WAGED's most recent Baseline (global) computation failed, reset to 0
+  // when a Baseline computation next succeeds. Owned exclusively by the GLOBAL_BASELINE phase. This
+  // is the latent signal -- serving may be fine (partial succeeds off the last-good baseline) while
+  // WAGED can no longer recompute the ideal target. Distinct from the serving rollup gauges above,
+  // which are owned by the PARTIAL phase.
+  private volatile boolean _wagedBaselineComputeFailing = false;
+  // Reversible gauge: 1 while the most recent delayed-rebalance-overwrite computation failed, reset
+  // to 0 when one next succeeds or is not needed. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES
+  // phase -- its only dedicated reversible signal (it otherwise shares the fallback gauge with
+  // emergency). This is the temporary min-active-replica top-up applied during the delayed window.
+  private volatile boolean _wagedRebalanceOverwriteFailing = false;
 
   // Cluster-wide estimated max capacity utilization for WAGED resources (see
   // ClusterStatusMonitorMBean#getEstimatedMaxClusterCapacityUsageGauge). Refreshed every pipeline
@@ -111,6 +129,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
   private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
+      new ConcurrentHashMap<>();
+
+  // WAGED per-HardConstraint "currently blocking" gauges (0/1). Unlike the cumulative counters
+  // above, these are reversible: 1 while a constraint blocked placement in the most recent WAGED
+  // computation, reset to 0 on the next clean computation. Lets a transient blip be told apart from
+  // a persistent failure by value, per reason. Pre-populated for every type to avoid NPE.
+  private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintBlockingGauges =
       new ConcurrentHashMap<>();
 
   // Cluster-level instance operation counts
@@ -157,9 +182,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         HelixRebalanceException.FailureCategory.values()) {
       _wagedFailureCategoryCounters.put(category, new AtomicLong(0L));
     }
-    // Same for per-HardConstraint counters.
+    // Same for per-HardConstraint counters and the reversible per-HardConstraint blocking gauges.
     for (HardConstraint.Type type : HardConstraint.Type.values()) {
       _wagedHardConstraintFailureCounters.put(type, new AtomicLong(0L));
+      _wagedHardConstraintBlockingGauges.put(type, new AtomicLong(0L));
     }
   }
 
@@ -884,9 +910,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       // period being attributed to the new one.
       _wagedFailureCategoryCounters.values().forEach(c -> c.set(0L));
       _wagedHardConstraintFailureCounters.values().forEach(c -> c.set(0L));
+      _wagedHardConstraintBlockingGauges.values().forEach(g -> g.set(0L));
       _wagedCustomerActionableFailureCount.set(0L);
       _wagedInternalFailureCount.set(0L);
       _wagedFallbackInUse = false;
+      _wagedCustomerActionableFailure = false;
+      _wagedInternalFailure = false;
+      _wagedBaselineComputeFailing = false;
+      _wagedRebalanceOverwriteFailing = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1318,11 +1349,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Record a WAGED rebalance failure with its classified category. Increments both the
-   * per-category counter and the matching rollup counter (customer-actionable vs internal).
-   * Safe to call from the controller pipeline thread.
+   * Increment the monotonic WAGED failure counters (per-category plus the customer-actionable /
+   * internal rollup counter) for a classified failure. This is the scope-agnostic "how often" tally
+   * -- every failing computation counts, whether baseline, partial, or emergency. It does NOT touch
+   * the reversible rollup gauges; see {@link #setWagedFailureRollupGauge}. Safe to call from any
+   * rebalance thread.
    */
-  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+  public void incrementWagedFailureCategoryCount(HelixRebalanceException.FailureCategory category) {
     if (category == null) {
       category = HelixRebalanceException.FailureCategory.UNKNOWN;
     }
@@ -1335,6 +1368,61 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Light the reversible rollup failure gauge (customer-actionable vs internal) for a classified
+   * failure. This is the "is serving failing right now" signal and is owned by the SERVING (partial
+   * / emergency) phase only -- baseline failures must not light it, since serving can be healthy
+   * while the baseline is stale. Reset on a clean partial via {@link #resetWagedFailureRollupGauges}.
+   */
+  public void setWagedFailureRollupGauge(HelixRebalanceException.FailureCategory category) {
+    if (category == null) {
+      category = HelixRebalanceException.FailureCategory.UNKNOWN;
+    }
+    if (category.isCustomerActionable()) {
+      _wagedCustomerActionableFailure = true;
+    } else {
+      _wagedInternalFailure = true;
+    }
+  }
+
+  /**
+   * Record a serving-scope WAGED rebalance failure with its classified category: ticks the
+   * monotonic counters and lights the reversible rollup gauge. Convenience for callers on the
+   * serving path (partial failure, synchronous emergency / overwrite). Baseline failures should call
+   * {@link #incrementWagedFailureCategoryCount} only.
+   */
+  public void reportWagedFailureByCategory(HelixRebalanceException.FailureCategory category) {
+    incrementWagedFailureCategoryCount(category);
+    setWagedFailureRollupGauge(category);
+  }
+
+  /**
+   * Reset the reversible rollup failure gauges to 0. Called when the SERVING (partial) computation
+   * succeeds so a prior "currently failing" reading clears on recovery. The monotonic rollup
+   * counters are untouched.
+   */
+  public void resetWagedFailureRollupGauges() {
+    _wagedCustomerActionableFailure = false;
+    _wagedInternalFailure = false;
+  }
+
+  /**
+   * Flip the reversible Baseline-compute-failing gauge. Set true when the Baseline (global)
+   * computation fails, false when it next succeeds. Owned exclusively by the GLOBAL_BASELINE phase.
+   */
+  public void updateWagedBaselineComputeFailing(boolean failing) {
+    _wagedBaselineComputeFailing = failing;
+  }
+
+  /**
+   * Flip the reversible delayed-rebalance-overwrite-failing gauge. Set true when the overwrite
+   * computation fails, false when it next succeeds or is not needed. Owned exclusively by the
+   * DELAYED_REBALANCE_OVERWRITES phase.
+   */
+  public void updateWagedRebalanceOverwriteFailing(boolean failing) {
+    _wagedRebalanceOverwriteFailing = failing;
+  }
+
+  /**
    * Record that a partition failed placement because at least one candidate node was rejected
    * by a hard constraint of the given type. Called once per partition per distinct constraint
    * type that contributed to the failure (set-union across nodes, not summed).
@@ -1344,6 +1432,23 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       type = HardConstraint.Type.UNKNOWN;
     }
     _wagedHardConstraintFailureCounters.get(type).incrementAndGet();
+  }
+
+  /**
+   * Publish the reversible per-HardConstraint "currently blocking" snapshot from the most recent
+   * WAGED computation: each type in {@code currentlyBlocking} is set to 1, every other type to 0.
+   * An empty (or null) set -- a clean computation -- resets all gauges to 0, so the signal tells a
+   * transient blip apart from a persistent failure by value. See
+   * {@link ClusterStatusMonitorMBean#getWagedHardConstraintFaultZoneBlockingGauge()}.
+   * @param currentlyBlocking HardConstraint.Types that blocked placement in the latest computation
+   */
+  public void updateWagedHardConstraintBlocking(Set<HardConstraint.Type> currentlyBlocking) {
+    Set<HardConstraint.Type> blocking =
+        currentlyBlocking == null ? Collections.emptySet() : currentlyBlocking;
+    for (Map.Entry<HardConstraint.Type, AtomicLong> entry : _wagedHardConstraintBlockingGauges
+        .entrySet()) {
+      entry.getValue().set(blocking.contains(entry.getKey()) ? 1L : 0L);
+    }
   }
 
   /**
@@ -1385,6 +1490,26 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedInternalFailureCounter() {
     return _wagedInternalFailureCount.get();
+  }
+
+  @Override
+  public long getWagedCustomerActionableFailureGauge() {
+    return _wagedCustomerActionableFailure ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedInternalFailureGauge() {
+    return _wagedInternalFailure ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedBaselineComputeFailingGauge() {
+    return _wagedBaselineComputeFailing ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedRebalanceOverwriteFailingGauge() {
+    return _wagedRebalanceOverwriteFailing ? 1L : 0L;
   }
 
   @Override
@@ -1475,6 +1600,41 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedHardConstraintUnknownFailureCounter() {
     return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.UNKNOWN).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintFaultZoneBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.FAULT_ZONE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeCapacityBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.NODE_CAPACITY).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintNodeMaxPartitionLimitBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.NODE_MAX_PARTITION_LIMIT).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintReplicaActivateBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.REPLICA_ACTIVATE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintSamePartitionOnInstanceBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.SAME_PARTITION_ON_INSTANCE).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintValidGroupTagBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.VALID_GROUP_TAG).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintUnknownBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.UNKNOWN).get();
   }
 
   @Override
