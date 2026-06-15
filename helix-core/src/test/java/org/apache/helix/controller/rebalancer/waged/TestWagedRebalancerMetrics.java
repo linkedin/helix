@@ -112,7 +112,7 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
   }
 
   @Test
-  public void testHardConstraintBlockingSnapshotIsPartialScoped()
+  public void testHardConstraintBlockingSnapshotIsServingScoped()
       throws HelixRebalanceException, IOException {
     _metadataStore.reset();
     String testName = "TestBlockingScope";
@@ -130,25 +130,33 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
 
       // A concurrent BASELINE run blocked by a *different* reason must NOT clobber the serving
       // gauges -- this is the cross-phase masking the scope gate exists to prevent. The baseline
-      // snapshot is dropped: NODE_CAPACITY stays 0 and FAULT_ZONE (owned by partial) stays 1.
+      // snapshot is dropped: NODE_CAPACITY stays 0 and FAULT_ZONE (set by partial) stays 1.
       rebalancer.reportHardConstraintBlockingSnapshot(
           ClusterModel.RebalanceScopeType.GLOBAL_BASELINE,
           Collections.singleton(HardConstraint.Type.NODE_CAPACITY));
       Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
       Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
 
-      // EMERGENCY and DELAYED_REBALANCE_OVERWRITES are likewise dropped (no-ops on these gauges).
-      rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.EMERGENCY,
-          Collections.singleton(HardConstraint.Type.FAULT_ZONE));
+      // DELAYED_REBALANCE_OVERWRITES is a temporary, non-served computation -- also dropped.
       rebalancer.reportHardConstraintBlockingSnapshot(
           ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES,
           Collections.singleton(HardConstraint.Type.NODE_CAPACITY));
       Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
       Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
 
-      // The owning PARTIAL phase stays reversible: a clean partial run resets its gauges to 0.
+      // EMERGENCY is also a serving phase (its assignment is persisted), so it DOES publish. When a
+      // node is permanently down and emergency cannot re-place the evacuated replicas, partial never
+      // runs that pass -- so emergency must own the serving gauges or the reason would be lost. Its
+      // snapshot replaces the set: NODE_CAPACITY -> 1, FAULT_ZONE -> 0.
+      rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.EMERGENCY,
+          Collections.singleton(HardConstraint.Type.NODE_CAPACITY));
+      Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 1L);
+      Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
+
+      // The serving gauges stay reversible: a clean partial run resets them to 0.
       rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.PARTIAL,
           Collections.emptySet());
+      Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
       Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
     } finally {
       rebalancer.close();

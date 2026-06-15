@@ -334,17 +334,21 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
    * computation, 0 otherwise. An empty set (a clean run) resets every gauge to 0, so the signal tells
    * a transient blip apart from a persistent failure by value.
    *
-   * <p>Scoped to the PARTIAL phase only. The serving (best-possible) assignment is produced by the
-   * partial computation, so its per-reason blocking gauges must be driven by one writer -- partial --
-   * and nothing else. Baseline / emergency / overwrite snapshots are intentionally dropped here:
-   * baseline has its own reversible gauge ({@link ClusterStatusMonitor#updateWagedBaselineComputeFailing}),
-   * and emergency / overwrite failures surface via WagedFallbackInUseGauge. Baseline and partial run
-   * on separate executors, so without this scoping a concurrent baseline run would clobber the
-   * serving gauges (the masking the per-reason gauges are meant to avoid). Null-tolerant.
+   * <p>Scoped to the serving phases: PARTIAL and EMERGENCY. Both produce the assignment that is
+   * actually persisted and served, so both own these gauges. Crucially they do not race: within a
+   * pass emergency runs first and, when it fails, throws before partial is reached -- so partial does
+   * not run, making emergency the sole serving writer exactly when it is the phase that failed (and
+   * its per-reason attribution would otherwise be lost). GLOBAL_BASELINE and DELAYED_REBALANCE_OVERWRITES
+   * snapshots are intentionally dropped here: baseline has its own reversible gauge
+   * ({@link ClusterStatusMonitor#updateWagedBaselineComputeFailing}) and runs concurrently with partial
+   * on a separate executor (so without this gate a baseline run would clobber the serving gauges -- the
+   * masking the per-reason gauges are meant to avoid), and the delayed-overwrite branch is a temporary,
+   * non-persisted top-up that surfaces via WagedFallbackInUseGauge. Null-tolerant.
    */
   void reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType scope,
       Set<HardConstraint.Type> currentlyBlocking) {
-    if (scope != ClusterModel.RebalanceScopeType.PARTIAL) {
+    if (scope != ClusterModel.RebalanceScopeType.PARTIAL
+        && scope != ClusterModel.RebalanceScopeType.EMERGENCY) {
       return;
     }
     ClusterStatusMonitor monitor = _clusterStatusMonitor;

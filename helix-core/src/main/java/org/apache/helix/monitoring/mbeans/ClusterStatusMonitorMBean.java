@@ -210,16 +210,21 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   // (alert on `== 1 for Xm`), while a transient blip falls back to 0 on the next clean run -- the
   // per-reason transient-vs-persistent discriminator the cumulative counters cannot provide.
   //
-  // SCOPE: these gauges reflect the PARTIAL (serving) phase only. WAGED runs calculate() up to four
-  // times per pipeline -- baseline, emergency, delayed-overwrite, and partial -- and the baseline and
-  // partial phases run concurrently on separate executors. A reversible gauge must have exactly one
-  // writer per pipeline or a clean run of one phase would clobber (mask) a failing run of another, so
-  // a single owner is chosen: partial, because it produces the assignment that is actually served.
-  // The other phases are intentionally NOT wired to these gauges:
-  //   - Baseline (global) failures surface via the binary getWagedBaselineComputeFailingGauge() (no
-  //     per-reason breakdown) plus the monotonic per-HardConstraint counters above.
-  //   - Emergency / delayed-overwrite failures surface via getWagedFallbackInUseGauge() plus
-  //     the monotonic per-HardConstraint counters above.
+  // SCOPE: these gauges reflect the SERVING phases -- PARTIAL and EMERGENCY -- which produce the
+  // assignment that is actually persisted and served. WAGED runs calculate() up to four times per
+  // pipeline (baseline, emergency, delayed-overwrite, partial); a reversible gauge must not be shared
+  // with a phase whose health it does not represent, or a clean run of one phase would clobber (mask)
+  // a failing run of another. Partial and emergency do not race: within a pass emergency runs first
+  // and, when it fails, throws before partial is reached -- so partial does not run, making emergency
+  // the sole serving writer exactly when it is the phase that failed (its per-reason attribution would
+  // otherwise be lost, since node-down-can't-reassign is precisely an emergency failure). The
+  // non-serving phases are intentionally NOT wired to these gauges:
+  //   - Baseline (global) runs concurrently with partial on a separate executor and computes the
+  //     from-scratch ideal, not the served assignment; its failures surface via the binary
+  //     getWagedBaselineComputeFailingGauge() (no per-reason breakdown) plus the per-HardConstraint
+  //     counters above.
+  //   - Delayed-overwrite is a temporary, non-persisted top-up; its failures surface via
+  //     getWagedFallbackInUseGauge() plus the per-HardConstraint counters above.
   // So to attribute a per-reason failure outside the serving path, read the monotonic counters; these
   // reversible gauges answer specifically "which reason is blocking the *served* assignment right now".
 
