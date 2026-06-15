@@ -115,6 +115,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // WAGED can no longer recompute the ideal target. Distinct from the serving rollup gauges above,
   // which are owned by the PARTIAL phase.
   private volatile boolean _wagedBaselineComputeFailing = false;
+  // Reversible gauge: 1 while the most recent delayed-rebalance-overwrite computation failed, reset
+  // to 0 when one next succeeds or is not needed. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES
+  // phase -- its only dedicated reversible signal (it otherwise shares the fallback gauge with
+  // emergency). This is the temporary min-active-replica top-up applied during the delayed window.
+  private volatile boolean _wagedRebalanceOverwriteFailing = false;
 
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
@@ -896,6 +901,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedCustomerActionableFailure = false;
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
+      _wagedRebalanceOverwriteFailing = false;
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1392,6 +1398,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Flip the reversible delayed-rebalance-overwrite-failing gauge. Set true when the overwrite
+   * computation fails, false when it next succeeds or is not needed. Owned exclusively by the
+   * DELAYED_REBALANCE_OVERWRITES phase.
+   */
+  public void updateWagedRebalanceOverwriteFailing(boolean failing) {
+    _wagedRebalanceOverwriteFailing = failing;
+  }
+
+  /**
    * Record that a partition failed placement because at least one candidate node was rejected
    * by a hard constraint of the given type. Called once per partition per distinct constraint
    * type that contributed to the failure (set-union across nodes, not summed).
@@ -1474,6 +1489,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedBaselineComputeFailingGauge() {
     return _wagedBaselineComputeFailing ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedRebalanceOverwriteFailingGauge() {
+    return _wagedRebalanceOverwriteFailing ? 1L : 0L;
   }
 
   @Override

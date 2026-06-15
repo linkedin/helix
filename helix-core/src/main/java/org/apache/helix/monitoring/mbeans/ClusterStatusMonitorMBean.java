@@ -176,6 +176,18 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getWagedBaselineComputeFailingGauge();
 
+  /**
+   * Reversible gauge for the delayed-rebalance-overwrite phase: 1 while the most recent overwrite
+   * computation failed, 0 once a later one succeeds or is not needed. Owned by the
+   * DELAYED_REBALANCE_OVERWRITES phase -- its only dedicated reversible signal (it otherwise shares
+   * getWagedFallbackInUseGauge() with emergency). This phase is the temporary, non-persisted
+   * min-active-replica top-up applied during the delayed window, so a sustained 1 means partitions
+   * below minActiveReplicas cannot be topped up while their instances are offline-yet-active. The
+   * specific blocking reason is available from the per-HardConstraint counters.
+   * @return 1 if the WAGED delayed-rebalance-overwrite computation is currently failing; 0 otherwise.
+   */
+  long getWagedRebalanceOverwriteFailingGauge();
+
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least
   // one candidate gets its counter incremented once for that partition. These sub-dimensions let

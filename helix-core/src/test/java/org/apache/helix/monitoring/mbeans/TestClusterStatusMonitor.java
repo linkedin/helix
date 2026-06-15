@@ -1012,6 +1012,23 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testWagedRebalanceOverwriteFailingGaugeIsReversible() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedOverwriteGaugeCluster");
+
+    // Starts at 0 -- gives the delayed-rebalance-overwrite phase its own alertable signal instead of
+    // sharing the fallback gauge with emergency.
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 0L);
+
+    // A failed overwrite computation flips it to 1.
+    monitor.updateWagedRebalanceOverwriteFailing(true);
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 1L);
+
+    // A later successful (or not-needed) overwrite computation resets it to 0.
+    monitor.updateWagedRebalanceOverwriteFailing(false);
+    Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 0L);
+  }
+
+  @Test
   public void testIncrementWagedFailureCategoryCountDoesNotLightRollupGauge() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineScopeCluster");
 

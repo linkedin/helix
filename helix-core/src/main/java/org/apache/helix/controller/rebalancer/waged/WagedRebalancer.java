@@ -399,6 +399,20 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   }
 
   /**
+   * Drive the reversible WagedRebalanceOverwriteFailingGauge from the delayed-rebalance-overwrite
+   * phase outcome: clear it when the overwrite computation succeeds or is not needed, set it when one
+   * fails. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES phase -- this is the only reversible
+   * signal for that phase, which otherwise shares WagedFallbackInUseGauge with emergency.
+   * Null-tolerant.
+   */
+  void reportOverwriteComputeStatus(boolean clean) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedRebalanceOverwriteFailing(!clean);
+    }
+  }
+
+  /**
    * Reset the reversible serving rollup gauges when the partial (serving) computation succeeds. The
    * per-reason serving blocking gauges already reset via the empty snapshot; this clears the
    * customer/internal rollup that {@link #reportAsyncFailure} sets on a partial failure. Driving the
@@ -652,12 +666,16 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     final Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
 
     if (activeNodes.equals(enabledLiveInstances) || !requireRebalanceOverwrite(clusterData, currentResourceAssignment)) {
-      // no need for additional process, return the current resource assignment
+      // no need for additional process -- the overwrite phase is not failing, so clear its gauge.
+      reportOverwriteComputeStatus(true);
       return currentResourceAssignment;
     }
     _rebalanceOverwriteCounter.increment(1L);
     _rebalanceOverwriteLatency.startMeasuringLatency();
     LOG.info("Start delayed rebalance overwrites in emergency rebalance.");
+    // Drive the reversible overwrite gauge from this phase's outcome. Reported once in finally so
+    // both catch blocks are covered: false (failing) unless we reach the success point below.
+    boolean overwriteClean = false;
     try {
       // use the "real" live and enabled instances for calculation
       ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(
@@ -666,6 +684,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       // keep only the resource entries requiring changes for minActiveReplica
       assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
       DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
+      overwriteClean = true;
       return currentResourceAssignment;
     } catch (HelixRebalanceException e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
@@ -677,6 +696,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, e);
     } finally {
       _rebalanceOverwriteLatency.endMeasuringLatency();
+      reportOverwriteComputeStatus(overwriteClean);
     }
   }
 
