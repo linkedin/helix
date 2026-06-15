@@ -209,6 +209,19 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   // on recovery, so a value sustained at 1 means the reason is *currently and persistently* blocking
   // (alert on `== 1 for Xm`), while a transient blip falls back to 0 on the next clean run -- the
   // per-reason transient-vs-persistent discriminator the cumulative counters cannot provide.
+  //
+  // SCOPE: these gauges reflect the PARTIAL (serving) phase only. WAGED runs calculate() up to four
+  // times per pipeline -- baseline, emergency, delayed-overwrite, and partial -- and the baseline and
+  // partial phases run concurrently on separate executors. A reversible gauge must have exactly one
+  // writer per pipeline or a clean run of one phase would clobber (mask) a failing run of another, so
+  // a single owner is chosen: partial, because it produces the assignment that is actually served.
+  // The other phases are intentionally NOT wired to these gauges:
+  //   - Baseline (global) failures surface via the binary getWagedBaselineComputeFailingGauge() (no
+  //     per-reason breakdown) plus the monotonic per-HardConstraint counters above.
+  //   - Emergency / delayed-overwrite failures surface via getWagedFallbackInUseGauge() plus
+  //     the monotonic per-HardConstraint counters above.
+  // So to attribute a per-reason failure outside the serving path, read the monotonic counters; these
+  // reversible gauges answer specifically "which reason is blocking the *served* assignment right now".
 
   /** @return 1 if the fault-zone constraint is currently blocking placement; 0 otherwise. */
   long getWagedHardConstraintFaultZoneBlockingGauge();

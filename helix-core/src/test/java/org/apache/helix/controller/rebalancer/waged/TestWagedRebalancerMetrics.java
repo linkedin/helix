@@ -39,8 +39,10 @@ import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.pipeline.Pipeline;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.rebalancer.waged.constraints.MockRebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.model.AbstractTestClusterModel;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.stages.AttributeName;
 import org.apache.helix.controller.stages.ClusterEvent;
 import org.apache.helix.controller.stages.ClusterEventType;
@@ -107,6 +109,50 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
     // Check that there exists a non-zero value in the metrics
     Assert.assertTrue(_metricCollector.getMetricMap().values().stream()
         .anyMatch(metric -> ((Number) metric.getLastEmittedMetricValue()).longValue() > 0L));
+  }
+
+  @Test
+  public void testHardConstraintBlockingSnapshotIsPartialScoped()
+      throws HelixRebalanceException, IOException {
+    _metadataStore.reset();
+    String testName = "TestBlockingScope";
+    MetricCollector metricCollector = new WagedRebalancerMetricCollector(testName);
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(_metadataStore, _algorithm, Optional.of(metricCollector));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+
+      // The PARTIAL (serving) phase owns the per-reason blocking gauges: its snapshot publishes.
+      rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.PARTIAL,
+          Collections.singleton(HardConstraint.Type.FAULT_ZONE));
+      Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
+
+      // A concurrent BASELINE run blocked by a *different* reason must NOT clobber the serving
+      // gauges -- this is the cross-phase masking the scope gate exists to prevent. The baseline
+      // snapshot is dropped: NODE_CAPACITY stays 0 and FAULT_ZONE (owned by partial) stays 1.
+      rebalancer.reportHardConstraintBlockingSnapshot(
+          ClusterModel.RebalanceScopeType.GLOBAL_BASELINE,
+          Collections.singleton(HardConstraint.Type.NODE_CAPACITY));
+      Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
+      Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
+
+      // EMERGENCY and DELAYED_REBALANCE_OVERWRITES are likewise dropped (no-ops on these gauges).
+      rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.EMERGENCY,
+          Collections.singleton(HardConstraint.Type.FAULT_ZONE));
+      rebalancer.reportHardConstraintBlockingSnapshot(
+          ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES,
+          Collections.singleton(HardConstraint.Type.NODE_CAPACITY));
+      Assert.assertEquals(monitor.getWagedHardConstraintNodeCapacityBlockingGauge(), 0L);
+      Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 1L);
+
+      // The owning PARTIAL phase stays reversible: a clean partial run resets its gauges to 0.
+      rebalancer.reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType.PARTIAL,
+          Collections.emptySet());
+      Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneBlockingGauge(), 0L);
+    } finally {
+      rebalancer.close();
+    }
   }
 
   @Test
