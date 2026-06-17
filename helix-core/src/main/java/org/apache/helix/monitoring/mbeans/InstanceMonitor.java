@@ -96,7 +96,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
   private SimpleDynamicMetric<Long> _domainInfoValidGauge;
 
-  // Instance Operation Duration Gauges (in milliseconds)
+  // Instance Operation Duration Gauges (in seconds)
   private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
   private SimpleDynamicMetric<Long> _instanceOperationDurationDisableGauge;
   private SimpleDynamicMetric<Long> _instanceOperationDurationEvacuateGauge;
@@ -106,6 +106,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   // Track current operation and start time for duration calculation
   private InstanceConstants.InstanceOperation _currentOperation;
   private long _currentOperationStartTime;
+  // Whether _currentOperationStartTime has been seeded yet. Used only for the legacy
+  // unknown-timestamp (-1) path to latch the first observed time exactly once.
+  private boolean _operationStartTimeInitialized;
 
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
@@ -123,9 +126,10 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
     _currentOperation = InstanceConstants.InstanceOperation.ENABLE;
-    // Initialize to 0 so that if we haven't received operation info yet, duration will be large
-    // and will be corrected when we receive the actual operation start time from InstanceConfig
+    // Seeded on the first updateInstanceOperation() call. While the operation start time is
+    // uninitialized, the duration gauge stays at 0 instead of measuring from epoch 0.
     _currentOperationStartTime = 0L;
+    _operationStartTimeInitialized = false;
 
     createMetrics();
   }
@@ -247,40 +251,40 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Get the current duration in ENABLE operation (in milliseconds)
-   * @return duration in milliseconds, or 0 if not in ENABLE state
+   * Get the current duration in ENABLE operation (in seconds)
+   * @return duration in seconds, or 0 if not in ENABLE state
    */
   protected long getInstanceOperationDurationEnable() {
     return _instanceOperationDurationEnableGauge.getValue();
   }
 
   /**
-   * Get the current duration in DISABLE operation (in milliseconds)
-   * @return duration in milliseconds, or 0 if not in DISABLE state
+   * Get the current duration in DISABLE operation (in seconds)
+   * @return duration in seconds, or 0 if not in DISABLE state
    */
   protected long getInstanceOperationDurationDisable() {
     return _instanceOperationDurationDisableGauge.getValue();
   }
 
   /**
-   * Get the current duration in EVACUATE operation (in milliseconds)
-   * @return duration in milliseconds, or 0 if not in EVACUATE state
+   * Get the current duration in EVACUATE operation (in seconds)
+   * @return duration in seconds, or 0 if not in EVACUATE state
    */
   protected long getInstanceOperationDurationEvacuate() {
     return _instanceOperationDurationEvacuateGauge.getValue();
   }
 
   /**
-   * Get the current duration in SWAP_IN operation (in milliseconds)
-   * @return duration in milliseconds, or 0 if not in SWAP_IN state
+   * Get the current duration in SWAP_IN operation (in seconds)
+   * @return duration in seconds, or 0 if not in SWAP_IN state
    */
   protected long getInstanceOperationDurationSwapIn() {
     return _instanceOperationDurationSwapInGauge.getValue();
   }
 
   /**
-   * Get the current duration in UNKNOWN operation (in milliseconds)
-   * @return duration in milliseconds, or 0 if not in UNKNOWN state
+   * Get the current duration in UNKNOWN operation (in seconds)
+   * @return duration in seconds, or 0 if not in UNKNOWN state
    */
   protected long getInstanceOperationDurationUnknown() {
     return _instanceOperationDurationUnknownGauge.getValue();
@@ -386,15 +390,16 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Update the instance operation and recalculate duration metrics.
-   * This method should be called whenever the instance operation changes or periodically
-   * to update the duration of the current operation.
+   * Update the instance operation and recalculate duration metrics. This method should be called
+   * whenever the instance operation changes or periodically to refresh the duration of the current
+   * operation. The duration gauges are reported in seconds.
    *
    * @param newOperation the current instance operation
-   * @param operationStartTime the timestamp (in milliseconds since epoch) when the operation started.
-   *                          This should come from InstanceConfig.InstanceOperation.getTimestamp()
-   *                          to survive controller restarts. Use -1 if timestamp is unknown
-   *                          (for backward compatibility with legacy HELIX_ENABLED field).
+   * @param operationStartTime the timestamp (in milliseconds since epoch) when the operation
+   *                          started. This should come from
+   *                          InstanceConfig.InstanceOperation.getTimestamp() to survive controller
+   *                          restarts. Use -1 if the timestamp is unknown (for backward
+   *                          compatibility with the legacy HELIX_ENABLED field).
    */
   public synchronized void updateInstanceOperation(InstanceConstants.InstanceOperation newOperation,
       long operationStartTime) {
@@ -402,27 +407,36 @@ public class InstanceMonitor extends DynamicMBeanProvider {
       newOperation = InstanceConstants.InstanceOperation.ENABLE;
     }
 
-    // Handle backward compatibility: if timestamp is -1 (unknown), use current time
-    // This happens when InstanceOperation is not set and we're using legacy HELIX_ENABLED field
-    // We capture current time ONCE to ensure consistency across calculations
+    // Capture current time ONCE so all calculations below are consistent.
     long currentTime = System.currentTimeMillis();
-    if (operationStartTime == -1L) {
-      operationStartTime = currentTime;
-    }
 
-    // Check if operation changed
-    if (_currentOperation != newOperation) {
-      // Switch to the new operation
+    boolean operationChanged = _currentOperation != newOperation;
+    if (operationChanged) {
       _currentOperation = newOperation;
-      _currentOperationStartTime = operationStartTime;
-
-      // Reset all gauges except the current (new) operation
+      // Reset all gauges except the current (new) operation.
       resetAllExceptOperations(Collections.singleton(_currentOperation));
     }
 
-    // Update the duration gauge for the current operation (called on every update)
-    long currentDuration = currentTime - _currentOperationStartTime;
-    updateOperationDurationGauge(_currentOperation, currentDuration);
+    if (operationStartTime != -1L) {
+      // InstanceConfig carries the authoritative operation timestamp. Always trust it so the
+      // duration is correct even when the operation has not changed (e.g. an instance that is
+      // already ENABLE). Without this, the start time would never be seeded for an already-ENABLE
+      // instance and the gauge would report wall-clock time instead of an elapsed duration.
+      _currentOperationStartTime = operationStartTime;
+      _operationStartTimeInitialized = true;
+    } else if (operationChanged || !_operationStartTimeInitialized) {
+      // Backward compatibility: the timestamp is unknown (legacy HELIX_ENABLED field). Latch the
+      // current time on the first observation or whenever the operation changes, so the duration
+      // grows from now rather than from epoch 0.
+      _currentOperationStartTime = currentTime;
+      _operationStartTimeInitialized = true;
+    }
+
+    // Report the duration in seconds. Clamp to >= 0 to guard against clock skew between the host
+    // that wrote the timestamp and this controller; a future-dated timestamp would otherwise
+    // surface as a negative duration.
+    long currentDurationSeconds = Math.max(0L, (currentTime - _currentOperationStartTime) / 1000L);
+    updateOperationDurationGauge(_currentOperation, currentDurationSeconds);
   }
 
   /**
