@@ -94,6 +94,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _rebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
+  // DEFAULT controller cluster-event pipeline backlog. Near 0 on a healthy controller (the queue
+  // dedups by event type); climbs when the controller still holds leadership but stops draining
+  // events, surfacing the "zombie leader" failure mode.
+  private AtomicLong _controllerEventQueueSizeGauge = new AtomicLong(0L);
 
   // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
   // enum value so reads on never-incremented categories return 0 instead of NPE.
@@ -1467,6 +1471,16 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _continuousTaskRebalanceFailureCount.set(newValue);
   }
 
+  /**
+   * Surface the DEFAULT controller cluster-event pipeline backlog as a JMX gauge. A healthy
+   * controller drains events quickly so this stays near 0 (the queue dedups by event type); a
+   * wedged controller that still holds leadership but stops processing lets it climb, making the
+   * "zombie leader" failure mode detectable.
+   */
+  public void setControllerEventQueueSizeGauge(long size) {
+    _controllerEventQueueSizeGauge.set(size);
+  }
+
   @Override
   public long getRebalanceFailureCounter() {
     return _rebalanceFailureCount.get();
@@ -1480,6 +1494,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getContinuousTaskRebalanceFailureCount() {
     return _continuousTaskRebalanceFailureCount.get();
+  }
+
+  @Override
+  public long getControllerEventQueueSizeGauge() {
+    return _controllerEventQueueSizeGauge.get();
   }
 
   @Override

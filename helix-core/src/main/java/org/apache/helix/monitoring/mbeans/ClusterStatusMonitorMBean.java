@@ -97,6 +97,15 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getContinuousTaskRebalanceFailureCount();
 
+  /**
+   * Backlog of the DEFAULT controller cluster-event pipeline (events enqueued but not yet
+   * processed). Stays near 0 on a healthy controller because the pipeline drains quickly and the
+   * queue dedups by event type; climbs when the controller holds leadership but has stopped
+   * processing events ("zombie leader"). Alert on a sustained average above ~0.
+   * @return The current DEFAULT controller event queue size.
+   */
+  long getControllerEventQueueSizeGauge();
+
   // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
   // Each WAGED HelixRebalanceException increments exactly one of these. The pair
   // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended

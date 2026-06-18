@@ -1342,6 +1342,21 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       return;
     }
     queue.put(event);
+    if (queue == _eventQueue) {
+      updateControllerEventQueueSizeGauge();
+    }
+  }
+
+  /**
+   * Publish the current DEFAULT cluster-event pipeline backlog to the per-cluster monitor. Invoked
+   * on both the enqueue side (ZK-callback / periodic-rebalance threads) and the dequeue side (the
+   * pipeline thread) so the gauge climbs when events pile up faster than they are drained, which
+   * surfaces a controller that still holds leadership but has stopped processing ("zombie leader").
+   */
+  private void updateControllerEventQueueSizeGauge() {
+    if (_isMonitoring && _clusterStatusMonitor != null && _eventQueue != null) {
+      _clusterStatusMonitor.setControllerEventQueueSizeGauge(_eventQueue.size());
+    }
   }
 
   @Override
@@ -1579,6 +1594,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       while (!isInterrupted()) {
         try {
           ClusterEvent newClusterEvent = _eventBlockingQueue.take();
+          if (_eventBlockingQueue == _eventQueue) {
+            updateControllerEventQueueSizeGauge();
+          }
           String threadName = String.format(
               "HelixController-pipeline-%s-(%s)", _processorName, newClusterEvent.getEventId());
           this.setName(threadName);

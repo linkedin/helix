@@ -898,6 +898,24 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testControllerEventQueueSizeGaugeStartsAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestControllerEventQueueGaugeCluster");
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerEventQueueSizeGaugeReflectsLatestSetter() {
+    ClusterStatusMonitor monitor =
+        new ClusterStatusMonitor("TestControllerEventQueueGaugeSetterCluster");
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+    monitor.setControllerEventQueueSizeGauge(7L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 7L);
+    // Gauge is reversible: draining the pipeline takes it back down to 0.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
   public void testWagedHardConstraintCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintCluster");
     Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 0L);
