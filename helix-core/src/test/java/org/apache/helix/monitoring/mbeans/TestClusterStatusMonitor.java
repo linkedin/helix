@@ -916,6 +916,20 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testControllerEventQueueSizeGaugeResetsToZeroOnLeadershipChange() {
+    ClusterStatusMonitor monitor =
+        new ClusterStatusMonitor("TestControllerEventQueueGaugeResetCluster");
+    monitor.setControllerEventQueueSizeGauge(5L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 5L);
+    // reset() runs on leadership change / monitor teardown. Because the monitor instance is reused
+    // across leadership periods, a backlog left over from a prior leader must be zeroed here;
+    // otherwise the re-registered bean would re-report it after re-election until the next
+    // enqueue/dequeue refreshes the gauge.
+    monitor.reset();
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
   public void testWagedHardConstraintCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintCluster");
     Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 0L);

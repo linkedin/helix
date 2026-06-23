@@ -101,7 +101,13 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    * Backlog of the DEFAULT controller cluster-event pipeline (events enqueued but not yet
    * processed). Stays near 0 on a healthy controller because the pipeline drains quickly and the
    * queue dedups by event type; climbs when the controller holds leadership but has stopped
-   * processing events ("zombie leader"). Alert on a sustained average above ~0.
+   * processing events ("zombie leader").
+   * <p>
+   * Depth alone is ambiguous: under load a healthy controller also reads &gt; 0 (events queue
+   * behind the in-flight pipeline run), but it keeps draining them, so
+   * {@code ClusterEventStatus...TotalProcessed.EventCounter} advances. A wedged controller instead
+   * shows depth stuck &gt; 0 with that counter flat. The alert threshold and windowing belong in
+   * the alerting layer, not here.
    * @return The current DEFAULT controller event queue size.
    */
   long getControllerEventQueueSizeGauge();

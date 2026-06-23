@@ -922,6 +922,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
       _wagedRebalanceOverwriteFailing = false;
+      // Zero the DEFAULT controller-event pipeline backlog gauge on leadership change, for the
+      // same reason as the counters above: the ClusterStatusMonitor instance is reused across
+      // leadership periods, so a stale depth from a prior leader must not be re-reported by the
+      // re-registered bean after re-election (it would otherwise persist until the next
+      // enqueue/dequeue refreshes it).
+      _controllerEventQueueSizeGauge.set(0L);
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
