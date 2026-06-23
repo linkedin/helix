@@ -35,17 +35,23 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 /**
- * Real-ZK reproduction for CICP-34004. The mocked TestEvacuateInstanceTaskAssignment stubbed the
+ * Real-ZK reproduction for CICP-34004. The existing TestEvacuateInstanceTaskAssignment stubbed the
  * data provider; this drives the real controller pipeline end to end.
  *
- * Scenario (mirrors prod): a target MasterSlave DB has its MASTER on an instance that is then
- * flagged EVACUATE, and the replacement cannot bootstrap (here: the only other node is stopped, so
- * the replica has nowhere to move). The MASTER therefore stays on the EVACUATE instance. A targeted
- * (FixedTarget) job targeting MASTER must still be assigned to that EVACUATE+MASTER instance.
+ * Scenario: a target MasterSlave DB has its MASTER on an instance that is then flagged EVACUATE,
+ * while the only other node is blocked from completing its state transition - so the replacement
+ * replica can never bootstrap and the MASTER stays put on the EVACUATE instance. This mirrors a long
+ * swap-out window where the replacement has not finished bootstrapping. A targeted (FixedTarget) job
+ * targeting MASTER must still be assigned to that EVACUATE+MASTER instance.
  *
  * Pre-fix this hangs because EVACUATE instances were excluded from task assignment.
  */
 public class TestEvacuateTargetJobAssignment extends TaskTestBase {
+  // Long enough to outlast the test, so the blocked replica never bootstraps.
+  private static final long BLOCKED_TRANSITION_MS = 300_000L;
+  // Time for the controller to react to EVACUATE before we assert the MASTER did not move.
+  private static final long MASTER_SETTLE_MS = 5_000L;
+  private static final long WORKFLOW_TIMEOUT_MS = 30_000L;
 
   @BeforeClass
   public void beforeClass() throws Exception {
@@ -66,12 +72,11 @@ public class TestEvacuateTargetJobAssignment extends TaskTestBase {
     Assert.assertNotNull(master, "target DB should have a MASTER");
 
     // 2. Block the OTHER (non-master) node's MasterSlave transitions so its replica can never
-    //    bootstrap. Both nodes stay live; this recreates the prod condition where the swap
-    //    replacement is still bootstrapping, so min-active-replica keeps the MASTER pinned on the
-    //    EVACUATE node.
+    //    bootstrap. Both nodes stay live; the replacement therefore stays stuck and
+    //    min-active-replica keeps the MASTER pinned on the EVACUATE node.
     for (MockParticipantManager p : _participants) {
       if (p != null && p.isConnected() && !p.getInstanceName().equals(master)) {
-        p.setTransition(new SleepTransition(300000));
+        p.setTransition(new SleepTransition(BLOCKED_TRANSITION_MS));
       }
     }
 
@@ -79,21 +84,13 @@ public class TestEvacuateTargetJobAssignment extends TaskTestBase {
     _gSetupTool.getClusterManagementTool()
         .setInstanceOperation(CLUSTER_NAME, master, InstanceConstants.InstanceOperation.EVACUATE);
 
-    // 4. Confirm MASTER stays on the EVACUATE instance (replacement is blocked from bootstrapping).
-    boolean stays = false;
-    for (int i = 0; i < 20; i++) {
-      Thread.sleep(1000);
-      ExternalView ev =
-          _gSetupTool.getClusterManagementTool().getResourceExternalView(CLUSTER_NAME, tgtDb);
-      Map<String, String> stateMap = ev == null ? null : ev.getStateMap(partition);
-      if (stateMap != null && "MASTER".equals(stateMap.get(master))) {
-        stays = true;
-        if (i >= 4) {
-          break; // master held steady for ~5s
-        }
-      }
-    }
-    Assert.assertTrue(stays,
+    // 4. Confirm MASTER stays on the EVACUATE instance: after the controller has reacted to EVACUATE,
+    //    the blocked replacement means MASTER has nowhere to move.
+    Thread.sleep(MASTER_SETTLE_MS);
+    ExternalView ev =
+        _gSetupTool.getClusterManagementTool().getResourceExternalView(CLUSTER_NAME, tgtDb);
+    Map<String, String> stateMap = ev == null ? null : ev.getStateMap(partition);
+    Assert.assertTrue(stateMap != null && "MASTER".equals(stateMap.get(master)),
         "MASTER must stay on the EVACUATE instance " + master + " while the replacement is blocked");
 
     // 5. Start a targeted job that targets the MASTER state of the DB (like an Espresso backup job).
@@ -108,7 +105,7 @@ public class TestEvacuateTargetJobAssignment extends TaskTestBase {
     // 6. The targeted task must be assigned to the EVACUATE+MASTER instance and complete.
     //    Pre-fix (CICP-34004) the job hangs because the EVACUATE host is excluded.
     TaskState state =
-        _driver.pollForWorkflowState(wf, 30000, TaskState.COMPLETED, TaskState.FAILED);
+        _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
     Assert.assertEquals(state, TaskState.COMPLETED,
         "Targeted task must run on the EVACUATE+MASTER instance " + master
             + " but the workflow ended in state " + state);
