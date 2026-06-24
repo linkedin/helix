@@ -126,15 +126,10 @@ public class TestWorkflowControllerDataProviderEvacuate {
   }
 
   /**
-   * Regression guard for the second throttle-path NPE fix (CICP-34004), distinct from the
-   * instanceConfig fix above. resetActiveTaskCount seeded the per-instance active-task count from
-   * getAssignableLiveInstances(), which excludes EVACUATE instances. So
-   * getParticipantActiveTaskCount() returned null for a live EVACUATE task candidate, and
-   * AbstractTaskDispatcher's "participantCapacity - cache.getParticipantActiveTaskCount(instance)"
-   * threw a NullPointerException while unboxing. That NPE is caught in WorkflowDispatcher and logged
-   * as "Failed to compute job assignment for job ...", so the whole job produces no assignment and
-   * every partition stays unscheduled. The fix seeds from getEnabledLiveInstances() (the task
-   * candidate set), so every candidate has a non-null count.
+   * Regression guard for the active-task-count throttle-path NPE (CICP-34004), distinct from the
+   * instanceConfig fix above. A live EVACUATE task candidate must have a non-null active-task count
+   * after resetActiveTaskCount; otherwise AbstractTaskDispatcher's throttling math unboxes a null.
+   * See the PR for the full chain.
    */
   @Test
   public void testActiveTaskCountSeededForEvacuateThrottlePath() {
@@ -158,18 +153,13 @@ public class TestWorkflowControllerDataProviderEvacuate {
 
     provider.resetActiveTaskCount(new CurrentStateOutput());
 
-    // Every task candidate must have a non-null active task count. AbstractTaskDispatcher does
-    // "participantCapacity - getParticipantActiveTaskCount(instance)"; a null here unboxes into an
-    // NPE that aborts the whole job assignment.
+    // Every task candidate must have a non-null active-task count (the dispatcher unboxes it).
     Assert.assertNotNull(provider.getParticipantActiveTaskCount(evacuateLive),
-        "Active task count for the EVACUATE task candidate must not be null after "
-            + "resetActiveTaskCount; otherwise the throttling code NPEs while unboxing (CICP-34004)");
+        "Active task count for the EVACUATE task candidate must not be null after resetActiveTaskCount");
     Assert.assertNotNull(provider.getParticipantActiveTaskCount(enabledLive),
         "Active task count for the ENABLE task candidate must not be null after resetActiveTaskCount");
 
-    // Defense in depth: the getter defaults to 0 (not null) even for an instance that was never
-    // seeded, so the throttling math cannot NPE if the seed set and the dispatcher's candidate set
-    // ever diverge again.
+    // Defense in depth: the getter defaults to 0 for an unseeded instance.
     Assert.assertEquals(provider.getParticipantActiveTaskCount("never_registered_instance"),
         Integer.valueOf(0),
         "getParticipantActiveTaskCount must default to 0 for an unseeded instance (CICP-34004)");
