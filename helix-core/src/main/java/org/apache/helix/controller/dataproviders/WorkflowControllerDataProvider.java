@@ -166,7 +166,13 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
    */
   public void resetActiveTaskCount(CurrentStateOutput currentStateOutput) {
     // init participant map
-    for (String liveInstance : getAssignableLiveInstances().keySet()) {
+    // Seed from getEnabledLiveInstances() (the task-assignment candidate set), not
+    // getAssignableLiveInstances(). The former includes live EVACUATE instances so targeted task
+    // jobs can be scheduled onto a still-MASTER partition on an evacuating host; the latter excludes
+    // them. If an evacuating candidate is left unseeded here, getParticipantActiveTaskCount() returns
+    // null for it and the task throttling code in AbstractTaskDispatcher NPEs while unboxing, which
+    // aborts the whole job assignment. See CICP-34004.
+    for (String liveInstance : getEnabledLiveInstances()) {
       _participantActiveTaskCount.put(liveInstance, 0);
     }
     // Active task == init and running tasks

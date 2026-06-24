@@ -27,6 +27,7 @@ import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
@@ -122,6 +123,49 @@ public class TestWorkflowControllerDataProviderEvacuate {
     Assert.assertNull(provider.getAssignableInstanceConfigMap().get(evacuateLive),
         "AssignableInstanceConfigMap must NOT include EVACUATE - this is why the original throttle code path NPE'd");
     Assert.assertNotNull(provider.getAssignableInstanceConfigMap().get(enabledLive));
+  }
+
+  /**
+   * Regression guard for the second throttle-path NPE fix (CICP-34004), distinct from the
+   * instanceConfig fix above. resetActiveTaskCount seeded the per-instance active-task count from
+   * getAssignableLiveInstances(), which excludes EVACUATE instances. So
+   * getParticipantActiveTaskCount() returned null for a live EVACUATE task candidate, and
+   * AbstractTaskDispatcher's "participantCapacity - cache.getParticipantActiveTaskCount(instance)"
+   * threw a NullPointerException while unboxing. That NPE is caught in WorkflowDispatcher and logged
+   * as "Failed to compute job assignment for job ...", so the whole job produces no assignment and
+   * every partition stays unscheduled. The fix seeds from getEnabledLiveInstances() (the task
+   * candidate set), so every candidate has a non-null count.
+   */
+  @Test
+  public void testActiveTaskCountSeededForEvacuateThrottlePath() {
+    String enabledLive = "host_enabled_live";
+    String evacuateLive = "host_evacuate_live";
+
+    Map<String, InstanceConfig> configMap = new HashMap<>();
+    configMap.put(enabledLive,
+        instanceWithOperation(enabledLive, InstanceConstants.InstanceOperation.ENABLE));
+    configMap.put(evacuateLive,
+        instanceWithOperation(evacuateLive, InstanceConstants.InstanceOperation.EVACUATE));
+
+    List<LiveInstance> liveInstances =
+        Arrays.asList(new LiveInstance(enabledLive), new LiveInstance(evacuateLive));
+
+    WorkflowControllerDataProvider provider = newProvider(configMap, liveInstances);
+
+    // Precondition: the evacuating live instance is a task-assignment candidate.
+    Assert.assertTrue(provider.getEnabledLiveInstances().contains(evacuateLive),
+        "EVACUATE+live instance must be a task candidate (CICP-34004 fix)");
+
+    provider.resetActiveTaskCount(new CurrentStateOutput());
+
+    // Every task candidate must have a non-null active task count. AbstractTaskDispatcher does
+    // "participantCapacity - getParticipantActiveTaskCount(instance)"; a null here unboxes into an
+    // NPE that aborts the whole job assignment.
+    Assert.assertNotNull(provider.getParticipantActiveTaskCount(evacuateLive),
+        "Active task count for the EVACUATE task candidate must not be null after "
+            + "resetActiveTaskCount; otherwise the throttling code NPEs while unboxing (CICP-34004)");
+    Assert.assertNotNull(provider.getParticipantActiveTaskCount(enabledLive),
+        "Active task count for the ENABLE task candidate must not be null after resetActiveTaskCount");
   }
 
   @Test
