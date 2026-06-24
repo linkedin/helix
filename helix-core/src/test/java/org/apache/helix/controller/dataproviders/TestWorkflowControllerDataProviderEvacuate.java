@@ -166,6 +166,13 @@ public class TestWorkflowControllerDataProviderEvacuate {
             + "resetActiveTaskCount; otherwise the throttling code NPEs while unboxing (CICP-34004)");
     Assert.assertNotNull(provider.getParticipantActiveTaskCount(enabledLive),
         "Active task count for the ENABLE task candidate must not be null after resetActiveTaskCount");
+
+    // Defense in depth: the getter defaults to 0 (not null) even for an instance that was never
+    // seeded, so the throttling math cannot NPE if the seed set and the dispatcher's candidate set
+    // ever diverge again.
+    Assert.assertEquals(provider.getParticipantActiveTaskCount("never_registered_instance"),
+        Integer.valueOf(0),
+        "getParticipantActiveTaskCount must default to 0 for an unseeded instance (CICP-34004)");
   }
 
   @Test

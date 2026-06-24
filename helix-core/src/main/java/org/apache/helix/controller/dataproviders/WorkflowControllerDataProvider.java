@@ -154,7 +154,9 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
   }
 
   public Integer getParticipantActiveTaskCount(String instance) {
-    return _participantActiveTaskCount.get(instance);
+    // Default to 0 (no active tasks) for an instance not seeded by resetActiveTaskCount, so the task
+    // throttling math in AbstractTaskDispatcher never unboxes a null. See CICP-34004.
+    return _participantActiveTaskCount.getOrDefault(instance, 0);
   }
 
   public void setParticipantActiveTaskCount(String instance, int taskCount) {
@@ -165,13 +167,12 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
    * Reset RUNNING/INIT tasks count in JobRebalancer
    */
   public void resetActiveTaskCount(CurrentStateOutput currentStateOutput) {
-    // init participant map
-    // Seed from getEnabledLiveInstances() (the task-assignment candidate set), not
-    // getAssignableLiveInstances(). The former includes live EVACUATE instances so targeted task
-    // jobs can be scheduled onto a still-MASTER partition on an evacuating host; the latter excludes
-    // them. If an evacuating candidate is left unseeded here, getParticipantActiveTaskCount() returns
-    // null for it and the task throttling code in AbstractTaskDispatcher NPEs while unboxing, which
-    // aborts the whole job assignment. See CICP-34004.
+    // init participant map.
+    // Seed from getEnabledLiveInstances() (the task-candidate set AbstractTaskDispatcher iterates),
+    // not getAssignableLiveInstances(): the former includes live EVACUATE instances so targeted
+    // tasks can run on a still-MASTER partition on an evacuating host, and excludes DISABLE instances
+    // the dispatcher never iterates. This keeps the count map aligned with the dispatcher's candidate
+    // set. See CICP-34004.
     for (String liveInstance : getEnabledLiveInstances()) {
       _participantActiveTaskCount.put(liveInstance, 0);
     }
