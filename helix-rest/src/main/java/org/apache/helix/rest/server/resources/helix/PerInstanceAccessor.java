@@ -20,7 +20,9 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -49,21 +51,27 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Error;
 import org.apache.helix.model.EvacuationInfo;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
+import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
@@ -73,7 +81,12 @@ import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
+import org.apache.helix.task.TaskConstants;
+import org.apache.helix.util.FeasibilityResult;
+import org.apache.helix.util.FeasibilityViolation;
 import org.apache.helix.util.InstanceUtil;
+import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.helix.util.RebalanceFeasibilityEvaluator;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.eclipse.jetty.util.StringUtil;
 import org.slf4j.Logger;
@@ -641,9 +654,18 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("force") boolean force) {
     HelixAdmin admin = getHelixAdmin();
     try {
+      if (!force) {
+        FeasibilityResult feasibility = checkInstanceRemovalFeasibility(clusterId, instanceName);
+        if (!feasibility.isFeasible()) {
+          return badRequest(String.format(
+              "Cannot drop instance %s: %s. Use force=true query param to override.", instanceName,
+              formatViolations(feasibility)));
+        }
+      }
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
       admin.dropInstance(clusterId, instanceConfig);
     } catch (HelixException e) {
@@ -676,7 +698,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Path("configs")
   public Response updateInstanceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -708,6 +730,15 @@ public class PerInstanceAccessor extends AbstractHelixResource {
            */
           validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
               instanceConfig, command);
+          if (!force) {
+            FeasibilityResult feasibility =
+                checkInstanceConfigCapacityFeasibility(clusterId, instanceName, instanceConfig);
+            if (!feasibility.isFeasible()) {
+              return badRequest(String.format(
+                  "Cannot update config for instance %s: %s. Use force=true query param to override.",
+                  instanceName, formatViolations(feasibility)));
+            }
+          }
           configAccessor.updateInstanceConfig(clusterId, instanceName, instanceConfig);
           break;
         case delete:
@@ -732,6 +763,103 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       return serverError(ex);
     }
     return OK();
+  }
+
+  private static final RebalanceFeasibilityEvaluator FEASIBILITY_EVALUATOR =
+      new RebalanceFeasibilityEvaluator();
+
+  /**
+   * Computes whether dropping {@code instanceName} would push any hosted partition below its
+   * resource's minActiveReplicas. For each resource it removes the instance from the current
+   * ExternalView and runs the {@link RebalanceFeasibilityEvaluator} min-active-replica check,
+   * using the same active/unhealthy-state definition as the controller. Resources that are
+   * disabled, invalid, task resources, or without a minActiveReplicas constraint are skipped.
+   */
+  private FeasibilityResult checkInstanceRemovalFeasibility(String clusterId, String instanceName) {
+    HelixDataAccessor accessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    List<String> resources = accessor.getChildNames(keyBuilder.idealStates());
+    if (resources == null || resources.isEmpty()) {
+      return FeasibilityResult.feasible();
+    }
+
+    List<FeasibilityResult> results = new ArrayList<>();
+    for (String resource : resources) {
+      IdealState idealState = accessor.getProperty(keyBuilder.idealStates(resource));
+      if (idealState == null || !idealState.isEnabled() || !idealState.isValid()
+          || TaskConstants.STATE_MODEL_NAME.equals(idealState.getStateModelDefRef())) {
+        continue;
+      }
+      int minActiveReplicas = idealState.getMinActiveReplicas();
+      if (minActiveReplicas < 0) {
+        continue;
+      }
+      ExternalView externalView = accessor.getProperty(keyBuilder.externalView(resource));
+      if (externalView == null) {
+        continue;
+      }
+      StateModelDefinition stateModelDef = idealState.getStateModelDefRef() != null
+          ? accessor.getProperty(keyBuilder.stateModelDef(idealState.getStateModelDefRef()))
+          : null;
+      ResourceConfig resourceConfig = accessor.getProperty(keyBuilder.resourceConfig(resource));
+      Set<String> unhealthyStates =
+          InstanceValidationUtil.getUnhealthyStates(resourceConfig, stateModelDef);
+
+      Map<String, Map<String, String>> postDropAssignment = new HashMap<>();
+      for (String partition : externalView.getPartitionSet()) {
+        Map<String, String> stateMap = externalView.getStateMap(partition);
+        if (stateMap == null || !stateMap.containsKey(instanceName)) {
+          // The instance does not host this partition; dropping it has no effect here.
+          continue;
+        }
+        if (unhealthyStates.contains(stateMap.get(instanceName))) {
+          // Removing an already-unhealthy replica does not reduce availability.
+          continue;
+        }
+        Map<String, String> afterDrop = new HashMap<>(stateMap);
+        afterDrop.remove(instanceName);
+        postDropAssignment.put(partition, afterDrop);
+      }
+      if (!postDropAssignment.isEmpty()) {
+        results.add(FEASIBILITY_EVALUATOR.checkMinActiveReplicas(resource, postDropAssignment,
+            minActiveReplicas, unhealthyStates));
+      }
+    }
+    return FeasibilityResult.merge(results);
+  }
+
+  /**
+   * Computes whether merging {@code delta} into the instance's current config would leave it
+   * missing a required WAGED capacity key. It simulates the same merge the persist path performs
+   * ({@link ZNRecord#merge}) and runs the {@link RebalanceFeasibilityEvaluator} capacity check.
+   * A cluster with no instance capacity keys configured (non-WAGED) is a no-op.
+   */
+  private FeasibilityResult checkInstanceConfigCapacityFeasibility(String clusterId,
+      String instanceName, InstanceConfig delta) {
+    ConfigAccessor configAccessor = getConfigAccessor();
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterId);
+    if (clusterConfig == null || clusterConfig.getInstanceCapacityKeys() == null
+        || clusterConfig.getInstanceCapacityKeys().isEmpty()) {
+      return FeasibilityResult.feasible();
+    }
+    InstanceConfig current = configAccessor.getInstanceConfig(clusterId, instanceName);
+    ZNRecord mergedRecord =
+        current != null ? new ZNRecord(current.getRecord()) : new ZNRecord(instanceName);
+    mergedRecord.merge(delta.getRecord());
+    InstanceConfig mergedConfig = new InstanceConfig(mergedRecord);
+    return FEASIBILITY_EVALUATOR.checkInstanceCapacities(clusterConfig,
+        Collections.singletonList(mergedConfig));
+  }
+
+  private static String formatViolations(FeasibilityResult result) {
+    StringBuilder sb = new StringBuilder();
+    for (FeasibilityViolation violation : result.getViolations()) {
+      if (sb.length() > 0) {
+        sb.append("; ");
+      }
+      sb.append(violation.toString());
+    }
+    return sb.toString();
   }
 
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
