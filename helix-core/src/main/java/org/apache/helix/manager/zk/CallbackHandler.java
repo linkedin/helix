@@ -36,6 +36,7 @@ import org.apache.helix.HelixConstants.ChangeType;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
+import org.apache.helix.InstanceType;
 import org.apache.helix.HelixProperty;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.NotificationContext.Type;
@@ -139,7 +140,7 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener, Recur
   private boolean _watchChild = true; // Whether we should subscribe to the child znode's data
   // change.
 
-  // When true (controller CURRENT_STATE/TASK_CURRENT_STATE/CUSTOMIZED_STATE handler + flag enabled +
+  // When true (controller CURRENT_STATE/TASK_CURRENT_STATE handler + flag enabled +
   // persist-watcher client), this handler installs ONE PERSISTENT_RECURSIVE watch covering its whole
   // subtree instead of one child watch plus one data watch per partition.
   private final boolean _useRecursivePersistWatch;
@@ -153,7 +154,9 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener, Recur
   private volatile boolean _recursiveWatchUnsupported = false;
 
   // indicated whether this CallbackHandler is ready to serve event callback from ZkClient.
-  private boolean _ready = false;
+  // Volatile: written under the manager monitor (init/reset) and read on the ZkEventThread
+  // (handleZNodeChange / handleChildChange / handleDataChange / enqueueTask).
+  private volatile boolean _ready = false;
 
   /**
    * maintain the expected notification types
@@ -202,7 +205,13 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener, Recur
 
     _useRecursivePersistWatch =
         Boolean.getBoolean(SystemPropertyKeys.PARTICIPANT_STATE_PERSIST_RECURSIVE_WATCH_ENABLED)
-            && (_changeType == CURRENT_STATE || _changeType == TASK_CURRENT_STATE);
+            && (_changeType == CURRENT_STATE || _changeType == TASK_CURRENT_STATE)
+            // Only the controller runs its ZkClient in persist-watcher mode (see ZKHelixManager).
+            // Gate on instance type too so a spectator/participant current-state handler sharing the
+            // JVM does not attempt a recursive subscribe on a non-persist client (which would throw,
+            // log a warning, and fall back to per-node watches).
+            && (_manager.getInstanceType() == InstanceType.CONTROLLER
+                || _manager.getInstanceType() == InstanceType.CONTROLLER_PARTICIPANT);
 
     init();
   }
@@ -802,7 +811,11 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener, Recur
     // controller pipeline reacts identically (it re-reads current state regardless of which node).
     try {
       updateNotificationTime(System.nanoTime());
-      if (dataPath != null && dataPath.startsWith(_path)) {
+      // Match the watched node itself or a node strictly under it. Respect the '/' segment boundary
+      // so a sibling whose name merely extends _path (e.g. .../session1 vs .../session11) cannot be
+      // accepted. (The recursive-watcher trie already scopes delivery to the exact subtree; this
+      // guard is defense-in-depth in case dispatch ever changes.)
+      if (dataPath != null && (dataPath.equals(_path) || dataPath.startsWith(_path + "/"))) {
         if (!isReady()) {
           logger.info("CallbackHandler {} is in reset state; skip recursive {} event on path: {}",
               _uid, eventType, dataPath);

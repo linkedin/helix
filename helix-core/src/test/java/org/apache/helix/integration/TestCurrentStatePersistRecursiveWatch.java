@@ -200,6 +200,89 @@ public class TestCurrentStatePersistRecursiveWatch extends ZkUnitTestBase {
   }
 
   /**
+   * Regression test for the CONTROLLER's own ZK-session loss (the production failover / ZK-blip case):
+   * on a new session the controller must TEAR DOWN the recursive watches from the expired session and
+   * RE-INSTALL them on the new session, and resume delivering current-state changes. This exercises
+   * the reset()-then-init() re-arm path on the controller side (vs. the participant-departure test).
+   */
+  @Test
+  public void testRecursiveWatchReArmedOnControllerSessionExpiry() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+    final int n = 3;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
+        1, // resources
+        8, // partitions per resource
+        n, // nodes
+        3, // replicas
+        "MasterSlave", true);
+
+    MockParticipantManager[] participants = new MockParticipantManager[n];
+    for (int i = 0; i < n; i++) {
+      participants[i] = new MockParticipantManager(ZK_ADDR, clusterName, "localhost_" + (12918 + i));
+      participants[i].syncStart();
+    }
+    ClusterControllerManager controller =
+        new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
+    controller.syncStart();
+
+    ZkHelixClusterVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(clusterName).setZkClient(_gZkClient)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
+    Assert.assertTrue(verifier.verifyByPolling(), "Cluster did not converge");
+
+    // A participant's CURRENTSTATES subtree the controller watches. The participant session is NOT
+    // expired here (only the controller's session is), so this path is stable across the controller's
+    // new session -- the controller must re-install its recursive watch on this same path.
+    String participantSession = participants[0].getSessionId();
+    String csPath =
+        "/" + clusterName + "/INSTANCES/localhost_12918/CURRENTSTATES/" + participantSession;
+    Assert.assertTrue(countControllerRecursiveListeners(controller, csPath) >= 1,
+        "precondition: controller should hold a recursive watch on the participant's CURRENTSTATES");
+
+    // Expire the CONTROLLER's own ZK session: handleNewSession -> resetHandlers (remove old-session
+    // recursive watches) -> initHandlers (re-install on the new session). The watch must come back.
+    String oldControllerSession = controller.getSessionId();
+    ZkTestHelper.expireSession(controller.getZkClient());
+
+    // Confirm a genuinely NEW controller session (so this exercises real server-side watch loss, not a
+    // stale client-side trie entry): a persistent-recursive watch is dropped by the server on expiry.
+    boolean newSession = TestHelper.verify(
+        () -> controller.isConnected() && !oldControllerSession.equals(controller.getSessionId()),
+        TestHelper.WAIT_DURATION);
+    Assert.assertTrue(newSession, "controller did not establish a new session after expiry");
+
+    boolean reArmed = TestHelper.verify(
+        () -> countControllerRecursiveListeners(controller, csPath) >= 1, TestHelper.WAIT_DURATION);
+    Assert.assertTrue(reArmed,
+        "Controller did not re-install its recursive current-state watch after its own session "
+            + "expiry (path " + csPath + "); reset()/init() re-arm on the new session is broken");
+
+    // Functional proof the re-armed watch actually DELIVERS on the new session (the test runs with no
+    // periodic rebalance, so the only way the controller observes the post-failure current-state
+    // transitions is the recursive watch firing). A participant failure forces master movement, which
+    // the controller can only carry out by observing OFFLINE->SLAVE->MASTER transitions. Re-convergence
+    // proves incremental current-state events are delivered after the controller's session expiry.
+    participants[1].syncStop();
+    Assert.assertTrue(verifier.verifyByPolling(),
+        "Cluster did not re-converge after controller session expiry + participant failure; the "
+            + "re-armed recursive watch did not deliver incremental current-state events");
+
+    controller.syncStop();
+    for (int i = 0; i < n; i++) {
+      if (participants[i].isConnected()) {
+        participants[i].syncStop();
+      }
+    }
+    deleteCluster(clusterName);
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  /**
    * Number of recursive-watch listeners the controller's client-side trie holds for {@code path}.
    * Reaches the raw {@code ZkClient} that owns the {@link ZkPathRecursiveWatcherTrie} via reflection
    * (the same reflection-into-zkclient-internals pattern used by {@code ZkTestHelper#getZkWatch}).

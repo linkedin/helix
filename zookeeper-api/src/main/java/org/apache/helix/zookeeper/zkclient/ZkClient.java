@@ -3160,15 +3160,22 @@ public class ZkClient implements Watcher {
   }
 
   private void executeWithInPersistListenerMutex(ManipulateListener runnable) {
+    boolean locked = false;
     try {
       _persistListenerMutex.lockInterruptibly();
+      locked = true;
       runnable.run();
     } catch (KeeperException.NoWatcherException e) {
       LOG.warn("Persist watcher is already removed");
     } catch (KeeperException | InterruptedException ex) {
       throw new ZkException(ex);
     } finally {
-      _persistListenerMutex.unlock();
+      // Only unlock if we actually acquired the lock: an interrupted lockInterruptibly() does NOT
+      // hold it, and unlocking an unowned ReentrantLock would throw IllegalMonitorStateException,
+      // masking the original exception and swallowing the interrupt.
+      if (locked) {
+        _persistListenerMutex.unlock();
+      }
     }
   }
 
