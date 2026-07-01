@@ -21,16 +21,21 @@ package org.apache.helix.integration.task;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants.InstanceOperation;
+import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.mock.participant.SleepTransition;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.task.JobConfig;
 import org.apache.helix.task.JobContext;
@@ -57,8 +62,10 @@ import org.testng.annotations.Test;
  *       host, restart the controller so the task data provider is rebuilt fresh, start a targeted
  *       MASTER job, and assert the outcome. Adding such a scenario = adding one row.</li>
  *   <li><b>Dedicated {@code @Test} methods</b> for odd-shaped scenarios that need extra steps a single
- *       matrix row cannot express: throttle-capacity accounting on a lone EVACUATE candidate, and a
- *       targeted job that runs on the EVACUATE MASTER and still completes after the evacuation resolves.</li>
+ *       matrix row cannot express: throttle-capacity accounting on a lone EVACUATE candidate, a
+ *       targeted job that runs on the EVACUATE MASTER and still completes after the evacuation resolves,
+ *       and a multi-partition blast-radius check that one MASTER on an EVACUATE host does not abort the
+ *       whole job (CICP-50303 empty JobContext).</li>
  * </ul>
  *
  * <p>The controller restart in every EVACUATE scenario is essential, not cosmetic: the bug only
@@ -123,18 +130,8 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     String tgtDb = WorkflowGenerator.DEFAULT_TGT_DB;
     String partition = tgtDb + "_0";
 
-    String master = pollForMaster(tgtDb, partition);
-    Assert.assertNotNull(master, "target DB should have a MASTER");
-
-    // Block every other node so the replacement replica can never bootstrap; the MASTER therefore
-    // stays on the operated host for the whole test (a long swap-out window).
-    blockReplacementsFor(master);
-
-    _gSetupTool.getClusterManagementTool().setInstanceOperation(CLUSTER_NAME, master, op);
-    Thread.sleep(SETTLE_MS);
-
-    Assert.assertEquals(masterOf(tgtDb, partition), master,
-        "MASTER must stay on the operated host " + master + " (op=" + op + ") while replacement blocked");
+    // Pin the target MASTER on its host under `op` (replacement blocked so it cannot move).
+    String master = pinMasterUnderOperation(tgtDb, partition, op);
 
     // Rebuild the controller (and its task data provider) fresh while the node is already under `op`.
     restartController();
@@ -202,6 +199,8 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
 
     // Capacity is respected: exactly `capacity` tasks run concurrently on the lone EVACUATE candidate,
     // and they all land on the EVACUATE host (proving it is a seeded, usable candidate with no NPE).
+    // Assumes the default per-instance task quota is >= capacity, so the participant capacity is the
+    // binding limit here (true for the default cluster config).
     Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, evacuateHost) == capacity,
         TestHelper.WAIT_DURATION),
         "EVACUATE host must run exactly " + capacity + " concurrent tasks (throttle correctness)");
@@ -213,26 +212,17 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   }
 
   /**
-   * Odd-shaped lifecycle scenario: a targeted job first starts and runs on the EVACUATE MASTER (this
-   * requires the fix), then the replacement is unblocked so the evacuation can finally proceed and the
-   * partition can hand MASTER off. The workflow must still reach COMPLETED - no wedged partition, no
-   * swallowed NPE - regardless of whether the specific task instance finishes on the old MASTER or is
-   * reassigned to the new one.
+   * Odd-shaped lifecycle scenario: a targeted job first runs on the EVACUATE MASTER (requires the
+   * fix), then the replacement is unblocked so the evacuation can proceed. The test asserts the MASTER
+   * actually migrates off the EVACUATE host and the workflow still reaches COMPLETED across that
+   * hand-off - no wedged partition, no swallowed NPE.
    */
   @Test
-  public void testTargetedJobCompletesAfterEvacuationResolves() throws Exception {
+  public void testTargetedJobCompletesWhenMasterMigratesOffEvacuateHost() throws Exception {
     String tgtDb = WorkflowGenerator.DEFAULT_TGT_DB;
     String partition = tgtDb + "_0";
 
-    String master = pollForMaster(tgtDb, partition);
-    Assert.assertNotNull(master, "target DB should have a MASTER");
-
-    blockReplacementsFor(master);
-    _gSetupTool.getClusterManagementTool()
-        .setInstanceOperation(CLUSTER_NAME, master, InstanceOperation.EVACUATE);
-    Thread.sleep(SETTLE_MS);
-    Assert.assertEquals(masterOf(tgtDb, partition), master,
-        "MASTER must start on the EVACUATE host " + master);
+    String master = pinMasterUnderOperation(tgtDb, partition, InstanceOperation.EVACUATE);
 
     // Fresh data provider while EVACUATE (prod trigger); the task must schedule on the EVACUATE MASTER,
     // which requires the fix.
@@ -256,10 +246,76 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
       }
     }
 
+    // The MASTER must actually leave the EVACUATE host (the hand-off this test is named for).
+    Assert.assertTrue(TestHelper.verify(() -> {
+      String cur = masterOf(tgtDb, partition);
+      return cur != null && !cur.equals(master);
+    }, TestHelper.WAIT_DURATION), "MASTER must migrate off the EVACUATE host " + master);
+
     TaskState state =
         _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
     Assert.assertEquals(state, TaskState.COMPLETED,
-        "Targeted job must complete after the evacuation resolves, got " + state);
+        "Targeted job must complete across the MASTER hand-off, got " + state);
+  }
+
+  /**
+   * Blast-radius regression for CICP-50303 (lor1 ESPRESSO_MT-LD-13, empty JobContext). The NPE is
+   * thrown while the throttle loop processes the unseeded EVACUATE instance, and WorkflowDispatcher
+   * swallows it as a WARN - so the WHOLE job's assignment is aborted (empty JobContext), not just the
+   * one partition whose MASTER sits on the EVACUATE host. Pre-#172 this was a task-level miss (other
+   * partitions still scheduled); the EVACUATE-inclusion made it job-level.
+   *
+   * <p>Uses a multi-partition target DB with a MASTER on the EVACUATE host and MASTERs on healthy
+   * hosts, under a cold cache, and asserts every partition's task still runs - i.e. partitions on
+   * healthy hosts are not collateral damage. Pre-fix the whole job hangs; post-fix all complete.
+   */
+  @Test
+  public void testWholeJobNotAbortedByOneMasterOnEvacuateHost() throws Exception {
+    String multiDb = "MultiPartTargetDB";
+    int numParts = 6;
+    _gSetupTool.addResourceToCluster(CLUSTER_NAME, multiDb, numParts, MASTER_SLAVE_STATE_MODEL,
+        IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
+    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, multiDb, _numReplicas);
+
+    // Every partition must have a MASTER; pick a host holding at least one and confirm other
+    // partitions live on different (healthy) hosts, so the "blast radius" is meaningful.
+    Map<Integer, String> masters = pollAllMasters(multiDb, numParts);
+    Assert.assertEquals(masters.size(), numParts, "all partitions of " + multiDb + " must have a MASTER");
+    String evacHost = masters.get(0);
+    Assert.assertTrue(masters.values().stream().anyMatch(h -> !h.equals(evacHost)),
+        "test needs MASTERs on hosts other than the EVACUATE host " + evacHost);
+
+    // Pin the EVACUATE host's MASTER partitions (block replacements), then flip it to EVACUATE.
+    blockReplacementsFor(evacHost);
+    _gSetupTool.getClusterManagementTool()
+        .setInstanceOperation(CLUSTER_NAME, evacHost, InstanceOperation.EVACUATE);
+    Thread.sleep(SETTLE_MS);
+
+    // Cold cache: rebuild the controller while evacHost is already EVACUATE (the prod trigger).
+    restartController();
+
+    String wf = TestHelper.getTestMethodName();
+    startTargetedMasterJob(wf, multiDb, QUICK_TASK_MS);
+
+    // Pre-fix, the NPE on the unseeded evacHost aborts the entire job compute -> empty JobContext ->
+    // the workflow never completes and NONE of the partitions (incl. those on healthy hosts) schedule.
+    TaskState state =
+        _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
+    Assert.assertEquals(state, TaskState.COMPLETED,
+        "one MASTER on an EVACUATE host must not abort the whole multi-partition job, got " + state);
+
+    // Blast-radius check: tasks ran both on the EVACUATE host and on at least one healthy host.
+    JobContext ctx = _driver.getJobContext(TaskUtil.getNamespacedJobName(wf, "job1"));
+    Set<String> assigned = new HashSet<>();
+    for (int p : ctx.getPartitionSet()) {
+      assigned.add(ctx.getAssignedParticipant(p));
+    }
+    Assert.assertTrue(assigned.contains(evacHost),
+        "a task must run on the EVACUATE MASTER host " + evacHost);
+    Assert.assertTrue(assigned.stream().anyMatch(h -> h != null && !h.equals(evacHost)),
+        "tasks for MASTERs on healthy hosts must also be scheduled (no whole-job abort)");
+
+    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, multiDb);
   }
 
   /**
@@ -304,6 +360,20 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     Workflow workflow = new Workflow.Builder(workflowName).addJob("job1", job).build();
     _createdWorkflows.add(workflowName);
     _driver.start(workflow);
+  }
+
+  private String pinMasterUnderOperation(String tgtDb, String partition, InstanceOperation op)
+      throws InterruptedException {
+    String master = pollForMaster(tgtDb, partition);
+    Assert.assertNotNull(master, "target DB should have a MASTER");
+    // Block every other node so the replacement replica can never bootstrap; the MASTER therefore
+    // stays on the operated host for the whole test (a long swap-out window).
+    blockReplacementsFor(master);
+    _gSetupTool.getClusterManagementTool().setInstanceOperation(CLUSTER_NAME, master, op);
+    Thread.sleep(SETTLE_MS);
+    Assert.assertEquals(masterOf(tgtDb, partition), master,
+        "MASTER must stay on the operated host " + master + " (op=" + op + ") while replacement blocked");
+    return master;
   }
 
   private void restartController() {
@@ -356,6 +426,36 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
       }
     }
     return null;
+  }
+
+  private Map<Integer, String> pollAllMasters(String db, int numParts) throws InterruptedException {
+    for (int i = 0; i < 120; i++) {
+      Map<Integer, String> m = mastersByPartition(db, numParts);
+      if (m.size() == numParts) {
+        return m;
+      }
+      Thread.sleep(500);
+    }
+    return mastersByPartition(db, numParts);
+  }
+
+  private Map<Integer, String> mastersByPartition(String db, int numParts) {
+    Map<Integer, String> res = new HashMap<>();
+    ExternalView ev = _gSetupTool.getClusterManagementTool().getResourceExternalView(CLUSTER_NAME, db);
+    if (ev == null) {
+      return res;
+    }
+    for (int p = 0; p < numParts; p++) {
+      Map<String, String> sm = ev.getStateMap(db + "_" + p);
+      if (sm != null) {
+        for (Map.Entry<String, String> e : sm.entrySet()) {
+          if (MASTER.equals(e.getValue())) {
+            res.put(p, e.getKey());
+          }
+        }
+      }
+    }
+    return res;
   }
 
   private int countRunning(String namespacedJob) {

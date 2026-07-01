@@ -168,8 +168,10 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
    */
   public void resetActiveTaskCount(CurrentStateOutput currentStateOutput) {
     // init participant map.
-    // Seed from getEnabledLiveInstances(), the task-candidate set AbstractTaskDispatcher iterates,
-    // not getAssignableLiveInstances() which excludes live EVACUATE instances. See CICP-34004.
+    // Seed from getEnabledLiveInstances(), the task-candidate set AbstractTaskDispatcher iterates
+    // (see JobDispatcher#getCurrentInstanceToTaskAssignments), not getAssignableLiveInstances() which
+    // excludes live EVACUATE instances. This set MUST match the dispatcher's iteration set. See
+    // CICP-34004.
     for (String liveInstance : getEnabledLiveInstances()) {
       _participantActiveTaskCount.put(liveInstance, 0);
     }
