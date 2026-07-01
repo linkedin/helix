@@ -239,10 +239,6 @@ public class JobDispatcher extends AbstractTaskDispatcher {
     // These dropping transitions will be prioritized above all task state transition assignments
     Map<String, Set<Integer>> tasksToDrop = new HashMap<>();
 
-    // Task-assignment candidate set. INVARIANT: this must stay in lockstep with the set
-    // WorkflowControllerDataProvider.resetActiveTaskCount seeds the active-task-count map from
-    // (also getEnabledLiveInstances()). If they diverge, an iterated-but-unseeded instance reads as 0
-    // active tasks and gets over-assigned. See CICP-34004.
     Map<String, SortedSet<Integer>> currentInstanceToTaskAssignments =
         getCurrentInstanceToTaskAssignments(cache.getEnabledLiveInstances(), currStateOutput,
             jobResource, tasksToDrop);
