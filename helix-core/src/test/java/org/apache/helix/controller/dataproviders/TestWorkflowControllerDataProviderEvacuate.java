@@ -126,10 +126,9 @@ public class TestWorkflowControllerDataProviderEvacuate {
   }
 
   /**
-   * Regression guard for the active-task-count throttle-path NPE (CICP-34004), distinct from the
-   * instanceConfig fix above. A live EVACUATE task candidate must have a non-null active-task count
-   * after resetActiveTaskCount; otherwise AbstractTaskDispatcher's throttling math unboxes a null.
-   * See the PR for the full chain.
+   * Regression guard for the active-task-count throttle-path NPE, distinct from the instanceConfig
+   * fix above. A live EVACUATE task candidate must have a non-null active-task count after
+   * resetActiveTaskCount; otherwise AbstractTaskDispatcher's throttling math unboxes a null.
    */
   @Test
   public void testActiveTaskCountSeededForEvacuateThrottlePath() {

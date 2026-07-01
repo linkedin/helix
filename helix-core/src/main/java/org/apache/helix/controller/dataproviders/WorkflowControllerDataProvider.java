@@ -154,8 +154,8 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
   }
 
   public Integer getParticipantActiveTaskCount(String instance) {
-    // Default to 0 (no active tasks) for an instance not seeded by resetActiveTaskCount, so the task
-    // throttling math in AbstractTaskDispatcher never unboxes a null. See CICP-34004.
+    // Default to 0 for an instance not yet seeded by resetActiveTaskCount, so the throttling math in
+    // AbstractTaskDispatcher never unboxes a null.
     return _participantActiveTaskCount.getOrDefault(instance, 0);
   }
 
@@ -167,11 +167,8 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
    * Reset RUNNING/INIT tasks count in JobRebalancer
    */
   public void resetActiveTaskCount(CurrentStateOutput currentStateOutput) {
-    // init participant map.
-    // Seed from getEnabledLiveInstances(), the task-candidate set AbstractTaskDispatcher iterates
-    // (see JobDispatcher#getCurrentInstanceToTaskAssignments), not getAssignableLiveInstances() which
-    // excludes live EVACUATE instances. This set MUST match the dispatcher's iteration set. See
-    // CICP-34004.
+    // Seed the active-task-count map from getEnabledLiveInstances() (the task-candidate set the
+    // dispatcher iterates), not getAssignableLiveInstances() which excludes live EVACUATE instances.
     for (String liveInstance : getEnabledLiveInstances()) {
       _participantActiveTaskCount.put(liveInstance, 0);
     }
