@@ -69,9 +69,9 @@ import org.testng.annotations.Test;
  *
  * <p>Cluster shape is deliberately small and controllable (1 partition, 1 replica) so the single
  * MASTER can be pinned on a chosen host by blocking the replacement's state transition, which is the
- * only reliable way to reproduce the "long swap-out window" the bug needs. See also
- * {@link TestEvacuateTargetJobAssignment} (the original single-case reproduction) and the unit-level
- * {@code TestWorkflowControllerDataProviderEvacuate}.
+ * only reliable way to reproduce the "long swap-out window" the bug needs. Complements the unit-level
+ * {@code TestWorkflowControllerDataProviderEvacuate} (data-provider contract) and the mocked
+ * {@code TestEvacuateInstanceTaskAssignment} (throttle-path white-box check).
  */
 public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   // Long enough to outlast the test so a blocked replacement never bootstraps.
