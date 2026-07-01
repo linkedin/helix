@@ -51,9 +51,9 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
- * Real-ZK, end-to-end (no mocks) scenario coverage for CICP-34004: targeted task jobs must still be
- * scheduled when the target partition's MASTER sits on a live EVACUATE host, and the task throttle
- * path must not NPE while accounting for that EVACUATE host.
+ * Real-ZK, end-to-end (no mocks) coverage: targeted task jobs must still be scheduled when the target
+ * partition's MASTER sits on a live EVACUATE host, and the task throttle path must not NPE while
+ * accounting for that EVACUATE host.
  *
  * <p>Structure is a hybrid so new scenarios are cheap to add:
  * <ul>
@@ -63,22 +63,19 @@ import org.testng.annotations.Test;
  *       MASTER job, and assert the outcome. Adding such a scenario = adding one row.</li>
  *   <li><b>Dedicated {@code @Test} methods</b> for odd-shaped scenarios that need extra steps a single
  *       matrix row cannot express: throttle-capacity accounting on a lone EVACUATE candidate, a
- *       targeted job that runs on the EVACUATE MASTER and still completes after the evacuation resolves,
- *       and a multi-partition blast-radius check that one MASTER on an EVACUATE host does not abort the
- *       whole job (CICP-50303 empty JobContext).</li>
+ *       targeted job that runs on the EVACUATE MASTER and completes after the evacuation resolves, and
+ *       a multi-partition check that one MASTER on an EVACUATE host does not abort the whole job.</li>
  * </ul>
  *
- * <p>The controller restart in every EVACUATE scenario is essential, not cosmetic: the bug only
- * reproduces when the data provider is built fresh while the node is already EVACUATE (a restart /
- * leadership change during the evacuation - the real prod trigger). Without it a stale, pre-EVACUATE
- * seed hides the NPE and the scenario passes even on the buggy code. Verified: every EVACUATE scenario
- * here fails on the pre-fix code and passes with the fix, while the ENABLE baseline passes on both.
+ * <p>The controller restart in every EVACUATE scenario is essential: the failure only reproduces when
+ * the data provider is built fresh while the node is already EVACUATE (a restart or leadership change
+ * during the evacuation - the prod trigger). Without it a stale, pre-EVACUATE seed of 0 masks the
+ * missing count and the scenario passes even on the buggy code; the ENABLE rows are the baseline.
  *
- * <p>Cluster shape is deliberately small and controllable (1 partition, 1 replica) so the single
- * MASTER can be pinned on a chosen host by blocking the replacement's state transition, which is the
- * only reliable way to reproduce the "long swap-out window" the bug needs. Complements the unit-level
- * {@code TestWorkflowControllerDataProviderEvacuate} (data-provider contract) and the mocked
- * {@code TestEvacuateInstanceTaskAssignment} (throttle-path white-box check).
+ * <p>Cluster shape is deliberately small (1 partition, 1 replica) so the single MASTER can be pinned on
+ * a chosen host by blocking the replacement's state transition - the only reliable way to reproduce the
+ * long swap-out window. Complements the unit-level {@code TestWorkflowControllerDataProviderEvacuate}
+ * and the mocked {@code TestEvacuateInstanceTaskAssignment}.
  */
 public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   // Long enough to outlast the test so a blocked replacement never bootstraps.
@@ -106,16 +103,13 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
 
   /**
    * Same-shape scenarios: apply {@code op} to the host holding the target MASTER, keep the MASTER
-   * pinned there by blocking the replacement, restart the controller so the task data provider (and
-   * its per-instance active-task-count map) is rebuilt fresh while the node is already under {@code op},
-   * then require a targeted MASTER job to run on that host.
+   * pinned there by blocking the replacement, restart the controller so the active-task-count map is
+   * rebuilt while the node is already under {@code op}, then require a targeted MASTER job to run there.
    *
-   * <p>The controller restart is essential, not incidental: {@code resetActiveTaskCount} only ever adds
-   * to {@code _participantActiveTaskCount}, so a node seeded as 0 while still ENABLE keeps that stale
-   * entry across pipeline runs and hides the CICP-34004 NPE. Only a fresh data provider (restart /
-   * leadership change during the evacuation - the real prod trigger) reproduces the unseeded EVACUATE
-   * node. EVACUATE is the fix under test; ENABLE is the regression baseline (the fix must not change the
-   * normal path).
+   * <p>The restart matters: {@code resetActiveTaskCount} only adds to {@code _participantActiveTaskCount},
+   * so a node seeded 0 while ENABLE keeps that stale entry across runs and masks the missing count. Only
+   * a fresh data provider leaves the EVACUATE node unseeded. ENABLE is the baseline; the two must behave
+   * the same.
    */
   @DataProvider(name = "scheduleOnOperatedHostScenarios")
   public static Object[][] scheduleOnOperatedHostScenarios() {
@@ -176,8 +170,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     Thread.sleep(SETTLE_MS);
 
     // Rebuild the controller so the active-task-count map is seeded fresh while the only candidate is
-    // already EVACUATE - the prod trigger. Pre-fix this leaves the EVACUATE host unseeded (null) and the
-    // throttle math NPEs, so no task is ever scheduled and the assertions below fail.
+    // already EVACUATE, leaving it unseeded on the buggy code.
     restartController();
 
     String wf = TestHelper.getTestMethodName();
@@ -213,10 +206,9 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   }
 
   /**
-   * Odd-shaped lifecycle scenario: a targeted job first runs on the EVACUATE MASTER (requires the
-   * fix), then the replacement is unblocked so the evacuation can proceed. The test asserts the MASTER
-   * actually migrates off the EVACUATE host and the workflow still reaches COMPLETED across that
-   * hand-off - no wedged partition, no swallowed NPE.
+   * A targeted job first runs on the EVACUATE MASTER, then the replacement is unblocked so the
+   * evacuation can proceed. Asserts the MASTER actually migrates off the EVACUATE host and the workflow
+   * still reaches COMPLETED across that hand-off - no wedged partition, no swallowed NPE.
    */
   @Test
   public void testTargetedJobCompletesWhenMasterMigratesOffEvacuateHost() throws Exception {
@@ -225,16 +217,14 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
 
     String master = pinMasterUnderOperation(tgtDb, partition, InstanceOperation.EVACUATE);
 
-    // Fresh data provider while EVACUATE (prod trigger); the task must schedule on the EVACUATE MASTER,
-    // which requires the fix.
+    // Fresh data provider while the node is already EVACUATE.
     restartController();
 
     String wf = TestHelper.getTestMethodName();
     startTargetedMasterJob(wf, tgtDb, RUNNING_TASK_MS);
     String namespacedJob = TaskUtil.getNamespacedJobName(wf, "job1");
 
-    // The task is observably RUNNING on the EVACUATE MASTER before we resolve the evacuation, so the
-    // hand-off below genuinely happens against a live targeted job (not one that already finished).
+    // Confirm the task is RUNNING on the EVACUATE MASTER, so the hand-off happens against a live job.
     Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, master) == 1,
         TestHelper.WAIT_DURATION),
         "targeted task must be RUNNING on the EVACUATE MASTER " + master + " before the hand-off");
@@ -260,15 +250,13 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   }
 
   /**
-   * Blast-radius regression for CICP-50303 (lor1 ESPRESSO_MT-LD-13, empty JobContext). The NPE is
-   * thrown while the throttle loop processes the unseeded EVACUATE instance, and WorkflowDispatcher
-   * swallows it as a WARN - so the WHOLE job's assignment is aborted (empty JobContext), not just the
-   * one partition whose MASTER sits on the EVACUATE host. Pre-#172 this was a task-level miss (other
-   * partitions still scheduled); the EVACUATE-inclusion made it job-level.
+   * When the throttle loop hits the unseeded EVACUATE instance, the NPE is swallowed by
+   * WorkflowDispatcher as a WARN, so the whole job's assignment is abandoned (empty JobContext), not
+   * just the one partition whose MASTER sits on the EVACUATE host.
    *
-   * <p>Uses a multi-partition target DB with a MASTER on the EVACUATE host and MASTERs on healthy
-   * hosts, under a cold cache, and asserts every partition's task still runs - i.e. partitions on
-   * healthy hosts are not collateral damage. Pre-fix the whole job hangs; post-fix all complete.
+   * <p>Uses a multi-partition target DB with a MASTER on the EVACUATE host and MASTERs on healthy hosts,
+   * under a cold cache, and asserts every partition's task still runs - healthy-host partitions are not
+   * collateral damage. On the buggy code the whole job hangs.
    */
   @Test
   public void testWholeJobNotAbortedByOneMasterOnEvacuateHost() throws Exception {
@@ -280,7 +268,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     _createdResources.add(multiDb);
 
     // Every partition must have a MASTER; pick a host holding at least one and confirm other
-    // partitions live on different (healthy) hosts, so the "blast radius" is meaningful.
+    // partitions live on different (healthy) hosts, so the check covers healthy-host partitions too.
     Map<Integer, String> masters = pollAllMasters(multiDb, numParts);
     Assert.assertEquals(masters.size(), numParts, "all partitions of " + multiDb + " must have a MASTER");
     String evacHost = masters.get(0);
@@ -293,11 +281,11 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
         .setInstanceOperation(CLUSTER_NAME, evacHost, InstanceOperation.EVACUATE);
     Thread.sleep(SETTLE_MS);
 
-    // Cold cache: rebuild the controller while evacHost is already EVACUATE (the prod trigger).
+    // Cold cache: rebuild the controller while evacHost is already EVACUATE.
     restartController();
 
-    // Re-confirm a MASTER is still pinned on the EVACUATE host after the restart, so the
-    // "task ran on evacHost" assertion below can't be a false negative if pinning ever slips.
+    // Re-confirm a MASTER is still pinned on the EVACUATE host after the restart, so the assertion that
+    // a task ran there cannot be a false negative if pinning ever slips.
     Assert.assertTrue(
         TestHelper.verify(() -> mastersByPartition(multiDb, numParts).containsValue(evacHost),
             TestHelper.WAIT_DURATION),
@@ -306,14 +294,14 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     String wf = TestHelper.getTestMethodName();
     startTargetedMasterJob(wf, multiDb, QUICK_TASK_MS);
 
-    // Pre-fix, the NPE on the unseeded evacHost aborts the entire job compute -> empty JobContext ->
-    // the workflow never completes and NONE of the partitions (incl. those on healthy hosts) schedule.
+    // On the buggy code the NPE on the unseeded evacHost aborts the entire job compute (empty
+    // JobContext), so no partition - including those on healthy hosts - is scheduled.
     TaskState state =
         _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
     Assert.assertEquals(state, TaskState.COMPLETED,
         "one MASTER on an EVACUATE host must not abort the whole multi-partition job, got " + state);
 
-    // Blast-radius check: tasks ran both on the EVACUATE host and on at least one healthy host.
+    // Tasks ran both on the EVACUATE host and on at least one healthy host.
     JobContext ctx = _driver.getJobContext(TaskUtil.getNamespacedJobName(wf, "job1"));
     Set<String> assigned = new HashSet<>();
     for (int p : ctx.getPartitionSet()) {

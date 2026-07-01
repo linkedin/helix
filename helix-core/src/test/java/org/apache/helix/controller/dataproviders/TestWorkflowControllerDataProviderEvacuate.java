@@ -126,9 +126,9 @@ public class TestWorkflowControllerDataProviderEvacuate {
   }
 
   /**
-   * Regression guard for the active-task-count throttle-path NPE, distinct from the instanceConfig
-   * fix above. A live EVACUATE task candidate must have a non-null active-task count after
-   * resetActiveTaskCount; otherwise AbstractTaskDispatcher's throttling math unboxes a null.
+   * A live EVACUATE task candidate must have a non-null active-task count after resetActiveTaskCount,
+   * else AbstractTaskDispatcher's throttling math unboxes a null. Also checks the getter defaults to 0
+   * for an unseeded instance.
    */
   @Test
   public void testActiveTaskCountSeededForEvacuateThrottlePath() {
@@ -146,9 +146,8 @@ public class TestWorkflowControllerDataProviderEvacuate {
 
     WorkflowControllerDataProvider provider = newProvider(configMap, liveInstances);
 
-    // Precondition: the evacuating live instance is a task-assignment candidate.
     Assert.assertTrue(provider.getEnabledLiveInstances().contains(evacuateLive),
-        "EVACUATE+live instance must be a task candidate (CICP-34004 fix)");
+        "EVACUATE+live instance must be a task candidate");
 
     provider.resetActiveTaskCount(new CurrentStateOutput());
 
@@ -158,10 +157,9 @@ public class TestWorkflowControllerDataProviderEvacuate {
     Assert.assertNotNull(provider.getParticipantActiveTaskCount(enabledLive),
         "Active task count for the ENABLE task candidate must not be null after resetActiveTaskCount");
 
-    // Defense in depth: the getter defaults to 0 for an unseeded instance.
     Assert.assertEquals(provider.getParticipantActiveTaskCount("never_registered_instance"),
         Integer.valueOf(0),
-        "getParticipantActiveTaskCount must default to 0 for an unseeded instance (CICP-34004)");
+        "getParticipantActiveTaskCount must default to 0 for an unseeded instance");
   }
 
   @Test
