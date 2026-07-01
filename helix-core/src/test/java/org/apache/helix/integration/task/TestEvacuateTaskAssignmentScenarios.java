@@ -93,6 +93,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   private static final String MASTER = "MASTER";
 
   private final List<String> _createdWorkflows = new ArrayList<>();
+  private final List<String> _createdResources = new ArrayList<>();
 
   @BeforeClass
   public void beforeClass() throws Exception {
@@ -276,6 +277,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     _gSetupTool.addResourceToCluster(CLUSTER_NAME, multiDb, numParts, MASTER_SLAVE_STATE_MODEL,
         IdealState.RebalanceMode.FULL_AUTO.name(), CrushEdRebalanceStrategy.class.getName());
     _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, multiDb, _numReplicas);
+    _createdResources.add(multiDb);
 
     // Every partition must have a MASTER; pick a host holding at least one and confirm other
     // partitions live on different (healthy) hosts, so the "blast radius" is meaningful.
@@ -293,6 +295,13 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
 
     // Cold cache: rebuild the controller while evacHost is already EVACUATE (the prod trigger).
     restartController();
+
+    // Re-confirm a MASTER is still pinned on the EVACUATE host after the restart, so the
+    // "task ran on evacHost" assertion below can't be a false negative if pinning ever slips.
+    Assert.assertTrue(
+        TestHelper.verify(() -> mastersByPartition(multiDb, numParts).containsValue(evacHost),
+            TestHelper.WAIT_DURATION),
+        "a MASTER must still be pinned on the EVACUATE host " + evacHost + " before the job starts");
 
     String wf = TestHelper.getTestMethodName();
     startTargetedMasterJob(wf, multiDb, QUICK_TASK_MS);
@@ -314,8 +323,6 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
         "a task must run on the EVACUATE MASTER host " + evacHost);
     Assert.assertTrue(assigned.stream().anyMatch(h -> h != null && !h.equals(evacHost)),
         "tasks for MASTERs on healthy hosts must also be scheduled (no whole-job abort)");
-
-    _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, multiDb);
   }
 
   /**
@@ -333,6 +340,14 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
       }
     }
     _createdWorkflows.clear();
+    for (String res : _createdResources) {
+      try {
+        _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, res);
+      } catch (Exception ignored) {
+        // Best-effort cleanup; the resource may already be gone.
+      }
+    }
+    _createdResources.clear();
     for (int i = 0; i < _numNodes; i++) {
       String name = _participants[i].getInstanceName();
       _gSetupTool.getClusterManagementTool()
