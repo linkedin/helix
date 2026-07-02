@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.controller.rebalancer.util.ResourceUsageCalculator;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
@@ -78,6 +79,14 @@ class PartialRebalanceRunner implements AutoCloseable {
   private final Runnable _partialRebalanceSuccessReporter;
   private final CountMetric _partialRebalanceCounter;
   private final LatencyMetric _partialRebalanceLatency;
+  // Sub-phase latencies of _partialRebalanceLatency: time spent building the cluster model vs.
+  // solving it with the assignment algorithm. Together they let a slow partial rebalance be
+  // attributed to either half.
+  private final LatencyMetric _partialRebalanceBuildLatency;
+  private final LatencyMetric _partialRebalanceSolveLatency;
+  // Count of replica placements in the new best possible assignment that differ from the previous
+  // one, i.e. the churn (state-transition blast radius) this partial rebalance introduces.
+  private final CountMetric _partialRebalanceReplicaMovementCounter;
 
   private boolean _asyncPartialRebalanceEnabled;
   private Future<Boolean> _asyncPartialRebalanceResult;
@@ -105,6 +114,18 @@ class PartialRebalanceRunner implements AutoCloseable {
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceLatencyGauge
             .name(),
         LatencyMetric.class);
+    _partialRebalanceBuildLatency = metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceBuildLatencyGauge
+            .name(),
+        LatencyMetric.class);
+    _partialRebalanceSolveLatency = metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceSolveLatencyGauge
+            .name(),
+        LatencyMetric.class);
+    _partialRebalanceReplicaMovementCounter = metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceReplicaMovementCounter
+            .name(),
+        CountMetric.class);
     _baselineDivergenceGauge = metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.BaselineDivergenceGauge.name(),
         BaselineDivergenceGauge.class);
@@ -199,6 +220,7 @@ class PartialRebalanceRunner implements AutoCloseable {
         _assignmentManager.getBestPossibleAssignment(_assignmentMetadataStore, currentStateOutput,
             resourceMap.keySet());
     ClusterModel clusterModel;
+    _partialRebalanceBuildLatency.startMeasuringLatency();
     try {
       clusterModel = ClusterModelProvider
           .generateClusterModelForPartialRebalance(clusterData, resourceMap, activeNodes,
@@ -207,8 +229,25 @@ class PartialRebalanceRunner implements AutoCloseable {
       throw new HelixRebalanceException("Failed to generate cluster model for partial rebalance.",
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
+    } finally {
+      _partialRebalanceBuildLatency.endMeasuringLatency();
     }
-    Map<String, ResourceAssignment> newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    _partialRebalanceSolveLatency.startMeasuringLatency();
+    Map<String, ResourceAssignment> newAssignment;
+    try {
+      newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    } finally {
+      _partialRebalanceSolveLatency.endMeasuringLatency();
+    }
+    boolean isBestPossibleChanged = _assignmentMetadataStore != null
+        && _assignmentMetadataStore.isBestPossibleChanged(newAssignment);
+    // Report how many replica placements changed relative to the previous best possible assignment.
+    // This best possible assignment is what actually drives state transitions, so this is the churn
+    // magnitude the cluster will experience. Skip the diff pass when nothing changed.
+    if (isBestPossibleChanged) {
+      _partialRebalanceReplicaMovementCounter.increment(ResourceUsageCalculator
+          .countReplicaMovements(currentBestPossibleAssignment, newAssignment));
+    }
 
     // Asynchronously report baseline divergence metric before persisting to metadata store,
     // just in case if persisting fails, we still have the metric.
@@ -223,7 +262,7 @@ class PartialRebalanceRunner implements AutoCloseable {
         currentBaseline, newAssignmentCopy);
 
     boolean bestPossibleUpdateSuccessful = false;
-    if (_assignmentMetadataStore != null && _assignmentMetadataStore.isBestPossibleChanged(newAssignment)) {
+    if (isBestPossibleChanged) {
       // This will not persist the new Best Possible Assignment into ZK. It will only update the in-memory cache.
       // If this is done successfully, the new Best Possible Assignment will be persisted into ZK the next time that
       // the pipeline is triggered. We schedule the pipeline to run below.
