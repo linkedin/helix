@@ -26,11 +26,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.slf4j.Logger;
@@ -60,6 +62,14 @@ public class ClusterContext {
   private final Map<String, ResourceAssignment> _baselineAssignment;
   // <ResourceName, ResourceAssignment contains the best possible assignment>
   private final Map<String, ResourceAssignment> _bestPossibleAssignment;
+  // Memoized per-(resource, partition) instance->state views derived from the immutable baseline
+  // and best possible assignments above. These lookups are invariant for the whole rebalance run,
+  // so caching them avoids recomputing the same map (and allocating a throwaway Partition key) for
+  // every candidate node while scoring a replica. Keyed: resourceName -> partitionName -> map.
+  private final Map<String, Map<String, Map<String, String>>> _baselineAssignmentStateMapCache =
+      new ConcurrentHashMap<>();
+  private final Map<String, Map<String, Map<String, String>>> _bestPossibleAssignmentStateMapCache =
+      new ConcurrentHashMap<>();
   // Estimate remaining capacity after assignment. Used to compute score when sorting replicas.
   private final Map<String, Long> _estimateUtilizationMap;
   // Cluster total capacity. Used to compute score when sorting replicas.
@@ -160,6 +170,46 @@ public class ClusterContext {
   public Map<String, ResourceAssignment> getBestPossibleAssignment() {
     return _bestPossibleAssignment == null || _bestPossibleAssignment.isEmpty() ? Collections.emptyMap()
         : _bestPossibleAssignment;
+  }
+
+  /**
+   * Returns the (instanceName -&gt; state) map for the given partition from the baseline assignment.
+   * The result is memoized for the lifetime of this {@link ClusterContext} because the baseline
+   * assignment does not change during a rebalance run. This lets partition-movement soft
+   * constraints avoid recomputing the same lookup once per candidate node.
+   * @return the instance-to-state map, or {@link Collections#emptyMap()} if the resource or
+   *         partition is absent from the baseline assignment.
+   */
+  public Map<String, String> getBaselineAssignmentStateMap(String resourceName,
+      String partitionName) {
+    return getCachedAssignmentStateMap(_baselineAssignmentStateMapCache, getBaselineAssignment(),
+        resourceName, partitionName);
+  }
+
+  /**
+   * Returns the (instanceName -&gt; state) map for the given partition from the best possible
+   * assignment. The result is memoized for the lifetime of this {@link ClusterContext} because the
+   * best possible assignment does not change during a rebalance run. This lets partition-movement
+   * soft constraints avoid recomputing the same lookup once per candidate node.
+   * @return the instance-to-state map, or {@link Collections#emptyMap()} if the resource or
+   *         partition is absent from the best possible assignment.
+   */
+  public Map<String, String> getBestPossibleAssignmentStateMap(String resourceName,
+      String partitionName) {
+    return getCachedAssignmentStateMap(_bestPossibleAssignmentStateMapCache,
+        getBestPossibleAssignment(), resourceName, partitionName);
+  }
+
+  private static Map<String, String> getCachedAssignmentStateMap(
+      Map<String, Map<String, Map<String, String>>> cache,
+      Map<String, ResourceAssignment> assignment, String resourceName, String partitionName) {
+    ResourceAssignment resourceAssignment = assignment.get(resourceName);
+    if (resourceAssignment == null) {
+      return Collections.emptyMap();
+    }
+    return cache.computeIfAbsent(resourceName, key -> new ConcurrentHashMap<>())
+        .computeIfAbsent(partitionName,
+            key -> resourceAssignment.getReplicaMap(new Partition(key)));
   }
 
   public Map<String, Map<String, Set<String>>> getAssignmentForFaultZoneMap() {
