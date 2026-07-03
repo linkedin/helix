@@ -984,6 +984,22 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testControllerPipelineStalledGaugeHonorsConfiguredThreshold() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledThresholdCluster");
+    monitor.setControllerEventQueueSizeGauge(2L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L); // 6s since last run
+    // With a 10s threshold, a 6s gap is not yet stalled.
+    monitor.setPipelineStallThresholdMs(10000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+    // Tightening the threshold to 3s makes the same 6s gap count as stalled.
+    monitor.setPipelineStallThresholdMs(3000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+    // A non-positive threshold is ignored (keeps the last valid value), so it stays stalled.
+    monitor.setPipelineStallThresholdMs(0L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+  }
+
+  @Test
   public void testWagedHardConstraintCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintCluster");
     Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 0L);

@@ -102,10 +102,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // GenericHelixController. Paired with the queue-size gauge to derive
   // ControllerPipelineStalledGauge. 0 until the first pipeline completes (treated as "no data").
   private AtomicLong _lastPipelineEndTimestamp = new AtomicLong(0L);
-  // A non-empty event queue whose pipeline has not completed within this many ms is treated as a
-  // wedged ("zombie leader") controller. Deliberately short for now; tune against the observed
-  // ClusterEventMonitor TotalProcessed durations.
-  private static final long PIPELINE_STALL_THRESHOLD_MS = 5000L;
+  // Stall threshold (ms): a non-empty event queue whose pipeline has not completed within this many
+  // ms is treated as a wedged ("zombie leader") controller. Sourced from ClusterConfig
+  // (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) and pushed by GenericHelixController each pipeline run;
+  // uses the default until first reported.
+  private static final long DEFAULT_PIPELINE_STALL_THRESHOLD_MS = 5000L;
+  private AtomicLong _pipelineStallThresholdMs =
+      new AtomicLong(DEFAULT_PIPELINE_STALL_THRESHOLD_MS);
 
   // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
   // enum value so reads on never-incremented categories return 0 instead of NPE.
@@ -1507,6 +1510,17 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _lastPipelineEndTimestamp.set(timestampMs);
   }
 
+  /**
+   * Set the wedged-controller stall threshold (ms), sourced from ClusterConfig
+   * (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) by GenericHelixController. Non-positive values are
+   * ignored so a misconfiguration cannot silently disable {@link #getControllerPipelineStalledGauge()}.
+   */
+  public void setPipelineStallThresholdMs(long thresholdMs) {
+    if (thresholdMs > 0) {
+      _pipelineStallThresholdMs.set(thresholdMs);
+    }
+  }
+
   @Override
   public long getRebalanceFailureCounter() {
     return _rebalanceFailureCount.get();
@@ -1536,7 +1550,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     // leader"). Computed lazily on read so it stays correct even if the pipeline thread is dead and
     // no setter runs.
     if (_controllerEventQueueSizeGauge.get() > 0 && lastEnd > 0
-        && (System.currentTimeMillis() - lastEnd) > PIPELINE_STALL_THRESHOLD_MS) {
+        && (System.currentTimeMillis() - lastEnd) > _pipelineStallThresholdMs.get()) {
       return 1L;
     }
     return 0L;

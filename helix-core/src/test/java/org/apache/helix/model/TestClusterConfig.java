@@ -49,6 +49,15 @@ public class TestClusterConfig {
   }
 
   @Test
+  public void testControllerPipelineStallThresholdMsDefaultAndRoundTrip() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    // Defaults to 5000ms when unset.
+    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 5000L);
+    testConfig.setControllerPipelineStallThresholdMs(30000L);
+    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 30000L);
+  }
+
+  @Test
   public void testGetCapacityKeysEmpty() {
     ClusterConfig testConfig = new ClusterConfig("testId");
     Assert.assertEquals(testConfig.getInstanceCapacityKeys(), Collections.emptyList());

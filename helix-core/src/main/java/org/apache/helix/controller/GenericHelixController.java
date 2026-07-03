@@ -977,6 +977,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         // Report DEFAULT-pipeline progress so ControllerPipelineStalledGauge can tell a wedged
         // controller (queue not draining) apart from an idle or busy-but-progressing one.
         _clusterStatusMonitor.setLastPipelineEndTimestamp(_lastPipelineEndTimestamp);
+        // Keep the stall threshold in sync with ClusterConfig so it can be tuned without a redeploy.
+        ClusterConfig stallThresholdConfig = dataProvider.getClusterConfig();
+        if (stallThresholdConfig != null) {
+          _clusterStatusMonitor.setPipelineStallThresholdMs(
+              stallThresholdConfig.getControllerPipelineStallThresholdMs());
+        }
         if (shouldCountTopologyEventAsProcessed(rebalanceFail, dataProvider)) {
           _clusterStatusMonitor.incrementTopologyChangeEventProcessed(event.getEventType());
         }
