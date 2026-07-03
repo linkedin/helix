@@ -112,6 +112,16 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getControllerEventQueueSizeGauge();
 
+  /**
+   * Reversible 0/1 wedged-controller ("zombie leader") gauge. 1 when the DEFAULT event queue is
+   * non-empty but no pipeline run has completed within the stall threshold, i.e. the controller
+   * holds events but is not processing them; 0 when idle (empty queue) or actively draining.
+   * Unlike the raw queue size, this is producer-rate-independent and does not false-positive on a
+   * busy-but-progressing controller. Gate EKG/alerts on {@code == 1}.
+   * @return 1 if the controller pipeline appears wedged, otherwise 0.
+   */
+  long getControllerPipelineStalledGauge();
+
   // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
   // Each WAGED HelixRebalanceException increments exactly one of these. The pair
   // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended

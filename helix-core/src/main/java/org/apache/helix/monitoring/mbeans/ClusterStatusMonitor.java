@@ -98,6 +98,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // dedups by event type); climbs when the controller still holds leadership but stops draining
   // events, surfacing the "zombie leader" failure mode.
   private AtomicLong _controllerEventQueueSizeGauge = new AtomicLong(0L);
+  // Wall-clock time (ms) of the last completed DEFAULT controller pipeline run, reported by
+  // GenericHelixController. Paired with the queue-size gauge to derive
+  // ControllerPipelineStalledGauge. 0 until the first pipeline completes (treated as "no data").
+  private AtomicLong _lastPipelineEndTimestamp = new AtomicLong(0L);
+  // A non-empty event queue whose pipeline has not completed within this many ms is treated as a
+  // wedged ("zombie leader") controller. Deliberately short for now; tune against the observed
+  // ClusterEventMonitor TotalProcessed durations.
+  private static final long PIPELINE_STALL_THRESHOLD_MS = 5000L;
 
   // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
   // enum value so reads on never-incremented categories return 0 instead of NPE.
@@ -928,6 +936,9 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       // re-registered bean after re-election (it would otherwise persist until the next
       // enqueue/dequeue refreshes it).
       _controllerEventQueueSizeGauge.set(0L);
+      // Reset the pipeline-progress timestamp for the same reason: a stale value from a prior
+      // leadership period must not make the re-registered bean report a spurious stall.
+      _lastPipelineEndTimestamp.set(0L);
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1487,6 +1498,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _controllerEventQueueSizeGauge.set(size);
   }
 
+  /**
+   * Report the wall-clock time (ms) of the most recent completed DEFAULT controller pipeline run.
+   * Consumed by {@link #getControllerPipelineStalledGauge()} to tell a wedged controller (queue
+   * not draining) apart from a healthy idle or busy-but-progressing one.
+   */
+  public void setLastPipelineEndTimestamp(long timestampMs) {
+    _lastPipelineEndTimestamp.set(timestampMs);
+  }
+
   @Override
   public long getRebalanceFailureCounter() {
     return _rebalanceFailureCount.get();
@@ -1505,6 +1525,21 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getControllerEventQueueSizeGauge() {
     return _controllerEventQueueSizeGauge.get();
+  }
+
+  @Override
+  public long getControllerPipelineStalledGauge() {
+    long lastEnd = _lastPipelineEndTimestamp.get();
+    // 0 = not stalled: either the queue is empty (idle is healthy) or no pipeline has completed yet
+    // (no baseline). 1 = a non-empty queue whose DEFAULT pipeline has not completed within the
+    // stall threshold, i.e. the controller holds events but is not draining them (wedged / "zombie
+    // leader"). Computed lazily on read so it stays correct even if the pipeline thread is dead and
+    // no setter runs.
+    if (_controllerEventQueueSizeGauge.get() > 0 && lastEnd > 0
+        && (System.currentTimeMillis() - lastEnd) > PIPELINE_STALL_THRESHOLD_MS) {
+      return 1L;
+    }
+    return 0L;
   }
 
   @Override

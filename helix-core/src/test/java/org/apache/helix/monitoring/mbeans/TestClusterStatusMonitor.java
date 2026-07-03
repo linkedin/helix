@@ -930,6 +930,60 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testControllerPipelineStalledGaugeStartsAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledStartCluster");
+    // No queue backlog and no pipeline completion reported yet: no baseline, so not stalled.
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenQueueEmpty() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledIdleCluster");
+    // Empty queue but a stale last-completion timestamp: an idle controller is healthy, not wedged.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 60000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenProgressing() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledBusyCluster");
+    // Non-empty queue but a pipeline completed just now: busy-but-progressing, not wedged.
+    monitor.setControllerEventQueueSizeGauge(5L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWithoutBaseline() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledNoBaselineCluster");
+    // Non-empty queue but no pipeline completion ever reported (timestamp 0): treated as no data.
+    monitor.setControllerEventQueueSizeGauge(5L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeOneWhenWedged() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledWedgedCluster");
+    // Non-empty queue whose pipeline last completed longer ago than the stall threshold (5s):
+    // the controller holds events but is not draining them, i.e. wedged.
+    monitor.setControllerEventQueueSizeGauge(3L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeResetsToZeroOnLeadershipChange() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledResetCluster");
+    monitor.setControllerEventQueueSizeGauge(3L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+    // reset() zeroes the progress timestamp so a re-registered bean does not report a stale stall.
+    monitor.reset();
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
   public void testWagedHardConstraintCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedHardConstraintCluster");
     Assert.assertEquals(monitor.getWagedHardConstraintFaultZoneFailureCounter(), 0L);
