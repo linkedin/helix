@@ -27,6 +27,11 @@ import java.util.Set;
 /**
  * A Node is an entity that can serve capacity recording purpose. It has a capacity and knowledge
  * of partitions assigned to it, so it can decide if it can receive additional partitions.
+ * <p>
+ * A single instance is shared across the per-resource best-possible-state computations that the
+ * controller runs in parallel (see {@code BestPossibleStateCalcStage}). The mutating and reading
+ * methods are therefore synchronized so the capacity check-and-reserve in
+ * {@link #canAdd(String, String)} stays atomic and its writes are visible across threads.
  */
 public class CapacityNode {
   private int _currentlyAssigned;
@@ -47,7 +52,7 @@ public class CapacityNode {
    * @param partition The partition to assign
    * @return true if the assignment can be made, false otherwise
    */
-  public boolean canAdd(String resource, String partition) {
+  public synchronized boolean canAdd(String resource, String partition) {
     if (_currentlyAssigned >= _capacity || (_partitionMap.containsKey(resource)
         && _partitionMap.get(resource).contains(partition))) {
       return false;
@@ -61,7 +66,7 @@ public class CapacityNode {
    * Set the capacity of this node
    * @param capacity  The capacity to set
    */
-  public void setCapacity(int capacity) {
+  public synchronized void setCapacity(int capacity) {
     _capacity = capacity;
   }
 
@@ -77,7 +82,7 @@ public class CapacityNode {
    * Get number of partitions currently assigned to this node
    * @return The number of partitions currently assigned to this node
    */
-  public int getCurrentlyAssigned() {
+  public synchronized int getCurrentlyAssigned() {
     return _currentlyAssigned;
   }
 
