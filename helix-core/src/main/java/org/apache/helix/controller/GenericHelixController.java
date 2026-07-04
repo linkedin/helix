@@ -1547,6 +1547,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             _resourceControlDataProvider.clearMonitoringRecords();
           }
           _clusterStatusMonitor.active();
+          // Seed the pipeline-progress baseline at monitoring-enable (leadership acquisition) so a
+          // controller that wedges before completing its very first pipeline run is still caught:
+          // with a 0 baseline the stalled gauge cannot fire. Cold-start slowness that briefly reads
+          // as stalled is covered by the EKG warm-up window and the configurable stall threshold.
+          _clusterStatusMonitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
         } else {
           logger.info("Disable clusterStatusMonitor for cluster " + _clusterName);
           // Reset will be done if (_isMonitoring = false) later, no matter if the state is changed or not.
