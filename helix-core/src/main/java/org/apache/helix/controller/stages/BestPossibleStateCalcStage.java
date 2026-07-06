@@ -21,6 +21,7 @@ package org.apache.helix.controller.stages;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -43,6 +44,7 @@ import org.apache.helix.controller.rebalancer.MaintenanceRebalancer;
 import org.apache.helix.controller.rebalancer.Rebalancer;
 import org.apache.helix.controller.rebalancer.SemiAutoRebalancer;
 import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
+import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -292,27 +294,43 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     Map<String, Resource> remainingResourceMap = new HashMap<>(resourceMap);
     remainingResourceMap.keySet().removeAll(calculatedResourceMap.keySet());
 
-    // Parallel computation for all the resources
-    List<Callable<Void>> computeBestPossibleStateTasks = new ArrayList<>();
-
+    // Resources that use the global per-instance partition limit (GreedyRebalanceStrategy with an
+    // active capacity scoreboard) share a single mutable CapacityNode set
+    // (ResourceControllerDataProvider#getSimpleCapacitySet). Computing them in parallel is
+    // non-deterministic: the order in which threads reserve capacity varies run-to-run, producing a
+    // different (though still valid) assignment each pipeline round and causing perpetual rebalance
+    // churn (and previously ConcurrentModificationException). They must be computed sequentially in
+    // a stable order so the assignment is deterministic across rounds.
+    List<Resource> globalCapacityResources = new ArrayList<>();
+    List<Resource> parallelResources = new ArrayList<>();
     for (Resource resource : remainingResourceMap.values()) {
-      computeBestPossibleStateTasks.add(() -> {
-        boolean result = false;
-        try {
-          result = computeSingleResourceBestPossibleState(
-              event, cache, currentStateOutput, resource, output);
-        } catch (HelixException ex) {
-          LogUtil.logError(logger, _eventId, String.format(
-              "Exception when calculating best possible state for %s",
-              resource.getResourceName()), ex);
-        }
+      if (usesGlobalCapacityScoreboard(resource, cache)) {
+        globalCapacityResources.add(resource);
+      } else {
+        parallelResources.add(resource);
+      }
+    }
 
-        if (!result) {
-          failureResources.add(resource.getResourceName());
-          LogUtil.logWarn(logger, _eventId, String.format(
-              "Failed to calculate best possible state for %s",
-              resource.getResourceName()));
-        }
+    if (logger.isDebugEnabled()) {
+      LogUtil.logDebug(logger, _eventId, String.format(
+          "Computing best possible state: %d global-capacity resource(s) sequentially, "
+              + "%d resource(s) in parallel.", globalCapacityResources.size(),
+          parallelResources.size()));
+    }
+
+    // Sequential, deterministic-order computation for the shared global-capacity resources.
+    globalCapacityResources.sort(Comparator.comparing(Resource::getResourceName));
+    for (Resource resource : globalCapacityResources) {
+      computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
+          output, failureResources);
+    }
+
+    // Parallel computation for the remaining resources.
+    List<Callable<Void>> computeBestPossibleStateTasks = new ArrayList<>();
+    for (Resource resource : parallelResources) {
+      computeBestPossibleStateTasks.add(() -> {
+        computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
+            output, failureResources);
         return null;
       });
     }
@@ -333,6 +351,47 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
                 failureResources.size()));
 
     return output;
+  }
+
+  /**
+   * A resource participates in the global per-instance partition-limit computation when the
+   * cluster-wide capacity scoreboard is active and the resource uses {@link GreedyRebalanceStrategy}.
+   * Such resources share a single mutable {@code CapacityNode} set and therefore must be computed
+   * sequentially and in a deterministic order to avoid non-deterministic assignments and churn.
+   */
+  private boolean usesGlobalCapacityScoreboard(Resource resource,
+      ResourceControllerDataProvider cache) {
+    if (cache.getSimpleCapacitySet() == null) {
+      return false;
+    }
+    IdealState idealState = cache.getIdealState(resource.getResourceName());
+    return idealState != null && GreedyRebalanceStrategy.class.getName()
+        .equals(idealState.getRebalanceStrategy());
+  }
+
+  /**
+   * Computes the best possible state for a single resource and records the resource as failed (in
+   * {@code failureResources}) when the computation does not succeed. Shared by the sequential
+   * global-capacity path and the parallel path.
+   */
+  private void computeAndRecordSingleResourceBestPossibleState(ClusterEvent event,
+      ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput, Resource resource,
+      BestPossibleStateOutput output, List<String> failureResources) {
+    boolean result = false;
+    try {
+      result =
+          computeSingleResourceBestPossibleState(event, cache, currentStateOutput, resource, output);
+    } catch (HelixException ex) {
+      LogUtil.logError(logger, _eventId, String
+          .format("Exception when calculating best possible state for %s",
+              resource.getResourceName()), ex);
+    }
+
+    if (!result) {
+      failureResources.add(resource.getResourceName());
+      LogUtil.logWarn(logger, _eventId, String
+          .format("Failed to calculate best possible state for %s", resource.getResourceName()));
+    }
   }
 
   private void updateRebalanceStatus(final boolean hasFailure, final List<String> failedResources,
