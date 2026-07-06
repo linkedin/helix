@@ -311,6 +311,13 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       }
     }
 
+    if (logger.isDebugEnabled()) {
+      LogUtil.logDebug(logger, _eventId, String.format(
+          "Computing best possible state: %d global-capacity resource(s) sequentially, "
+              + "%d resource(s) in parallel.", globalCapacityResources.size(),
+          parallelResources.size()));
+    }
+
     // Sequential, deterministic-order computation for the shared global-capacity resources.
     globalCapacityResources.sort(Comparator.comparing(Resource::getResourceName));
     for (Resource resource : globalCapacityResources) {
