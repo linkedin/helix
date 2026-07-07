@@ -21,6 +21,7 @@ package org.apache.helix.integration.controller;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
@@ -204,7 +205,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     for (int i = 0; i < 3; i++) {
       _participants[i].syncStop();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 0, 2000L);
+    Assert.assertTrue(TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, TestHelper.WAIT_DURATION));
 
     // Check that the cluster is in maintenance
     MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -216,7 +218,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       _participants[i] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
       _participants[i].syncStart();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 3, 2000L);
+    Assert.assertTrue(TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, TestHelper.WAIT_DURATION));
 
     // Check that the cluster is no longer in maintenance (auto-recovered)
     maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -233,7 +236,11 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     for (int i = 0; i < 2; i++) {
       _participants[i].syncStop();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 0, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      List<String> liveInstances = _dataAccessor.getChildNames(_keyBuilder.liveInstances());
+      return !liveInstances.contains(PARTICIPANT_PREFIX + "_" + _startPort)
+          && !liveInstances.contains(PARTICIPANT_PREFIX + "_" + (_startPort + 1));
+    }, TestHelper.WAIT_DURATION));
 
     // Now bring up all instances
     for (int i = 0; i < 3; i++) {
@@ -241,7 +248,12 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       _participants[i] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
       _participants[i].syncStart();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 3, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      List<String> liveInstances = _dataAccessor.getChildNames(_keyBuilder.liveInstances());
+      return liveInstances.contains(PARTICIPANT_PREFIX + "_" + _startPort)
+          && liveInstances.contains(PARTICIPANT_PREFIX + "_" + (_startPort + 1))
+          && liveInstances.contains(PARTICIPANT_PREFIX + "_" + (_startPort + 2));
+    }, TestHelper.WAIT_DURATION));
 
     // The cluster should still be in maintenance because it was enabled manually
     MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -262,7 +274,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     for (int i = 0; i < 3; i++) {
       _participants[i].syncStop();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 0, 2000L);
+    Assert.assertTrue(TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, TestHelper.WAIT_DURATION));
 
     // Check that maintenance signal was triggered by Controller
     MaintenanceSignal maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -275,7 +288,11 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
         "TRIGGERED_BY", "SHOULD NOT BE RECORDED");
     _gSetupTool.getClusterManagementTool().manuallyEnableMaintenanceMode(CLUSTER_NAME, true, null,
         customFields);
-    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      MaintenanceSignal signal = _dataAccessor.getProperty(_keyBuilder.maintenance());
+      return signal != null
+          && signal.getTriggeringEntity() == MaintenanceSignal.TriggeringEntity.USER;
+    }, TestHelper.WAIT_DURATION));
 
     // Check that maintenance mode has successfully overwritten with the right TRIGGERED_BY field
     maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -301,7 +318,11 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     // Manually exit maintenance mode
     _gSetupTool.getClusterManagementTool().manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null,
         null);
-    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      MaintenanceSignal signal = _dataAccessor.getProperty(_keyBuilder.maintenance());
+      return signal != null
+          && signal.getTriggeringEntity() == MaintenanceSignal.TriggeringEntity.CONTROLLER;
+    }, TestHelper.WAIT_DURATION));
 
     // Since 3 instances are missing, the cluster should have gone back under maintenance
     // automatically
@@ -318,7 +339,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       _participants[i] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
       _participants[i].syncStart();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 3, 2000L);
+    Assert.assertTrue(TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, TestHelper.WAIT_DURATION));
 
     // Check that the cluster exited maintenance
     maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -328,7 +350,8 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     for (int i = 0; i < 3; i++) {
       _participants[i].syncStop();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 0, 2000L);
+    Assert.assertTrue(TestHelper.verify(
+        () -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, TestHelper.WAIT_DURATION));
 
     // Check that cluster is back under maintenance
     maintenanceSignal = _dataAccessor.getProperty(_keyBuilder.maintenance());
@@ -344,9 +367,9 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     // automatically because the instances currently have more than 1
     clusterConfig.setMaxPartitionsPerInstance(1);
     _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
-    TestHelper.verify(
+    Assert.assertTrue(TestHelper.verify(
         () -> ((ClusterConfig) _dataAccessor.getProperty(_keyBuilder.clusterConfig())).getMaxPartitionsPerInstance() == 1,
-        2000L);
+        TestHelper.WAIT_DURATION));
 
 
     // Now bring up all instances
@@ -355,7 +378,12 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
       _participants[i] = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instanceName);
       _participants[i].syncStart();
     }
-    TestHelper.verify(() -> _dataAccessor.getChildNames(_keyBuilder.liveInstances()).size() == 3, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      List<String> liveInstances = _dataAccessor.getChildNames(_keyBuilder.liveInstances());
+      return liveInstances.contains(PARTICIPANT_PREFIX + "_" + _startPort)
+          && liveInstances.contains(PARTICIPANT_PREFIX + "_" + (_startPort + 1))
+          && liveInstances.contains(PARTICIPANT_PREFIX + "_" + (_startPort + 2));
+    }, TestHelper.WAIT_DURATION));
 
     // Check that the cluster is still in maintenance (should not have auto-exited because it would
     // fail the MaxPartitionsPerInstance check)
@@ -432,7 +460,12 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     clusterConfig.setMaxPartitionsPerInstance(-1);
     _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
 
-    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      ControllerHistory h = _dataAccessor.getProperty(_keyBuilder.controllerLeaderHistory());
+      return "EXIT".equals(convertStringToMap(
+          h.getMaintenanceHistoryList().get(h.getMaintenanceHistoryList().size() - 1))
+          .get("OPERATION_TYPE"));
+    }, TestHelper.WAIT_DURATION));
 
     // Now check that the cluster exited maintenance
     // EXIT, CONTROLLER, for MAX_PARTITION_PER_INSTANCE_EXCEEDED
@@ -448,7 +481,12 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     Map<String, String> customFieldMap = ImmutableMap.of("k1", "v1", "k2", "v2");
     _gSetupTool.getClusterManagementTool()
         .manuallyEnableMaintenanceMode(CLUSTER_NAME, true, TestHelper.getTestMethodName(), customFieldMap);
-    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) != null, 2000L);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      ControllerHistory h = _dataAccessor.getProperty(_keyBuilder.controllerLeaderHistory());
+      Map<String, String> last = convertStringToMap(
+          h.getMaintenanceHistoryList().get(h.getMaintenanceHistoryList().size() - 1));
+      return "ENTER".equals(last.get("OPERATION_TYPE")) && "USER".equals(last.get("TRIGGERED_BY"));
+    }, TestHelper.WAIT_DURATION));
 
     // ENTER, USER, for reason TEST, no internalReason
     history = _dataAccessor.getProperty(_keyBuilder.controllerLeaderHistory());
