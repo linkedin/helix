@@ -256,10 +256,10 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   /**
    * A targeted task already RUNNING on the EVACUATE MASTER keeps running across a controller failover
    * and the workflow still completes. This is a regression guard, not an NPE reproducer: an INIT/RUNNING
-   * task seeds its own host in {@code resetActiveTaskCount} via {@code fillActiveTaskCount}, so the
-   * active-task-count entry is present even on the buggy code and this path never NPEs (verified: it
-   * passes with the fix reverted). The NPE needs an EVACUATE candidate with no running task at assignment
-   * time - see {@link #testTargetedJobScheduledByNewLeaderAfterFailover}.
+   * task seeds its own host in {@code resetActiveTaskCount} via {@code fillActiveTaskCount}, so its
+   * active-task-count entry is always present and this path never hits the unseeded-candidate NPE. That
+   * NPE needs an EVACUATE candidate with no running task at assignment time - see {@link
+   * #testTargetedJobScheduledByNewLeaderAfterFailover}.
    */
   @Test
   public void testInFlightTaskOnEvacuateMasterSurvivesControllerFailover() throws Exception {
@@ -299,11 +299,11 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   /**
    * The scheduling half of a failover: a targeted job queued while the controller is down must be
    * assigned by the newly elected leader onto the idle EVACUATE MASTER. The new leader builds a cold
-   * cache while the node is already EVACUATE and no task is running there, so the active-task-count map
-   * leaves it unseeded on the buggy code, {@code getParticipantActiveTaskCount} returns null, and the
-   * first assignment NPEs (swallowed as a WARN, job never starts). Fails with the fix reverted, passes
-   * with it. Complements {@link #testInFlightTaskOnEvacuateMasterSurvivesControllerFailover}, where an
-   * already-running task self-seeds its host and so survives regardless of the fix.
+   * cache while the node is already EVACUATE and no task is running there; if the active-task-count map
+   * leaves that candidate unseeded, {@code getParticipantActiveTaskCount} returns null and the first
+   * assignment NPEs (swallowed as a WARN, so the job never starts). Complements {@link
+   * #testInFlightTaskOnEvacuateMasterSurvivesControllerFailover}, where an already-running task
+   * self-seeds its host and so survives without depending on candidate seeding at all.
    */
   @Test
   public void testTargetedJobScheduledByNewLeaderAfterFailover() throws Exception {
