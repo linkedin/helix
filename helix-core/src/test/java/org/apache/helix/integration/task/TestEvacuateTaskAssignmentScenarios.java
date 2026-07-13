@@ -63,8 +63,10 @@ import org.testng.annotations.Test;
  *       MASTER job, and assert the outcome. Adding such a scenario = adding one row.</li>
  *   <li><b>Dedicated {@code @Test} methods</b> for odd-shaped scenarios that need extra steps a single
  *       matrix row cannot express: throttle-capacity accounting on a lone EVACUATE candidate, a
- *       targeted job that runs on the EVACUATE MASTER and completes after the evacuation resolves, and
- *       a multi-partition check that one MASTER on an EVACUATE host does not abort the whole job.</li>
+ *       targeted job that runs on the EVACUATE MASTER and completes after the evacuation resolves,
+ *       failover coverage (a running task surviving a leadership change, and a queued job scheduled by
+ *       the new leader onto the EVACUATE MASTER), and a multi-partition check that one MASTER on an
+ *       EVACUATE host does not abort the whole job.</li>
  * </ul>
  *
  * <p>The controller restart in every EVACUATE scenario is essential: the failure only reproduces when
@@ -87,6 +89,8 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   private static final long QUICK_TASK_MS = 1_000L;
   // Longer task so the migration scenario can observe the task RUNNING during the hand-off.
   private static final long RUNNING_TASK_MS = 5_000L;
+  // Long enough that the task is still in-flight while the controller fails over and rebuilds its cache.
+  private static final long FAILOVER_TASK_MS = 30_000L;
   private static final String MASTER = "MASTER";
 
   private final List<String> _createdWorkflows = new ArrayList<>();
@@ -247,6 +251,85 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
         _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
     Assert.assertEquals(state, TaskState.COMPLETED,
         "Targeted job must complete across the MASTER hand-off, got " + state);
+  }
+
+  /**
+   * A targeted task already RUNNING on the EVACUATE MASTER keeps running across a controller failover
+   * and the workflow still completes. This is a regression guard, not an NPE reproducer: an INIT/RUNNING
+   * task seeds its own host in {@code resetActiveTaskCount} via {@code fillActiveTaskCount}, so the
+   * active-task-count entry is present even on the buggy code and this path never NPEs (verified: it
+   * passes with the fix reverted). The NPE needs an EVACUATE candidate with no running task at assignment
+   * time - see {@link #testTargetedJobScheduledByNewLeaderAfterFailover}.
+   */
+  @Test
+  public void testInFlightTaskOnEvacuateMasterSurvivesControllerFailover() throws Exception {
+    String tgtDb = WorkflowGenerator.DEFAULT_TGT_DB;
+    String partition = tgtDb + "_0";
+
+    String master = pinMasterUnderOperation(tgtDb, partition, InstanceOperation.EVACUATE);
+
+    // Start a long targeted job so the task is still RUNNING when the controller fails over.
+    String wf = TestHelper.getTestMethodName();
+    startTargetedMasterJob(wf, tgtDb, FAILOVER_TASK_MS);
+    String namespacedJob = TaskUtil.getNamespacedJobName(wf, "job1");
+
+    Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, master) == 1,
+        TestHelper.WAIT_DURATION),
+        "targeted task must be RUNNING on the EVACUATE MASTER " + master + " before the failover");
+
+    // Controller failover: the new leader rebuilds a cold cache while the node is already EVACUATE and
+    // the task is in-flight.
+    restartController();
+
+    // The running task's assignment must not be dropped by an NPE on the unseeded EVACUATE host.
+    Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, master) == 1,
+        TestHelper.WAIT_DURATION),
+        "task must still be RUNNING on the EVACUATE MASTER " + master + " right after the failover");
+
+    TaskState state =
+        _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
+    Assert.assertEquals(state, TaskState.COMPLETED,
+        "in-flight targeted job on the EVACUATE MASTER must survive controller failover, got " + state);
+
+    JobContext ctx = _driver.getJobContext(namespacedJob);
+    Assert.assertEquals(ctx.getAssignedParticipant(0), master,
+        "task must remain assigned to the EVACUATE MASTER " + master + " across the failover");
+  }
+
+  /**
+   * The scheduling half of a failover: a targeted job queued while the controller is down must be
+   * assigned by the newly elected leader onto the idle EVACUATE MASTER. The new leader builds a cold
+   * cache while the node is already EVACUATE and no task is running there, so the active-task-count map
+   * leaves it unseeded on the buggy code, {@code getParticipantActiveTaskCount} returns null, and the
+   * first assignment NPEs (swallowed as a WARN, job never starts). Fails with the fix reverted, passes
+   * with it. Complements {@link #testInFlightTaskOnEvacuateMasterSurvivesControllerFailover}, where an
+   * already-running task self-seeds its host and so survives regardless of the fix.
+   */
+  @Test
+  public void testTargetedJobScheduledByNewLeaderAfterFailover() throws Exception {
+    String tgtDb = WorkflowGenerator.DEFAULT_TGT_DB;
+    String partition = tgtDb + "_0";
+
+    String master = pinMasterUnderOperation(tgtDb, partition, InstanceOperation.EVACUATE);
+
+    // Kill the current leader, queue the targeted job while there is no controller, then elect a new
+    // leader whose cold cache is built with the node already EVACUATE and no task running on it.
+    if (_controller != null && _controller.isConnected()) {
+      _controller.syncStop();
+    }
+    String wf = TestHelper.getTestMethodName();
+    startTargetedMasterJob(wf, tgtDb, QUICK_TASK_MS);
+    restartController();
+
+    TaskState state =
+        _driver.pollForWorkflowState(wf, WORKFLOW_TIMEOUT_MS, TaskState.COMPLETED, TaskState.FAILED);
+    Assert.assertEquals(state, TaskState.COMPLETED,
+        "new leader must schedule the queued targeted job onto the EVACUATE MASTER " + master
+            + " after failover, got " + state);
+
+    JobContext ctx = _driver.getJobContext(TaskUtil.getNamespacedJobName(wf, "job1"));
+    Assert.assertEquals(ctx.getAssignedParticipant(0), master,
+        "task must run on the EVACUATE MASTER " + master + " after the failover");
   }
 
   /**
