@@ -255,11 +255,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
 
   /**
    * A targeted task already RUNNING on the EVACUATE MASTER keeps running across a controller failover
-   * and the workflow still completes. This is a regression guard, not an NPE reproducer: an INIT/RUNNING
-   * task seeds its own host in {@code resetActiveTaskCount} via {@code fillActiveTaskCount}, so its
-   * active-task-count entry is always present and this path never hits the unseeded-candidate NPE. That
-   * NPE needs an EVACUATE candidate with no running task at assignment time - see {@link
-   * #testTargetedJobScheduledByNewLeaderAfterFailover}.
+   * and the workflow still completes.
    */
   @Test
   public void testInFlightTaskOnEvacuateMasterSurvivesControllerFailover() throws Exception {
@@ -281,7 +277,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     // the task is in-flight.
     restartController();
 
-    // The running task's assignment must not be dropped by an NPE on the unseeded EVACUATE host.
+    // The task must still be RUNNING on the same MASTER once the new leader has taken over.
     Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, master) == 1,
         TestHelper.WAIT_DURATION),
         "task must still be RUNNING on the EVACUATE MASTER " + master + " right after the failover");
@@ -297,13 +293,8 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
   }
 
   /**
-   * The scheduling half of a failover: a targeted job queued while the controller is down must be
-   * assigned by the newly elected leader onto the idle EVACUATE MASTER. The new leader builds a cold
-   * cache while the node is already EVACUATE and no task is running there; if the active-task-count map
-   * leaves that candidate unseeded, {@code getParticipantActiveTaskCount} returns null and the first
-   * assignment NPEs (swallowed as a WARN, so the job never starts). Complements {@link
-   * #testInFlightTaskOnEvacuateMasterSurvivesControllerFailover}, where an already-running task
-   * self-seeds its host and so survives without depending on candidate seeding at all.
+   * A targeted job queued while the controller is down must be scheduled by the newly elected leader
+   * onto the idle EVACUATE MASTER, and the workflow completes.
    */
   @Test
   public void testTargetedJobScheduledByNewLeaderAfterFailover() throws Exception {
