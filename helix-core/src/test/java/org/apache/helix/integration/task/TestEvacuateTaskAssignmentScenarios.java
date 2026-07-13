@@ -198,7 +198,7 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
     Assert.assertTrue(TestHelper.verify(() -> countRunningOn(namespacedJob, evacuateHost) == capacity,
         TestHelper.WAIT_DURATION),
         "EVACUATE host must run exactly " + capacity + " concurrent tasks (throttle correctness)");
-    Assert.assertEquals(countRunning(namespacedJob), capacity,
+    Assert.assertEquals(countRunningOn(namespacedJob, null), capacity,
         "No task may run anywhere except within the EVACUATE host's capacity");
 
     _driver.stop(wf);
@@ -459,10 +459,6 @@ public class TestEvacuateTaskAssignmentScenarios extends TaskTestBase {
       }
     }
     return res;
-  }
-
-  private int countRunning(String namespacedJob) {
-    return countRunningOn(namespacedJob, null);
   }
 
   private int countRunningOn(String namespacedJob, String instance) {
