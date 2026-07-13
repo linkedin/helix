@@ -19,14 +19,11 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  * under the License.
  */
 
-import java.util.Collections;
 import java.util.Map;
 
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
-import org.apache.helix.model.Partition;
-import org.apache.helix.model.ResourceAssignment;
 
 /**
  * Evaluate the proposed assignment according to the potential partition movements cost.
@@ -53,16 +50,6 @@ abstract class AbstractPartitionMovementConstraint extends SoftConstraint {
   @Override
   protected abstract double getAssignmentScore(AssignableNode node, AssignableReplica replica,
       ClusterContext clusterContext);
-
-  protected Map<String, String> getStateMap(AssignableReplica replica,
-      Map<String, ResourceAssignment> assignment) {
-    String resourceName = replica.getResourceName();
-    String partitionName = replica.getPartitionName();
-    if (assignment == null || !assignment.containsKey(resourceName)) {
-      return Collections.emptyMap();
-    }
-    return assignment.get(resourceName).getReplicaMap(new Partition(partitionName));
-  }
 
   protected double calculateAssignmentScore(String logicalId, String state,
       Map<String, String> instanceToStateMap) {
