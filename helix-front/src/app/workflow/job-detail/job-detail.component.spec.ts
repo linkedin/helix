@@ -48,4 +48,35 @@ describe('JobDetailComponent', () => {
   it('should create', () => {
     expect(component).toBeTruthy();
   });
+
+  it('taskSummary should be null when there is no summary field', () => {
+    component.job = { context: { simpleFields: {} } } as any;
+    expect(component.taskSummary).toBeNull();
+    expect(component.hasTaskFailures).toBe(false);
+  });
+
+  it('taskSummary should parse the TASK_STATUS_SUMMARY JSON string', () => {
+    component.job = {
+      context: {
+        simpleFields: {
+          TASK_STATUS_SUMMARY:
+            '{"total":6,"completed":4,"failed":2,"other":0,"byState":{"COMPLETED":4,"TASK_ABORTED":1,"TASK_ERROR":1},"failedTasks":[3,5]}',
+        },
+      },
+    } as any;
+    const summary = component.taskSummary;
+    expect(summary).not.toBeNull();
+    expect(summary.total).toBe(6);
+    expect(summary.completed).toBe(4);
+    expect(summary.failed).toBe(2);
+    expect(summary.failedTasks).toEqual([3, 5]);
+    expect(component.hasTaskFailures).toBe(true);
+  });
+
+  it('taskSummary should return null for malformed JSON', () => {
+    component.job = {
+      context: { simpleFields: { TASK_STATUS_SUMMARY: 'not-json' } },
+    } as any;
+    expect(component.taskSummary).toBeNull();
+  });
 });

@@ -1,0 +1,38 @@
+.task-summary {
+  padding: 16px;
+
+  .summary-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+
+    .chip {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 13px;
+      background: #eeeeee;
+
+      &.completed {
+        background: #e6f4ea;
+        color: #1e7e34;
+      }
+
+      &.failed.has-failures {
+        background: #fdecea;
+        color: #c5221f;
+        font-weight: 600;
+      }
+    }
+  }
+
+  .failed-tasks {
+    margin-bottom: 12px;
+    color: #c5221f;
+  }
+
+  .no-summary {
+    color: rgba(0, 0, 0, 0.54);
+    font-style: italic;
+  }
+}

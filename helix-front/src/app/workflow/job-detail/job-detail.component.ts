@@ -24,4 +24,28 @@ export class JobDetailComponent implements OnInit {
       () => (this.isLoading = false)
     );
   }
+
+  // Aggregated per-task status summary. Helix writes it as a JSON string into the
+  // JobContext simple field TASK_STATUS_SUMMARY when the job reaches a terminal state. Surfaces
+  // partial failures even when the job's own state flag is COMPLETED.
+  get taskSummary(): any {
+    const raw =
+      this.job &&
+      this.job.context &&
+      this.job.context.simpleFields &&
+      this.job.context.simpleFields.TASK_STATUS_SUMMARY;
+    if (!raw) {
+      return null;
+    }
+    try {
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  get hasTaskFailures(): boolean {
+    const summary = this.taskSummary;
+    return !!summary && summary.failed > 0;
+  }
 }

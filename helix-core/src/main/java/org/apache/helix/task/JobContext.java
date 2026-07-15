@@ -20,22 +20,30 @@ package org.apache.helix.task;
  */
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.apache.helix.HelixProperty;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Provides a typed interface to the context information stored by {@link TaskRebalancer} in the
  * Helix property store.
  */
 public class JobContext extends HelixProperty {
+  private static final Logger LOG = LoggerFactory.getLogger(JobContext.class);
+  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
   private enum ContextProperties {
     START_TIME, // Time at which this JobContext was created
     STATE,
@@ -48,6 +56,9 @@ public class JobContext extends HelixProperty {
     INFO,
     NAME,
     EXECUTION_START_TIME, // Time at which the first task of this job got scheduled
+    TASK_STATUS_SUMMARY, // Aggregated per-task terminal status summary (JSON), set when the job
+                         // reaches a terminal state. Surfaces partial failures even when the job
+                         // itself is COMPLETED (e.g. FailureThreshold set high so all tasks run).
   }
 
   // Note: This field needs to be set if any of the job context fields have been changed.
@@ -335,6 +346,73 @@ public class JobContext extends HelixProperty {
       return WorkflowContext.NOT_STARTED;
     }
     return Long.parseLong(tStr);
+  }
+
+  /**
+   * Task partition states that represent a terminal failure (the task was given up and will not be
+   * retried, or it errored/timed out). Used to compute the aggregated task status summary.
+   */
+  private static boolean isFailedState(TaskPartitionState state) {
+    return state == TaskPartitionState.TASK_ERROR || state == TaskPartitionState.TASK_ABORTED
+        || state == TaskPartitionState.TIMED_OUT || state == TaskPartitionState.ERROR;
+  }
+
+  /**
+   * Aggregates the state of every scheduled task in this job into a compact, job-level summary and
+   * stores it as a simple field (JSON). This lets operators observe partial failures even when the
+   * job's own status flag is COMPLETED, which happens when FailureThreshold is set high so that all
+   * partition tasks are allowed to run to completion. Intended to be called by the controller when
+   * the job reaches a terminal state (completed / failed / timed out).
+   * The summary shape is:
+   * {@code {"total":N,"completed":X,"failed":Y,"other":Z,"byState":{...},"failedTasks":[...]}}.
+   */
+  public void updateTaskStatusSummary() {
+    Set<Integer> partitions = getPartitionSet();
+    Map<String, Integer> byState = new TreeMap<>();
+    List<Integer> failedTasks = Lists.newArrayList();
+    int completed = 0;
+    int failed = 0;
+    for (int p : partitions) {
+      TaskPartitionState state = getPartitionState(p);
+      String key = (state == null) ? "UNSCHEDULED" : state.name();
+      byState.merge(key, 1, Integer::sum);
+      if (state == TaskPartitionState.COMPLETED) {
+        completed++;
+      } else if (isFailedState(state)) {
+        failed++;
+        failedTasks.add(p);
+      }
+    }
+    failedTasks.sort(null);
+
+    Map<String, Object> summary = new LinkedHashMap<>();
+    summary.put("total", partitions.size());
+    summary.put("completed", completed);
+    summary.put("failed", failed);
+    summary.put("other", partitions.size() - completed - failed);
+    summary.put("byState", byState);
+    summary.put("failedTasks", failedTasks);
+
+    try {
+      String json = OBJECT_MAPPER.writeValueAsString(summary);
+      if (!json.equals(getTaskStatusSummary())) {
+        _record.setSimpleField(ContextProperties.TASK_STATUS_SUMMARY.name(), json);
+        markJobContextAsModified();
+      }
+    } catch (JsonProcessingException e) {
+      // The summary is a best-effort convenience field; never let it disrupt the job status
+      // update path.
+      LOG.warn("Failed to serialize task status summary for job {}", getName(), e);
+    }
+  }
+
+  /**
+   * @return the aggregated per-task status summary as a JSON string, or null if it has not been
+   *         computed yet (i.e. the job has not reached a terminal state). See
+   *         {@link #updateTaskStatusSummary()} for the shape.
+   */
+  public String getTaskStatusSummary() {
+    return _record.getSimpleField(ContextProperties.TASK_STATUS_SUMMARY.name());
   }
 
   /**
