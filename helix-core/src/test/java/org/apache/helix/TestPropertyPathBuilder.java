@@ -59,5 +59,13 @@ public class TestPropertyPathBuilder {
 
     actual = PropertyPathBuilder.clusterStatus("test_cluster");
     Assert.assertEquals(actual, "/test_cluster/STATUS/CLUSTER/test_cluster");
+
+    actual = PropertyPathBuilder.getPath(PropertyType.CONVERGENCESTATUS, "test_cluster");
+    Assert.assertEquals(actual,
+        "/test_cluster/PROPERTYSTORE/HELIX_CONVERGENCE_STATUS");
+    actual =
+        PropertyPathBuilder.getPath(PropertyType.CONVERGENCESTATUS, "test_cluster", "resource");
+    Assert.assertEquals(actual,
+        "/test_cluster/PROPERTYSTORE/HELIX_CONVERGENCE_STATUS/resource");
   }
 }

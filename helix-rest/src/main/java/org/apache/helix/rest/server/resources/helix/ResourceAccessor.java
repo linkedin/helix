@@ -45,12 +45,17 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
@@ -169,6 +174,33 @@ public class ResourceAccessor extends AbstractHelixResource {
       @PathParam("resourceName") String resourceName) {
 
     return JSONRepresentation(computePartitionHealth(clusterId, resourceName));
+  }
+
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{resourceName}/convergence")
+  public Response getResourceConvergence(@PathParam("clusterId") String clusterId,
+      @PathParam("resourceName") String resourceName) {
+    HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    ConvergenceStatus report =
+        dataAccessor.getProperty(keyBuilder.convergenceStatus(resourceName));
+    ConvergenceStatus clusterReport =
+        dataAccessor.getProperty(keyBuilder.convergenceStatus());
+    LiveInstance leader = dataAccessor.getProperty(keyBuilder.controllerLeader());
+    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+    boolean monitoringEnabled =
+        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled();
+    if (report == null
+        && ConvergenceStatusResponseMapper
+            .isFreshClusterReport(clusterReport, leader, monitoringEnabled)) {
+      return notFound();
+    }
+    return JSONRepresentation(
+        ConvergenceStatusResponseMapper
+            .mapResource(clusterId, resourceName, report, clusterReport, leader,
+                monitoringEnabled));
   }
 
   @ResponseMetered(name = HttpConstants.READ_REQUEST)

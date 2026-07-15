@@ -26,6 +26,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.helix.model.ClusterStatus;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.CustomizedView;
@@ -68,6 +69,7 @@ public class PropertyPathBuilder {
     typeToClassMapping.put(PropertyType.PAUSE, PauseSignal.class);
     typeToClassMapping.put(PropertyType.MAINTENANCE, MaintenanceSignal.class);
     typeToClassMapping.put(PropertyType.STATUS, ClusterStatus.class);
+    typeToClassMapping.put(PropertyType.CONVERGENCESTATUS, ConvergenceStatus.class);
     // TODO: Below must handle the case for future versions of Task Framework with a different path
     // structure
     typeToClassMapping.put(PropertyType.WORKFLOWCONTEXT, WorkflowContext.class);
@@ -94,6 +96,10 @@ public class PropertyPathBuilder {
     addEntry(PropertyType.TARGETEXTERNALVIEW, 1, "/{clusterName}/TARGETEXTERNALVIEW");
     addEntry(PropertyType.TARGETEXTERNALVIEW, 2,
         "/{clusterName}/TARGETEXTERNALVIEW/{resourceName}");
+    addEntry(PropertyType.CONVERGENCESTATUS, 1,
+        "/{clusterName}/PROPERTYSTORE/HELIX_CONVERGENCE_STATUS");
+    addEntry(PropertyType.CONVERGENCESTATUS, 2,
+        "/{clusterName}/PROPERTYSTORE/HELIX_CONVERGENCE_STATUS/{resourceName}");
     addEntry(PropertyType.CUSTOMIZEDVIEW, 1, "/{clusterName}/CUSTOMIZEDVIEW");
     addEntry(PropertyType.CUSTOMIZEDVIEW, 2, "/{clusterName}/CUSTOMIZEDVIEW/{resourceName}");
     addEntry(PropertyType.CUSTOMIZEDVIEW, 3,

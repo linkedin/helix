@@ -26,6 +26,7 @@ import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterConstraints;
 import org.apache.helix.model.ClusterStatus;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.CustomizedState;
@@ -54,6 +55,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.apache.helix.PropertyType.CONFIGS;
+import static org.apache.helix.PropertyType.CONVERGENCESTATUS;
 import static org.apache.helix.PropertyType.CONTROLLER;
 import static org.apache.helix.PropertyType.CURRENTSTATES;
 import static org.apache.helix.PropertyType.CUSTOMIZEDSTATES;
@@ -753,6 +755,23 @@ public class PropertyKey {
      */
     public PropertyKey targetExternalView(String resourceName) {
       return new PropertyKey(TARGETEXTERNALVIEW, ExternalView.class, _clusterName, resourceName);
+    }
+
+    /**
+     * Get the cluster convergence status root.
+     * @return {@link PropertyKey}
+     */
+    public PropertyKey convergenceStatus() {
+      return new PropertyKey(CONVERGENCESTATUS, ConvergenceStatus.class, _clusterName);
+    }
+
+    /**
+     * Get the convergence status of a resource.
+     * @param resourceName resource name
+     * @return {@link PropertyKey}
+     */
+    public PropertyKey convergenceStatus(String resourceName) {
+      return new PropertyKey(CONVERGENCESTATUS, ConvergenceStatus.class, _clusterName, resourceName);
     }
 
     /**

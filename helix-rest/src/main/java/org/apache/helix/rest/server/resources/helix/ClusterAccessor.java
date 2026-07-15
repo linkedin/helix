@@ -58,6 +58,7 @@ import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CustomizedStateConfig;
 import org.apache.helix.model.HelixConfigScope;
@@ -160,6 +161,24 @@ public class ClusterAccessor extends AbstractHelixResource {
     clusterInfo.put(ClusterProperties.liveInstances.name(), liveInstances);
 
     return JSONRepresentation(clusterInfo);
+  }
+
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{clusterId}/convergence")
+  public Response getClusterConvergence(@PathParam("clusterId") String clusterId) {
+    HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    ConvergenceStatus report = dataAccessor.getProperty(keyBuilder.convergenceStatus());
+    LiveInstance leader = dataAccessor.getProperty(keyBuilder.controllerLeader());
+    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+    boolean monitoringEnabled =
+        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled();
+    return JSONRepresentation(
+        ConvergenceStatusResponseMapper
+            .mapCluster(clusterId, report, leader, monitoringEnabled));
   }
 
   @NamespaceAuth

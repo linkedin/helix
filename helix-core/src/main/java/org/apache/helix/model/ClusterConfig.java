@@ -200,6 +200,9 @@ public class ClusterConfig extends HelixProperty {
     // for message ordering and extracted throttle logic. When disabled (default), the original
     // IntermediateStateCalcStage (V1) is used for backward compatibility.
     INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
+
+    // Enable asynchronous customer-facing assignment convergence reporting.
+    CONVERGENCE_MONITORING_ENABLED,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -865,6 +868,24 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isTargetExternalViewEnabled() {
     return _record.getBooleanField(ClusterConfigProperty.TARGET_EXTERNALVIEW_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable asynchronous convergence monitoring. Disabled by default so clusters that do
+   * not consume convergence reports pay only a constant-time feature flag check.
+   * @param enabled true to enable convergence monitoring
+   */
+  public void setConvergenceMonitoringEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.CONVERGENCE_MONITORING_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Determine whether convergence monitoring is enabled.
+   * @return true when convergence monitoring is enabled
+   */
+  public boolean isConvergenceMonitoringEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.CONVERGENCE_MONITORING_ENABLED.name(), false);
   }
 
   /**

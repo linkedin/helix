@@ -76,6 +76,8 @@ import org.apache.helix.controller.stages.BestPossibleStateCalcStage;
 import org.apache.helix.controller.stages.ClusterEvent;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CompatibilityCheckStage;
+import org.apache.helix.controller.stages.ConvergenceStatusPersistenceCache;
+import org.apache.helix.controller.stages.ConvergenceStatusPersistStage;
 import org.apache.helix.controller.stages.CurrentStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedViewAggregationStage;
@@ -173,6 +175,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private final ClusterEventProcessor _managementModeEventThread;
 
   private final Map<AsyncWorkerType, DedupEventProcessor<String, Runnable>> _asyncFIFOWorkerPool;
+  private final ConvergenceStatusPersistenceCache _convergenceStatusPersistenceCache =
+      new ConvergenceStatusPersistenceCache();
 
   private long _continuousRebalanceFailureCount = 0;
   private long _continuousResourceRebalanceFailureCount = 0;
@@ -540,6 +544,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       rebalancePipeline.addStage(new PersistAssignmentStage());
       rebalancePipeline.addStage(new TargetExteralViewCalcStage());
       rebalancePipeline.addStage(new ParticipantDeregistrationStage());
+      rebalancePipeline.addStage(new ConvergenceStatusPersistStage());
 
       // external view generation
       Pipeline externalViewPipeline = new Pipeline(pipelineName);
@@ -666,6 +671,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       managementMode.addStage(new ManagementModeStage());
       managementMode.addStage(new ManagementMessageGenerationPhase());
       managementMode.addStage(new ManagementMessageDispatchStage());
+      managementMode.addStage(new ConvergenceStatusPersistStage());
 
       PipelineRegistry registry = new PipelineRegistry();
       Arrays.asList(
@@ -813,6 +819,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // regains leadership.
     event.addAttribute(AttributeName.STATEFUL_REBALANCER.name(),
         _rebalancerRef.getRebalancer(manager));
+    ClusterConfig convergenceClusterConfig =
+        _resourceControlDataProvider == null ? null : _resourceControlDataProvider.getClusterConfig();
+    event.addAttribute(AttributeName.CONVERGENCE_MONITORING_ENABLED.name(),
+        convergenceClusterConfig != null
+            && convergenceClusterConfig.isConvergenceMonitoringEnabled());
 
     Optional<String> eventSessionId = Optional.empty();
     // We should expect only events in tests don't have it.
@@ -1321,6 +1332,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     event.addAttribute(AttributeName.helixmanager.name(), changeContext.getManager());
     event.addAttribute(AttributeName.changeContext.name(), changeContext);
     event.addAttribute(AttributeName.AsyncFIFOWorkerPool.name(), _asyncFIFOWorkerPool);
+    event.addAttribute(AttributeName.CONVERGENCE_STATUS_PERSISTENCE_CACHE.name(),
+        _convergenceStatusPersistenceCache);
     for (Map.Entry<String, Object> attr : eventAttributes.entrySet()) {
       event.addAttribute(attr.getKey(), attr.getValue());
     }
