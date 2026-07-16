@@ -47,6 +47,7 @@ import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
 import org.apache.helix.participant.StateMachineEngine;
@@ -81,6 +82,71 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
       }
     }
     _instanceToDisable = _mockParticipantManagers.remove(indexToDisable);
+  }
+
+  @Test
+  public void testUpdateInstanceConfigCapacityGuardRail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestGuardRailCapacityCluster";
+    _gSetupTool.addCluster(cluster, true);
+    String instance = "host_0";
+    _gSetupTool.addInstanceToCluster(cluster, instance);
+
+    // Require capacity keys CU and MEM with no cluster default; the instance must provide both.
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("CU", "MEM"));
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    // Update provides only CU -> merged config is missing required MEM -> guard rail blocks.
+    String payload = "{\"id\":\"host_0\",\"simpleFields\":{},\"listFields\":{},"
+        + "\"mapFields\":{\"INSTANCE_CAPACITY_MAP\":{\"CU\":\"100\"}}}";
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs").format(cluster, instance)
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .post(this, Entity.entity(payload, MediaType.APPLICATION_JSON_TYPE));
+
+    // force=true bypasses the guard rail.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?force=true")
+        .format(cluster, instance)
+        .expectedReturnStatusCode(Response.Status.OK.getStatusCode())
+        .post(this, Entity.entity(payload, MediaType.APPLICATION_JSON_TYPE));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceMinActiveReplicaGuardRail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestGuardRailDeleteCluster";
+    _gSetupTool.addCluster(cluster, true);
+    for (int i = 0; i < 3; i++) {
+      _gSetupTool.addInstanceToCluster(cluster, "host_" + i);
+    }
+
+    // Resource with minActiveReplicas=2; ExternalView places 2 active replicas on host_0/host_1.
+    String resource = "TestDB";
+    IdealState idealState = new IdealState(resource);
+    idealState.setStateModelDefRef("OnlineOffline");
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setNumPartitions(1);
+    idealState.setReplicas("3");
+    idealState.setMinActiveReplicas(2);
+    idealState.enable(true);
+
+    ExternalView externalView = new ExternalView(resource);
+    externalView.setState("TestDB_0", "host_0", "ONLINE");
+    externalView.setState("TestDB_0", "host_1", "ONLINE");
+
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    accessor.setProperty(accessor.keyBuilder().idealStates(resource), idealState);
+    accessor.setProperty(accessor.keyBuilder().externalView(resource), externalView);
+
+    // Dropping host_0 leaves 1 active replica (< minActiveReplicas=2) -> guard rail blocks.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}").format(cluster, "host_0")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode()).delete(this);
+
+    // force=true bypasses the guard rail and drops the instance.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}?force=true").format(cluster, "host_0")
+        .expectedReturnStatusCode(Response.Status.OK.getStatusCode()).delete(this);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test
