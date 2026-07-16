@@ -1547,4 +1547,225 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     }
     return assignment;
   }
+
+  // --- Guard Rail Tests for deleteInstance ---
+
+  /**
+   * Test that deleting an instance that has no partitions in ExternalView passes the guard rail.
+   * We add a fresh instance (not live, not in any ExternalView) and verify delete succeeds.
+   */
+  @Test
+  public void testDeleteInstanceGuardRailPassesForUnassignedInstance() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String testInstance = CLUSTER_NAME + "localhost_19999";
+    _gSetupTool.addInstanceToCluster(CLUSTER_NAME, testInstance);
+
+    // Instance is not live and has no ExternalView assignments, guard rail should pass
+    delete("clusters/" + CLUSTER_NAME + "/instances/" + testInstance,
+        Response.Status.OK.getStatusCode());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that deleting an instance with active replicas that would violate minActiveReplicas
+   * is blocked by the guard rail. The test cluster has minActiveReplicas=3 with only 2 replicas,
+   * so removing any instance with active partitions should fail.
+   */
+  @Test
+  public void testDeleteInstanceGuardRailBlocksWhenMinActiveReplicaViolated() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    // Use a separate cluster (TestCluster_0) to avoid interfering with other tests.
+    // TestCluster_0 has resources with minActiveReplicas set and active instances.
+    String clusterName = "TestCluster_0";
+    String testInstance = clusterName + "localhost_19998";
+
+    // Add the instance and set up an ExternalView entry that makes it look active
+    _gSetupTool.addInstanceToCluster(clusterName, testInstance);
+    String resource = clusterName + "_db_0";
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName,
+        _baseAccessor);
+    ExternalView ev = accessor.getProperty(accessor.keyBuilder().externalView(resource));
+    if (ev != null) {
+      // Inject the test instance into a partition's state map with SLAVE state
+      String partition = ev.getPartitionSet().iterator().next();
+      Map<String, String> stateMap = new HashMap<>(ev.getStateMap(partition));
+      stateMap.put(testInstance, "SLAVE");
+      ev.setStateMap(partition, stateMap);
+      accessor.setProperty(accessor.keyBuilder().externalView(resource), ev);
+    }
+
+    // Attempt to delete without force -- should be blocked
+    Response response = target("clusters/" + clusterName + "/instances/" + testInstance)
+        .request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+    String body = response.readEntity(String.class);
+    Assert.assertTrue(body.contains("MIN_ACTIVE_REPLICA_CHECK_FAILED"),
+        "Error should contain min active replica check failure details. Got: " + body);
+
+    // Clean up: remove the injected entry and drop the instance
+    if (ev != null) {
+      String partition = ev.getPartitionSet().iterator().next();
+      Map<String, String> stateMap = new HashMap<>(ev.getStateMap(partition));
+      stateMap.remove(testInstance);
+      ev.setStateMap(partition, stateMap);
+      accessor.setProperty(accessor.keyBuilder().externalView(resource), ev);
+    }
+    _gSetupTool.getClusterManagementTool().dropInstance(clusterName,
+        _gSetupTool.getClusterManagementTool().getInstanceConfig(clusterName, testInstance));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that deleteInstance with force=true bypasses the guard rail even when
+   * minActiveReplica would be violated.
+   */
+  @Test
+  public void testDeleteInstanceGuardRailBypassWithForce() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String testInstance = CLUSTER_NAME + "localhost_19997";
+    _gSetupTool.addInstanceToCluster(CLUSTER_NAME, testInstance);
+
+    // Delete with force=true should always succeed for an offline instance
+    delete("clusters/" + CLUSTER_NAME + "/instances/" + testInstance + "?force=true",
+        Response.Status.OK.getStatusCode());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // --- Guard Rail Tests for updateInstanceConfig capacity changes ---
+
+  /**
+   * Test that updating instance config with a capacity map reduction that breaks
+   * WAGED rebalancer constraints is blocked.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityReductionBlocked() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestCluster_1";
+    String instanceName = clusterName + "localhost_12918";
+
+    // Set up cluster config with required capacity keys
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("cpu", "memory", "disk"));
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+    // Set instance capacity with all required keys
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    Map<String, Integer> capacityMap = new HashMap<>();
+    capacityMap.put("cpu", 100);
+    capacityMap.put("memory", 256);
+    capacityMap.put("disk", 500);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+
+    // Now try to update capacity map to remove the "disk" key (reduce to only cpu and memory)
+    // with a reduced cpu value. The cluster has no default for "disk", so after merge
+    // the required key "disk" would be missing from the update payload.
+    ZNRecord updateRecord = new ZNRecord(instanceName);
+    Map<String, String> reducedCapacity = new HashMap<>();
+    reducedCapacity.put("cpu", "50");
+    reducedCapacity.put("memory", "128");
+    updateRecord.setMapField("INSTANCE_CAPACITY_MAP", reducedCapacity);
+
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(updateRecord),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should return 400 because the merged config would be missing the "disk" key
+    // Note: the update merges maps, so the existing "disk" key should remain.
+    // Instead, let's test with a cluster that has no defaults and the instance loses a key.
+    // Actually, the merge in configAccessor.updateInstanceConfig merges at the ZNRecord level,
+    // and map fields merge at the map level too. So setting a new map with only cpu+memory
+    // would replace the INSTANCE_CAPACITY_MAP field entirely.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(clusterName, instanceName).post(this, entity);
+
+    // Clean up: restore the original capacity and remove capacity keys requirement
+    instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+    clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceCapacityKeys(Collections.emptyList());
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that updating instance config with force=true bypasses the capacity guard rail.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityReductionForceBypass() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestCluster_2";
+    String instanceName = clusterName + "localhost_12918";
+
+    // Set up cluster config with required capacity keys
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("cpu", "memory", "disk"));
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+    // Set instance capacity with all required keys
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    Map<String, Integer> capacityMap = new HashMap<>();
+    capacityMap.put("cpu", 100);
+    capacityMap.put("memory", 256);
+    capacityMap.put("disk", 500);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+
+    // Update with reduced capacity but force=true should succeed
+    ZNRecord updateRecord = new ZNRecord(instanceName);
+    Map<String, String> reducedCapacity = new HashMap<>();
+    reducedCapacity.put("cpu", "50");
+    reducedCapacity.put("memory", "128");
+    updateRecord.setMapField("INSTANCE_CAPACITY_MAP", reducedCapacity);
+
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(updateRecord),
+        MediaType.APPLICATION_JSON_TYPE);
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update&force=true")
+        .format(clusterName, instanceName).post(this, entity);
+
+    // Clean up
+    instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+    clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceCapacityKeys(Collections.emptyList());
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that updating a non-capacity field in instance config does not trigger
+   * the capacity guard rail.
+   */
+  @Test
+  public void testUpdateInstanceConfigNonCapacityChangePasses() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestCluster_3";
+    String instanceName = clusterName + "localhost_12918";
+
+    // Update a simple field (not capacity-related)
+    ZNRecord updateRecord = new ZNRecord(instanceName);
+    updateRecord.getSimpleFields().put("CUSTOM_TAG", "test-value");
+
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(updateRecord),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // Should succeed since no capacity change
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(clusterName, instanceName).post(this, entity);
+
+    // Verify the field was set
+    InstanceConfig config = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    Assert.assertEquals(config.getRecord().getSimpleField("CUSTOM_TAG"), "test-value");
+
+    // Clean up
+    ZNRecord deleteRecord = new ZNRecord(instanceName);
+    deleteRecord.getSimpleFields().put("CUSTOM_TAG", "test-value");
+    entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(deleteRecord),
+        MediaType.APPLICATION_JSON_TYPE);
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=delete")
+        .format(clusterName, instanceName).post(this, entity);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
 }

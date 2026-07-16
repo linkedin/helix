@@ -73,7 +73,11 @@ import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.util.InstanceUtil;
+import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.helix.util.MinActiveReplicaCheckResult;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.eclipse.jetty.util.StringUtil;
 import org.slf4j.Logger;
@@ -641,10 +645,30 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("force") boolean force) {
     HelixAdmin admin = getHelixAdmin();
     try {
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
+      if (instanceConfig == null) {
+        return notFound(
+            String.format("Instance %s not found in cluster %s", instanceName, clusterId));
+      }
+
+      if (!force) {
+        HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+        MinActiveReplicaCheckResult checkResult =
+            InstanceValidationUtil.siblingNodesActiveReplicaCheckWithDetails(
+                dataAccessor, instanceName, Collections.emptySet());
+        if (!checkResult.isPassed()) {
+          LOG.warn("Guard rail blocked deletion of instance {} in cluster {}: {}",
+              instanceName, clusterId, checkResult);
+          return badRequest(String.format(
+              "Cannot drop instance %s: %s. Use force=true query param to override.",
+              instanceName, checkResult));
+        }
+      }
+
       admin.dropInstance(clusterId, instanceConfig);
     } catch (HelixException e) {
       return badRequest(e.getMessage());
@@ -676,6 +700,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Path("configs")
   public Response updateInstanceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String commandStr,
+      @DefaultValue("false") @QueryParam("force") boolean force,
       String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
@@ -708,6 +733,10 @@ public class PerInstanceAccessor extends AbstractHelixResource {
            */
           validateDeltaTopologySettingInInstanceConfig(clusterId, instanceName, configAccessor,
               instanceConfig, command);
+          if (!force) {
+            validateInstanceCapacityChange(clusterId, instanceName, configAccessor,
+                instanceConfig);
+          }
           configAccessor.updateInstanceConfig(clusterId, instanceName, instanceConfig);
           break;
         case delete:
@@ -722,8 +751,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           return badRequest(String.format("Unsupported command: %s", command));
       }
     } catch (IllegalArgumentException ex) {
-      LOG.error("Invalid topology setting for Instance : {}. Fail the config update", instanceName, ex);
-      return serverError(ex);
+      LOG.error("Invalid config for Instance: {}. Fail the config update", instanceName, ex);
+      return badRequest(ex.getMessage());
     } catch (HelixException ex) {
       return notFound(ex.getMessage());
     } catch (Exception ex) {
@@ -1018,6 +1047,55 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     return originalInstanceConfigCopy
         .validateTopologySettingInInstanceConfig(configAccessor.getClusterConfig(clusterName),
             instanceName);
+  }
+
+  /**
+   * Validates that an instance config update does not break WAGED rebalancer capacity constraints.
+   * Only triggers when the update includes INSTANCE_CAPACITY_MAP changes that reduce a capacity
+   * value. Simulates the merged config and checks that all required capacity keys remain present.
+   *
+   * @throws IllegalArgumentException if the capacity change would break WAGED constraints
+   */
+  private void validateInstanceCapacityChange(String clusterName, String instanceName,
+      ConfigAccessor configAccessor, InstanceConfig newInstanceConfig) {
+    Map<String, Integer> newCapacityMap = newInstanceConfig.getInstanceCapacityMap();
+    if (newCapacityMap.isEmpty()) {
+      return;
+    }
+
+    InstanceConfig existingConfig = configAccessor.getInstanceConfig(clusterName, instanceName);
+    if (existingConfig == null) {
+      return;
+    }
+    Map<String, Integer> currentCapacityMap = existingConfig.getInstanceCapacityMap();
+
+    boolean capacityReduced = false;
+    for (Map.Entry<String, Integer> entry : newCapacityMap.entrySet()) {
+      Integer currentValue = currentCapacityMap.get(entry.getKey());
+      if (currentValue != null && entry.getValue() < currentValue) {
+        capacityReduced = true;
+        break;
+      }
+    }
+
+    if (!capacityReduced) {
+      return;
+    }
+
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
+    if (clusterConfig == null) {
+      return;
+    }
+
+    try {
+      InstanceConfig mergedConfig = new InstanceConfig(existingConfig.getRecord());
+      mergedConfig.getRecord().update(newInstanceConfig.getRecord());
+      WagedValidationUtil.validateAndGetInstanceCapacity(clusterConfig, mergedConfig);
+    } catch (HelixException e) {
+      throw new IllegalArgumentException(String.format(
+          "Capacity update for instance %s would break WAGED rebalancer constraints: %s. "
+              + "Use force=true query param to override.", instanceName, e.getMessage()));
+    }
   }
 
 }
