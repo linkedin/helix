@@ -42,6 +42,7 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.rules.MinActiveReplicaGuardrailRule;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -944,6 +945,71 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
         .format(CLUSTER_NAME, instanceName).post(this, entity);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the DELETE instance endpoint. STOPPABLE_CLUSTER is configured with
+   * MIN_ACTIVE_REPLICA (3) greater than NUM_REPLICA (2), so dropping any instance that hosts a
+   * partition necessarily drops that partition below its required minimum active replicas and must
+   * be blocked. None of these tests actually drop the instance, so they are non-destructive.
+   */
+  @Test
+  public void testDeleteInstanceGuardrailBlocks() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete).request()
+            .delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(MinActiveReplicaGuardrailRule.RULE_ID));
+
+    // The instance must not have been dropped by a blocked request.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailDryRun() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // dryRun only simulates: it always returns 200 with the verdict and never drops the instance.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("dryRun", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(MinActiveReplicaGuardrailRule.RULE_ID));
+
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailForceBypass() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // force=true bypasses the guard rail. The drop itself then fails because the participant is
+    // still live, which confirms the request got past the guard rail rather than being blocked by
+    // its verdict.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("force", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    String body = response.readEntity(String.class);
+    Assert.assertFalse(body.contains(MinActiveReplicaGuardrailRule.RULE_ID),
+        "force=true should bypass the guard rail, not return its verdict: " + body);
+
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
