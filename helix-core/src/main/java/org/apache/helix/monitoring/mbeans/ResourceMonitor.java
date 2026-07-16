@@ -91,6 +91,13 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   private HistogramDynamicMetric _partitionTopStateHandoffDurationGauge;
   private HistogramDynamicMetric _partitionTopStateHandoffHelixLatencyGauge;
 
+  // Partition recovery duration metrics: how long a partition stays below minActiveReplicas
+  // before the controller restores it. Mirrors the top-state handoff metrics above.
+  private HistogramDynamicMetric _partitionRecoveryDurationGauge;
+  private HistogramDynamicMetric _partitionRecoveryHelixLatencyGauge;
+  private SimpleDynamicMetric<Long> _partitionsRecoveryDurationBeyondThresholdGauge;
+  private SimpleDynamicMetric<Long> _successRecoveryCounter;
+
   private SimpleDynamicMetric<String> _rebalanceState;
 
   private String _tag = ClusterStatusMonitor.DEFAULT_TAG;
@@ -168,6 +175,16 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _successfulTopStateHandoffDurationCounter =
         new SimpleDynamicMetric("SuccessfulTopStateHandoffDurationCounter", 0L);
 
+    _partitionRecoveryDurationGauge =
+        new HistogramDynamicMetric("PartitionRecoveryDurationGauge", new Histogram(
+            new SlidingTimeWindowArrayReservoir(getResetIntervalInMs(), TimeUnit.MILLISECONDS)));
+    _partitionRecoveryHelixLatencyGauge =
+        new HistogramDynamicMetric("PartitionRecoveryHelixLatencyGauge", new Histogram(
+            new SlidingTimeWindowArrayReservoir(getResetIntervalInMs(), TimeUnit.MILLISECONDS)));
+    _partitionsRecoveryDurationBeyondThresholdGauge =
+        new SimpleDynamicMetric("PartitionsRecoveryDurationBeyondThresholdGauge", 0L);
+    _successRecoveryCounter = new SimpleDynamicMetric("SucceededPartitionRecoveryCounter", 0L);
+
     _rebalanceState = new SimpleDynamicMetric<>("RebalanceStatus", RebalanceStatus.UNKNOWN.name());
   }
 
@@ -228,6 +245,22 @@ public class ResourceMonitor extends DynamicMBeanProvider {
 
   public HistogramDynamicMetric getPartitionTopStateHandoffHelixLatencyGauge() {
     return _partitionTopStateHandoffHelixLatencyGauge;
+  }
+
+  public HistogramDynamicMetric getPartitionRecoveryDurationGauge() {
+    return _partitionRecoveryDurationGauge;
+  }
+
+  public HistogramDynamicMetric getPartitionRecoveryHelixLatencyGauge() {
+    return _partitionRecoveryHelixLatencyGauge;
+  }
+
+  public long getPartitionsRecoveryDurationBeyondThresholdGauge() {
+    return _partitionsRecoveryDurationBeyondThresholdGauge.getValue();
+  }
+
+  public long getSucceededPartitionRecoveryCounter() {
+    return _successRecoveryCounter.getValue();
   }
 
   @Deprecated
@@ -399,6 +432,27 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     }
   }
 
+  /**
+   * Records a completed partition recovery: a partition whose active replica count had dropped
+   * below its {@code minActiveReplicas} returning to at least {@code minActiveReplicas}.
+   *
+   * @param totalDuration end-to-end degraded window ({@code T_end - T_start}), in ms
+   * @param helixLatency  the Helix-controlled portion of the window (detect / compute / throttle /
+   *                      delay-wait / dispatch), in ms; the remainder is participant execution time.
+   *                      Pass a negative value when it has not been computed (v1) to skip the gauge.
+   * @param succeeded     whether the partition recovered (vs. still degraded beyond threshold)
+   */
+  public void updatePartitionRecoveryStats(long totalDuration, long helixLatency,
+      boolean succeeded) {
+    if (succeeded) {
+      _successRecoveryCounter.updateValue(_successRecoveryCounter.getValue() + 1);
+      _partitionRecoveryDurationGauge.updateValue(totalDuration);
+      if (helixLatency >= 0) {
+        _partitionRecoveryHelixLatencyGauge.updateValue(helixLatency);
+      }
+    }
+  }
+
   public void updateRebalancerStats(long numPendingRecoveryRebalancePartitions,
       long numPendingLoadRebalancePartitions, long numRecoveryRebalanceThrottledPartitions,
       long numLoadRebalanceThrottledPartitions, boolean rebalanceThrottledByErrorPartitions) {
@@ -490,6 +544,18 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     }
   }
 
+  public void incrementPartitionRecoveryBeyondThresholdGauge() {
+    _partitionsRecoveryDurationBeyondThresholdGauge
+        .updateValue(_partitionsRecoveryDurationBeyondThresholdGauge.getValue() + 1);
+    _lastResetTime = System.currentTimeMillis();
+  }
+
+  public void decrementPartitionRecoveryBeyondThresholdGauge() {
+    _partitionsRecoveryDurationBeyondThresholdGauge
+        .updateValue(Math.max(0, _partitionsRecoveryDurationBeyondThresholdGauge.getValue() - 1));
+    _lastResetTime = System.currentTimeMillis();
+  }
+
   public void incrementMissingTopStateBeyondThresholdGauge() {
     _missingTopStatePartitionsBeyondThresholdGauge.updateValue(_missingTopStatePartitionsBeyondThresholdGauge.getValue() + 1);
     _lastResetTime = System.currentTimeMillis();
@@ -545,6 +611,10 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _partitionTopStateHandoffDurationGauge,
         _partitionTopStateHandoffHelixLatencyGauge,
         _partitionTopStateNonGracefulHandoffDurationGauge,
+        _partitionRecoveryDurationGauge,
+        _partitionRecoveryHelixLatencyGauge,
+        _partitionsRecoveryDurationBeyondThresholdGauge,
+        _successRecoveryCounter,
         _totalMessageReceived,
         _totalMessageReceivedCounter,
         _numPendingStateTransitions,

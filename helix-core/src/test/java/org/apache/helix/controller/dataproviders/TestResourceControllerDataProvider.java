@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
+import org.apache.helix.controller.stages.MissingMinActiveReplicaRecord;
 import org.apache.helix.model.IdealState;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -87,5 +88,25 @@ public class TestResourceControllerDataProvider {
     // Now, since the cache has been cleaned, the get will return different order.
     Assert.assertTrue(
         dataProvider.getStablePartitionList(resourceName) == null);
+  }
+
+  @Test
+  public void testMissingMinActiveReplicaMapLifecycle() {
+    ResourceControllerDataProvider dataProvider = new ResourceControllerDataProvider();
+
+    // The recovery-tracking map is initialized and empty.
+    Assert.assertNotNull(dataProvider.getMissingMinActiveReplicaMap());
+    Assert.assertTrue(dataProvider.getMissingMinActiveReplicaMap().isEmpty());
+
+    // Records persist in the cache across pipeline runs until explicitly cleared.
+    Map<String, MissingMinActiveReplicaRecord> perResource = new HashMap<>();
+    perResource.put("TestResource_0",
+        new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
+    dataProvider.getMissingMinActiveReplicaMap().put("TestResource", perResource);
+    Assert.assertEquals(dataProvider.getMissingMinActiveReplicaMap().size(), 1);
+
+    // clearMonitoringRecords wipes the recovery-tracking map.
+    dataProvider.clearMonitoringRecords();
+    Assert.assertTrue(dataProvider.getMissingMinActiveReplicaMap().isEmpty());
   }
 }

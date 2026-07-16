@@ -20,8 +20,11 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -94,12 +97,17 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
         cache.getPostDispatchHandoffMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
 
     long durationThreshold = Long.MAX_VALUE;
     long handoffDurationThreshold = Long.MAX_VALUE;
+    long recoveryDurationThreshold = Long.MAX_VALUE;
     if (cache.getClusterConfig() != null) {
       durationThreshold = cache.getClusterConfig().getMissTopStateDurationThreshold();
       handoffDurationThreshold = cache.getClusterConfig().getTopStateHandoffDurationThreshold();
+      recoveryDurationThreshold =
+          cache.getClusterConfig().getPartitionRecoveryDurationThreshold();
     }
 
     // Remove any resource records that no longer exists
@@ -107,6 +115,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     controllerObservedHandoffMap.keySet().retainAll(resourceMap.keySet());
     participantExecutionHandoffMap.keySet().retainAll(resourceMap.keySet());
     lastTopStateMap.keySet().retainAll(resourceMap.keySet());
+    missingMinActiveReplicaMap.keySet().retainAll(resourceMap.keySet());
 
     for (Resource resource : resourceMap.values()) {
       StateModelDefinition stateModelDef = cache.getStateModelDef(resource.getStateModelDefRef());
@@ -149,6 +158,11 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           reportTopStateHandoffFailIfNecessary(cache, resourceName, partition, durationThreshold,
               clusterStatusMonitor);
         }
+
+        // Track how long the partition stays below its minActiveReplicas count, independent of
+        // top state presence.
+        updatePartitionRecoveryStatus(cache, clusterStatusMonitor, resourceName, partition,
+            currentStateOutput, stateModelDef, recoveryDurationThreshold);
       }
 
       if (!_failingPartitionsInfoMap.isEmpty()) {
@@ -159,6 +173,131 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (clusterStatusMonitor != null) {
       clusterStatusMonitor.resetMaxMissingTopStateGauge();
     }
+  }
+
+  /**
+   * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
+   * duration"). An edge detector runs once per pipeline execution per partition:
+   * <ul>
+   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B).</li>
+   *   <li>degraded -&gt; degraded: mark it once for alerting if it exceeds the threshold.</li>
+   *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
+   * </ul>
+   * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
+   * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. helixLatency
+   * attribution is a follow-up, so the end-to-end duration is emitted with a negative helixLatency.
+   *
+   * @param cache cluster data cache
+   * @param clusterStatusMonitor monitor object
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param currentStateOutput current state output
+   * @param stateModelDef state model def object
+   * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold gauge
+   */
+  private void updatePartitionRecoveryStatus(ResourceControllerDataProvider cache,
+      ClusterStatusMonitor clusterStatusMonitor, String resourceName, Partition partition,
+      CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
+      long recoveryDurationThreshold) {
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return;
+    }
+    int minActiveReplica = getMinActiveReplica(idealState);
+    if (minActiveReplica <= 0) {
+      // No min-active-replica requirement to track for this resource.
+      return;
+    }
+
+    int activeReplicaCount =
+        countActiveReplicas(currentStateOutput, resourceName, partition, stateModelDef);
+    boolean belowMin = activeReplicaCount < minActiveReplica;
+
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
+    String partitionName = partition.getPartitionName();
+    MissingMinActiveReplicaRecord record = missingMinActiveReplicaMap.containsKey(resourceName)
+        ? missingMinActiveReplicaMap.get(resourceName).get(partitionName) : null;
+
+    if (belowMin) {
+      if (record == null) {
+        // Edge: healthy -> degraded. Stamp the detection time as the recovery start.
+        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
+            .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
+      } else {
+        // Still degraded. Count it once for alerting if it has exceeded the threshold.
+        long recoveryDuration = System.currentTimeMillis() - record.getStartTimeStamp();
+        if (record.getStartTimeStamp() > 0 && recoveryDuration > recoveryDurationThreshold
+            && !record.isFailed()) {
+          record.setFailed();
+          LogUtil.logDebug(LOG, _eventId, String.format(
+              "Partition %s of resource %s has been below minActiveReplicas for %s ms, beyond "
+                  + "threshold %s ms", partitionName, resourceName, recoveryDuration,
+              recoveryDurationThreshold));
+          if (clusterStatusMonitor != null) {
+            clusterStatusMonitor.incrementPartitionRecoveryBeyondThresholdGauge(resourceName);
+          }
+        }
+      }
+    } else if (record != null) {
+      // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
+      missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
+      long totalDuration = System.currentTimeMillis() - record.getStartTimeStamp();
+      if (clusterStatusMonitor != null) {
+        // helixLatency attribution is a follow-up; pass a negative value to skip that gauge.
+        clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration, -1L,
+            true);
+        if (record.isFailed()) {
+          clusterStatusMonitor.decrementPartitionRecoveryBeyondThresholdGauge(resourceName);
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolve the effective minActiveReplicas for a resource. Falls back to the resource replica
+   * count when minActiveReplicas is not explicitly set, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param idealState ideal state of the resource
+   * @return effective minActiveReplicas, or a non-positive value when there is nothing to track
+   */
+  private int getMinActiveReplica(IdealState idealState) {
+    int minActiveReplica = idealState.getMinActiveReplicas();
+    if (minActiveReplica < 0) {
+      minActiveReplica = idealState.getReplicaCount(-1);
+    }
+    return minActiveReplica;
+  }
+
+  /**
+   * Count the replicas of a partition currently in an active state. Active states are all states
+   * in the state model's priority list except the initial state, DROPPED, and ERROR, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param currentStateOutput current state output
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(CurrentStateOutput currentStateOutput, String resourceName,
+      Partition partition, StateModelDefinition stateModelDef) {
+    Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
+    activeStates.remove(stateModelDef.getInitialState());
+    activeStates.remove(HelixDefinedState.DROPPED.name());
+    activeStates.remove(HelixDefinedState.ERROR.name());
+
+    int activeReplicaCount = 0;
+    Map<String, String> stateMap = currentStateOutput.getCurrentStateMap(resourceName, partition);
+    if (stateMap != null) {
+      for (String state : stateMap.values()) {
+        if (activeStates.contains(state)) {
+          activeReplicaCount++;
+        }
+      }
+    }
+    return activeReplicaCount;
   }
 
   /**

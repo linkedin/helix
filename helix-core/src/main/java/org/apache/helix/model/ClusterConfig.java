@@ -65,6 +65,7 @@ public class ClusterConfig extends HelixProperty {
     STATE_TRANSITION_CANCELLATION_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
     TOP_STATE_HANDOFF_DURATION_THRESHOLD,
+    PARTITION_RECOVERY_DURATION_THRESHOLD,
     RESOURCE_PRIORITY_FIELD,
     REBALANCE_TIMER_PERIOD,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
@@ -238,6 +239,7 @@ public class ClusterConfig extends HelixProperty {
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
   private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
+  private final static long DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD = 300000L; // 5 minutes
 
   /**
    * Instantiate for a specific cluster
@@ -831,6 +833,27 @@ public class ClusterConfig extends HelixProperty {
   public long getTopStateHandoffDurationThreshold() {
     return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
         DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD);
+  }
+
+  /**
+   * Set the partition recovery duration threshold in milliseconds. A partition whose active replica
+   * count stays below its minActiveReplicas longer than this threshold is counted in the
+   * PartitionsRecoveryDurationBeyondThresholdGauge for alerting.
+   * @param durationThreshold the threshold in milliseconds
+   */
+  public void setPartitionRecoveryDurationThreshold(long durationThreshold) {
+    _record.setLongField(ClusterConfigProperty.PARTITION_RECOVERY_DURATION_THRESHOLD.name(),
+        durationThreshold);
+  }
+
+  /**
+   * Get the partition recovery duration threshold. If not configured, defaults to 300000ms
+   * (5 minutes).
+   * @return the threshold in milliseconds
+   */
+  public long getPartitionRecoveryDurationThreshold() {
+    return _record.getLongField(ClusterConfigProperty.PARTITION_RECOVERY_DURATION_THRESHOLD.name(),
+        DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD);
   }
 
   /**

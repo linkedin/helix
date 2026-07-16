@@ -338,6 +338,49 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testUpdatePartitionRecoveryStats() throws JMException {
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=recoveryTest"));
+    monitor.register();
+    try {
+      // A successful recovery records the total duration and increments the counter.
+      monitor.updatePartitionRecoveryStats(4000L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 4000L);
+      // helixLatency < 0 is skipped (v1), so the helixLatency histogram stays empty.
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 0L);
+
+      // A second successful recovery increments the counter and records the larger max, and a
+      // non-negative helixLatency is now recorded.
+      monitor.updatePartitionRecoveryStats(9000L, 2000L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 2000L);
+
+      // A non-successful update records nothing.
+      monitor.updatePartitionRecoveryStats(1000L, 500L, false);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+
+      // The beyond-threshold gauge increments / decrements and never goes below zero.
+      monitor.incrementPartitionRecoveryBeyondThresholdGauge();
+      monitor.incrementPartitionRecoveryBeyondThresholdGauge();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 2L);
+      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 1L);
+      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
+      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 0L,
+          "Beyond-threshold gauge must clamp at zero");
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testUpdatePartitionWeightStats() throws JMException, IOException {
     final MBeanServerConnection mBeanServer = ManagementFactory.getPlatformMBeanServer();
     final String clusterName = TestHelper.getTestMethodName();

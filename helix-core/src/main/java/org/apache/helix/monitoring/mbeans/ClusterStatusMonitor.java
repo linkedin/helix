@@ -790,6 +790,31 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  public void updatePartitionRecoveryDurationStats(String resourceName, long totalDuration,
+      long helixLatency, boolean succeeded) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.updatePartitionRecoveryStats(totalDuration, helixLatency, succeeded);
+    }
+  }
+
+  public void incrementPartitionRecoveryBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.incrementPartitionRecoveryBeyondThresholdGauge();
+    }
+  }
+
+  public void decrementPartitionRecoveryBeyondThresholdGauge(String resourceName) {
+    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
+
+    if (resourceMonitor != null) {
+      resourceMonitor.decrementPartitionRecoveryBeyondThresholdGauge();
+    }
+  }
+
   public void decrementMissingTopStateBeyondThresholdGauge(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
