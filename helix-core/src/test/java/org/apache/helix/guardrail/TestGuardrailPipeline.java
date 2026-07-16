@@ -122,6 +122,26 @@ public class TestGuardrailPipeline {
   }
 
   @Test
+  public void testNullReturningRuleFailsClosed() {
+    GuardrailRule nullRule = new GuardrailRule() {
+      @Override
+      public String getId() {
+        return "null-rule";
+      }
+
+      @Override
+      public ValidationResult validate(GuardrailContext context) {
+        return null;
+      }
+    };
+
+    ValidationResult result = new GuardrailPipeline(nullRule).validate(context());
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Assert.assertEquals(result.getViolations().get(0).getRuleId(), "null-rule");
+  }
+
+  @Test
   public void testViolationsAreImmutable() {
     ValidationResult result = new GuardrailPipeline(failingRule("a")).validate(context());
     try {

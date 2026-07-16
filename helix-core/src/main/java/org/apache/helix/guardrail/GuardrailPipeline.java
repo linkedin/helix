@@ -60,7 +60,14 @@ public class GuardrailPipeline {
     for (GuardrailRule rule : rules) {
       try {
         ValidationResult result = rule.validate(context);
-        if (result != null && !result.isFeasible()) {
+        if (result == null) {
+          // A rule that returns no verdict has not certified the mutation as safe; fail closed,
+          // symmetrically with a rule that throws.
+          LOG.warn("Guard rail rule {} returned null for cluster {}; failing closed.", rule.getId(),
+              context.getClusterName());
+          violations.add(Violation.newBuilder(rule.getId())
+              .message("Rule returned no result.").build());
+        } else if (!result.isFeasible()) {
           violations.addAll(result.getViolations());
         }
       } catch (Exception e) {

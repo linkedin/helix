@@ -21,6 +21,7 @@ package org.apache.helix.guardrail.rules;
 
 import java.util.Collections;
 
+import org.apache.helix.HelixException;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.ValidationResult;
@@ -55,9 +56,22 @@ public class MinActiveReplicaGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
-    MinActiveReplicaCheckResult checkResult = InstanceValidationUtil
-        .siblingNodesActiveReplicaCheckWithDetails(context.getDataAccessor(), instanceName,
-            Collections.emptySet());
+    MinActiveReplicaCheckResult checkResult;
+    try {
+      checkResult = InstanceValidationUtil.siblingNodesActiveReplicaCheckWithDetails(
+          context.getDataAccessor(), instanceName, Collections.emptySet());
+    } catch (HelixException e) {
+      // The underlying check scans every enabled resource and can throw (e.g. when a resource has
+      // no ExternalView computed yet) before it can even determine whether this instance hosts it.
+      // We cannot certify the drop as safe, so fail closed with an honest message rather than
+      // mislabeling an evaluation failure as a min-active-replica shortfall.
+      return ValidationResult.infeasible(Violation.newBuilder(RULE_ID)
+          .message(String.format(
+              "Could not verify minimum active replicas for instance %s: %s Blocking as a "
+                  + "precaution; retry once cluster state is fully available, or use force=true to "
+                  + "override.", instanceName, e.getMessage()))
+          .build());
+    }
 
     if (checkResult.isPassed()) {
       return ValidationResult.feasible();

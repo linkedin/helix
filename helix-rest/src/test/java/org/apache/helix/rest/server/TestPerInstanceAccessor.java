@@ -997,9 +997,10 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String instanceToDelete = "instance0";
 
-    // force=true bypasses the guard rail. The drop itself then fails because the participant is
-    // still live, which confirms the request got past the guard rail rather than being blocked by
-    // its verdict.
+    // force=true bypasses the guard rail and lets the request reach the actual drop. The drop then
+    // fails specifically because the participant is still live -- asserting on that error (rather
+    // than merely "some 400") directly confirms the request got past the guard rail into
+    // dropInstance, instead of being blocked by the guard rail verdict.
     Response response =
         target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
             .queryParam("force", true).request().delete();
@@ -1008,7 +1009,10 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     String body = response.readEntity(String.class);
     Assert.assertFalse(body.contains(MinActiveReplicaGuardrailRule.RULE_ID),
         "force=true should bypass the guard rail, not return its verdict: " + body);
+    Assert.assertTrue(body.contains("is still alive"),
+        "force=true should reach dropInstance, which fails on the live participant: " + body);
 
+    // The live participant was not dropped, so its config must still be present.
     Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }

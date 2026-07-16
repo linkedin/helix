@@ -117,6 +117,10 @@ public class AbstractHelixResource extends AbstractResource {
    *   <li><b>force</b> ({@code force=true}): proceeds even when the mutation is unsafe, logging the
    *       overridden violations. {@code dryRun} takes precedence over {@code force}.</li>
    * </ul>
+   * Note: the verdict reflects only the guard rail rules evaluated here, not the full feasibility of
+   * the underlying mutation. A feasible dry-run does not guarantee the subsequent write will
+   * succeed, since the mutation may enforce additional preconditions of its own.
+   * <p>
    * When this method returns {@link Optional#empty()} the caller should proceed with the mutation;
    * when it returns a response, the caller should return that response as-is.
    *
