@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -37,19 +38,24 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
@@ -1015,6 +1021,128 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     // The live participant was not dropped, so its config must still be present.
     Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the updateInstanceConfig "update" endpoint's capacity-reduction path.
+   * Declares a single WAGED capacity dimension, gives all instances capacity 100 (supply 1000), and
+   * plants a WAGED resource committing demand 950 (10 partitions * 1 replica * weight 95), leaving
+   * only 50 units of headroom. It then verifies: (1) an over-cut reduction is blocked (400 + verdict,
+   * nothing written); (2) the same reduction under dryRun always returns 200 with the verdict and is
+   * still not written; (3) force=true bypasses the guard rail and the unsafe reduction is written;
+   * (4) a within-headroom reduction passes and is written. Cluster/instance capacity config and the
+   * demand resource are saved and torn down so the shared cluster is left unperturbed.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityHeadroomGuardrail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String targetInstance = CLUSTER_NAME + "localhost_12919";
+    String demandResource = "guardrailHeadroomDemandResource";
+
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances = admin.getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    try {
+      // supply = (# instances) * 100 in dimension FOO. With 10 instances that is 1000.
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList("FOO"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // Committed demand = 10 partitions * 1 replica * weight 95 = 950, leaving 50 of headroom.
+      admin.addResource(CLUSTER_NAME, demandResource, 10, "OnlineOffline", "FULL_AUTO");
+      IdealState idealState = admin.getResourceIdealState(CLUSTER_NAME, demandResource);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      idealState.setReplicas("1");
+      admin.setResourceIdealState(CLUSTER_NAME, demandResource, idealState);
+      ResourceConfig resourceConfig = new ResourceConfig(demandResource);
+      resourceConfig.setPartitionCapacityMap(
+          ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 95)));
+      _configAccessor.setResourceConfig(CLUSTER_NAME, demandResource, resourceConfig);
+
+      // 1. Enforcement: reducing to 30 drops supply to 930 < 950, so the freed load has no home.
+      Response blocked = postCapacityDelta(targetInstance, 30, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 2. Dry-run: always 200 with the same infeasible verdict, still nothing written.
+      Response dryRun = postCapacityDelta(targetInstance, 30, ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 3. force=true bypasses the guard rail: the unsafe reduction is actually written.
+      Response forced = postCapacityDelta(targetInstance, 30, ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 30);
+
+      // Restore the target to 100 before exercising the happy path.
+      InstanceConfig restoreTarget =
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance);
+      restoreTarget.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, targetInstance, restoreTarget);
+
+      // 4. A within-headroom reduction (100 -> 60 leaves supply 960 >= 950) passes and is written.
+      Response allowed = postCapacityDelta(targetInstance, 60, Collections.emptyMap());
+      Assert.assertEquals(allowed.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 60);
+    } finally {
+      try {
+        admin.dropResource(CLUSTER_NAME, demandResource);
+      } catch (Exception ignored) {
+        // best-effort teardown
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(
+          originalCapacityKeys == null ? new ArrayList<>() : originalCapacityKeys);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * POST an InstanceConfig capacity delta ({@code {"FOO": fooCapacity}}) to the updateInstanceConfig
+   * "update" endpoint, threading through any guard-rail query flags (e.g. {@code dryRun},
+   * {@code force}), and return the raw {@link Response} so the caller can assert on status and body.
+   */
+  private Response postCapacityDelta(String instance, int fooCapacity, Map<String, Object> flags)
+      throws IOException {
+    InstanceConfig delta = new InstanceConfig(instance);
+    delta.setInstanceCapacityMap(ImmutableMap.of("FOO", fooCapacity));
+    Entity<String> entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/instances/" + instance + "/configs")
+        .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
   }
 
   /**
