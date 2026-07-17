@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -47,6 +48,9 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -240,7 +244,9 @@ public class ResourceAccessor extends AbstractHelixResource {
       @DefaultValue("DEFAULT") @QueryParam("rebalanceStrategy") String rebalanceStrategy,
       @DefaultValue("0") @QueryParam("bucketSize") int bucketSize,
       @DefaultValue("-1") @QueryParam("maxPartitionsPerInstance") int maxPartitionsPerInstance,
-      @DefaultValue("addResource") @QueryParam("command") String command, String content) {
+      @DefaultValue("addResource") @QueryParam("command") String command,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     // Get the command. If not provided, the default would be "addResource"
     Command cmd;
     try {
@@ -296,10 +302,27 @@ public class ResourceAccessor extends AbstractHelixResource {
           _logger.error("Input does not contain both IdealState and ResourceConfig!");
           return badRequest("Input does not contain both IdealState and ResourceConfig!");
         }
+
+        ResourceConfig proposedResourceConfig = new ResourceConfig(resourceConfigRecord);
+
+        // Guard rail: block (or simulate) adding a resource whose partition weight exceeds the
+        // largest single instance's capacity in any dimension, which would make it permanently
+        // unplaceable. force=true overrides; dryRun=true only reports the verdict without writing.
+        GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(getDataAccssor(clusterId))
+            .proposedResourceConfig(proposedResourceConfig)
+            .build();
+        GuardrailPipeline pipeline =
+            new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
+        Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
+
         // Add using HelixAdmin API
         try {
           admin.addResourceWithWeight(clusterId, new IdealState(idealStateRecord),
-              new ResourceConfig(resourceConfigRecord));
+              proposedResourceConfig);
         } catch (HelixException e) {
           String errMsg = String.format("Failed to add resource %s with weight in cluster %s!",
               idealStateRecord.getId(), clusterId);
