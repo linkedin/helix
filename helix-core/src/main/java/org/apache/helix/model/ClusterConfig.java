@@ -838,7 +838,7 @@ public class ClusterConfig extends HelixProperty {
   /**
    * Set the partition recovery duration threshold in milliseconds. A partition whose active replica
    * count stays below its minActiveReplicas longer than this threshold is counted in the
-   * PartitionsRecoveryDurationBeyondThresholdGauge for alerting.
+   * PartitionsRecoveryDurationBeyondThresholdCounter for alerting.
    * @param durationThreshold the threshold in milliseconds
    */
   public void setPartitionRecoveryDurationThreshold(long durationThreshold) {

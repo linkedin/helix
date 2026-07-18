@@ -138,8 +138,6 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
         getCache().getMissingMinActiveReplicaMap().get(TEST_RESOURCE).get(PARTITION);
     Assert.assertTrue(record.getStartTimeStamp() >= beforeDetection,
         "Recovery start time should be stamped at detection time");
-    Assert.assertFalse(record.isFailed(),
-        "A freshly-degraded partition should not yet be marked beyond threshold");
 
     // No recovery observed yet, so no duration / counter should have been emitted.
     ResourceMonitor resourceMonitor = getResourceMonitor();
@@ -183,54 +181,67 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     Assert.assertTrue(recordedDuration >= elapsedMs,
         "Recorded recovery duration should be at least the seeded elapsed time, got "
             + recordedDuration);
-    // helixLatency is a follow-up; v1 emits -1 so the beyond-threshold gauge stays untouched here.
-    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 0L);
+    // The seeded record started only elapsedMs (5s) ago, well under the default recovery threshold
+    // (5 min), so this fast recovery must not increment the beyond-threshold counter.
+    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 0L);
   }
 
   @Test
-  public void testBeyondThresholdGaugeIncrementsThenClearsOnRecovery() {
+  public void testSlowRecoveryIncrementsBeyondThresholdCounter() {
     preSetup(MIN_ACTIVE_REPLICAS);
     ClusterConfig clusterConfig = new ClusterConfig(_clusterName);
     clusterConfig.setPartitionRecoveryDurationThreshold(5000L);
     setClusterConfig(clusterConfig);
 
-    // Seed a record that started 10s ago (beyond the 5s threshold) while still degraded.
+    // Seed a record that started 10s ago (beyond the 5s threshold) while still degraded. A
+    // still-degraded scrape must NOT increment the counter -- the breach is only counted at
+    // recovery, so the monotonic counter can capture breaches that heal between scrapes.
     final long seededStart = System.currentTimeMillis() - 10000L;
     runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"), cache -> seedRecord(seededStart));
 
+    // Still-degraded scrape: nothing is emitted (no monitor need be created yet) and the record
+    // is still tracked. If a monitor already exists, its beyond-threshold counter must still be 0.
+    Assert.assertTrue(hasRecord(), "The record should still be tracked while degraded");
     ResourceMonitor resourceMonitor = getResourceMonitor();
-    Assert.assertNotNull(resourceMonitor);
-    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 1L,
-        "A partition degraded beyond the threshold should increment the beyond-threshold gauge");
-    Assert.assertTrue(
-        getCache().getMissingMinActiveReplicaMap().get(TEST_RESOURCE).get(PARTITION).isFailed(),
-        "The record should be marked failed once counted beyond threshold");
+    if (resourceMonitor != null) {
+      Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 0L,
+          "A still-degraded partition must not increment the beyond-threshold counter in flight");
+    }
 
-    // Now recover the partition.
+    // Now recover the partition. Its total below-min window (~10s) exceeds the 5s threshold, so
+    // the counter increments exactly once, at recovery.
     runPipeline(statesOf("MASTER", "SLAVE", "OFFLINE"), null);
 
     Assert.assertFalse(hasRecord(), "Recovery record should be cleared after recovery");
     resourceMonitor = getResourceMonitor();
-    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 0L,
-        "The beyond-threshold gauge should decrement once the partition recovers");
+    Assert.assertNotNull(resourceMonitor,
+        "A ResourceMonitor should be created when a recovery duration is emitted");
+    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 1L,
+        "A recovery whose below-min window exceeded the threshold should increment the counter");
     Assert.assertEquals(resourceMonitor.getSucceededPartitionRecoveryCounter(), 1L);
   }
 
   @Test
-  public void testBeyondThresholdGaugeCountedOnlyOnce() {
+  public void testBeyondThresholdCounterAccumulatesAndNeverDecrements() {
     preSetup(MIN_ACTIVE_REPLICAS);
     ClusterConfig clusterConfig = new ClusterConfig(_clusterName);
     clusterConfig.setPartitionRecoveryDurationThreshold(5000L);
     setClusterConfig(clusterConfig);
 
-    final long seededStart = System.currentTimeMillis() - 10000L;
-    Map<String, String> degraded = statesOf("MASTER", "OFFLINE", "OFFLINE");
-    runPipeline(degraded, cache -> seedRecord(seededStart));
-    // A second scrape while still degraded and still beyond threshold must not double-count.
-    runPipeline(degraded, null);
+    // First slow breach: seed a 10s-old record, then recover -> counter == 1.
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"),
+        cache -> seedRecord(System.currentTimeMillis() - 10000L));
+    runPipeline(statesOf("MASTER", "SLAVE", "OFFLINE"), null);
+    Assert.assertEquals(getResourceMonitor().getPartitionsRecoveryDurationBeyondThresholdCounter(),
+        1L);
 
-    ResourceMonitor resourceMonitor = getResourceMonitor();
-    Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 1L,
-        "A partition already counted beyond threshold must not be counted again on later scrapes");
+    // A heal followed by a fresh drop opens a NEW window. Seed a second 10s-old record and recover
+    // again -> the monotonic counter accumulates to 2 (it never resets and never decrements).
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"),
+        cache -> seedRecord(System.currentTimeMillis() - 10000L));
+    runPipeline(statesOf("MASTER", "SLAVE", "OFFLINE"), null);
+    Assert.assertEquals(getResourceMonitor().getPartitionsRecoveryDurationBeyondThresholdCounter(),
+        2L, "The beyond-threshold counter must accumulate across separate breach windows");
+    Assert.assertEquals(getResourceMonitor().getSucceededPartitionRecoveryCounter(), 2L);
   }
 }

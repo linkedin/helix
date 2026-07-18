@@ -799,19 +799,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
-  public void incrementPartitionRecoveryBeyondThresholdGauge(String resourceName) {
+  public void incrementPartitionRecoveryBeyondThresholdCounter(String resourceName) {
     ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
 
     if (resourceMonitor != null) {
-      resourceMonitor.incrementPartitionRecoveryBeyondThresholdGauge();
-    }
-  }
-
-  public void decrementPartitionRecoveryBeyondThresholdGauge(String resourceName) {
-    ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceName);
-
-    if (resourceMonitor != null) {
-      resourceMonitor.decrementPartitionRecoveryBeyondThresholdGauge();
+      resourceMonitor.incrementPartitionRecoveryBeyondThresholdCounter();
     }
   }
 

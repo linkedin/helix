@@ -95,7 +95,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   // before the controller restores it. Mirrors the top-state handoff metrics above.
   private HistogramDynamicMetric _partitionRecoveryDurationGauge;
   private HistogramDynamicMetric _partitionRecoveryHelixLatencyGauge;
-  private SimpleDynamicMetric<Long> _partitionsRecoveryDurationBeyondThresholdGauge;
+  private SimpleDynamicMetric<Long> _partitionsRecoveryDurationBeyondThresholdCounter;
   private SimpleDynamicMetric<Long> _successRecoveryCounter;
 
   private SimpleDynamicMetric<String> _rebalanceState;
@@ -181,8 +181,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _partitionRecoveryHelixLatencyGauge =
         new HistogramDynamicMetric("PartitionRecoveryHelixLatencyGauge", new Histogram(
             new SlidingTimeWindowArrayReservoir(getResetIntervalInMs(), TimeUnit.MILLISECONDS)));
-    _partitionsRecoveryDurationBeyondThresholdGauge =
-        new SimpleDynamicMetric("PartitionsRecoveryDurationBeyondThresholdGauge", 0L);
+    _partitionsRecoveryDurationBeyondThresholdCounter =
+        new SimpleDynamicMetric("PartitionsRecoveryDurationBeyondThresholdCounter", 0L);
     _successRecoveryCounter = new SimpleDynamicMetric("SucceededPartitionRecoveryCounter", 0L);
 
     _rebalanceState = new SimpleDynamicMetric<>("RebalanceStatus", RebalanceStatus.UNKNOWN.name());
@@ -255,8 +255,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     return _partitionRecoveryHelixLatencyGauge;
   }
 
-  public long getPartitionsRecoveryDurationBeyondThresholdGauge() {
-    return _partitionsRecoveryDurationBeyondThresholdGauge.getValue();
+  public long getPartitionsRecoveryDurationBeyondThresholdCounter() {
+    return _partitionsRecoveryDurationBeyondThresholdCounter.getValue();
   }
 
   public long getSucceededPartitionRecoveryCounter() {
@@ -544,15 +544,12 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     }
   }
 
-  public void incrementPartitionRecoveryBeyondThresholdGauge() {
-    _partitionsRecoveryDurationBeyondThresholdGauge
-        .updateValue(_partitionsRecoveryDurationBeyondThresholdGauge.getValue() + 1);
-    _lastResetTime = System.currentTimeMillis();
-  }
-
-  public void decrementPartitionRecoveryBeyondThresholdGauge() {
-    _partitionsRecoveryDurationBeyondThresholdGauge
-        .updateValue(Math.max(0, _partitionsRecoveryDurationBeyondThresholdGauge.getValue() - 1));
+  public void incrementPartitionRecoveryBeyondThresholdCounter() {
+    // Monotonic counter: incremented once when a recovery completes beyond the threshold, and
+    // never decremented. This lets scrape-robust rate/increase queries count breach occurrences
+    // even when a breach heals between scrapes, which a point-in-time gauge would miss.
+    _partitionsRecoveryDurationBeyondThresholdCounter
+        .updateValue(_partitionsRecoveryDurationBeyondThresholdCounter.getValue() + 1);
     _lastResetTime = System.currentTimeMillis();
   }
 
@@ -613,7 +610,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _partitionTopStateNonGracefulHandoffDurationGauge,
         _partitionRecoveryDurationGauge,
         _partitionRecoveryHelixLatencyGauge,
-        _partitionsRecoveryDurationBeyondThresholdGauge,
+        _partitionsRecoveryDurationBeyondThresholdCounter,
         _successRecoveryCounter,
         _totalMessageReceived,
         _totalMessageReceivedCounter,

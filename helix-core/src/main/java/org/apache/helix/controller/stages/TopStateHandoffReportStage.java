@@ -193,7 +193,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * @param partition partition of the given resource
    * @param currentStateOutput current state output
    * @param stateModelDef state model def object
-   * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold gauge
+   * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold counter
    */
   private void updatePartitionRecoveryStatus(ResourceControllerDataProvider cache,
       ClusterStatusMonitor clusterStatusMonitor, String resourceName, Partition partition,
@@ -224,21 +224,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         // Edge: healthy -> degraded. Stamp the detection time as the recovery start.
         missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
             .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
-      } else {
-        // Still degraded. Count it once for alerting if it has exceeded the threshold.
-        long recoveryDuration = System.currentTimeMillis() - record.getStartTimeStamp();
-        if (record.getStartTimeStamp() > 0 && recoveryDuration > recoveryDurationThreshold
-            && !record.isFailed()) {
-          record.setFailed();
-          LogUtil.logDebug(LOG, _eventId, String.format(
-              "Partition %s of resource %s has been below minActiveReplicas for %s ms, beyond "
-                  + "threshold %s ms", partitionName, resourceName, recoveryDuration,
-              recoveryDurationThreshold));
-          if (clusterStatusMonitor != null) {
-            clusterStatusMonitor.incrementPartitionRecoveryBeyondThresholdGauge(resourceName);
-          }
-        }
       }
+      // Still degraded: keep waiting. The breach is counted once at recovery (below), not while in
+      // flight, so the monotonic counter reliably captures it even across scrape gaps.
     } else if (record != null) {
       // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
       missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
@@ -247,8 +235,12 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         // helixLatency attribution is a follow-up; pass a negative value to skip that gauge.
         clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration, -1L,
             true);
-        if (record.isFailed()) {
-          clusterStatusMonitor.decrementPartitionRecoveryBeyondThresholdGauge(resourceName);
+        if (totalDuration > recoveryDurationThreshold) {
+          LogUtil.logDebug(LOG, _eventId, String.format(
+              "Partition %s of resource %s stayed below minActiveReplicas for %s ms, beyond "
+                  + "threshold %s ms", partitionName, resourceName, totalDuration,
+              recoveryDurationThreshold));
+          clusterStatusMonitor.incrementPartitionRecoveryBeyondThresholdCounter(resourceName);
         }
       }
     }

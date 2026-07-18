@@ -32,24 +32,12 @@ package org.apache.helix.controller.stages;
  */
 public class MissingMinActiveReplicaRecord {
   private final long startTimeStamp;
-  private boolean failed;
 
   public MissingMinActiveReplicaRecord(long start) {
     startTimeStamp = start;
-    failed = false;
   }
 
   /* package */ long getStartTimeStamp() {
     return startTimeStamp;
-  }
-
-  /* package */ void setFailed() {
-    // Mark the record as failed once the partition has stayed below minActiveReplicas beyond the
-    // configured recovery duration threshold, so the beyond-threshold gauge is only incremented once.
-    failed = true;
-  }
-
-  /* package */ boolean isFailed() {
-    return failed;
   }
 }

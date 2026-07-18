@@ -365,16 +365,14 @@ public class TestResourceMonitor {
       monitor.updatePartitionRecoveryStats(1000L, 500L, false);
       Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
 
-      // The beyond-threshold gauge increments / decrements and never goes below zero.
-      monitor.incrementPartitionRecoveryBeyondThresholdGauge();
-      monitor.incrementPartitionRecoveryBeyondThresholdGauge();
-      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 2L);
-      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
-      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 1L);
-      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
-      monitor.decrementPartitionRecoveryBeyondThresholdGauge();
-      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdGauge(), 0L,
-          "Beyond-threshold gauge must clamp at zero");
+      // The beyond-threshold counter is monotonic: it only ever increments and is never decremented,
+      // so scrape-robust increase() queries can count breaches even when they heal between scrapes.
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 2L);
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 3L,
+          "Beyond-threshold counter must be monotonically increasing");
     } finally {
       monitor.unregister();
     }
