@@ -96,7 +96,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   private HistogramDynamicMetric _partitionRecoveryDurationGauge;
   private HistogramDynamicMetric _partitionRecoveryHelixLatencyGauge;
   private SimpleDynamicMetric<Long> _partitionsRecoveryDurationBeyondThresholdCounter;
-  private SimpleDynamicMetric<Long> _successRecoveryCounter;
+  private SimpleDynamicMetric<Long> _succeededPartitionRecoveryCounter;
 
   private SimpleDynamicMetric<String> _rebalanceState;
 
@@ -183,7 +183,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
             new SlidingTimeWindowArrayReservoir(getResetIntervalInMs(), TimeUnit.MILLISECONDS)));
     _partitionsRecoveryDurationBeyondThresholdCounter =
         new SimpleDynamicMetric("PartitionsRecoveryDurationBeyondThresholdCounter", 0L);
-    _successRecoveryCounter = new SimpleDynamicMetric("SucceededPartitionRecoveryCounter", 0L);
+    _succeededPartitionRecoveryCounter = new SimpleDynamicMetric("SucceededPartitionRecoveryCounter", 0L);
 
     _rebalanceState = new SimpleDynamicMetric<>("RebalanceStatus", RebalanceStatus.UNKNOWN.name());
   }
@@ -260,7 +260,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   }
 
   public long getSucceededPartitionRecoveryCounter() {
-    return _successRecoveryCounter.getValue();
+    return _succeededPartitionRecoveryCounter.getValue();
   }
 
   @Deprecated
@@ -445,7 +445,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   public void updatePartitionRecoveryStats(long totalDuration, long helixLatency,
       boolean succeeded) {
     if (succeeded) {
-      _successRecoveryCounter.updateValue(_successRecoveryCounter.getValue() + 1);
+      _succeededPartitionRecoveryCounter.updateValue(_succeededPartitionRecoveryCounter.getValue() + 1);
       _partitionRecoveryDurationGauge.updateValue(totalDuration);
       if (helixLatency >= 0) {
         _partitionRecoveryHelixLatencyGauge.updateValue(helixLatency);
@@ -611,7 +611,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _partitionRecoveryDurationGauge,
         _partitionRecoveryHelixLatencyGauge,
         _partitionsRecoveryDurationBeyondThresholdCounter,
-        _successRecoveryCounter,
+        _succeededPartitionRecoveryCounter,
         _totalMessageReceived,
         _totalMessageReceivedCounter,
         _numPendingStateTransitions,

@@ -139,11 +139,10 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     Assert.assertTrue(record.getStartTimeStamp() >= beforeDetection,
         "Recovery start time should be stamped at detection time");
 
-    // No recovery observed yet, so no duration / counter should have been emitted.
-    ResourceMonitor resourceMonitor = getResourceMonitor();
-    if (resourceMonitor != null) {
-      Assert.assertEquals(resourceMonitor.getSucceededPartitionRecoveryCounter(), 0L);
-    }
+    // No recovery observed yet: nothing is emitted, so no ResourceMonitor is created for the
+    // resource. Assert that explicitly rather than skipping, so a stray emission can't pass green.
+    Assert.assertNull(getResourceMonitor(),
+        "No ResourceMonitor should exist while the partition is still degraded (nothing emitted)");
   }
 
   @Test
@@ -199,21 +198,18 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     final long seededStart = System.currentTimeMillis() - 10000L;
     runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"), cache -> seedRecord(seededStart));
 
-    // Still-degraded scrape: nothing is emitted (no monitor need be created yet) and the record
-    // is still tracked. If a monitor already exists, its beyond-threshold counter must still be 0.
+    // Still-degraded scrape: nothing is emitted, so no ResourceMonitor exists yet, and the record
+    // is still tracked. Assert both explicitly so a stray in-flight emission can't pass green.
     Assert.assertTrue(hasRecord(), "The record should still be tracked while degraded");
-    ResourceMonitor resourceMonitor = getResourceMonitor();
-    if (resourceMonitor != null) {
-      Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 0L,
-          "A still-degraded partition must not increment the beyond-threshold counter in flight");
-    }
+    Assert.assertNull(getResourceMonitor(),
+        "A still-degraded partition must not emit anything (no ResourceMonitor created) in flight");
 
     // Now recover the partition. Its total below-min window (~10s) exceeds the 5s threshold, so
     // the counter increments exactly once, at recovery.
     runPipeline(statesOf("MASTER", "SLAVE", "OFFLINE"), null);
 
     Assert.assertFalse(hasRecord(), "Recovery record should be cleared after recovery");
-    resourceMonitor = getResourceMonitor();
+    ResourceMonitor resourceMonitor = getResourceMonitor();
     Assert.assertNotNull(resourceMonitor,
         "A ResourceMonitor should be created when a recovery duration is emitted");
     Assert.assertEquals(resourceMonitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 1L,
