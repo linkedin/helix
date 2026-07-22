@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
@@ -108,6 +109,10 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
+    // Capture capacity rejection data from this pipeline run and clear for next run
+    final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
+        cache.getAndClearCapacityRejections();
+
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
         if (clusterStatusMonitor != null) {
@@ -127,6 +132,17 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
             IdealState is = idealStateMap.get(resourceName);
             reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
                 externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
+          }
+
+          // Increment capacity rejection counters for each resource
+          for (Map.Entry<String, Map<String, AtomicLong>> entry
+              : capacityRejectionSnapshot.entrySet()) {
+            String resourceName = entry.getKey();
+            if (resourceConfigMap.containsKey(resourceName) && resourceConfigMap.get(resourceName)
+                .isMonitoringDisabled()) {
+              continue;
+            }
+            clusterStatusMonitor.incrementMappingCapacityRejectionCounters(resourceName, entry.getValue());
           }
         }
       } catch (Exception e) {

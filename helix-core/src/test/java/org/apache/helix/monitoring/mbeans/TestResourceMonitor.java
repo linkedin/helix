@@ -248,6 +248,25 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testCapacityRejectionCounter() throws JMException {
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=value2"));
+    monitor.register();
+
+    try {
+      monitor.incrementCapacityRejectionCounter("Instance_1", 2);
+      monitor.incrementCapacityRejectionCounter("Instance_1", 3);
+      monitor.incrementCapacityRejectionCounter("Instance_2", 1);
+
+      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_1"), 5L);
+      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_2"), 1L);
+      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_3"), 0L);
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testNoMetricsRecordedForNullOrDisabledIdealState() throws JMException {
     final int n = 5;
     ResourceMonitor monitor =
