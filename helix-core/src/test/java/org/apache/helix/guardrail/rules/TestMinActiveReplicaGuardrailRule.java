@@ -100,6 +100,39 @@ public class TestMinActiveReplicaGuardrailRule {
   }
 
   /**
+   * A resource whose ExternalView has not been computed yet has no committed placement, so it is
+   * not hosted on the instance and must be skipped rather than blocking the drop cluster-wide.
+   */
+  @Test
+  public void testResourceWithoutExternalViewIsSkipped() {
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+
+    IdealState idealState = mock(IdealState.class);
+    when(idealState.isEnabled()).thenReturn(true);
+    when(idealState.isValid()).thenReturn(true);
+    when(idealState.getStateModelDefRef()).thenReturn("MasterSlave");
+
+    doReturn(ImmutableList.of(RESOURCE)).when(dataAccessor)
+        .getChildNames(argThat(new PropertyKeyArgument(PropertyType.IDEALSTATES)));
+    doReturn(idealState).when(dataAccessor)
+        .getProperty(argThat(new PropertyKeyArgument(PropertyType.IDEALSTATES)));
+    // No ExternalView computed yet: the rule must skip it, not fail closed for the whole cluster.
+    doReturn(null).when(dataAccessor)
+        .getProperty(argThat(new PropertyKeyArgument(PropertyType.EXTERNALVIEW)));
+
+    GuardrailContext context = GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .instanceName(INSTANCE)
+        .build();
+
+    ValidationResult result = rule.validate(context);
+
+    Assert.assertTrue(result.isFeasible());
+    Assert.assertTrue(result.getViolations().isEmpty());
+  }
+
+  /**
    * Builds a mock {@link HelixDataAccessor} exposing a single MasterSlave resource with one
    * partition whose replica states / minActiveReplicas are supplied by the caller. OFFLINE, ERROR
    * and DROPPED are treated as unhealthy (via the default state-model initial state).

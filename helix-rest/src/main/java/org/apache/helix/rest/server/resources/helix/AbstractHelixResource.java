@@ -121,6 +121,14 @@ public class AbstractHelixResource extends AbstractResource {
    * the underlying mutation. A feasible dry-run does not guarantee the subsequent write will
    * succeed, since the mutation may enforce additional preconditions of its own.
    * <p>
+   * Note also that the verdict is computed from a snapshot of cluster state read at preflight time.
+   * Because the cluster is a live, eventually-consistent system &mdash; the controller keeps
+   * rebalancing and participants join and leave independently of this call &mdash; that state can
+   * change between this read and the subsequent write. This check is therefore a best-effort early
+   * abort, not a transactional gate: a {@code feasible} verdict does not lock the cluster, so a
+   * mutation judged safe here may still race with a concurrent state change. The mutation's own
+   * preconditions and the controller remain the authoritative safety net.
+   * <p>
    * When this method returns {@link Optional#empty()} the caller should proceed with the mutation;
    * when it returns a response, the caller should return that response as-is.
    *

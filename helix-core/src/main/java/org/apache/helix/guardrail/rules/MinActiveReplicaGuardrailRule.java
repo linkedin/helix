@@ -39,6 +39,11 @@ import org.apache.helix.util.MinActiveReplicaCheckResult;
  * healthy replicas that would remain on sibling instances. If that count is below the resource's
  * {@code minActiveReplicas}, the mutation is unsafe and this rule reports the first offending
  * resource / partition as a {@link Violation}.
+ * <p>
+ * The evaluation is scoped to resources actually hosted on the instance: a resource whose
+ * ExternalView has not been computed yet has no committed placement, so it is skipped rather than
+ * blocking the drop. This prevents a single not-yet-placed resource from blocking instance removal
+ * across the entire cluster while its ExternalView is still being computed.
  */
 public class MinActiveReplicaGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "MIN_ACTIVE_REPLICA_ON_INSTANCE_DROP";
@@ -59,12 +64,12 @@ public class MinActiveReplicaGuardrailRule implements GuardrailRule {
     MinActiveReplicaCheckResult checkResult;
     try {
       checkResult = InstanceValidationUtil.siblingNodesActiveReplicaCheckWithDetails(
-          context.getDataAccessor(), instanceName, Collections.emptySet());
+          context.getDataAccessor(), instanceName, Collections.emptySet(), true);
     } catch (HelixException e) {
-      // The underlying check scans every enabled resource and can throw (e.g. when a resource has
-      // no ExternalView computed yet) before it can even determine whether this instance hosts it.
-      // We cannot certify the drop as safe, so fail closed with an honest message rather than
-      // mislabeling an evaluation failure as a min-active-replica shortfall.
+      // Resources not yet placed (no ExternalView) are skipped above, so this only trips on an
+      // unexpected evaluation failure. We cannot certify the drop as safe, so fail closed with an
+      // honest message rather than mislabeling an evaluation failure as a min-active-replica
+      // shortfall.
       return ValidationResult.infeasible(Violation.newBuilder(RULE_ID)
           .message(String.format(
               "Could not verify minimum active replicas for instance %s: %s Blocking as a "
