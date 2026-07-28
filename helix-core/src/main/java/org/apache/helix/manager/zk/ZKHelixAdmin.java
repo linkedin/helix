@@ -1773,6 +1773,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void addResource(String clusterName, String resourceName, IdealState idealstate) {
     logger.info("Add resource {} in cluster {}.", resourceName, clusterName);
+    validateNonNegativeNumPartitions(clusterName, idealstate);
     String stateModelRef = idealstate.getStateModelDefRef();
     String stateModelDefPath = PropertyPathBuilder.stateModelDef(clusterName, stateModelRef);
     if (!_zkClient.exists(stateModelDefPath)) {
@@ -1906,10 +1907,29 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger
         .info("Set IdealState for resource {} in cluster {} with new IdealState {}.", resourceName,
             clusterName, idealState == null ? "NULL" : idealState.toString());
+    validateNonNegativeNumPartitions(clusterName, idealState);
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     accessor.setProperty(keyBuilder.idealStates(resourceName), idealState);
+  }
+
+  /**
+   * Validates that the given IdealState has a non-negative NUM_PARTITIONS before it is persisted.
+   * A missing NUM_PARTITIONS field defaults to -1 (see {@link IdealState#getNumPartitions()}). If
+   * such a record reaches ZooKeeper, the rebalancer later cannot place the resource (fails with
+   * NO_CANDIDATE_NODE) and keeps serving a stale assignment. Rejecting the write up front keeps the
+   * invalid record out of ZooKeeper. Mirrors the NUM_PARTITIONS check in
+   * {@link IdealState#isValid()}. A null IdealState is left untouched so existing callers that rely
+   * on that behavior are not affected.
+   */
+  private static void validateNonNegativeNumPartitions(String clusterName, IdealState idealState) {
+    if (idealState != null && idealState.getNumPartitions() < 0) {
+      throw new HelixException(String.format(
+          "Cannot write IdealState for resource %s in cluster %s: NUM_PARTITIONS must be "
+              + "non-negative, but was %d.",
+          idealState.getResourceName(), clusterName, idealState.getNumPartitions()));
+    }
   }
 
   /**
@@ -1929,6 +1949,17 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException(String.format(
           "updateIdealState failed. The IdealState for the given resource does not already exist. Resource name: %s",
           resourceName));
+    }
+    // This is a merge update, so a partial input that does not carry NUM_PARTITIONS must still be
+    // allowed (it simply does not touch partitions). Only reject an explicitly negative value so a
+    // caller cannot overwrite a valid NUM_PARTITIONS with -1.
+    if (idealState.getRecord().getSimpleFields()
+            .containsKey(IdealState.IdealStateProperty.NUM_PARTITIONS.name())
+        && idealState.getNumPartitions() < 0) {
+      throw new HelixException(String.format(
+          "updateIdealState failed for resource %s in cluster %s: NUM_PARTITIONS must be "
+              + "non-negative, but was %d.",
+          resourceName, clusterName, idealState.getNumPartitions()));
     }
     // Update by way of merge
     ZKUtil.upsertWithOptionalCreate(_zkClient, zkPath, idealState.getRecord(), true, true, false);

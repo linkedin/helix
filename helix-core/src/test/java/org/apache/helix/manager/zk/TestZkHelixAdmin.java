@@ -454,6 +454,114 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
+  /**
+   * Verifies that every IdealState write path in ZKHelixAdmin rejects a NUM_PARTITIONS that is
+   * missing (defaults to -1) or negative, so an invalid resource can never reach ZooKeeper and
+   * later break the rebalancer with NO_CANDIDATE_NODE. Also verifies that legitimate writes and
+   * partial merge-updates that do not touch NUM_PARTITIONS still succeed.
+   */
+  @Test
+  public void testWriteIdealStateRejectsInvalidNumPartitions() {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+    tool.addCluster(clusterName, true);
+    Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient), "Cluster should be setup");
+    tool.addStateModelDef(clusterName, "MasterSlave",
+        new StateModelDefinition(StateModelConfigGenerator.generateConfigForMasterSlave()));
+
+    PropertyKey.Builder keyBuilder = new PropertyKey.Builder(clusterName);
+
+    // 1. addResource(IdealState) with no NUM_PARTITIONS (getNumPartitions() defaults to -1) must be
+    // rejected and must not create the ideal-state node. This is the path Ambry's bootstrap tool
+    // uses and the one that caused the incident.
+    String missingPartResource = "resourceMissingNumPartitions";
+    IdealState missingPart = new IdealState(missingPartResource);
+    missingPart.setStateModelDefRef("MasterSlave");
+    Assert.assertEquals(missingPart.getNumPartitions(), -1);
+    try {
+      tool.addResource(clusterName, missingPartResource, missingPart);
+      Assert.fail("addResource should reject an IdealState with NUM_PARTITIONS < 0");
+    } catch (HelixException expected) {
+      // expected
+    }
+    Assert.assertFalse(_gZkClient.exists(keyBuilder.idealStates(missingPartResource).getPath()),
+        "Invalid resource must not be persisted");
+
+    // 2. The int-partitions addResource overload with a negative partition count must also be
+    // rejected (it builds an IdealState and delegates to the IdealState overload).
+    try {
+      tool.addResource(clusterName, "resourceNegativePartitions", -1, "MasterSlave");
+      Assert.fail("addResource should reject a negative partition count");
+    } catch (HelixException expected) {
+      // expected
+    }
+    Assert.assertFalse(
+        _gZkClient.exists(keyBuilder.idealStates("resourceNegativePartitions").getPath()),
+        "Invalid resource must not be persisted");
+
+    // 3. setResourceIdealState (full overwrite) with no NUM_PARTITIONS must be rejected. This is the
+    // path Ambry's full-auto migration and addIdealState(file) use.
+    String overwriteResource = "resourceOverwriteMissingNumPartitions";
+    IdealState overwriteMissing = new IdealState(overwriteResource);
+    overwriteMissing.setStateModelDefRef("MasterSlave");
+    Assert.assertEquals(overwriteMissing.getNumPartitions(), -1);
+    try {
+      tool.setResourceIdealState(clusterName, overwriteResource, overwriteMissing);
+      Assert.fail("setResourceIdealState should reject an IdealState with NUM_PARTITIONS < 0");
+    } catch (HelixException expected) {
+      // expected
+    }
+    Assert.assertFalse(_gZkClient.exists(keyBuilder.idealStates(overwriteResource).getPath()),
+        "Invalid resource must not be persisted");
+
+    // 4. A valid resource must still be created and overwritten successfully (no regression).
+    String validResource = "validResource";
+    tool.addResource(clusterName, validResource, 4, "MasterSlave");
+    Assert.assertTrue(_gZkClient.exists(keyBuilder.idealStates(validResource).getPath()),
+        "Valid resource should be created");
+    IdealState validIdealState = tool.getResourceIdealState(clusterName, validResource);
+    Assert.assertEquals(validIdealState.getNumPartitions(), 4);
+    validIdealState.setNumPartitions(8);
+    tool.setResourceIdealState(clusterName, validResource, validIdealState);
+    Assert.assertEquals(
+        tool.getResourceIdealState(clusterName, validResource).getNumPartitions(), 8);
+
+    // 5. updateIdealState is a merge: a partial update that does NOT carry NUM_PARTITIONS must still
+    // succeed and must not disturb the existing NUM_PARTITIONS.
+    IdealState partialUpdate = new IdealState(validResource);
+    partialUpdate.setInstanceGroupTag("TAG_1");
+    Assert.assertFalse(partialUpdate.getRecord().getSimpleFields()
+        .containsKey(IdealState.IdealStateProperty.NUM_PARTITIONS.name()));
+    tool.updateIdealState(clusterName, validResource, partialUpdate);
+    IdealState afterPartial = tool.getResourceIdealState(clusterName, validResource);
+    Assert.assertEquals(afterPartial.getNumPartitions(), 8, "Merge update must not change partitions");
+    Assert.assertEquals(afterPartial.getInstanceGroupTag(), "TAG_1");
+
+    // 6. updateIdealState with an explicitly negative NUM_PARTITIONS must be rejected so a caller
+    // cannot overwrite a valid value with -1.
+    IdealState badUpdate = new IdealState(validResource);
+    badUpdate.setNumPartitions(-1);
+    Assert.assertTrue(badUpdate.getRecord().getSimpleFields()
+        .containsKey(IdealState.IdealStateProperty.NUM_PARTITIONS.name()));
+    try {
+      tool.updateIdealState(clusterName, validResource, badUpdate);
+      Assert.fail("updateIdealState should reject an explicit NUM_PARTITIONS < 0");
+    } catch (HelixException expected) {
+      // expected
+    }
+    Assert.assertEquals(
+        tool.getResourceIdealState(clusterName, validResource).getNumPartitions(), 8,
+        "Existing NUM_PARTITIONS must be preserved after a rejected update");
+
+    tool.dropCluster(clusterName);
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
   // test add/remove message constraint
   @Test
   public void testAddRemoveMsgConstraint() {
