@@ -338,6 +338,57 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testUpdatePartitionRecoveryStats() throws JMException {
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=recoveryTest"));
+    monitor.register();
+    try {
+      // A successful recovery records the total duration and increments the counter.
+      monitor.updatePartitionRecoveryStats(4000L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 4000L);
+      // helixLatency < 0 is skipped (v1), so the helixLatency histogram stays empty.
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 0L);
+
+      // A second successful recovery increments the counter and records the larger max, and a
+      // non-negative helixLatency is now recorded.
+      monitor.updatePartitionRecoveryStats(9000L, 2000L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 2000L);
+
+      // A non-successful update records nothing.
+      monitor.updatePartitionRecoveryStats(1000L, 500L, false);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+
+      // A negative totalDuration (possible if the wall clock steps backward between the start and
+      // end samples) must NOT be recorded into the histogram -- it would corrupt min/p99/max. The
+      // recovery is still counted; only the invalid duration sample is skipped.
+      monitor.updatePartitionRecoveryStats(-500L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 3L,
+          "A negative-duration recovery is still counted");
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+              .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L,
+          "A negative duration must not be recorded into the histogram");
+
+      // The beyond-threshold counter is monotonic: it only ever increments and is never decremented,
+      // so scrape-robust increase() queries can count breaches even when they heal between scrapes.
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 2L);
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 3L,
+          "Beyond-threshold counter must be monotonically increasing");
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testUpdatePartitionWeightStats() throws JMException, IOException {
     final MBeanServerConnection mBeanServer = ManagementFactory.getPlatformMBeanServer();
     final String clusterName = TestHelper.getTestMethodName();

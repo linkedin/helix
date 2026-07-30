@@ -20,8 +20,11 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -30,6 +33,7 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -94,12 +98,17 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
         cache.getPostDispatchHandoffMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
 
     long durationThreshold = Long.MAX_VALUE;
     long handoffDurationThreshold = Long.MAX_VALUE;
+    long recoveryDurationThreshold = Long.MAX_VALUE;
     if (cache.getClusterConfig() != null) {
       durationThreshold = cache.getClusterConfig().getMissTopStateDurationThreshold();
       handoffDurationThreshold = cache.getClusterConfig().getTopStateHandoffDurationThreshold();
+      recoveryDurationThreshold =
+          cache.getClusterConfig().getPartitionRecoveryDurationThreshold();
     }
 
     // Remove any resource records that no longer exists
@@ -107,6 +116,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     controllerObservedHandoffMap.keySet().retainAll(resourceMap.keySet());
     participantExecutionHandoffMap.keySet().retainAll(resourceMap.keySet());
     lastTopStateMap.keySet().retainAll(resourceMap.keySet());
+    missingMinActiveReplicaMap.keySet().retainAll(resourceMap.keySet());
 
     for (Resource resource : resourceMap.values()) {
       StateModelDefinition stateModelDef = cache.getStateModelDef(resource.getStateModelDefRef());
@@ -149,6 +159,11 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           reportTopStateHandoffFailIfNecessary(cache, resourceName, partition, durationThreshold,
               clusterStatusMonitor);
         }
+
+        // Track how long the partition stays below its minActiveReplicas count, independent of
+        // top state presence.
+        updatePartitionRecoveryStatus(cache, clusterStatusMonitor, resourceName, partition,
+            currentStateOutput, stateModelDef, recoveryDurationThreshold);
       }
 
       if (!_failingPartitionsInfoMap.isEmpty()) {
@@ -159,6 +174,187 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (clusterStatusMonitor != null) {
       clusterStatusMonitor.resetMaxMissingTopStateGauge();
     }
+  }
+
+  /**
+   * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
+   * duration"). An edge detector runs once per pipeline execution per partition:
+   * <ul>
+   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B). The
+   *       transition is confirmed against the previously published ExternalView so that a partition
+   *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
+   *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
+   *   <li>degraded -&gt; degraded: mark it once for alerting if it exceeds the threshold.</li>
+   *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
+   * </ul>
+   * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
+   * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. helixLatency
+   * attribution is a follow-up, so the end-to-end duration is emitted with a negative helixLatency.
+   *
+   * @param cache cluster data cache
+   * @param clusterStatusMonitor monitor object
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param currentStateOutput current state output
+   * @param stateModelDef state model def object
+   * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold counter
+   */
+  private void updatePartitionRecoveryStatus(ResourceControllerDataProvider cache,
+      ClusterStatusMonitor clusterStatusMonitor, String resourceName, Partition partition,
+      CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
+      long recoveryDurationThreshold) {
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null || !idealState.isEnabled() || cache.isMaintenanceModeEnabled()) {
+      // Skip resources with no IdealState or that are disabled. A disabled resource is not
+      // expected to maintain its replicas, so a drop below min while disabled is not a real
+      // recovery -- mirrors ResourceMonitor#updateResourceState.
+      // Also skip while the cluster is in maintenance mode: the controller intentionally holds off
+      // restoring or moving replicas (node swaps, take-downs, the maintenance-timeout window), so a
+      // partition below min is expected behavior, not an availability regression. Counting it would
+      // inflate the recovery-duration histogram by the length of the maintenance window and fire
+      // false beyond-threshold breaches.
+      return;
+    }
+    int minActiveReplica = getMinActiveReplica(idealState);
+    if (minActiveReplica <= 0) {
+      // No min-active-replica requirement to track for this resource.
+      return;
+    }
+
+    int activeReplicaCount =
+        countActiveReplicas(currentStateOutput, resourceName, partition, stateModelDef);
+    boolean belowMin = activeReplicaCount < minActiveReplica;
+
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
+    String partitionName = partition.getPartitionName();
+    MissingMinActiveReplicaRecord record = missingMinActiveReplicaMap.containsKey(resourceName)
+        ? missingMinActiveReplicaMap.get(resourceName).get(partitionName) : null;
+
+    if (belowMin) {
+      if (record == null && wasPreviouslyAtOrAboveMin(cache, resourceName, partition, stateModelDef,
+          minActiveReplica)) {
+        // Edge: healthy -> degraded. A missing record is ambiguous -- it also means we have never
+        // observed this partition (brand-new resource, partition expansion, or the first run after
+        // clearMonitoringRecords() on a leadership change). Only open a recovery window when the
+        // previously published ExternalView confirms the partition was at or above min, so bring-up
+        // time is not mis-counted as a recovery. Stamp the detection time as the recovery start.
+        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
+            .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
+      }
+      // Still degraded: keep waiting. The breach is counted once at recovery (below), not while in
+      // flight, so the monotonic counter reliably captures it even across scrape gaps.
+    } else if (record != null) {
+      // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
+      missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
+      long totalDuration = System.currentTimeMillis() - record.getStartTimeStamp();
+      if (clusterStatusMonitor != null) {
+        // helixLatency attribution is a follow-up; pass a negative value to skip that gauge.
+        clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration, -1L,
+            true);
+        if (totalDuration > recoveryDurationThreshold) {
+          LogUtil.logDebug(LOG, _eventId, String.format(
+              "Partition %s of resource %s stayed below minActiveReplicas for %s ms, beyond "
+                  + "threshold %s ms", partitionName, resourceName, totalDuration,
+              recoveryDurationThreshold));
+          clusterStatusMonitor.incrementPartitionRecoveryBeyondThresholdCounter(resourceName);
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolve the effective minActiveReplicas for a resource. Falls back to the resource replica
+   * count when minActiveReplicas is not explicitly set, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param idealState ideal state of the resource
+   * @return effective minActiveReplicas, or a non-positive value when there is nothing to track
+   */
+  private int getMinActiveReplica(IdealState idealState) {
+    int minActiveReplica = idealState.getMinActiveReplicas();
+    if (minActiveReplica < 0) {
+      minActiveReplica = idealState.getReplicaCount(-1);
+    }
+    return minActiveReplica;
+  }
+
+  /**
+   * Count the replicas of a partition currently in an active state. Active states are all states
+   * in the state model's priority list except the initial state, DROPPED, and ERROR, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param currentStateOutput current state output
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(CurrentStateOutput currentStateOutput, String resourceName,
+      Partition partition, StateModelDefinition stateModelDef) {
+    return countActiveReplicas(currentStateOutput.getCurrentStateMap(resourceName, partition),
+        stateModelDef);
+  }
+
+  /**
+   * Count the replicas in an active state from a raw instance -&gt; state map. Active states are all
+   * states in the state model's priority list except the initial state, DROPPED, and ERROR,
+   * mirroring {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param stateMap instance -&gt; state map for a partition (may be null)
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(Map<String, String> stateMap,
+      StateModelDefinition stateModelDef) {
+    if (stateMap == null) {
+      return 0;
+    }
+    Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
+    activeStates.remove(stateModelDef.getInitialState());
+    activeStates.remove(HelixDefinedState.DROPPED.name());
+    activeStates.remove(HelixDefinedState.ERROR.name());
+
+    int activeReplicaCount = 0;
+    for (String state : stateMap.values()) {
+      if (activeStates.contains(state)) {
+        activeReplicaCount++;
+      }
+    }
+    return activeReplicaCount;
+  }
+
+  /**
+   * Determine whether a partition was at or above {@code minActiveReplicas} in the previously
+   * published ExternalView. Used to confirm a genuine healthy -&gt; below-min transition before
+   * opening a recovery window, so that a partition coming up from nothing is not mistaken for a
+   * drop. The ExternalView is refreshed from ZooKeeper at the start of every pipeline run (and is
+   * durable across a leadership change, unlike the in-memory recovery records), so it reflects the
+   * partition's state as of the previous observation.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @param minActiveReplica effective minActiveReplicas for the resource
+   * @return {@code true} if the previous ExternalView had at least minActiveReplicas active
+   *         replicas; {@code false} if there is no previous ExternalView (e.g. a brand-new resource)
+   *         or it was below min
+   */
+  private boolean wasPreviouslyAtOrAboveMin(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, StateModelDefinition stateModelDef,
+      int minActiveReplica) {
+    Map<String, ExternalView> externalViews = cache.getExternalViews();
+    ExternalView previousExternalView =
+        externalViews == null ? null : externalViews.get(resourceName);
+    if (previousExternalView == null) {
+      // No previously published ExternalView (e.g. a brand-new resource or partition). Treat as a
+      // bring-up, not a drop, so we do not open a recovery window.
+      return false;
+    }
+    Map<String, String> previousStateMap =
+        previousExternalView.getStateMap(partition.getPartitionName());
+    return countActiveReplicas(previousStateMap, stateModelDef) >= minActiveReplica;
   }
 
   /**

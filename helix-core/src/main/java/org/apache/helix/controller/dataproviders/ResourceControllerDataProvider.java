@@ -45,6 +45,7 @@ import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
 import org.apache.helix.controller.stages.InProgressHandoffRecord;
+import org.apache.helix.controller.stages.MissingMinActiveReplicaRecord;
 import org.apache.helix.controller.stages.MissingTopStateRecord;
 import org.apache.helix.model.CustomizedState;
 import org.apache.helix.model.CustomizedStateConfig;
@@ -92,6 +93,11 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   private Map<String, Map<String, InProgressHandoffRecord>> _inProgressHandoffMap;
   private Map<String, Map<String, InProgressHandoffRecord>> _postDispatchHandoffMap;
   private Map<String, Map<String, String>> _lastTopStateLocationMap;
+
+  // records for partitions currently below their minActiveReplicas count, used to compute how long
+  // a partition stays degraded (its recovery duration). Persists across pipeline runs so a start
+  // recorded in one run resolves to a duration in a later run, mirroring _missingTopStateMap.
+  private Map<String, Map<String, MissingMinActiveReplicaRecord>> _missingMinActiveReplicaMap;
 
   // Maintain a set of all ChangeTypes for change detection
   private Set<HelixConstants.ChangeType> _refreshedChangeTypes;
@@ -157,6 +163,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _inProgressHandoffMap = new HashMap<>();
     _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
+    _missingMinActiveReplicaMap = new HashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
     _customizedViewCacheMap = new HashMap<>();
@@ -395,6 +402,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     return _missingTopStateMap;
   }
 
+  public Map<String, Map<String, MissingMinActiveReplicaRecord>> getMissingMinActiveReplicaMap() {
+    return _missingMinActiveReplicaMap;
+  }
+
   public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
     return _inProgressHandoffMap;
   }
@@ -492,6 +503,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   public void clearMonitoringRecords() {
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
+    _missingMinActiveReplicaMap.clear();
   }
 
   /**
