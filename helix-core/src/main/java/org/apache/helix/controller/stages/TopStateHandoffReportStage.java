@@ -33,6 +33,7 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -179,7 +180,10 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
    * duration"). An edge detector runs once per pipeline execution per partition:
    * <ul>
-   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B).</li>
+   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B). The
+   *       transition is confirmed against the previously published ExternalView so that a partition
+   *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
+   *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
    *   <li>degraded -&gt; degraded: mark it once for alerting if it exceeds the threshold.</li>
    *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
    * </ul>
@@ -223,8 +227,13 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         ? missingMinActiveReplicaMap.get(resourceName).get(partitionName) : null;
 
     if (belowMin) {
-      if (record == null) {
-        // Edge: healthy -> degraded. Stamp the detection time as the recovery start.
+      if (record == null && wasPreviouslyAtOrAboveMin(cache, resourceName, partition, stateModelDef,
+          minActiveReplica)) {
+        // Edge: healthy -> degraded. A missing record is ambiguous -- it also means we have never
+        // observed this partition (brand-new resource, partition expansion, or the first run after
+        // clearMonitoringRecords() on a leadership change). Only open a recovery window when the
+        // previously published ExternalView confirms the partition was at or above min, so bring-up
+        // time is not mis-counted as a recovery. Stamp the detection time as the recovery start.
         missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
             .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
       }
@@ -278,21 +287,69 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private int countActiveReplicas(CurrentStateOutput currentStateOutput, String resourceName,
       Partition partition, StateModelDefinition stateModelDef) {
+    return countActiveReplicas(currentStateOutput.getCurrentStateMap(resourceName, partition),
+        stateModelDef);
+  }
+
+  /**
+   * Count the replicas in an active state from a raw instance -&gt; state map. Active states are all
+   * states in the state model's priority list except the initial state, DROPPED, and ERROR,
+   * mirroring {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param stateMap instance -&gt; state map for a partition (may be null)
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(Map<String, String> stateMap,
+      StateModelDefinition stateModelDef) {
+    if (stateMap == null) {
+      return 0;
+    }
     Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
     activeStates.remove(stateModelDef.getInitialState());
     activeStates.remove(HelixDefinedState.DROPPED.name());
     activeStates.remove(HelixDefinedState.ERROR.name());
 
     int activeReplicaCount = 0;
-    Map<String, String> stateMap = currentStateOutput.getCurrentStateMap(resourceName, partition);
-    if (stateMap != null) {
-      for (String state : stateMap.values()) {
-        if (activeStates.contains(state)) {
-          activeReplicaCount++;
-        }
+    for (String state : stateMap.values()) {
+      if (activeStates.contains(state)) {
+        activeReplicaCount++;
       }
     }
     return activeReplicaCount;
+  }
+
+  /**
+   * Determine whether a partition was at or above {@code minActiveReplicas} in the previously
+   * published ExternalView. Used to confirm a genuine healthy -&gt; below-min transition before
+   * opening a recovery window, so that a partition coming up from nothing is not mistaken for a
+   * drop. The ExternalView is refreshed from ZooKeeper at the start of every pipeline run (and is
+   * durable across a leadership change, unlike the in-memory recovery records), so it reflects the
+   * partition's state as of the previous observation.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @param minActiveReplica effective minActiveReplicas for the resource
+   * @return {@code true} if the previous ExternalView had at least minActiveReplicas active
+   *         replicas; {@code false} if there is no previous ExternalView (e.g. a brand-new resource)
+   *         or it was below min
+   */
+  private boolean wasPreviouslyAtOrAboveMin(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, StateModelDefinition stateModelDef,
+      int minActiveReplica) {
+    Map<String, ExternalView> externalViews = cache.getExternalViews();
+    ExternalView previousExternalView =
+        externalViews == null ? null : externalViews.get(resourceName);
+    if (previousExternalView == null) {
+      // No previously published ExternalView (e.g. a brand-new resource or partition). Treat as a
+      // bring-up, not a drop, so we do not open a recovery window.
+      return false;
+    }
+    Map<String, String> previousStateMap =
+        previousExternalView.getStateMap(partition.getPartitionName());
+    return countActiveReplicas(previousStateMap, stateModelDef) >= minActiveReplica;
   }
 
   /**

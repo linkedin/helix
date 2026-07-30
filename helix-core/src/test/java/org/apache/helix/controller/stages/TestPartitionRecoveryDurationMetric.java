@@ -27,6 +27,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.Resource;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
@@ -118,6 +119,20 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     getCache().getMissingMinActiveReplicaMap().put(TEST_RESOURCE, perResource);
   }
 
+  /**
+   * Publish an ExternalView to the accessor so the next pipeline run loads it as the "previous"
+   * ExternalView. The recovery detector uses it to confirm the partition was at or above min before
+   * a drop. Must be called before {@link #runPipeline} (the ExternalView is refreshed on the cache's
+   * first refresh).
+   */
+  private void publishExternalView(String s0, String s1, String s2) {
+    ExternalView externalView = new ExternalView(TEST_RESOURCE);
+    externalView.setState(PARTITION, HOSTNAME_PREFIX + 0, s0);
+    externalView.setState(PARTITION, HOSTNAME_PREFIX + 1, s1);
+    externalView.setState(PARTITION, HOSTNAME_PREFIX + 2, s2);
+    accessor.setProperty(accessor.keyBuilder().externalView(TEST_RESOURCE), externalView);
+  }
+
   private boolean hasRecord() {
     Map<String, Map<String, MissingMinActiveReplicaRecord>> map =
         getCache().getMissingMinActiveReplicaMap();
@@ -127,6 +142,10 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   @Test
   public void testRecordCreatedWhenBelowMinActiveReplica() {
     preSetup(MIN_ACTIVE_REPLICAS);
+
+    // The partition was healthy in the previously published ExternalView (3 active), so a drop is a
+    // genuine healthy -> below-min transition that must open a recovery window.
+    publishExternalView("MASTER", "SLAVE", "SLAVE");
 
     // Only 1 replica active (MASTER), the rest OFFLINE -> activeReplicaCount(1) < minActive(2).
     long beforeDetection = System.currentTimeMillis();
@@ -143,6 +162,39 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     // resource. Assert that explicitly rather than skipping, so a stray emission can't pass green.
     Assert.assertNull(getResourceMonitor(),
         "No ResourceMonitor should exist while the partition is still degraded (nothing emitted)");
+  }
+
+  @Test
+  public void testBringUpWithoutPreviousHealthyExternalViewCreatesNoRecord() {
+    preSetup(MIN_ACTIVE_REPLICAS);
+
+    // No previously published ExternalView: this is a partition coming up from nothing (a brand-new
+    // resource, partition expansion, or the first run after a leadership change clears the in-memory
+    // records), not a drop from a healthy state. Even though it is below min, no recovery window may
+    // open -- otherwise the initial bring-up time would later be mis-counted as a recovery.
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"), null);
+
+    Assert.assertFalse(hasRecord(),
+        "A partition below min with no prior healthy ExternalView (bring-up) must not create a record");
+    Assert.assertNull(getResourceMonitor(),
+        "Bring-up below min must not emit any recovery metric (no ResourceMonitor created)");
+  }
+
+  @Test
+  public void testDropWhenPreviousExternalViewBelowMinCreatesNoRecord() {
+    preSetup(MIN_ACTIVE_REPLICAS);
+
+    // The previous ExternalView was itself below min (1 active) -- e.g. the partition was already
+    // degraded under a prior controller before clearMonitoringRecords() wiped the in-memory record.
+    // We do not know the true start of that window, so we must not open a new one and fabricate a
+    // recovery duration.
+    publishExternalView("MASTER", "OFFLINE", "OFFLINE");
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"), null);
+
+    Assert.assertFalse(hasRecord(),
+        "A below-min partition whose previous ExternalView was also below min must not create a record");
+    Assert.assertNull(getResourceMonitor(),
+        "A pre-existing degraded partition must not emit any recovery metric");
   }
 
   @Test
