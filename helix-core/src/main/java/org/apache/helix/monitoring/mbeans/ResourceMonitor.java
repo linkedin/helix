@@ -446,7 +446,9 @@ public class ResourceMonitor extends DynamicMBeanProvider {
       boolean succeeded) {
     if (succeeded) {
       _succeededPartitionRecoveryCounter.updateValue(_succeededPartitionRecoveryCounter.getValue() + 1);
-      _partitionRecoveryDurationGauge.updateValue(totalDuration);
+      if (totalDuration >= 0) {
+        _partitionRecoveryDurationGauge.updateValue(totalDuration);
+      }
       if (helixLatency >= 0) {
         _partitionRecoveryHelixLatencyGauge.updateValue(helixLatency);
       }

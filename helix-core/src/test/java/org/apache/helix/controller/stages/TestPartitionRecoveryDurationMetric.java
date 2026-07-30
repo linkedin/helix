@@ -157,6 +157,22 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
+  public void testDisabledResourceCreatesNoRecord() {
+    preSetup(MIN_ACTIVE_REPLICAS);
+
+    // Resource is disabled: it is not expected to maintain its replicas, so a drop below min must
+    // not start recovery tracking (mirrors ResourceMonitor#updateResourceState). Disable the cached
+    // IdealState after ReadClusterDataStage populates it but before the recovery stage runs.
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"),
+        cache -> cache.getIdealState(TEST_RESOURCE).enable(false));
+
+    Assert.assertFalse(hasRecord(),
+        "A disabled resource below minActiveReplicas must not create a recovery record");
+    Assert.assertNull(getResourceMonitor(),
+        "A disabled resource must not emit any recovery metric (no ResourceMonitor created)");
+  }
+
+  @Test
   public void testRecoveryEmitsDurationAndClearsRecord() {
     preSetup(MIN_ACTIVE_REPLICAS);
 

@@ -365,6 +365,16 @@ public class TestResourceMonitor {
       monitor.updatePartitionRecoveryStats(1000L, 500L, false);
       Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
 
+      // A negative totalDuration (possible if the wall clock steps backward between the start and
+      // end samples) must NOT be recorded into the histogram -- it would corrupt min/p99/max. The
+      // recovery is still counted; only the invalid duration sample is skipped.
+      monitor.updatePartitionRecoveryStats(-500L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 3L,
+          "A negative-duration recovery is still counted");
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+              .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L,
+          "A negative duration must not be recorded into the histogram");
+
       // The beyond-threshold counter is monotonic: it only ever increments and is never decremented,
       // so scrape-robust increase() queries can count breaches even when they heal between scrapes.
       monitor.incrementPartitionRecoveryBeyondThresholdCounter();

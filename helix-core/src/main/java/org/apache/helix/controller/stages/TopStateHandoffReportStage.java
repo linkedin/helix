@@ -200,7 +200,10 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
       long recoveryDurationThreshold) {
     IdealState idealState = cache.getIdealState(resourceName);
-    if (idealState == null) {
+    if (idealState == null || !idealState.isEnabled()) {
+      // Skip resources with no IdealState or that are disabled. A disabled resource is not
+      // expected to maintain its replicas, so a drop below min while disabled is not a real
+      // recovery -- mirrors ResourceMonitor#updateResourceState.
       return;
     }
     int minActiveReplica = getMinActiveReplica(idealState);
