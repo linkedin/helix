@@ -204,10 +204,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
       long recoveryDurationThreshold) {
     IdealState idealState = cache.getIdealState(resourceName);
-    if (idealState == null || !idealState.isEnabled()) {
+    if (idealState == null || !idealState.isEnabled() || cache.isMaintenanceModeEnabled()) {
       // Skip resources with no IdealState or that are disabled. A disabled resource is not
       // expected to maintain its replicas, so a drop below min while disabled is not a real
       // recovery -- mirrors ResourceMonitor#updateResourceState.
+      // Also skip while the cluster is in maintenance mode: the controller intentionally holds off
+      // restoring or moving replicas (node swaps, take-downs, the maintenance-timeout window), so a
+      // partition below min is expected behavior, not an availability regression. Counting it would
+      // inflate the recovery-duration histogram by the length of the maintenance window and fire
+      // false beyond-threshold breaches.
       return;
     }
     int minActiveReplica = getMinActiveReplica(idealState);

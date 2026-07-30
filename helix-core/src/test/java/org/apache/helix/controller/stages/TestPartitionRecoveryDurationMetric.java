@@ -225,6 +225,27 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
+  public void testMaintenanceModeCreatesNoRecord() {
+    preSetup(MIN_ACTIVE_REPLICAS);
+
+    // The partition was healthy before, so without the maintenance guard this drop would open a
+    // recovery window -- isolating the behavior under test to maintenance mode alone.
+    publishExternalView("MASTER", "SLAVE", "SLAVE");
+
+    // During maintenance the controller intentionally holds off restoring or moving replicas (node
+    // swaps, take-downs, the maintenance-timeout window), so a partition below min is expected
+    // behavior, not an availability regression, and must not be tracked as a recovery. Enable
+    // maintenance mode on the cache after ReadClusterDataStage but before the recovery stage runs.
+    runPipeline(statesOf("MASTER", "OFFLINE", "OFFLINE"),
+        cache -> cache.enableMaintenanceMode());
+
+    Assert.assertFalse(hasRecord(),
+        "A partition below min while the cluster is in maintenance mode must not create a record");
+    Assert.assertNull(getResourceMonitor(),
+        "Maintenance-mode below min must not emit any recovery metric (no ResourceMonitor created)");
+  }
+
+  @Test
   public void testRecoveryEmitsDurationAndClearsRecord() {
     preSetup(MIN_ACTIVE_REPLICAS);
 
