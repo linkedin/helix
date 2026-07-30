@@ -198,6 +198,11 @@ public class JobTaskSummaryDriver {
         summary.contains("\"failed\":" + EXPECTED_FAILED) ? 1 : 0, 1);
     ok &= expect("summary contains total count",
         summary.contains("\"total\":" + NUM_TASKS) ? 1 : 0, 1);
+    // The summary must always carry the timed-out and in-progress breakdown, even when zero.
+    ok &= expect("summary contains timedOut count",
+        summary.contains("\"timedOut\":") ? 1 : 0, 1);
+    ok &= expect("summary contains inProgress count",
+        summary.contains("\"inProgress\":") ? 1 : 0, 1);
     return ok;
   }
 

@@ -23,12 +23,33 @@
         color: #c5221f;
         font-weight: 600;
       }
+
+      &.timed-out.has-timed-out {
+        background: #fef7e0;
+        color: #b06000;
+        font-weight: 600;
+      }
+
+      &.in-progress {
+        background: #e8f0fe;
+        color: #1967d2;
+      }
     }
   }
 
   .failed-tasks {
     margin-bottom: 12px;
     color: #c5221f;
+  }
+
+  .timed-out-tasks {
+    margin-bottom: 12px;
+    color: #b06000;
+  }
+
+  .in-progress-tasks {
+    margin-bottom: 12px;
+    color: #1967d2;
   }
 
   .no-summary {

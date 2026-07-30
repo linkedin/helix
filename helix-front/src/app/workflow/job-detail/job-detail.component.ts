@@ -48,4 +48,14 @@ export class JobDetailComponent implements OnInit {
     const summary = this.taskSummary;
     return !!summary && summary.failed > 0;
   }
+
+  get hasTimedOut(): boolean {
+    const summary = this.taskSummary;
+    return !!summary && summary.timedOut > 0;
+  }
+
+  get hasInProgress(): boolean {
+    const summary = this.taskSummary;
+    return !!summary && summary.inProgress > 0;
+  }
 }
