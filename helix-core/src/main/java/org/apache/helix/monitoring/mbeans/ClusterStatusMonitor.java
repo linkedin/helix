@@ -470,6 +470,31 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Updates the per-instance actual partition gauges from CurrentState-derived counts. Unlike
+   * {@link #setPerInstanceResourceStatus} which reflects the controller's target assignment, these
+   * gauges reflect what each instance actually hosts. Instances that are registered but absent from
+   * the supplied maps (for example, instances that are not live) are reset to 0.
+   * @param actualPartitionCounts instance name -&gt; number of partitions currently hosted
+   * @param actualTopStatePartitionCounts instance name -&gt; number of top-state partitions currently
+   *          hosted
+   */
+  public void setInstanceActualPartitionStatus(Map<String, Long> actualPartitionCounts,
+      Map<String, Long> actualTopStatePartitionCounts) {
+    synchronized (_instanceMonitorMap) {
+      for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
+        String instanceName = entry.getKey();
+        InstanceMonitor bean = entry.getValue();
+        long actualPartitionCount = actualPartitionCounts != null
+            ? actualPartitionCounts.getOrDefault(instanceName, 0L) : 0L;
+        long actualTopStatePartitionCount = actualTopStatePartitionCounts != null
+            ? actualTopStatePartitionCounts.getOrDefault(instanceName, 0L) : 0L;
+        bean.updateActualPartitionCount(actualPartitionCount);
+        bean.updateActualTopStatePartitionCount(actualTopStatePartitionCount);
+      }
+    }
+  }
+
+  /**
    * Updates the domain info validity gauge for each instance. Instances in the invalidInstances
    * set will have their gauge set to 0 (invalid), all other registered instances will be set
    * to 1 (valid).

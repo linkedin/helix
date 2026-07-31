@@ -42,6 +42,7 @@ import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
@@ -86,6 +87,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
             Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
             Map<String, Long> instanceErrorPartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActualPartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActualTopStatePartitionCounts = Maps.newHashMap();
             
             for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
@@ -96,9 +99,13 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 instanceMessageMap.put(instanceName,
                     Sets.newHashSet(dataProvider.getMessages(instanceName).values()));
                 
-                // Count ERROR partitions for this live instance
-                long errorCount = countErrorPartitions(dataProvider, instanceName);
-                instanceErrorPartitionCounts.put(instanceName, errorCount);
+                // Count partitions this live instance actually hosts, from its CurrentState
+                InstancePartitionCounts partitionCounts =
+                    computeInstancePartitionCounts(dataProvider, instanceName);
+                instanceErrorPartitionCounts.put(instanceName, partitionCounts.errorCount);
+                instanceActualPartitionCounts.put(instanceName, partitionCounts.actualPartitionCount);
+                instanceActualTopStatePartitionCounts.put(instanceName,
+                    partitionCounts.actualTopStatePartitionCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -115,6 +122,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
                     disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
                     instanceConfigMap, instanceErrorPartitionCounts);
+            clusterStatusMonitor.setInstanceActualPartitionStatus(instanceActualPartitionCounts,
+                instanceActualTopStatePartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
@@ -181,51 +190,84 @@ public class ReadClusterDataStage extends AbstractBaseStage {
   }
 
   /**
-   * Count the number of partitions in ERROR state for a given instance
+   * Holder for per-instance partition counts derived from an instance's CurrentState.
+   */
+  private static class InstancePartitionCounts {
+    long errorCount = 0L;
+    long actualPartitionCount = 0L;
+    long actualTopStatePartitionCount = 0L;
+  }
+
+  /**
+   * Compute per-instance partition counts from the instance's CurrentState in a single pass:
+   * the number of partitions in ERROR state, the number of partitions actually hosted (any
+   * non-DROPPED state), and the number of partitions in the resource top state.
    * @param dataProvider the data provider containing current state information
    * @param instanceName the name of the instance to check
-   * @return the count of partitions in ERROR state
+   * @return the counts; all zero if the instance is not live or on any read failure
    */
-  private long countErrorPartitions(BaseControllerDataProvider dataProvider, String instanceName) {
-    long errorCount = 0L;
-    
+  private InstancePartitionCounts computeInstancePartitionCounts(
+      BaseControllerDataProvider dataProvider, String instanceName) {
+    InstancePartitionCounts counts = new InstancePartitionCounts();
+
     try {
       Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
       LiveInstance liveInstance = liveInstances.get(instanceName);
-      
+
       if (liveInstance == null) {
-        return errorCount;
+        return counts;
       }
-      
+
       String sessionId = liveInstance.getEphemeralOwner();
-      Map<String, CurrentState> currentStateMap = 
+      Map<String, CurrentState> currentStateMap =
           dataProvider.getCurrentState(instanceName, sessionId, false);
-      
+
       if (currentStateMap == null) {
-        return errorCount;
+        return counts;
       }
-      
+
       for (CurrentState currentState : currentStateMap.values()) {
         if (currentState == null) {
           continue;
         }
-        
+
         Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
         if (partitionStateMap == null) {
           continue;
         }
-        
+
+        // Resolve the top state for this resource's state model, if available.
+        String topState = null;
+        String stateModelDefRef = currentState.getStateModelDefRef();
+        if (stateModelDefRef != null) {
+          StateModelDefinition stateModelDef = dataProvider.getStateModelDef(stateModelDefRef);
+          if (stateModelDef != null) {
+            topState = stateModelDef.getTopState();
+          }
+        }
+
         for (String state : partitionStateMap.values()) {
+          if (state == null) {
+            continue;
+          }
           if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
-            errorCount++;
+            counts.errorCount++;
+          }
+          // DROPPED partitions are no longer hosted, so they are excluded from actual counts.
+          if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)) {
+            continue;
+          }
+          counts.actualPartitionCount++;
+          if (topState != null && topState.equalsIgnoreCase(state)) {
+            counts.actualTopStatePartitionCount++;
           }
         }
       }
     } catch (Exception e) {
-      LogUtil.logWarn(logger, _eventId, 
-          "Failed to count error partitions for instance: " + instanceName, e);
+      LogUtil.logWarn(logger, _eventId,
+          "Failed to compute partition counts for instance: " + instanceName, e);
     }
-    
-    return errorCount;
+
+    return counts;
   }
 }
