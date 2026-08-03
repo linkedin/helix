@@ -191,8 +191,9 @@ public class ReadClusterDataStage extends AbstractBaseStage {
 
   /**
    * Holder for per-instance partition counts derived from an instance's CurrentState.
+   * Package-private for testing.
    */
-  private static class InstancePartitionCounts {
+  static class InstancePartitionCounts {
     long errorCount = 0L;
     long actualPartitionCount = 0L;
     long actualTopStatePartitionCount = 0L;
@@ -212,20 +213,19 @@ public class ReadClusterDataStage extends AbstractBaseStage {
    * @return the counts; all zero if the instance is not live. Resources that fail to be read are
    *         skipped, so the counts reflect every resource that could be processed.
    */
-  private InstancePartitionCounts computeInstancePartitionCounts(
+  InstancePartitionCounts computeInstancePartitionCounts(
       BaseControllerDataProvider dataProvider, String instanceName) {
     InstancePartitionCounts counts = new InstancePartitionCounts();
 
-    Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
-    LiveInstance liveInstance = liveInstances == null ? null : liveInstances.get(instanceName);
-    if (liveInstance == null) {
-      return counts;
-    }
-
     Map<String, CurrentState> currentStateMap;
     try {
-      currentStateMap = dataProvider.getCurrentState(instanceName, liveInstance.getEphemeralOwner(),
-          false);
+      Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
+      LiveInstance liveInstance = liveInstances == null ? null : liveInstances.get(instanceName);
+      if (liveInstance == null) {
+        return counts;
+      }
+      currentStateMap =
+          dataProvider.getCurrentState(instanceName, liveInstance.getEphemeralOwner(), false);
     } catch (Exception e) {
       LogUtil.logWarn(logger, _eventId,
           "Failed to read current states for instance: " + instanceName, e);
