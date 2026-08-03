@@ -24,15 +24,15 @@ import org.apache.helix.HelixDataAccessor;
 /**
  * Immutable bundle of everything a {@link GuardrailRule} needs to evaluate a proposed mutation.
  * <p>
- * The context is intentionally small: it carries the cluster name, a read-only
- * {@link HelixDataAccessor} for the target cluster, and the target instance name for
- * instance-scoped operations. When rules for other object types (e.g. resources) are added, the
+ * The context is intentionally small: it carries the cluster name, a narrow read-only view of
+ * cluster state ({@link ReadOnlyDataAccessor}) for the target cluster, and the target instance name
+ * for instance-scoped operations. When rules for other object types (e.g. resources) are added, the
  * corresponding field can be introduced here through the {@link Builder} without breaking existing
  * rules.
  */
 public class GuardrailContext {
   private final String clusterName;
-  private final HelixDataAccessor dataAccessor;
+  private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
 
   private GuardrailContext(Builder builder) {
@@ -45,7 +45,7 @@ public class GuardrailContext {
     return clusterName;
   }
 
-  public HelixDataAccessor getDataAccessor() {
+  public ReadOnlyDataAccessor getDataAccessor() {
     return dataAccessor;
   }
 
@@ -60,7 +60,7 @@ public class GuardrailContext {
 
   public static final class Builder {
     private final String clusterName;
-    private HelixDataAccessor dataAccessor;
+    private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
 
     private Builder(String clusterName) {
@@ -68,7 +68,7 @@ public class GuardrailContext {
     }
 
     public Builder dataAccessor(HelixDataAccessor dataAccessor) {
-      this.dataAccessor = dataAccessor;
+      this.dataAccessor = ReadOnlyDataAccessor.of(dataAccessor);
       return this;
     }
 

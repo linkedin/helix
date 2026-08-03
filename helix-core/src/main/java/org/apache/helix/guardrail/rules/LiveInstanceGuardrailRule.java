@@ -19,10 +19,10 @@
 
 package org.apache.helix.guardrail.rules;
 
-import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
+import org.apache.helix.guardrail.ReadOnlyDataAccessor;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.LiveInstance;
@@ -59,7 +59,7 @@ public class LiveInstanceGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
-    HelixDataAccessor dataAccessor = context.getDataAccessor();
+    ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     PropertyKey liveInstanceKey = dataAccessor.keyBuilder().liveInstance(instanceName);
     LiveInstance liveInstance = dataAccessor.getProperty(liveInstanceKey);
     if (liveInstance == null) {
