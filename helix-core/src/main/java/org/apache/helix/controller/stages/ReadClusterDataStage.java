@@ -200,74 +200,107 @@ public class ReadClusterDataStage extends AbstractBaseStage {
 
   /**
    * Compute per-instance partition counts from the instance's CurrentState in a single pass:
-   * the number of partitions in ERROR state, the number of partitions actually hosted (any
-   * non-DROPPED state), and the number of partitions in the resource top state.
+   * the number of partitions in ERROR state, the number of partitions actually hosted, and the
+   * number of those partitions in the resource top state.
+   * <p>
+   * A partition counts as "actually hosted" when its current state is neither DROPPED nor the
+   * state model's initial state (typically OFFLINE), matching the convention already used by
+   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. A resource whose state
+   * model definition cannot be resolved is skipped, since its states cannot be interpreted.
    * @param dataProvider the data provider containing current state information
    * @param instanceName the name of the instance to check
-   * @return the counts; all zero if the instance is not live or on any read failure
+   * @return the counts; all zero if the instance is not live. Resources that fail to be read are
+   *         skipped, so the counts reflect every resource that could be processed.
    */
   private InstancePartitionCounts computeInstancePartitionCounts(
       BaseControllerDataProvider dataProvider, String instanceName) {
     InstancePartitionCounts counts = new InstancePartitionCounts();
 
+    Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
+    LiveInstance liveInstance = liveInstances == null ? null : liveInstances.get(instanceName);
+    if (liveInstance == null) {
+      return counts;
+    }
+
+    Map<String, CurrentState> currentStateMap;
     try {
-      Map<String, LiveInstance> liveInstances = dataProvider.getLiveInstances();
-      LiveInstance liveInstance = liveInstances.get(instanceName);
-
-      if (liveInstance == null) {
-        return counts;
-      }
-
-      String sessionId = liveInstance.getEphemeralOwner();
-      Map<String, CurrentState> currentStateMap =
-          dataProvider.getCurrentState(instanceName, sessionId, false);
-
-      if (currentStateMap == null) {
-        return counts;
-      }
-
-      for (CurrentState currentState : currentStateMap.values()) {
-        if (currentState == null) {
-          continue;
-        }
-
-        Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
-        if (partitionStateMap == null) {
-          continue;
-        }
-
-        // Resolve the top state for this resource's state model, if available.
-        String topState = null;
-        String stateModelDefRef = currentState.getStateModelDefRef();
-        if (stateModelDefRef != null) {
-          StateModelDefinition stateModelDef = dataProvider.getStateModelDef(stateModelDefRef);
-          if (stateModelDef != null) {
-            topState = stateModelDef.getTopState();
-          }
-        }
-
-        for (String state : partitionStateMap.values()) {
-          if (state == null) {
-            continue;
-          }
-          if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
-            counts.errorCount++;
-          }
-          // DROPPED partitions are no longer hosted, so they are excluded from actual counts.
-          if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)) {
-            continue;
-          }
-          counts.actualPartitionCount++;
-          if (topState != null && topState.equalsIgnoreCase(state)) {
-            counts.actualTopStatePartitionCount++;
-          }
-        }
-      }
+      currentStateMap = dataProvider.getCurrentState(instanceName, liveInstance.getEphemeralOwner(),
+          false);
     } catch (Exception e) {
       LogUtil.logWarn(logger, _eventId,
-          "Failed to compute partition counts for instance: " + instanceName, e);
+          "Failed to read current states for instance: " + instanceName, e);
+      return counts;
+    }
+
+    if (currentStateMap == null) {
+      return counts;
+    }
+
+    for (Map.Entry<String, CurrentState> entry : currentStateMap.entrySet()) {
+      try {
+        accumulatePartitionCounts(dataProvider, entry.getValue(), counts);
+      } catch (Exception e) {
+        // Skip only the offending resource so one bad resource cannot zero out the whole instance.
+        LogUtil.logWarn(logger, _eventId, "Failed to compute partition counts for instance: "
+            + instanceName + ", resource: " + entry.getKey(), e);
+      }
     }
 
     return counts;
+  }
+
+  /**
+   * Accumulate the partition counts contributed by a single resource's CurrentState into
+   * {@code counts}.
+   */
+  private void accumulatePartitionCounts(BaseControllerDataProvider dataProvider,
+      CurrentState currentState, InstancePartitionCounts counts) {
+    if (currentState == null) {
+      return;
+    }
+
+    Map<String, String> partitionStateMap = currentState.getPartitionStateMap();
+    if (partitionStateMap == null || partitionStateMap.isEmpty()) {
+      return;
+    }
+
+    String stateModelDefRef = currentState.getStateModelDefRef();
+    StateModelDefinition stateModelDef =
+        stateModelDefRef == null ? null : dataProvider.getStateModelDef(stateModelDefRef);
+    if (stateModelDef == null) {
+      // Without the state model we cannot tell hosted partitions from initial/dropped ones, so
+      // counting them would report a misleading value. Still count ERROR, which is model agnostic.
+      LogUtil.logWarn(logger, _eventId,
+          "Skipping actual partition counts for resource: " + currentState.getResourceName()
+              + ", unresolved state model definition: " + stateModelDefRef);
+      for (String state : partitionStateMap.values()) {
+        if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
+          counts.errorCount++;
+        }
+      }
+      return;
+    }
+
+    String topState = stateModelDef.getTopState();
+    String initialState = stateModelDef.getInitialState();
+
+    for (String state : partitionStateMap.values()) {
+      if (state == null) {
+        continue;
+      }
+      if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
+        counts.errorCount++;
+      }
+      // DROPPED partitions are no longer hosted, and initial-state (e.g. OFFLINE) partitions are
+      // not yet being served, so neither counts towards what the instance actually hosts.
+      if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)
+          || state.equalsIgnoreCase(initialState)) {
+        continue;
+      }
+      counts.actualPartitionCount++;
+      if (topState != null && topState.equalsIgnoreCase(state)) {
+        counts.actualTopStatePartitionCount++;
+      }
+    }
   }
 }
