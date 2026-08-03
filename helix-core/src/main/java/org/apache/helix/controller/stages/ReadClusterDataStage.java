@@ -204,10 +204,12 @@ public class ReadClusterDataStage extends AbstractBaseStage {
    * the number of partitions in ERROR state, the number of partitions actually hosted, and the
    * number of those partitions in the resource top state.
    * <p>
-   * A partition counts as "actually hosted" when its current state is neither DROPPED nor the
-   * state model's initial state (typically OFFLINE), matching the convention already used by
-   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. A resource whose state
-   * model definition cannot be resolved is skipped, since its states cannot be interpreted.
+   * A partition counts as "actually hosted" when its current state is not the state model's
+   * initial state (typically OFFLINE), matching the convention already used by
+   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. DROPPED is also
+   * excluded defensively; participants delete the partition entry rather than persisting DROPPED,
+   * so it is not expected to appear here. A resource whose state model definition cannot be
+   * resolved is skipped, since its states cannot be interpreted.
    * @param dataProvider the data provider containing current state information
    * @param instanceName the name of the instance to check
    * @return the counts; all zero if the instance is not live. Resources that fail to be read are
@@ -291,8 +293,10 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
         counts.errorCount++;
       }
-      // DROPPED partitions are no longer hosted, and initial-state (e.g. OFFLINE) partitions are
-      // not yet being served, so neither counts towards what the instance actually hosts.
+      // Initial-state (e.g. OFFLINE) partitions are not being served, so they do not count towards
+      // what the instance actually hosts. DROPPED is excluded defensively only: on a successful
+      // drop the participant subtracts the partition entry from CurrentState instead of persisting
+      // DROPPED, so it should never be observed here.
       if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)
           || state.equalsIgnoreCase(initialState)) {
         continue;

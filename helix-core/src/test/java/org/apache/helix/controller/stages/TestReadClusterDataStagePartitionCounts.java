@@ -91,7 +91,8 @@ public class TestReadClusterDataStagePartitionCounts {
 
   /**
    * OFFLINE is the MasterSlave initial state, so those partitions are not being served and must not
-   * be reported as actually hosted. DROPPED partitions are no longer hosted at all.
+   * be reported as actually hosted. DROPPED is filtered defensively; participants subtract the
+   * partition entry rather than persisting DROPPED, so it is not expected in a real CurrentState.
    */
   @Test
   public void testExcludesInitialStateAndDroppedPartitions() {
@@ -106,7 +107,7 @@ public class TestReadClusterDataStagePartitionCounts {
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
     Assert.assertEquals(counts.actualPartitionCount, 3L,
-        "OFFLINE and DROPPED partitions must not count as actually hosted");
+        "OFFLINE must not count as actually hosted; DROPPED is filtered defensively");
     Assert.assertEquals(counts.actualTopStatePartitionCount, 1L);
     Assert.assertEquals(counts.errorCount, 0L);
   }

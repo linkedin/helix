@@ -496,7 +496,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * This is the actual-state analog of {@link #updatePartitionCount(long)}, which reflects the
    * controller's target assignment.
    * @param actualPartitionCount number of partitions on this instance from CurrentState, excluding
-   *          DROPPED and initial-state (e.g. OFFLINE) partitions
+   *          initial-state (e.g. OFFLINE) partitions
    */
   public synchronized void updateActualPartitionCount(long actualPartitionCount) {
     _actualPartitionCountGauge.updateValue(actualPartitionCount);

@@ -110,7 +110,7 @@ ObjectName: "ClusterStatus:cluster=[cluster-name],instanceName=[instance-name]"
 |DisabledPartitions|Get the total disabled partitions number for this instance|
 |PartitionGauge|Get number of partitions assigned to this instance in the best possible state|
 |TopStatePartitionGauge|Get number of partitions assigned to this instance in the top state in the best possible state|
-|ActualPartitionGauge|Get number of partitions this instance actually hosts according to its CurrentState, excluding DROPPED and initial-state (e.g. OFFLINE) partitions|
+|ActualPartitionGauge|Get number of partitions this instance actually hosts according to its CurrentState, excluding initial-state (e.g. OFFLINE) partitions|
 |ActualTopStatePartitionGauge|Get number of partitions this instance actually hosts in the resource top state according to its CurrentState|
 
 #### MBean ResourceMonitor
