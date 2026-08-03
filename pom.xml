@@ -427,7 +427,7 @@
   </ciManagement>
 
   <properties>
-    <revision>1.6.17-SNAPSHOT</revision>
+    <revision>1.6.18-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.build.outputTimestamp>1738132755</project.build.outputTimestamp>
 
