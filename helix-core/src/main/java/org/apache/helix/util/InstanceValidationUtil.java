@@ -439,6 +439,35 @@ public class InstanceValidationUtil {
    */
   public static MinActiveReplicaCheckResult siblingNodesActiveReplicaCheckWithDetails(
       HelixDataAccessor dataAccessor, String instanceName, Set<String> toBeStoppedInstances) {
+    return siblingNodesActiveReplicaCheckWithDetails(dataAccessor, instanceName,
+        toBeStoppedInstances, false);
+  }
+
+  /**
+   * Variant of
+   * {@link #siblingNodesActiveReplicaCheckWithDetails(HelixDataAccessor, String, Set)} that can
+   * tolerate resources whose ExternalView has not been computed yet.
+   * <p>
+   * When {@code skipResourcesWithoutExternalView} is {@code true}, a resource with no ExternalView
+   * is skipped instead of aborting the whole check with a {@link HelixException}. A resource with
+   * no ExternalView has no committed placement, so it is not actually hosted on {@code instanceName}
+   * (or any instance) and cannot be pushed below its minimum active replicas by dropping the
+   * instance. Skipping such resources scopes the result to the resources actually hosted on the
+   * instance, which is what advisory pre-flight callers (e.g. guard rails) want: an unrelated,
+   * not-yet-placed resource must not block an operation on a given instance. When {@code false},
+   * the original strict behavior is preserved and a missing ExternalView throws.
+   *
+   * @param dataAccessor A helper class to access the Helix data.
+   * @param instanceName An instance to be evaluated against this check.
+   * @param toBeStoppedInstances A set of instances presumed to be are already stopped. And it
+   *                             shouldn't contain the `instanceName`
+   * @param skipResourcesWithoutExternalView when {@code true}, silently skip resources that have no
+   *                             ExternalView instead of throwing
+   * @return MinActiveReplicaCheckResult with pass/fail status and details of first failure
+   */
+  public static MinActiveReplicaCheckResult siblingNodesActiveReplicaCheckWithDetails(
+      HelixDataAccessor dataAccessor, String instanceName, Set<String> toBeStoppedInstances,
+      boolean skipResourcesWithoutExternalView) {
     PropertyKey.Builder propertyKeyBuilder = dataAccessor.keyBuilder();
     List<String> resources = dataAccessor.getChildNames(propertyKeyBuilder.idealStates());
 
@@ -451,6 +480,11 @@ public class InstanceValidationUtil {
       ExternalView externalView =
           dataAccessor.getProperty(propertyKeyBuilder.externalView(resourceName));
       if (externalView == null) {
+        if (skipResourcesWithoutExternalView) {
+          // No committed placement yet, so this resource is not hosted on instanceName and cannot
+          // be driven below its min active replicas by dropping it. Skip rather than fail closed.
+          continue;
+        }
         throw new HelixException(
             String.format("Resource %s does not have external view!", resourceName));
       }

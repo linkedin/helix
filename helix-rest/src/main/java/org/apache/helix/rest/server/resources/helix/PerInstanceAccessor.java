@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
@@ -51,6 +52,9 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -641,7 +645,23 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+    // Guard rail: block (or simulate) dropping an instance that is still live -- its participant is
+    // connected, so its LIVEINSTANCES znode is present. force=true overrides this verdict, though
+    // the admin layer (ZKHelixAdmin.dropInstance) still rejects dropping a live instance;
+    // dryRun=true only reports the verdict without dropping.
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .instanceName(instanceName)
+        .build();
+    GuardrailPipeline pipeline = new GuardrailPipeline(new LiveInstanceGuardrailRule());
+    Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+    if (preflightResponse.isPresent()) {
+      return preflightResponse.get();
+    }
+
     HelixAdmin admin = getHelixAdmin();
     try {
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);

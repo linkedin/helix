@@ -42,6 +42,7 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -944,6 +945,75 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
         .format(CLUSTER_NAME, instanceName).post(this, entity);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the DELETE instance endpoint. Every participant in STOPPABLE_CLUSTER is
+   * started and connected, so its LIVEINSTANCES znode is present and the live-instance guard rail
+   * must block (or, for dryRun, report) the drop. None of these tests actually drop the instance, so
+   * they are non-destructive.
+   */
+  @Test
+  public void testDeleteInstanceGuardrailBlocks() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete).request()
+            .delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    // The instance must not have been dropped by a blocked request.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailDryRun() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // dryRun only simulates: it always returns 200 with the verdict and never drops the instance.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("dryRun", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailForceBypass() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // force=true bypasses the guard rail and lets the request reach the actual drop. The drop then
+    // fails specifically because the participant is still live -- asserting on that error (rather
+    // than merely "some 400") directly confirms the request got past the guard rail into
+    // dropInstance, instead of being blocked by the guard rail verdict.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("force", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    String body = response.readEntity(String.class);
+    Assert.assertFalse(body.contains(LiveInstanceGuardrailRule.RULE_ID),
+        "force=true should bypass the guard rail, not return its verdict: " + body);
+    Assert.assertTrue(body.contains("is still alive"),
+        "force=true should reach dropInstance, which fails on the live participant: " + body);
+
+    // The live participant was not dropped, so its config must still be present.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
