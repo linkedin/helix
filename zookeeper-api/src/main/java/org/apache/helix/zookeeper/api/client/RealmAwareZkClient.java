@@ -32,6 +32,7 @@ import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.IZkChildListener;
 import org.apache.helix.zookeeper.zkclient.IZkDataListener;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
+import org.apache.helix.zookeeper.zkclient.ZkClientSslConfig;
 import org.apache.helix.zookeeper.zkclient.callback.ZkAsyncCallbacks;
 import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
@@ -424,12 +425,15 @@ public interface RealmAwareZkClient {
     private String _routingDataSourceType;
     private String _routingDataSourceEndpoint;
     private int _sessionTimeout = DEFAULT_SESSION_TIMEOUT;
+    // Optional SSL/TLS config. When set and enabled, connections to ZK realms are established over TLS.
+    private ZkClientSslConfig _sslConfig;
 
     private RealmAwareZkConnectionConfig(Builder builder) {
       _zkRealmShardingKey = builder._zkRealmShardingKey;
       _routingDataSourceType = builder._routingDataSourceType;
       _routingDataSourceEndpoint = builder._routingDataSourceEndpoint;
       _sessionTimeout = builder._sessionTimeout;
+      _sslConfig = builder._sslConfig;
     }
 
     @Override
@@ -477,12 +481,17 @@ public interface RealmAwareZkClient {
       return _routingDataSourceEndpoint;
     }
 
+    public ZkClientSslConfig getSslConfig() {
+      return _sslConfig;
+    }
+
     public static class Builder {
       private RealmMode _realmMode;
       private String _zkRealmShardingKey;
       private String _routingDataSourceType;
       private String _routingDataSourceEndpoint;
       private int _sessionTimeout = DEFAULT_SESSION_TIMEOUT;
+      private ZkClientSslConfig _sslConfig;
 
       public Builder() {
       }
@@ -515,6 +524,18 @@ public interface RealmAwareZkClient {
 
       public Builder setSessionTimeout(int sessionTimeout) {
         _sessionTimeout = sessionTimeout;
+        return this;
+      }
+
+      /**
+       * Sets the SSL/TLS config used to establish secure connections to ZK realms. When set and
+       * enabled, certs are passed to the ZooKeeper client on a per-connection basis (no global
+       * JVM system properties required).
+       * @param sslConfig
+       * @return
+       */
+      public Builder setSslConfig(ZkClientSslConfig sslConfig) {
+        _sslConfig = sslConfig;
         return this;
       }
 

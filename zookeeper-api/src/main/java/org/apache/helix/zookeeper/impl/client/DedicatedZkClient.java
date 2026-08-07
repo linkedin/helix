@@ -101,7 +101,8 @@ public class DedicatedZkClient implements RealmAwareZkClient {
 
     // Create a ZK connection
     IZkConnection zkConnection =
-        new ZkConnection(zkRealmAddress, connectionConfig.getSessionTimeout());
+        new ZkConnection(zkRealmAddress, connectionConfig.getSessionTimeout(),
+            connectionConfig.getSslConfig());
 
     // Create a ZkClient
     _rawZkClient = new ZkClient(zkConnection, (int) clientConfig.getConnectInitTimeout(),

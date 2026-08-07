@@ -719,7 +719,9 @@ public class FederatedZkClient implements RealmAwareZkClient {
 
   private ZkClient createZkClient(String zkAddress) {
     LOG.debug("Creating ZkClient for realm: {}.", zkAddress);
-    return new ZkClient(new ZkConnection(zkAddress), (int) _clientConfig.getConnectInitTimeout(),
+    return new ZkClient(
+        new ZkConnection(zkAddress, _connectionConfig.getSessionTimeout(),
+            _connectionConfig.getSslConfig()), (int) _clientConfig.getConnectInitTimeout(),
         _clientConfig.getOperationRetryTimeout(), _pathBasedZkSerializer,
         _clientConfig.getMonitorType(), _clientConfig.getMonitorKey(),
         _clientConfig.getMonitorInstanceName(), _clientConfig.isMonitorRootPathOnly());

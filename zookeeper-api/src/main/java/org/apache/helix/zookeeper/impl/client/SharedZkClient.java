@@ -97,7 +97,8 @@ public class SharedZkClient implements RealmAwareZkClient {
     // sharedInnerZkClient is closed.
     HelixZkClient.ZkConnectionConfig zkConnectionConfig =
         new HelixZkClient.ZkConnectionConfig(zkRealmAddress)
-            .setSessionTimeout(connectionConfig.getSessionTimeout());
+            .setSessionTimeout(connectionConfig.getSessionTimeout())
+            .setSslConfig(connectionConfig.getSslConfig());
     HelixZkClient.ZkClientConfig zkClientConfig = new HelixZkClient.ZkClientConfig();
     zkClientConfig.setZkSerializer(clientConfig.getZkSerializer())
         .setConnectInitTimeout(clientConfig.getConnectInitTimeout())

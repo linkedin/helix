@@ -65,7 +65,7 @@ public abstract class HelixZkClientFactory implements RealmAwareZkClientFactory 
           "Failed to build ZkClient since no connection or ZK server address is specified.");
     } else {
       return new ZkConnection(connectionConfig.getZkServers(),
-          connectionConfig.getSessionTimeout());
+          connectionConfig.getSessionTimeout(), connectionConfig.getSslConfig());
     }
   }
 }

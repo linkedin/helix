@@ -20,6 +20,7 @@ package org.apache.helix.zookeeper.api.client;
  */
 
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
+import org.apache.helix.zookeeper.zkclient.ZkClientSslConfig;
 import org.apache.helix.zookeeper.zkclient.serialize.PathBasedZkSerializer;
 import org.apache.helix.zookeeper.zkclient.serialize.ZkSerializer;
 
@@ -42,6 +43,8 @@ public interface HelixZkClient extends RealmAwareZkClient {
     // Connection configs
     private final String _zkServers;
     private int _sessionTimeout = DEFAULT_SESSION_TIMEOUT;
+    // Optional SSL/TLS config. When set and enabled, the connection is established over TLS.
+    private ZkClientSslConfig _sslConfig;
 
     public ZkConnectionConfig(String zkServers) {
       _zkServers = zkServers;
@@ -81,6 +84,15 @@ public interface HelixZkClient extends RealmAwareZkClient {
 
     public int getSessionTimeout() {
       return _sessionTimeout;
+    }
+
+    public ZkConnectionConfig setSslConfig(ZkClientSslConfig sslConfig) {
+      this._sslConfig = sslConfig;
+      return this;
+    }
+
+    public ZkClientSslConfig getSslConfig() {
+      return _sslConfig;
     }
   }
 

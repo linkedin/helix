@@ -61,14 +61,22 @@ public class ZkConnection implements IZkConnection {
 
   private final String _servers;
   private final int _sessionTimeOut;
+  // Optional per-connection SSL/TLS config. When enabled, a ZKClientConfig carrying the
+  // keystore/truststore is passed to the ZooKeeper client so the connection is established over TLS.
+  private final ZkClientSslConfig _sslConfig;
 
   public ZkConnection(String zkServers) {
     this(zkServers, DEFAULT_SESSION_TIMEOUT);
   }
 
   public ZkConnection(String zkServers, int sessionTimeOut) {
+    this(zkServers, sessionTimeOut, null);
+  }
+
+  public ZkConnection(String zkServers, int sessionTimeOut, ZkClientSslConfig sslConfig) {
     _servers = zkServers;
     _sessionTimeOut = sessionTimeOut;
+    _sslConfig = sslConfig;
   }
 
   @Override
@@ -80,7 +88,7 @@ public class ZkConnection implements IZkConnection {
       }
       try {
         LOG.debug("Creating new ZookKeeper instance to connect to " + _servers + ".");
-        _zk = new ZooKeeper(_servers, _sessionTimeOut, watcher);
+        _zk = newZookeeper(watcher);
       } catch (IOException e) {
         throw new ZkException("Unable to connect to " + _servers, e);
       }
@@ -112,7 +120,7 @@ public class ZkConnection implements IZkConnection {
       ZooKeeper prevZk = _zk;
       try {
         LOG.debug("Creating new ZookKeeper instance to reconnect to " + _servers + ".");
-        _zk = new ZooKeeper(_servers, _sessionTimeOut, watcher);
+        _zk = newZookeeper(watcher);
         prevZk.close();
       } catch (IOException e) {
         throw new ZkException("Unable to connect to " + _servers, e);
@@ -120,6 +128,19 @@ public class ZkConnection implements IZkConnection {
     } finally {
       _zookeeperLock.unlock();
     }
+  }
+
+  /**
+   * Creates a new {@link ZooKeeper} instance. When a {@link ZkClientSslConfig} is present and
+   * enabled, a per-connection {@link org.apache.zookeeper.client.ZKClientConfig} carrying the
+   * keystore/truststore is supplied so the connection is established over TLS/mTLS; otherwise a
+   * plaintext connection is created.
+   */
+  private ZooKeeper newZookeeper(Watcher watcher) throws IOException {
+    if (_sslConfig != null && _sslConfig.isSslEnabled()) {
+      return new ZooKeeper(_servers, _sessionTimeOut, watcher, _sslConfig.createZKClientConfig());
+    }
+    return new ZooKeeper(_servers, _sessionTimeOut, watcher);
   }
 
   @Override
