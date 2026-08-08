@@ -119,11 +119,15 @@ public class TestJobTaskStatusSummary extends TaskTestBase {
     // operators can rely on them being part of the summary shape.
     Assert.assertEquals(summary.get("timedOut").asInt(), 0);
     Assert.assertEquals(summary.get("inProgress").asInt(), 0);
+    Assert.assertEquals(summary.get("pending").asInt(), 0);
     Assert.assertEquals(summary.get("timedOutTasks").size(), 0);
     Assert.assertEquals(summary.get("inProgressTasks").size(), 0);
-    // The top-level counts partition the tasks: total = completed + failed + inProgress + other.
+    Assert.assertEquals(summary.get("pendingTasks").size(), 0);
+    // The top-level counts partition the tasks:
+    // total = completed + failed + inProgress + pending + other.
     Assert.assertEquals(summary.get("completed").asInt() + summary.get("failed").asInt()
-        + summary.get("inProgress").asInt() + summary.get("other").asInt(), numTasks);
+        + summary.get("inProgress").asInt() + summary.get("pending").asInt()
+        + summary.get("other").asInt(), numTasks);
 
     JsonNode byState = summary.get("byState");
     Assert.assertEquals(byState.get(TaskPartitionState.COMPLETED.name()).asInt(), expectedCompleted);

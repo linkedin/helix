@@ -34,6 +34,9 @@
           <span class="chip in-progress" *ngIf="taskSummary.inProgress"
             >In Progress: {{ taskSummary.inProgress }}</span
           >
+          <span class="chip pending" *ngIf="taskSummary.pending"
+            >Pending: {{ taskSummary.pending }}</span
+          >
           <span class="chip other" *ngIf="taskSummary.other">Other: {{ taskSummary.other }}</span>
         </div>
         <div class="failed-tasks" *ngIf="hasTaskFailures">
@@ -48,12 +51,16 @@
           <strong>In progress task partitions:</strong>
           {{ taskSummary.inProgressTasks?.join(', ') }}
         </div>
+        <div class="pending-tasks" *ngIf="hasPending">
+          <strong>Pending task partitions:</strong>
+          {{ taskSummary.pendingTasks?.join(', ') }}
+        </div>
         <ngx-json-viewer [json]="taskSummary"></ngx-json-viewer>
       </ng-container>
       <ng-template #noSummary>
         <div class="no-summary">
-          No task status summary available yet. It is populated once the job reaches a terminal
-          state (completed, failed, or timed out).
+          No task status summary available yet. It is computed from the job's per-task states each
+          time this page is opened, and appears once the job has scheduled its tasks.
         </div>
       </ng-template>
     </div>

@@ -44,6 +44,24 @@ public class JobContext extends HelixProperty {
   private static final Logger LOG = LoggerFactory.getLogger(JobContext.class);
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+  // Field names used in the aggregated task status summary JSON produced by
+  // updateTaskStatusSummary(). Kept as named constants (rather than inline string literals) so the
+  // producer here and every consumer that mirrors this shape stay in agreement on the exact keys.
+  static final String SUMMARY_KEY_TOTAL = "total";
+  static final String SUMMARY_KEY_COMPLETED = "completed";
+  static final String SUMMARY_KEY_FAILED = "failed";
+  static final String SUMMARY_KEY_TIMED_OUT = "timedOut";
+  static final String SUMMARY_KEY_IN_PROGRESS = "inProgress";
+  static final String SUMMARY_KEY_PENDING = "pending";
+  static final String SUMMARY_KEY_OTHER = "other";
+  static final String SUMMARY_KEY_BY_STATE = "byState";
+  static final String SUMMARY_KEY_FAILED_TASKS = "failedTasks";
+  static final String SUMMARY_KEY_TIMED_OUT_TASKS = "timedOutTasks";
+  static final String SUMMARY_KEY_IN_PROGRESS_TASKS = "inProgressTasks";
+  static final String SUMMARY_KEY_PENDING_TASKS = "pendingTasks";
+  // byState bucket used for a partition that has no task state yet (getPartitionState == null).
+  static final String SUMMARY_STATE_UNSCHEDULED = "UNSCHEDULED";
+
   private enum ContextProperties {
     START_TIME, // Time at which this JobContext was created
     STATE,
@@ -358,13 +376,21 @@ public class JobContext extends HelixProperty {
   }
 
   /**
-   * Task partition states that represent an in-flight task: scheduled but not yet running (INIT) or
-   * actively running (RUNNING). Tasks can still be in one of these states when the summary is
-   * computed at the job-timeout choke point, so they are surfaced explicitly instead of being
-   * lumped into "other".
+   * Task partition state for a task that is actively running (RUNNING). Surfaced explicitly instead
+   * of being lumped into "other" so still-running tasks are visible, which matters because the
+   * summary is refreshed live while the job runs, not only when it reaches a terminal state.
    */
   private static boolean isInProgressState(TaskPartitionState state) {
-    return state == TaskPartitionState.INIT || state == TaskPartitionState.RUNNING;
+    return state == TaskPartitionState.RUNNING;
+  }
+
+  /**
+   * Task partition state for a task that has been scheduled but has not started running yet (INIT).
+   * Surfaced as its own "pending" count, distinct from "inProgress" (RUNNING), so operators can
+   * tell tasks that are waiting to start apart from tasks that are actively executing.
+   */
+  private static boolean isPendingState(TaskPartitionState state) {
+    return state == TaskPartitionState.INIT;
   }
 
   /**
@@ -374,14 +400,22 @@ public class JobContext extends HelixProperty {
    * partition tasks are allowed to run to completion. Intended to be called by the controller when
    * the job reaches a terminal state (completed / failed / timed out).
    * The summary shape is:
-   * {@code {"total":N,"completed":X,"failed":Y,"timedOut":T,"inProgress":R,"other":Z,
-   * "byState":{...},"failedTasks":[...],"timedOutTasks":[...],"inProgressTasks":[...]}}.
+   * {@code {"total":N,"completed":X,"failed":Y,"timedOut":T,"inProgress":R,"pending":P,"other":Z,
+   * "byState":{...},"failedTasks":[...],"timedOutTasks":[...],"inProgressTasks":[...],
+   * "pendingTasks":[...]}}.
    * The top-level counts partition the tasks as {@code total = completed + failed + inProgress +
-   * other}. {@code failed} is the count of tasks that did not succeed (errored, aborted, or timed
-   * out); {@code timedOut} is the subset of {@code failed} that specifically timed out, called out
-   * separately so operators can distinguish a task that ran out of time from one that errored or
-   * aborted. {@code inProgress} is the count of tasks still scheduled or running (relevant when the
-   * summary is written at the timeout choke point), pulled out of {@code other}.
+   * pending + other}. {@code failed} is the count of tasks that did not succeed (errored, aborted,
+   * or timed out); {@code timedOut} is the subset of {@code failed} that specifically timed out,
+   * called out separately so operators can distinguish a task that ran out of time from one that
+   * errored or aborted. {@code inProgress} is the count of tasks actively running (RUNNING) and
+   * {@code pending} is the count of tasks scheduled but not yet started (INIT); both are pulled out
+   * of {@code other} so still-active tasks are visible when the summary is recomputed on demand
+   * (for example when the job detail page is opened) while the job is still running.
+   * {@code byState} is a histogram mapping each raw task partition state name (or
+   * {@code "UNSCHEDULED"} for a partition that has not been assigned a state yet) to the number of
+   * tasks in that state; it is the fine-grained breakdown behind the coarser counts above. The
+   * {@code failedTasks} / {@code timedOutTasks} / {@code inProgressTasks} / {@code pendingTasks}
+   * arrays list the partition ids that fall into each of those buckets.
    */
   public void updateTaskStatusSummary() {
     Set<Integer> partitions = getPartitionSet();
@@ -389,13 +423,15 @@ public class JobContext extends HelixProperty {
     List<Integer> failedTasks = Lists.newArrayList();
     List<Integer> timedOutTasks = Lists.newArrayList();
     List<Integer> inProgressTasks = Lists.newArrayList();
+    List<Integer> pendingTasks = Lists.newArrayList();
     int completed = 0;
     int failed = 0;
     int timedOut = 0;
     int inProgress = 0;
+    int pending = 0;
     for (int p : partitions) {
       TaskPartitionState state = getPartitionState(p);
-      String key = (state == null) ? "UNSCHEDULED" : state.name();
+      String key = (state == null) ? SUMMARY_STATE_UNSCHEDULED : state.name();
       byState.merge(key, 1, Integer::sum);
       if (state == TaskPartitionState.COMPLETED) {
         completed++;
@@ -409,23 +445,29 @@ public class JobContext extends HelixProperty {
       } else if (isInProgressState(state)) {
         inProgress++;
         inProgressTasks.add(p);
+      } else if (isPendingState(state)) {
+        pending++;
+        pendingTasks.add(p);
       }
     }
     failedTasks.sort(null);
     timedOutTasks.sort(null);
     inProgressTasks.sort(null);
+    pendingTasks.sort(null);
 
     Map<String, Object> summary = new LinkedHashMap<>();
-    summary.put("total", partitions.size());
-    summary.put("completed", completed);
-    summary.put("failed", failed);
-    summary.put("timedOut", timedOut);
-    summary.put("inProgress", inProgress);
-    summary.put("other", partitions.size() - completed - failed - inProgress);
-    summary.put("byState", byState);
-    summary.put("failedTasks", failedTasks);
-    summary.put("timedOutTasks", timedOutTasks);
-    summary.put("inProgressTasks", inProgressTasks);
+    summary.put(SUMMARY_KEY_TOTAL, partitions.size());
+    summary.put(SUMMARY_KEY_COMPLETED, completed);
+    summary.put(SUMMARY_KEY_FAILED, failed);
+    summary.put(SUMMARY_KEY_TIMED_OUT, timedOut);
+    summary.put(SUMMARY_KEY_IN_PROGRESS, inProgress);
+    summary.put(SUMMARY_KEY_PENDING, pending);
+    summary.put(SUMMARY_KEY_OTHER, partitions.size() - completed - failed - inProgress - pending);
+    summary.put(SUMMARY_KEY_BY_STATE, byState);
+    summary.put(SUMMARY_KEY_FAILED_TASKS, failedTasks);
+    summary.put(SUMMARY_KEY_TIMED_OUT_TASKS, timedOutTasks);
+    summary.put(SUMMARY_KEY_IN_PROGRESS_TASKS, inProgressTasks);
+    summary.put(SUMMARY_KEY_PENDING_TASKS, pendingTasks);
 
     try {
       String json = OBJECT_MAPPER.writeValueAsString(summary);
