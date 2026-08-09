@@ -38,7 +38,9 @@ import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordJacksonSerializer;
 import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
+import org.apache.helix.zookeeper.util.GZipCompressionUtil;
 import org.apache.helix.zookeeper.zkclient.exception.ZkMarshallingError;
 import org.apache.helix.zookeeper.zkclient.serialize.ZkSerializer;
 import org.testng.Assert;
@@ -190,6 +192,69 @@ public class TestZkBucketDataAccessor extends ZkTestBase {
 
     // Check against the original HelixProperty
     Assert.assertEquals(readRecord, property);
+  }
+
+  /**
+   * The bucket slicing arithmetic has a boundary case when the compressed payload length is an
+   * exact multiple of the bucket size: the remainder is zero, so a naive "length % bucketSize"
+   * final bucket would be empty and those bytes would be lost, making the record undecodable.
+   */
+  @Test(dependsOnMethods = "testLargeWriteAndRead")
+  public void testWriteAndReadWhenSizeIsExactMultipleOfBucketSize() throws IOException {
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    ZNRecord largeRecord = new ZNRecord(NAME_KEY);
+    for (int i = 0; i < 4000; i++) {
+      largeRecord.setSimpleField("key_" + i, "value_" + i);
+    }
+
+    // Pad until the compressed length is even, so both the 1 and 2 bucket cases always run
+    // regardless of the zlib build.
+    int compressedLength = compressedLength(largeRecord);
+    for (int pad = 0; compressedLength % 2 != 0; pad++) {
+      largeRecord.setSimpleField("pad_" + pad, "x");
+      compressedLength = compressedLength(largeRecord);
+    }
+
+    for (int numBuckets : new int[]{1, 2}) {
+      ZkBucketDataAccessor exactSizeAccessor =
+          new ZkBucketDataAccessor(_zkClient, compressedLength / numBuckets, VERSION_TTL_MS);
+      try {
+        Assert.assertTrue(
+            exactSizeAccessor.compressedBucketWrite(path, new HelixProperty(largeRecord)));
+        HelixProperty readRecord =
+            exactSizeAccessor.compressedBucketRead(path, HelixProperty.class);
+        Assert.assertEquals(readRecord.getRecord().getSimpleFields(),
+            largeRecord.getSimpleFields(), "Mismatch with " + numBuckets + " bucket(s)");
+        exactSizeAccessor.compressedBucketDelete(path);
+      } finally {
+        exactSizeAccessor.disconnect();
+      }
+    }
+  }
+
+  private static int compressedLength(ZNRecord record) throws IOException {
+    return GZipCompressionUtil.compress(new ZNRecordJacksonSerializer().serialize(record)).length;
+  }
+
+  /**
+   * A reader configured with a different bucket size than the writer must still reassemble the
+   * record correctly, since the authoritative bucket size is the one recorded in the metadata.
+   */
+  @Test(dependsOnMethods = "testLargeWriteAndRead")
+  public void testReadWithDifferentBucketSizeThanWriter() throws IOException {
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    HelixProperty property = createLargeHelixProperty("mismatchedBucketSize", 2000);
+
+    ZkBucketDataAccessor writer = new ZkBucketDataAccessor(_zkClient, 10 * 1024, VERSION_TTL_MS);
+    ZkBucketDataAccessor reader = new ZkBucketDataAccessor(_zkClient, 50 * 1024, VERSION_TTL_MS);
+    try {
+      Assert.assertTrue(writer.compressedBucketWrite(path, property));
+      Assert.assertEquals(reader.compressedBucketRead(path, HelixProperty.class), property);
+      reader.compressedBucketDelete(path);
+    } finally {
+      writer.disconnect();
+      reader.disconnect();
+    }
   }
 
   /**
