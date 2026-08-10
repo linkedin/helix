@@ -178,7 +178,8 @@ public class ZkBucketDataAccessor implements BucketDataAccessor, AutoCloseable {
     // Compress the byte[]
     byte[] compressedRecord = GZipCompressionUtil.compress(serializedRecord);
     // Compute N - number of buckets
-    int numBuckets = (compressedRecord.length + _bucketSize - 1) / _bucketSize;
+    int numBuckets =
+        (int) (((long) compressedRecord.length + _bucketSize - 1) / _bucketSize);
 
     List<String> paths = new ArrayList<>();
     List<byte[]> buckets = new ArrayList<>();
@@ -299,7 +300,7 @@ public class ZkBucketDataAccessor implements BucketDataAccessor, AutoCloseable {
     int dataSize = Integer.parseInt((String) dataSizeObj);
 
     // Compute N - number of buckets
-    int numBuckets = (dataSize + _bucketSize - 1) / _bucketSize;
+    int numBuckets = (int) (((long) dataSize + _bucketSize - 1) / _bucketSize);
     byte[] compressedRecord = new byte[dataSize];
     String dataPath = path + "/" + versionToRead;
 

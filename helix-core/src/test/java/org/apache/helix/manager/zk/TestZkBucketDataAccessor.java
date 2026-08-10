@@ -192,6 +192,22 @@ public class TestZkBucketDataAccessor extends ZkTestBase {
     Assert.assertEquals(readRecord, property);
   }
 
+  @Test
+  public void testWriteAndReadWhenBucketCountAdditionOverflows() throws IOException {
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    HelixProperty property = new HelixProperty(record);
+    ZkBucketDataAccessor accessor =
+        new ZkBucketDataAccessor(_zkClient, Integer.MAX_VALUE, VERSION_TTL_MS);
+
+    try {
+      Assert.assertTrue(accessor.compressedBucketWrite(path, property));
+      Assert.assertEquals(accessor.compressedBucketRead(path, HelixProperty.class), property);
+    } finally {
+      accessor.compressedBucketDelete(path);
+      accessor.disconnect();
+    }
+  }
+
   /**
    * Test to ensure bucket GC still occurs in high frequency write scenarios.
    */
