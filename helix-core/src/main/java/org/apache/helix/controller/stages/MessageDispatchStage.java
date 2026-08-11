@@ -22,10 +22,12 @@ package org.apache.helix.controller.stages;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
@@ -94,6 +96,13 @@ public abstract class MessageDispatchStage extends AbstractBaseStage {
     }
 
     List<Message> messagesSent = sendMessages(dataAccessor, outputMessages);
+    Set<String> sentMessageIds = new HashSet<>();
+    messagesSent.forEach(message -> sentMessageIds.add(message.getMsgId()));
+    List<Message> messagesFailed = new ArrayList<>();
+    outputMessages.stream().filter(message -> !sentMessageIds.contains(message.getMsgId()))
+        .forEach(messagesFailed::add);
+    event.addAttribute(AttributeName.MESSAGE_DISPATCH_RESULT.name(),
+        new MessageDispatchResult(messagesSent, messagesFailed));
 
     // TODO: Need also count messages from task rebalancer
     if (!(cache instanceof WorkflowControllerDataProvider)) {

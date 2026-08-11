@@ -45,6 +45,7 @@ public enum PropertyType {
   EXTERNALVIEW(Type.CLUSTER, true, false),
   CUSTOMIZEDVIEW(Type.CLUSTER, true, false),
   TARGETEXTERNALVIEW(Type.CLUSTER, true, false),
+  CONVERGENCESTATUS(Type.CLUSTER, true, false),
   STATEMODELDEFS(Type.CLUSTER, true, false, false, false, true),
   CONTROLLER(Type.CLUSTER, true, false),
   PROPERTYSTORE(Type.CLUSTER, true, false),

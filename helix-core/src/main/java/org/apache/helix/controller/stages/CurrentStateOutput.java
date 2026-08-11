@@ -260,6 +260,17 @@ public class CurrentStateOutput {
     return getStateMessage(resourceName, partition, instanceName, _cancellationMessageMap);
   }
 
+  public Map<String, Message> getCancellationMessageMap(String resourceName,
+      Partition partition) {
+    if (_cancellationMessageMap.containsKey(resourceName)) {
+      Map<Partition, Map<String, Message>> map = _cancellationMessageMap.get(resourceName);
+      if (map.containsKey(partition)) {
+        return map.get(partition);
+      }
+    }
+    return Collections.emptyMap();
+  }
+
   private Message getStateMessage(String resourceName, Partition partition, String instanceName,
       Map<String, Map<Partition, Map<String, Message>>> stateMessageMap) {
     Map<Partition, Map<String, Message>> map = stateMessageMap.get(resourceName);
