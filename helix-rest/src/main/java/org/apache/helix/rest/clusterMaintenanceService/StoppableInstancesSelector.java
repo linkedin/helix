@@ -34,7 +34,6 @@ import java.util.stream.Collectors;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.InstanceConfig;
@@ -300,10 +299,15 @@ public class StoppableInstancesSelector {
   private Set<String> findToBeStoppedInstances(List<String> toBeStoppedInstances) {
     Set<String> toBeStoppedInstancesSet = new HashSet<>(toBeStoppedInstances);
     Set<String> allInstances = _clusterTopology.getAllInstances();
+    // Batch-read all instance configs in a single ZK call instead of one getProperty per instance.
+    Map<String, InstanceConfig> instanceConfigMap =
+        _dataAccessor.getChildValuesMap(_dataAccessor.keyBuilder().instanceConfigs(), true);
     for (String instance : allInstances) {
-      PropertyKey.Builder propertyKeyBuilder = _dataAccessor.keyBuilder();
-      InstanceConfig instanceConfig =
-          _dataAccessor.getProperty(propertyKeyBuilder.instanceConfig(instance));
+      InstanceConfig instanceConfig = instanceConfigMap.get(instance);
+      if (instanceConfig == null) {
+        // Instance is in the topology but has no config (e.g. removed concurrently); skip it.
+        continue;
+      }
       InstanceConstants.InstanceOperation operation = instanceConfig.getInstanceOperation().getOperation();
       if (operation == InstanceConstants.InstanceOperation.EVACUATE
           || operation == InstanceConstants.InstanceOperation.SWAP_IN

@@ -133,11 +133,14 @@ public class InstancesAccessor extends AbstractHelixResource {
       ArrayNode unknownNode = root.putArray(InstancesAccessor.InstancesProperties.unknown.name());
 
       List<String> liveInstances = accessor.getChildNames(accessor.keyBuilder().liveInstances());
+      // Batch-read all instance configs in a single ZK call, keyed by instance name, instead of
+      // issuing one getProperty per instance below.
+      Map<String, InstanceConfig> instanceConfigMap =
+          accessor.getChildValuesMap(accessor.keyBuilder().instanceConfigs(), true);
 
       // Categorize each instance by its operation state
       for (String instanceName : instances) {
-        InstanceConfig instanceConfig =
-            accessor.getProperty(accessor.keyBuilder().instanceConfig(instanceName));
+        InstanceConfig instanceConfig = instanceConfigMap.get(instanceName);
         if (instanceConfig != null) {
           // Get the instance operation
           InstanceConfig.InstanceOperation instanceOperation = instanceConfig.getInstanceOperation();
