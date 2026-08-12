@@ -20,6 +20,7 @@ package org.apache.helix.manager.zk;
  */
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -444,7 +445,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     final String rootPath = "/" + clusterName;
     final String owner = "helixAdmin";
     final String password = "helixAdminPassword";
-    final byte[] credentials = (owner + ":" + password).getBytes();
+    final byte[] credentials = (owner + ":" + password).getBytes(StandardCharsets.UTF_8);
 
     // only the digest user gets full permissions on the cluster root
     List<ACL> acl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
@@ -481,7 +482,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       // DELETE permission on the parent, and the parent here is "/", which is world writable.
       try {
         unauthorizedClient.delete(rootPath, -1);
-        Assert.fail("Expected the delete of a non empty cluster root to be rejected");
+        Assert.fail("Expected the delete of a non-empty cluster root to be rejected");
       } catch (KeeperException.NotEmptyException expected) {
         // expected
       }
