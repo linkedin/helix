@@ -976,7 +976,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
   public void testGetInstancesUnableToAcceptOnlineReplicas() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
 
-    // Dedicated cluster so the counts asserted here are not perturbed by other tests. No
+    // Dedicated cluster so the population asserted here is not perturbed by other tests. No
     // participants are started, so every routable instance is offline and counts against the
     // budget unless it carries a valid instance-operation maintenance marker.
     String clusterName = "TestOfflineBudgetCluster";
@@ -988,13 +988,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
       _gSetupTool.addInstanceToCluster(clusterName, instance);
     }
 
-    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
-    clusterConfig.setMaxOfflineInstancesAllowed(4);
-    clusterConfig.setNumOfflineInstancesForAutoExit(2);
-    _configAccessor.setClusterConfig(clusterName, clusterConfig);
-
-    // Baseline: all 5 instances are offline and unmarked, so all 5 count and the configured
-    // MAX_OFFLINE_INSTANCES_ALLOWED of 4 is exceeded.
+    // Baseline: all 5 instances are offline and unmarked, so all 5 count.
     JsonNode node = OBJECT_MAPPER.readTree(
         new JerseyUriRequestBuilder(
             "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
@@ -1003,18 +997,6 @@ public class TestInstancesAccessor extends AbstractTestClass {
         getSortedStringList(node,
             InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
                 .name()), sorted(instances));
-    Assert.assertEquals(node.get(
-        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
-            .name()).intValue(), 5);
-    Assert.assertEquals(node.get(
-            InstancesAccessor.InstancesProperties.max_offline_instances_allowed.name()).intValue(),
-        4);
-    Assert.assertEquals(node.get(
-        InstancesAccessor.InstancesProperties.num_offline_instances_for_auto_exit.name())
-        .intValue(), 2);
-    Assert.assertTrue(node.get(
-            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
-        .booleanValue(), "5 counted instances must exceed the configured limit of 4");
 
     // A valid marker exempts an instance; an expired marker does not. A SWAP_IN instance is
     // never counted regardless of marker state.
@@ -1036,34 +1018,23 @@ public class TestInstancesAccessor extends AbstractTestClass {
                 .name()),
         sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
         "Valid marker and SWAP_IN must be excluded; the expired marker must still count");
-    Assert.assertEquals(node.get(
-        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
-            .name()).intValue(), 3);
-    Assert.assertEquals(
-        getSortedStringList(node,
-            InstancesAccessor.InstancesProperties
-                .instances_under_instance_operation_maintenance.name()),
-        Collections.singletonList("obInstance0"),
-        "Only the unexpired marker should be reported as under maintenance");
-    Assert.assertFalse(node.get(
-            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
-        .booleanValue(), "3 counted instances is within the configured limit of 4");
 
-    // When the threshold is unset, the controller never auto-enters MM for this reason, so the
-    // endpoint must never report a breach.
-    clusterConfig = _configAccessor.getClusterConfig(clusterName);
-    clusterConfig.setMaxOfflineInstancesAllowed(-1);
+    // The population is a property of the instances alone. Changing the budget thresholds the
+    // controller compares it against must not change who is in it.
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setMaxOfflineInstancesAllowed(1);
+    clusterConfig.setNumOfflineInstancesForAutoExit(0);
     _configAccessor.setClusterConfig(clusterName, clusterConfig);
     node = OBJECT_MAPPER.readTree(
         new JerseyUriRequestBuilder(
             "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
             .isBodyReturnExpected(true).format(clusterName).get(this));
-    Assert.assertEquals(node.get(
-        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
-            .name()).intValue(), 3);
-    Assert.assertFalse(node.get(
-            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
-        .booleanValue(), "An unset MAX_OFFLINE_INSTANCES_ALLOWED can never be exceeded");
+    Assert.assertEquals(
+        getSortedStringList(node,
+            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
+                .name()),
+        sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
+        "Offline-budget thresholds must not affect which instances are counted");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }

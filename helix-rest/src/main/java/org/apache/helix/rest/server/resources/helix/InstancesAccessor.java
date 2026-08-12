@@ -92,12 +92,7 @@ public class InstancesAccessor extends AbstractHelixResource {
     customized_values,
     instance_stoppable_parallel,
     instance_not_stoppable_with_reasons,
-    instances_unable_to_accept_online_replicas,
-    instances_unable_to_accept_online_replicas_count,
-    instances_under_instance_operation_maintenance,
-    max_offline_instances_allowed,
-    num_offline_instances_for_auto_exit,
-    exceeds_max_offline_instances_allowed
+    instances_unable_to_accept_online_replicas
   }
 
   public enum InstanceHealthSelectionBase {
@@ -203,9 +198,9 @@ public class InstancesAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Reports the number of instances Helix itself counts against the cluster-wide offline
-   * budget that drives auto Maintenance Mode, so clients do not have to reimplement (and
-   * drift from) the controller's membership rules.
+   * Reports the instances Helix itself counts against the cluster-wide offline budget that
+   * drives auto Maintenance Mode, so clients do not have to reimplement (and drift from) the
+   * controller's membership rules.
    *
    * <p>The population is computed by
    * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)},
@@ -213,21 +208,17 @@ public class InstancesAccessor extends AbstractHelixResource {
    * and MM exit ({@code MaintenanceRecoveryStage}). An instance counts when it is routable,
    * not enabled-and-live, and not covered by a valid instance-operation maintenance marker.
    *
-   * <p>Response (HTTP 200):
+   * <p>Response (HTTP 200), shaped like the {@code getAllInstances} response on this route:
    * <pre>{@code
    * { "id": "cluster0",
-   *   "instances_unable_to_accept_online_replicas": ["h3", "h4"],
-   *   "instances_unable_to_accept_online_replicas_count": 2,
-   *   "instances_under_instance_operation_maintenance": ["h1"],
-   *   "max_offline_instances_allowed": 4,
-   *   "num_offline_instances_for_auto_exit": 2,
-   *   "exceeds_max_offline_instances_allowed": false }
+   *   "instances_unable_to_accept_online_replicas": ["h3", "h4"] }
    * }</pre>
    *
-   * <p>{@code max_offline_instances_allowed} and {@code num_offline_instances_for_auto_exit}
-   * are echoed as configured; a negative value means the threshold is not set, in which case
-   * {@code exceeds_max_offline_instances_allowed} is always false because the controller
-   * never auto-enters MM for this reason.
+   * <p>Only the population is returned. The thresholds it is compared against
+   * ({@code MAX_OFFLINE_INSTANCES_ALLOWED}, {@code NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT}) are
+   * already available from the cluster-config endpoint, and the resulting maintenance state is
+   * available from the maintenance-signal endpoint; deriving either here would hand clients a
+   * prediction where an authoritative answer already exists.
    */
   private Response getInstancesUnableToAcceptOnlineReplicas(String clusterId,
       HelixDataAccessor accessor) {
@@ -242,8 +233,7 @@ public class InstancesAccessor extends AbstractHelixResource {
 
   private Response computeInstancesUnableToAcceptOnlineReplicas(String clusterId,
       HelixDataAccessor accessor) {
-    ClusterConfig clusterConfig = getConfigAccessor().getClusterConfig(clusterId);
-    if (clusterConfig == null) {
+    if (getConfigAccessor().getClusterConfig(clusterId) == null) {
       return notFound();
     }
 
@@ -260,14 +250,10 @@ public class InstancesAccessor extends AbstractHelixResource {
     }
     List<String> liveInstances = accessor.getChildNames(keyBuilder.liveInstances());
 
-    long nowMs = System.currentTimeMillis();
     Set<String> unableToAcceptOnlineReplicas =
         InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(instanceConfigMap,
-            liveInstances == null ? Collections.emptyList() : liveInstances, nowMs);
-    Set<String> underMaintenance =
-        InstanceUtil.getInstancesUnderInstanceOperationMaintenance(instanceConfigMap, nowMs);
-
-    int maxOfflineInstancesAllowed = clusterConfig.getMaxOfflineInstancesAllowed();
+            liveInstances == null ? Collections.emptyList() : liveInstances,
+            System.currentTimeMillis());
 
     ObjectNode root = JsonNodeFactory.instance.objectNode();
     root.put(Properties.id.name(), clusterId);
@@ -277,19 +263,6 @@ public class InstancesAccessor extends AbstractHelixResource {
     for (String instanceName : new TreeSet<>(unableToAcceptOnlineReplicas)) {
       countedNode.add(instanceName);
     }
-    root.put(InstancesProperties.instances_unable_to_accept_online_replicas_count.name(),
-        unableToAcceptOnlineReplicas.size());
-    ArrayNode maintenanceNode =
-        root.putArray(InstancesProperties.instances_under_instance_operation_maintenance.name());
-    for (String instanceName : new TreeSet<>(underMaintenance)) {
-      maintenanceNode.add(instanceName);
-    }
-    root.put(InstancesProperties.max_offline_instances_allowed.name(), maxOfflineInstancesAllowed);
-    root.put(InstancesProperties.num_offline_instances_for_auto_exit.name(),
-        clusterConfig.getNumOfflineInstancesForAutoExit());
-    root.put(InstancesProperties.exceeds_max_offline_instances_allowed.name(),
-        maxOfflineInstancesAllowed >= 0
-            && unableToAcceptOnlineReplicas.size() > maxOfflineInstancesAllowed);
     return JSONRepresentation(root);
   }
 

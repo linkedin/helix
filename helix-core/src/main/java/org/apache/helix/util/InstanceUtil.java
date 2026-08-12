@@ -327,7 +327,7 @@ public class InstanceUtil {
    * @param liveInstanceNames names of the currently live instances.
    * @return a fresh modifiable set of instance names.
    */
-  public static Set<String> getEnabledLiveInstances(
+  private static Set<String> getEnabledLiveInstances(
       Map<String, InstanceConfig> instanceConfigMap, Collection<String> liveInstanceNames) {
     if (instanceConfigMap == null || liveInstanceNames == null) {
       return new HashSet<>();
@@ -389,27 +389,6 @@ public class InstanceUtil {
       return config != null && config.isUnderInstanceOperationMaintenance(nowMs);
     });
     return result;
-  }
-
-  /**
-   * Returns the instances carrying a valid (unexpired) instance-operation maintenance marker,
-   * i.e. the instances that are exempted from the offline budget by
-   * {@link #getInstancesUnableToAcceptOnlineReplicas(Map, Collection, long)}.
-   *
-   * @param instanceConfigMap all instance configs in the cluster, keyed by instance name.
-   * @param nowMs current wall-clock millis used for marker-expiry comparison.
-   * @return a fresh modifiable set of instance names.
-   */
-  public static Set<String> getInstancesUnderInstanceOperationMaintenance(
-      Map<String, InstanceConfig> instanceConfigMap, long nowMs) {
-    if (instanceConfigMap == null || instanceConfigMap.isEmpty()) {
-      return new HashSet<>();
-    }
-    return instanceConfigMap.entrySet().stream()
-        .filter(e -> e.getValue() != null && e.getValue()
-            .isUnderInstanceOperationMaintenance(nowMs))
-        .map(Map.Entry::getKey)
-        .collect(Collectors.toCollection(HashSet::new));
   }
 
   private static String formatMatchingInstances(List<InstanceConfig> matchingInstances) {
