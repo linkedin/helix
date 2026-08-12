@@ -22,10 +22,12 @@ package org.apache.helix.rest.server.resources.helix;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
@@ -44,6 +46,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
@@ -61,6 +64,7 @@ import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.rest.server.resources.exceptions.HelixHealthException;
 import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,7 +91,13 @@ public class InstancesAccessor extends AbstractHelixResource {
     skip_stoppable_check_list,
     customized_values,
     instance_stoppable_parallel,
-    instance_not_stoppable_with_reasons
+    instance_not_stoppable_with_reasons,
+    instances_unable_to_accept_online_replicas,
+    instances_unable_to_accept_online_replicas_count,
+    instances_under_instance_operation_maintenance,
+    max_offline_instances_allowed,
+    num_offline_instances_for_auto_exit,
+    exceeds_max_offline_instances_allowed
   }
 
   public enum InstanceHealthSelectionBase {
@@ -184,10 +194,103 @@ public class InstancesAccessor extends AbstractHelixResource {
         return badRequest(e.getMessage());
       }
       return JSONRepresentation(validationResultMap);
+    case getInstancesUnableToAcceptOnlineReplicas:
+      return getInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
     }
+  }
+
+  /**
+   * Reports the number of instances Helix itself counts against the cluster-wide offline
+   * budget that drives auto Maintenance Mode, so clients do not have to reimplement (and
+   * drift from) the controller's membership rules.
+   *
+   * <p>The population is computed by
+   * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)},
+   * the same method the controller uses on MM entry ({@code BestPossibleStateCalcStage})
+   * and MM exit ({@code MaintenanceRecoveryStage}). An instance counts when it is routable,
+   * not enabled-and-live, and not covered by a valid instance-operation maintenance marker.
+   *
+   * <p>Response (HTTP 200):
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instances_unable_to_accept_online_replicas": ["h3", "h4"],
+   *   "instances_unable_to_accept_online_replicas_count": 2,
+   *   "instances_under_instance_operation_maintenance": ["h1"],
+   *   "max_offline_instances_allowed": 4,
+   *   "num_offline_instances_for_auto_exit": 2,
+   *   "exceeds_max_offline_instances_allowed": false }
+   * }</pre>
+   *
+   * <p>{@code max_offline_instances_allowed} and {@code num_offline_instances_for_auto_exit}
+   * are echoed as configured; a negative value means the threshold is not set, in which case
+   * {@code exceeds_max_offline_instances_allowed} is always false because the controller
+   * never auto-enters MM for this reason.
+   */
+  private Response getInstancesUnableToAcceptOnlineReplicas(String clusterId,
+      HelixDataAccessor accessor) {
+    try {
+      return computeInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
+    } catch (Exception e) {
+      _logger.error("Failed to compute instances unable to accept online replicas for cluster {}",
+          clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private Response computeInstancesUnableToAcceptOnlineReplicas(String clusterId,
+      HelixDataAccessor accessor) {
+    ClusterConfig clusterConfig = getConfigAccessor().getClusterConfig(clusterId);
+    if (clusterConfig == null) {
+      return notFound();
+    }
+
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    List<InstanceConfig> instanceConfigs =
+        accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+    Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
+    if (instanceConfigs != null) {
+      for (InstanceConfig instanceConfig : instanceConfigs) {
+        if (instanceConfig != null) {
+          instanceConfigMap.put(instanceConfig.getInstanceName(), instanceConfig);
+        }
+      }
+    }
+    List<String> liveInstances = accessor.getChildNames(keyBuilder.liveInstances());
+
+    long nowMs = System.currentTimeMillis();
+    Set<String> unableToAcceptOnlineReplicas =
+        InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(instanceConfigMap,
+            liveInstances == null ? Collections.emptyList() : liveInstances, nowMs);
+    Set<String> underMaintenance =
+        InstanceUtil.getInstancesUnderInstanceOperationMaintenance(instanceConfigMap, nowMs);
+
+    int maxOfflineInstancesAllowed = clusterConfig.getMaxOfflineInstancesAllowed();
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    ArrayNode countedNode =
+        root.putArray(InstancesProperties.instances_unable_to_accept_online_replicas.name());
+    // Sorted so the payload is stable across calls for the same cluster state.
+    for (String instanceName : new TreeSet<>(unableToAcceptOnlineReplicas)) {
+      countedNode.add(instanceName);
+    }
+    root.put(InstancesProperties.instances_unable_to_accept_online_replicas_count.name(),
+        unableToAcceptOnlineReplicas.size());
+    ArrayNode maintenanceNode =
+        root.putArray(InstancesProperties.instances_under_instance_operation_maintenance.name());
+    for (String instanceName : new TreeSet<>(underMaintenance)) {
+      maintenanceNode.add(instanceName);
+    }
+    root.put(InstancesProperties.max_offline_instances_allowed.name(), maxOfflineInstancesAllowed);
+    root.put(InstancesProperties.num_offline_instances_for_auto_exit.name(),
+        clusterConfig.getNumOfflineInstancesForAutoExit());
+    root.put(InstancesProperties.exceeds_max_offline_instances_allowed.name(),
+        maxOfflineInstancesAllowed >= 0
+            && unableToAcceptOnlineReplicas.size() > maxOfflineInstancesAllowed);
+    return JSONRepresentation(root);
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)

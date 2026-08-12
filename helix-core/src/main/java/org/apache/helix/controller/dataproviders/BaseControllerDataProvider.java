@@ -64,6 +64,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
 import org.apache.helix.util.HelixUtil;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.slf4j.Logger;
@@ -759,16 +760,10 @@ public class BaseControllerDataProvider implements ControlContextProvider {
    * auto Maintenance Mode (MAX_OFFLINE_INSTANCES_ALLOWED at entry,
    * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT at exit).
    *
-   * <p>An instance counts when all three conditions hold:
-   * <ul>
-   *   <li>Its InstanceOperation is routable, i.e. not in
-   *       {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}.</li>
-   *   <li>It is not currently enabled-and-live.</li>
-   *   <li>It does not carry a valid (unexpired) instance-operation maintenance marker.</li>
-   * </ul>
-   * EVACUATE and DISABLE instances are included because they cannot accept new ONLINE
-   * replicas; ENABLE+offline instances are included for the same reason. SWAP_IN and
-   * UNKNOWN are excluded because they do not represent assignable cluster capacity.
+   * <p>Membership rules live in
+   * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)}
+   * so that the controller and the read-only helix-rest endpoint that reports this number to
+   * clients share one implementation.
    *
    * <p>Used by both BestPossibleStateCalcStage (MM entry) and MaintenanceRecoveryStage
    * (MM exit) so that the same population is measured against each threshold.
@@ -777,18 +772,8 @@ public class BaseControllerDataProvider implements ControlContextProvider {
    * @return a fresh modifiable set of instance names.
    */
   public Set<String> getInstancesUnableToAcceptOnlineReplicas(long nowMs) {
-    Map<String, InstanceConfig> instanceConfigMap = getInstanceConfigMap();
-    Set<String> result = instanceConfigMap.entrySet().stream()
-        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-            e.getValue().getInstanceOperation().getOperation()))
-        .map(Map.Entry::getKey)
-        .collect(Collectors.toCollection(HashSet::new));
-    result.removeAll(getEnabledLiveInstances());
-    result.removeIf(name -> {
-      InstanceConfig cfg = instanceConfigMap.get(name);
-      return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
-    });
-    return result;
+    return InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(getInstanceConfigMap(),
+        getLiveInstances().keySet(), nowMs);
   }
 
   /**

@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -969,6 +970,124 @@ public class TestInstancesAccessor extends AbstractTestClass {
         "Expected detailed reason to contain 'active replicas' but got: " + reason);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstancesUnableToAcceptOnlineReplicas() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Dedicated cluster so the counts asserted here are not perturbed by other tests. No
+    // participants are started, so every routable instance is offline and counts against the
+    // budget unless it carries a valid instance-operation maintenance marker.
+    String clusterName = "TestOfflineBudgetCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    List<String> instances =
+        Arrays.asList("obInstance0", "obInstance1", "obInstance2", "obInstance3", "obInstance4");
+    for (String instance : instances) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setMaxOfflineInstancesAllowed(4);
+    clusterConfig.setNumOfflineInstancesForAutoExit(2);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+    // Baseline: all 5 instances are offline and unmarked, so all 5 count and the configured
+    // MAX_OFFLINE_INSTANCES_ALLOWED of 4 is exceeded.
+    JsonNode node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    Assert.assertEquals(
+        getSortedStringList(node,
+            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
+                .name()), sorted(instances));
+    Assert.assertEquals(node.get(
+        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
+            .name()).intValue(), 5);
+    Assert.assertEquals(node.get(
+            InstancesAccessor.InstancesProperties.max_offline_instances_allowed.name()).intValue(),
+        4);
+    Assert.assertEquals(node.get(
+        InstancesAccessor.InstancesProperties.num_offline_instances_for_auto_exit.name())
+        .intValue(), 2);
+    Assert.assertTrue(node.get(
+            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
+        .booleanValue(), "5 counted instances must exceed the configured limit of 4");
+
+    // A valid marker exempts an instance; an expired marker does not. A SWAP_IN instance is
+    // never counted regardless of marker state.
+    long nowMs = System.currentTimeMillis();
+    setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance0", nowMs + 600_000L);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance1", nowMs - 1L);
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(clusterName, "obInstance2");
+    swapInConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.SWAP_IN).build());
+    _configAccessor.setInstanceConfig(clusterName, "obInstance2", swapInConfig);
+
+    node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    Assert.assertEquals(
+        getSortedStringList(node,
+            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
+                .name()),
+        sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
+        "Valid marker and SWAP_IN must be excluded; the expired marker must still count");
+    Assert.assertEquals(node.get(
+        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
+            .name()).intValue(), 3);
+    Assert.assertEquals(
+        getSortedStringList(node,
+            InstancesAccessor.InstancesProperties
+                .instances_under_instance_operation_maintenance.name()),
+        Collections.singletonList("obInstance0"),
+        "Only the unexpired marker should be reported as under maintenance");
+    Assert.assertFalse(node.get(
+            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
+        .booleanValue(), "3 counted instances is within the configured limit of 4");
+
+    // When the threshold is unset, the controller never auto-enters MM for this reason, so the
+    // endpoint must never report a breach.
+    clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setMaxOfflineInstancesAllowed(-1);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    Assert.assertEquals(node.get(
+        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas_count
+            .name()).intValue(), 3);
+    Assert.assertFalse(node.get(
+            InstancesAccessor.InstancesProperties.exceeds_max_offline_instances_allowed.name())
+        .booleanValue(), "An unset MAX_OFFLINE_INSTANCES_ALLOWED can never be exceeded");
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void setInstanceOperationMaintenanceUntilMs(String clusterName, String instanceName,
+      long untilMs) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperationMaintenanceUntilMs(untilMs);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+  }
+
+  private static List<String> sorted(Collection<String> names) {
+    List<String> result = new ArrayList<>(names);
+    Collections.sort(result);
+    return result;
+  }
+
+  /**
+   * Reads a JSON array field as a sorted list. Sorting both sides keeps the comparison
+   * order-insensitive while still producing a readable diff on failure (TestNG compares
+   * collections element-by-element in iteration order).
+   */
+  private List<String> getSortedStringList(JsonNode jsonNode, String key) {
+    return sorted(getStringSet(jsonNode, key));
   }
 
   private Set<String> getStringSet(JsonNode jsonNode, String key) {
