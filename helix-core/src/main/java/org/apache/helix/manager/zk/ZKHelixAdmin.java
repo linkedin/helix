@@ -118,6 +118,7 @@ import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1644,6 +1645,11 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean addCluster(String clusterName, boolean recreateIfExists) {
+    return addCluster(clusterName, recreateIfExists, null);
+  }
+
+  @Override
+  public boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
     logger.info("Add cluster {}.", clusterName);
     String root = "/" + clusterName;
 
@@ -1657,7 +1663,11 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
     }
     try {
-      _zkClient.createPersistent(root, true);
+      if (acl == null || acl.isEmpty()) {
+        _zkClient.createPersistent(root, true);
+      } else {
+        _zkClient.createPersistent(root, true, acl);
+      }
     } catch (Exception e) {
       // some other process might have created the cluster
       if (_zkClient.exists(root)) {

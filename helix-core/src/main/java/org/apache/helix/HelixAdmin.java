@@ -45,6 +45,7 @@ import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
+import org.apache.zookeeper.data.ACL;
 
 /*
  * Helix cluster management
@@ -109,6 +110,22 @@ public interface HelixAdmin {
    * @return true if successfully created, or if cluster already exists
    */
   boolean addCluster(String clusterName, boolean recreateIfExists);
+
+  /**
+   * Add a cluster whose root metadata store node is created with the given ACLs
+   * @param clusterName
+   * @param recreateIfExists If the cluster already exists, it will delete it and recreate
+   * @param acl ACLs applied to the cluster root node ("/{clusterName}"). If null or empty, the
+   *            default ACL of the underlying metadata store client is used, making this equivalent
+   *            to {@link #addCluster(String, boolean)}. Note that ZooKeeper does not propagate ACLs
+   *            to children, so the nodes created underneath the root keep the client default ACL.
+   *            The ACL is only applied when the root node is created by this call; the ACL of a
+   *            pre-existing cluster is left untouched unless recreateIfExists is true.
+   * @return true if successfully created, or if cluster already exists
+   */
+  default boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
+    throw new UnsupportedOperationException("addCluster with ACL is not implemented.");
+  }
 
   /**
    * Add a cluster and also add this cluster as a resource group in the super cluster

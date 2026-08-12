@@ -29,6 +29,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
@@ -77,13 +79,24 @@ import org.apache.helix.model.builder.ConstraintItemBuilder;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.tools.StateModelConfigGenerator;
+import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
 import org.apache.helix.zookeeper.exception.ZkClientException;
+import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
+import org.apache.helix.zookeeper.zkclient.ZkConnection;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
+import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
+import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
+import org.apache.zookeeper.server.auth.DigestAuthenticationProvider;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.AssertJUnit;
@@ -345,6 +358,191 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     deleteCluster(clusterName);
     System.out.println("END testZkHelixAdmin at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testAddClusterWithAcl() throws Exception {
+    System.out.println("START testAddClusterWithAcl at " + new Date(System.currentTimeMillis()));
+
+    final String clusterName = getShortClassName() + "_withAcl";
+    String rootPath = "/" + clusterName;
+    if (_gZkClient.exists(rootPath)) {
+      _gZkClient.deleteRecursively(rootPath);
+    }
+
+    // world:anyone without ADMIN so that the ACL is distinguishable from the default open ACL,
+    // while still allowing this test to read the cluster back and drop it afterwards
+    List<ACL> acl = Collections.singletonList(new ACL(
+        ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.WRITE | ZooDefs.Perms.DELETE,
+        ZooDefs.Ids.ANYONE_ID_UNSAFE));
+
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+    Assert.assertTrue(tool.addCluster(clusterName, true, acl));
+    Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+
+    // the ACL is applied to the cluster root
+    Assert.assertEquals(getAcl(rootPath), acl);
+    // cluster config content is still written after the root is created with the custom ACL
+    Assert.assertNotNull(_gZkClient.readData(PropertyPathBuilder.clusterConfig(clusterName), true));
+
+    // ZooKeeper does not propagate ACLs to children, so nodes below the root keep the ZkClient
+    // default ACL. This documents the boundary of what the ACL argument protects.
+    Assert.assertEquals(getAcl(PropertyPathBuilder.idealState(clusterName)),
+        ZooDefs.Ids.OPEN_ACL_UNSAFE);
+    Assert.assertEquals(getAcl(PropertyPathBuilder.clusterConfig(clusterName)),
+        ZooDefs.Ids.OPEN_ACL_UNSAFE);
+
+    deleteCluster(clusterName);
+    System.out.println("END testAddClusterWithAcl at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testAddClusterWithoutAclKeepsDefaultAcl() throws Exception {
+    System.out.println(
+        "START testAddClusterWithoutAclKeepsDefaultAcl at " + new Date(System.currentTimeMillis()));
+
+    final String clusterName = getShortClassName() + "_noAcl";
+    String rootPath = "/" + clusterName;
+    if (_gZkClient.exists(rootPath)) {
+      _gZkClient.deleteRecursively(rootPath);
+    }
+
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+    // an empty ACL list must behave exactly like the two argument overload
+    Assert.assertTrue(tool.addCluster(clusterName, true, Collections.emptyList()));
+    Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+    Assert.assertEquals(getAcl(rootPath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+
+    deleteCluster(clusterName);
+    System.out.println(
+        "END testAddClusterWithoutAclKeepsDefaultAcl at " + new Date(System.currentTimeMillis()));
+  }
+
+  private static List<ACL> getAcl(String path) throws Exception {
+    return getAcl(rawZooKeeper(_gZkClient), path);
+  }
+
+  private static List<ACL> getAcl(ZooKeeper zooKeeper, String path) throws Exception {
+    return zooKeeper.getACL(path, new Stat());
+  }
+
+  private static ZooKeeper rawZooKeeper(Object helixZkClient) {
+    return ((ZkConnection) ((org.apache.helix.zookeeper.zkclient.ZkClient) helixZkClient)
+        .getConnection()).getZookeeper();
+  }
+
+  /**
+   * Creates a cluster whose root is owned by a digest user and verifies, with a second client that
+   * does not present those credentials, what the root ACL actually protects.
+   */
+  @Test
+  public void testAddClusterAclEnforcement() throws Exception {
+    System.out.println(
+        "START testAddClusterAclEnforcement at " + new Date(System.currentTimeMillis()));
+
+    final String clusterName = getShortClassName() + "_aclEnforced";
+    final String rootPath = "/" + clusterName;
+    final String owner = "helixAdmin";
+    final String password = "helixAdminPassword";
+    final byte[] credentials = (owner + ":" + password).getBytes();
+
+    // only the digest user gets full permissions on the cluster root
+    List<ACL> acl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
+        new Id("digest", DigestAuthenticationProvider.generateDigest(owner + ":" + password))));
+
+    HelixZkClient.ZkClientConfig clientConfig = new HelixZkClient.ZkClientConfig();
+    clientConfig.setZkSerializer(new ZNRecordSerializer());
+    HelixZkClient authorizedClient = DedicatedZkClientFactory.getInstance()
+        .buildZkClient(new HelixZkClient.ZkConnectionConfig(ZK_ADDR), clientConfig);
+    ZooKeeper unauthorizedClient = null;
+    try {
+      ((org.apache.helix.zookeeper.zkclient.ZkClient) authorizedClient)
+          .addAuthInfo("digest", credentials);
+      if (authorizedClient.exists(rootPath)) {
+        authorizedClient.deleteRecursively(rootPath);
+      }
+
+      HelixAdmin tool = new ZKHelixAdmin(authorizedClient);
+      Assert.assertTrue(tool.addCluster(clusterName, true, acl));
+      Assert.assertEquals(getAcl(rawZooKeeper(authorizedClient), rootPath), acl);
+
+      // a second session that never presents the digest credentials
+      unauthorizedClient = createUnauthenticatedZkClient();
+
+      // The root ACL is enforced: a session without the credentials cannot even read the ACL.
+      try {
+        getAcl(unauthorizedClient, rootPath);
+        Assert.fail("Expected reading the ACL of a protected root to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+
+      // Deleting the root itself is rejected because it still has children. ZooKeeper checks the
+      // DELETE permission on the parent, and the parent here is "/", which is world writable.
+      try {
+        unauthorizedClient.delete(rootPath, -1);
+        Assert.fail("Expected the delete of a non empty cluster root to be rejected");
+      } catch (KeeperException.NotEmptyException expected) {
+        // expected
+      }
+
+      // Removing or adding a top level znode is checked against the root ACL, so it is blocked.
+      String idealStatePath = PropertyPathBuilder.idealState(clusterName);
+      try {
+        unauthorizedClient.delete(idealStatePath, -1);
+        Assert.fail("Expected the delete of " + idealStatePath + " to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+      try {
+        unauthorizedClient.create(rootPath + "/INJECTED", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+            CreateMode.PERSISTENT);
+        Assert.fail("Expected creating a child of the cluster root to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+
+      // A recursive delete therefore cannot get past the first level and the cluster survives.
+      Assert.assertTrue(authorizedClient.exists(rootPath));
+      Assert.assertTrue(authorizedClient.exists(idealStatePath));
+
+      // However the nodes below the root were created with the default open ACL, so the same
+      // unauthorized session can still read and modify everything inside the cluster.
+      Assert.assertEquals(getAcl(unauthorizedClient, idealStatePath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+      String clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterName);
+      Assert.assertNotNull(unauthorizedClient.getData(clusterConfigPath, false, new Stat()),
+          "Cluster config is readable by an unauthorized session");
+      unauthorizedClient.setData(clusterConfigPath, new byte[0], -1);
+      String injectedIdealState = idealStatePath + "/injectedResource";
+      unauthorizedClient.create(injectedIdealState, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+          CreateMode.PERSISTENT);
+      Assert.assertTrue(authorizedClient.exists(injectedIdealState),
+          "An unauthorized session was able to add a resource to the cluster");
+      unauthorizedClient.delete(injectedIdealState, -1);
+
+      // The owner of the root ACL can still tear the cluster down.
+      authorizedClient.deleteRecursively(rootPath);
+      Assert.assertFalse(authorizedClient.exists(rootPath));
+    } finally {
+      if (unauthorizedClient != null) {
+        unauthorizedClient.close();
+      }
+      authorizedClient.close();
+    }
+
+    System.out.println(
+        "END testAddClusterAclEnforcement at " + new Date(System.currentTimeMillis()));
+  }
+
+  private static ZooKeeper createUnauthenticatedZkClient() throws Exception {
+    CountDownLatch connected = new CountDownLatch(1);
+    ZooKeeper zooKeeper = new ZooKeeper(ZK_ADDR, 30000, event -> {
+      if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+        connected.countDown();
+      }
+    });
+    Assert.assertTrue(connected.await(30, TimeUnit.SECONDS), "Failed to connect to " + ZK_ADDR);
+    return zooKeeper;
   }
 
   @Test
