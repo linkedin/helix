@@ -122,8 +122,13 @@ public interface HelixAdmin {
    *            The ACL is only applied when the root node is created by this call; the ACL of a
    *            pre-existing cluster is left untouched unless recreateIfExists is true.
    * @return true if successfully created, or if cluster already exists
+   * @throws UnsupportedOperationException if a non empty ACL is supplied and the implementation
+   *         does not support custom ACLs
    */
   default boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      return addCluster(clusterName, recreateIfExists);
+    }
     throw new UnsupportedOperationException("addCluster with ACL is not implemented.");
   }
 

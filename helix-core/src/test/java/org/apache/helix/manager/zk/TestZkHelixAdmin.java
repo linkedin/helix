@@ -426,7 +426,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     return zooKeeper.getACL(path, new Stat());
   }
 
-  private static ZooKeeper rawZooKeeper(Object helixZkClient) {
+  private static ZooKeeper rawZooKeeper(HelixZkClient helixZkClient) {
     return ((ZkConnection) ((org.apache.helix.zookeeper.zkclient.ZkClient) helixZkClient)
         .getConnection()).getZookeeper();
   }
