@@ -49,6 +49,7 @@ import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
@@ -129,7 +130,7 @@ public class InstancesAccessor extends AbstractHelixResource {
       ArrayNode instancesNode =
           root.putArray(InstancesAccessor.InstancesProperties.instances.name());
       instancesNode.addAll((ArrayNode) OBJECT_MAPPER.valueToTree(instances));
-      
+
       ArrayNode onlineNode = root.putArray(InstancesAccessor.InstancesProperties.online.name());
       ArrayNode enabledNode = root.putArray(InstancesAccessor.InstancesProperties.enabled.name());
       ArrayNode disabledNode = root.putArray(InstancesAccessor.InstancesProperties.disabled.name());
@@ -220,7 +221,8 @@ public class InstancesAccessor extends AbstractHelixResource {
    * available from the maintenance-signal endpoint; deriving either here would hand clients a
    * prediction where an authoritative answer already exists.
    */
-  private Response getInstancesUnableToAcceptOnlineReplicas(String clusterId,
+  private Response
+  getInstancesUnableToAcceptOnlineReplicas(String clusterId,
       HelixDataAccessor accessor) {
     try {
       return computeInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
@@ -233,7 +235,12 @@ public class InstancesAccessor extends AbstractHelixResource {
 
   private Response computeInstancesUnableToAcceptOnlineReplicas(String clusterId,
       HelixDataAccessor accessor) {
-    if (getConfigAccessor().getClusterConfig(clusterId) == null) {
+    // An unknown cluster must not fall through to an empty population: to a client, "no instances
+    // counted" reads as "the whole offline budget is free". The caller's null check cannot catch
+    // it because HelixDataAccessor#getChildNames normalizes a missing path to an empty list, so
+    // resolve the cluster explicitly, the same way ClusterAccessor does. ConfigAccessor is not
+    // used here because it throws on an unknown cluster, which would surface as a 500.
+    if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
       return notFound();
     }
 

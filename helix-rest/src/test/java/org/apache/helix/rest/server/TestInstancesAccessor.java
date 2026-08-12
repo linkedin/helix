@@ -1036,6 +1036,13 @@ public class TestInstancesAccessor extends AbstractTestClass {
         sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
         "Offline-budget thresholds must not affect which instances are counted");
 
+    // An unknown cluster must 404 like every other command on this route, not 500. Resolving the
+    // cluster through ConfigAccessor instead of the request's HelixDataAccessor would throw here.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestOfflineBudgetClusterDoesNotExist").get(this);
+
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
