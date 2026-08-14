@@ -705,6 +705,37 @@ public class TestResourceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /**
+   * force/dryRun are only meaningful for the addWagedResource command, which is the only one that
+   * runs a guard rail pipeline. On any other command they were silently ignored, so dryRun=true on a
+   * plain addResource still performed a real write. They must now be rejected with 400 and create
+   * nothing.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testDryRunAndForceRejectedForNonWagedCommand() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String dryRunResource = "dryRunRejectedResource";
+    put("clusters/" + CLUSTER_NAME + "/resources/" + dryRunResource,
+        ImmutableMap.of("command", "addResource", "numPartitions", "1", "stateModelRef",
+            "OnlineOffline", "dryRun", "true"),
+        Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+        .contains(dryRunResource));
+
+    String forceResource = "forceRejectedResource";
+    put("clusters/" + CLUSTER_NAME + "/resources/" + forceResource,
+        ImmutableMap.of("command", "addResource", "numPartitions", "1", "stateModelRef",
+            "OnlineOffline", "force", "true"),
+        Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+        .contains(forceResource));
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   private Response putWagedResource(String resourceName, ResourceConfig resourceConfig,
       Map<String, Object> flags) throws IOException {
     IdealState idealState = new IdealState(resourceName);

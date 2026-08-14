@@ -40,7 +40,8 @@ import org.apache.helix.model.ResourceConfig;
 
 /**
  * Guard rail that blocks adding a WAGED resource whose per-partition weight, in any capacity
- * dimension, exceeds the largest capacity advertised by any single instance in that dimension.
+ * dimension, exceeds the largest capacity advertised by any single <em>assignable</em> instance in
+ * that dimension.
  * <p>
  * WAGED places a partition on exactly one instance per replica, so a partition can only ever be
  * placed if, for every weight dimension {@code d}, some instance has {@code capacity_d >= weight_d}.
@@ -95,13 +96,28 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
-    // Largest capacity any single instance advertises, per dimension, folding in the cluster-level
-    // default instance capacity the same way the WAGED rebalancer does.
+    // Largest capacity any single ASSIGNABLE instance advertises, per dimension, folding in the
+    // cluster-level default instance capacity the same way the WAGED rebalancer does. Only
+    // assignable instances are counted: WAGED places exclusively on the instances in
+    // BaseControllerDataProvider#getAssignableInstanceConfigMap(), i.e. those where
+    // InstanceConfig#isAssignable() is true (this excludes EVACUATE / SWAP_IN / UNKNOWN operations).
+    // Counting capacity advertised by a non-assignable instance would let this rule certify a
+    // resource that WAGED can never actually place.
+    //
+    // getChildValues(..., true) reads instance configs fail-closed: a transient ZK read error or a
+    // single unreadable instance-config znode propagates out, and the guard rail pipeline then turns
+    // the add into a 400 rather than silently validating against partial cluster state. That is the
+    // safe default for a guard rail, at the cost of coupling addWagedResource availability to
+    // instance-config readability.
     Map<String, Integer> defaultInstanceCapacity = clusterConfig.getDefaultInstanceCapacityMap();
     List<InstanceConfig> instanceConfigs =
         dataAccessor.getChildValues(keyBuilder.instanceConfigs(), true);
     Map<String, Integer> maxInstanceCapacity = new HashMap<>();
     for (InstanceConfig instanceConfig : instanceConfigs) {
+      if (instanceConfig == null || !instanceConfig.isAssignable()) {
+        // WAGED will not place on a non-assignable instance, so its capacity is irrelevant here.
+        continue;
+      }
       Map<String, Integer> instanceCapacity = new HashMap<>(defaultInstanceCapacity);
       instanceCapacity.putAll(instanceConfig.getInstanceCapacityMap());
       for (Map.Entry<String, Integer> entry : instanceCapacity.entrySet()) {
@@ -110,8 +126,9 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
     }
 
     if (maxInstanceCapacity.isEmpty()) {
-      // No instance advertises any capacity yet, so there is nothing to compare against. Leave this
-      // to existing key-coverage validation rather than emit a misleading "unplaceable" verdict.
+      // No assignable instance advertises any capacity yet, so there is nothing to compare against.
+      // Leave this to existing key-coverage validation rather than emit a misleading "unplaceable"
+      // verdict.
       return ValidationResult.feasible();
     }
 
@@ -162,7 +179,17 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
         if (weight == null) {
           continue;
         }
-        int maxCapacity = maxInstanceCapacity.getOrDefault(dimension, 0);
+        Integer maxCapacity = maxInstanceCapacity.get(dimension);
+        if (maxCapacity == null) {
+          // No assignable instance advertises capacity for this dimension. That is an instance-side
+          // misconfiguration (a cluster-declared capacity key missing from the instances), which
+          // WagedValidationUtil#validateAndGetInstanceCapacity already reports against the instances.
+          // Treating the absent dimension as capacity 0 here would blame the resource author for an
+          // instance problem and tell them to lower a weight that cannot go below 0. It is also
+          // inconsistent with the weight == null skip above, where missing key coverage is likewise
+          // deferred to that separate validation. So skip this dimension rather than over-block.
+          continue;
+        }
         if (weight > maxCapacity) {
           // DEFAULT_PARTITION_KEY is a placeholder for "every partition", not a real partition, so
           // report it as unscoped for a clearer message.

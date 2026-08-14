@@ -28,6 +28,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
@@ -215,6 +216,49 @@ public class TestPartitionWeightCapacityGuardrailRule {
     Assert.assertEquals(violation.getPartitionName(), RESOURCE + "_1");
   }
 
+  @Test
+  public void testNonAssignableInstanceCapacityIgnored() throws IOException {
+    // WAGED only places on assignable instances. A large-capacity instance that is EVACUATE (being
+    // decommissioned) is not assignable, so its capacity must not count toward placeability: with
+    // only the assignable instance's 100 capacity, a DEFAULT weight of 5000 is unplaceable.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig, ImmutableList.of(
+        instanceConfig("assignable", ImmutableMap.of("FOO", 100)),
+        instanceConfig("evacuating", ImmutableMap.of("FOO", 10000),
+            InstanceConstants.InstanceOperation.EVACUATE)));
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor,
+        resourceConfig(ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY,
+            ImmutableMap.of("FOO", 5000)))));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), PartitionWeightCapacityGuardrailRule.RULE_ID);
+    // The 10000-capacity evacuating instance is ignored, so the reported ceiling is the assignable
+    // instance's 100 rather than 10000.
+    Assert.assertTrue(violation.getMessage().contains("capacity 100"));
+  }
+
+  @Test
+  public void testMissingCapacityDimensionNotBlamedOnResource() throws IOException {
+    // The cluster declares two capacity keys but the instances only advertise FOO. A BAR weight must
+    // not be blamed on the resource as "exceeds capacity 0"; a capacity key missing from the
+    // instances is an instance-side misconfiguration reported separately, so the rule defers on that
+    // dimension (mirroring the missing-weight skip) and only checks the dimensions instances cover.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 50, "BAR", 1)));
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig));
+
+    Assert.assertTrue(result.isFeasible());
+    Assert.assertTrue(result.getViolations().isEmpty());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     // Default to a single-partition resource so the canonical testResource_0 partition is real.
@@ -247,6 +291,13 @@ public class TestPartitionWeightCapacityGuardrailRule {
   private static InstanceConfig instanceConfig(String name, Map<String, Integer> capacity) {
     InstanceConfig instanceConfig = new InstanceConfig(name);
     instanceConfig.setInstanceCapacityMap(capacity);
+    return instanceConfig;
+  }
+
+  private static InstanceConfig instanceConfig(String name, Map<String, Integer> capacity,
+      InstanceConstants.InstanceOperation operation) {
+    InstanceConfig instanceConfig = instanceConfig(name, capacity);
+    instanceConfig.setInstanceOperation(operation);
     return instanceConfig;
   }
 

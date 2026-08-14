@@ -254,6 +254,16 @@ public class ResourceAccessor extends AbstractHelixResource {
     } catch (Exception e) {
       return badRequest("Invalid command : " + command);
     }
+    // force and dryRun are only honored by commands that run a guard rail pipeline (currently only
+    // addWagedResource). For any other command they are silently ignored and, worse, dryRun=true on
+    // a plain addResource would still perform a real write — the opposite of a simulation. Reject
+    // them up front for unsupported commands so callers are never misled into thinking a mutation
+    // was simulated or its violations overridden.
+    if ((force || dryRun) && cmd != Command.addWagedResource) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'addWagedResource' command, "
+              + "not '%s'.", command));
+    }
     HelixAdmin admin = getHelixAdmin();
     try {
       switch (cmd) {
