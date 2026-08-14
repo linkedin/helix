@@ -87,8 +87,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
             Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
             Map<String, Long> instanceErrorPartitionCounts = Maps.newHashMap();
-            Map<String, Long> instanceActualPartitionCounts = Maps.newHashMap();
-            Map<String, Long> instanceActualTopStatePartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActiveStatePartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActiveStateTopStatePartitionCounts = Maps.newHashMap();
             
             for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
@@ -99,13 +99,13 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 instanceMessageMap.put(instanceName,
                     Sets.newHashSet(dataProvider.getMessages(instanceName).values()));
                 
-                // Count partitions this live instance actually hosts, from its CurrentState
+                // Count partitions this live instance holds in an active state, from CurrentState
                 InstancePartitionCounts partitionCounts =
                     computeInstancePartitionCounts(dataProvider, instanceName);
                 instanceErrorPartitionCounts.put(instanceName, partitionCounts.errorCount);
-                instanceActualPartitionCounts.put(instanceName, partitionCounts.actualPartitionCount);
-                instanceActualTopStatePartitionCounts.put(instanceName,
-                    partitionCounts.actualTopStatePartitionCount);
+                instanceActiveStatePartitionCounts.put(instanceName, partitionCounts.activeStatePartitionCount);
+                instanceActiveStateTopStatePartitionCounts.put(instanceName,
+                    partitionCounts.activeStateTopStatePartitionCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -121,8 +121,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
                     disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
-                    instanceConfigMap, instanceErrorPartitionCounts, instanceActualPartitionCounts,
-                    instanceActualTopStatePartitionCounts);
+                    instanceConfigMap, instanceErrorPartitionCounts, instanceActiveStatePartitionCounts,
+                    instanceActiveStateTopStatePartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
@@ -194,21 +194,23 @@ public class ReadClusterDataStage extends AbstractBaseStage {
    */
   static class InstancePartitionCounts {
     long errorCount = 0L;
-    long actualPartitionCount = 0L;
-    long actualTopStatePartitionCount = 0L;
+    long activeStatePartitionCount = 0L;
+    long activeStateTopStatePartitionCount = 0L;
   }
 
   /**
    * Compute per-instance partition counts from the instance's CurrentState in a single pass:
-   * the number of partitions in ERROR state, the number of partitions actually hosted, and the
+   * the number of partitions in ERROR state, the number of partitions in an active state, and the
    * number of those partitions in the resource top state.
    * <p>
-   * A partition counts as "actually hosted" when its current state is not the state model's
-   * initial state (typically OFFLINE), matching the convention already used by
-   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. DROPPED is also
-   * excluded defensively; participants delete the partition entry rather than persisting DROPPED,
-   * so it is not expected to appear here. A resource whose state model definition cannot be
-   * resolved is skipped, since its states cannot be interpreted.
+   * A partition counts as being in an "active state" when its current state is not the state
+   * model's initial state (typically OFFLINE), matching the convention already used by
+   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. This tracks state
+   * machine progress rather than disk residency, so a partition that occupies disk while sitting
+   * in the initial state is not counted. DROPPED is also excluded defensively; participants delete
+   * the partition entry rather than persisting DROPPED, so it is not expected to appear here. A
+   * resource whose state model definition cannot be resolved is skipped, since its states cannot
+   * be interpreted.
    * @param dataProvider the data provider containing current state information
    * @param instanceName the name of the instance to check
    * @return the counts; all zero if the instance is not live. Resources that fail to be read are
@@ -269,10 +271,11 @@ public class ReadClusterDataStage extends AbstractBaseStage {
     StateModelDefinition stateModelDef =
         stateModelDefRef == null ? null : dataProvider.getStateModelDef(stateModelDefRef);
     if (stateModelDef == null) {
-      // Without the state model we cannot tell hosted partitions from initial/dropped ones, so
-      // counting them would report a misleading value. Still count ERROR, which is model agnostic.
+      // Without the state model we cannot tell active-state partitions from initial/dropped ones,
+      // so counting them would report a misleading value. Still count ERROR, which is model
+      // agnostic.
       LogUtil.logWarn(logger, _eventId,
-          "Skipping actual partition counts for resource: " + currentState.getResourceName()
+          "Skipping active-state partition counts for resource: " + currentState.getResourceName()
               + ", unresolved state model definition: " + stateModelDefRef);
       for (String state : partitionStateMap.values()) {
         if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
@@ -292,17 +295,17 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
         counts.errorCount++;
       }
-      // Initial-state (e.g. OFFLINE) partitions are not being served, so they do not count towards
-      // what the instance actually hosts. DROPPED is excluded defensively only: on a successful
-      // drop the participant subtracts the partition entry from CurrentState instead of persisting
-      // DROPPED, so it should never be observed here.
+      // Initial-state (e.g. OFFLINE) partitions are not being served, so they do not count as
+      // active. This tracks state machine progress, not disk residency. DROPPED is excluded
+      // defensively only: on a successful drop the participant subtracts the partition entry from
+      // CurrentState instead of persisting DROPPED, so it should never be observed here.
       if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)
           || state.equalsIgnoreCase(initialState)) {
         continue;
       }
-      counts.actualPartitionCount++;
+      counts.activeStatePartitionCount++;
       if (topState != null && topState.equalsIgnoreCase(state)) {
-        counts.actualTopStatePartitionCount++;
+        counts.activeStateTopStatePartitionCount++;
       }
     }
   }

@@ -41,7 +41,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Covers the CurrentState-derived per-instance partition counts that back the ERROR,
- * ActualPartitionGauge and ActualTopStatePartitionGauge metrics.
+ * ActiveStatePartitionGauge and ActiveStateTopStatePartitionGauge metrics.
  */
 public class TestReadClusterDataStagePartitionCounts {
   private static final String INSTANCE = "instance_0";
@@ -106,9 +106,9 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 3L,
+    Assert.assertEquals(counts.activeStatePartitionCount, 3L,
         "OFFLINE must not count as actually hosted; DROPPED is filtered defensively");
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 1L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 1L);
     Assert.assertEquals(counts.errorCount, 0L);
   }
 
@@ -128,8 +128,8 @@ public class TestReadClusterDataStagePartitionCounts {
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
     Assert.assertEquals(counts.errorCount, 2L);
-    Assert.assertEquals(counts.actualPartitionCount, 3L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 1L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 3L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 1L);
   }
 
   /**
@@ -152,8 +152,8 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 4L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 2L,
+    Assert.assertEquals(counts.activeStatePartitionCount, 4L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 2L,
         "MASTER and LEADER are both top states for their own resource");
     Assert.assertEquals(counts.errorCount, 0L);
   }
@@ -163,7 +163,7 @@ public class TestReadClusterDataStagePartitionCounts {
    * no actual counts. ERROR is state model agnostic and is still counted.
    */
   @Test
-  public void testUnresolvedStateModelSkipsActualCountsButKeepsErrorCount() {
+  public void testUnresolvedStateModelSkipsActiveStateCountsButKeepsErrorCount() {
     Map<String, String> partitionStates = new HashMap<>();
     partitionStates.put("p0", "MASTER");
     partitionStates.put("p1", "ERROR");
@@ -174,8 +174,8 @@ public class TestReadClusterDataStagePartitionCounts {
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
     Assert.assertEquals(counts.errorCount, 1L);
-    Assert.assertEquals(counts.actualPartitionCount, 0L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 0L);
   }
 
   /**
@@ -201,9 +201,9 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 2L,
+    Assert.assertEquals(counts.activeStatePartitionCount, 2L,
         "A single failing resource must not zero out counts from healthy resources");
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 1L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 1L);
   }
 
   @Test
@@ -213,8 +213,8 @@ public class TestReadClusterDataStagePartitionCounts {
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
     Assert.assertEquals(counts.errorCount, 0L);
-    Assert.assertEquals(counts.actualPartitionCount, 0L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 0L);
   }
 
   /**
@@ -228,8 +228,8 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 0L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 0L);
     Assert.assertEquals(counts.errorCount, 0L);
   }
 
@@ -239,8 +239,8 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 0L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 0L);
   }
 
   /**
@@ -260,8 +260,8 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 1L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 1L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 1L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 1L);
     Assert.assertEquals(counts.errorCount, 0L);
   }
 
@@ -274,7 +274,7 @@ public class TestReadClusterDataStagePartitionCounts {
 
     InstancePartitionCounts counts = _stage.computeInstancePartitionCounts(_dataProvider, INSTANCE);
 
-    Assert.assertEquals(counts.actualPartitionCount, 0L);
-    Assert.assertEquals(counts.actualTopStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStatePartitionCount, 0L);
+    Assert.assertEquals(counts.activeStateTopStatePartitionCount, 0L);
   }
 }
