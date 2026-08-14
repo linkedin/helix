@@ -1192,14 +1192,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
   /**
    * Drain and register the per-instance listeners deferred by
-   * {@link GenericHelixController#checkLiveInstancesObservation} during INIT, off the caller's
-   * thread.
+   * {@link GenericHelixController#checkLiveInstancesObservation} during a leadership acquisition,
+   * off the caller's thread.
    *
-   * <p>This is required for the failover path: when a standby controller is promoted on an
-   * existing ZK session (leader znode change -> {@code onControllerChange(CALLBACK)}), the
-   * promotion runs on the ZkClient event thread and never goes through
-   * {@link #handleNewSession(String)}, so the deferred listeners would otherwise be silently
-   * dropped and the new leader would register no {@code /INSTANCES/<inst>/CURRENTSTATES} watches.
+   * <p>Called from {@link DistributedLeaderElection#onControllerChange} for every leadership
+   * acquisition - both INIT (a fresh ZK session) and CALLBACK (a standby taking over on an
+   * existing session, i.e. failover). This single trigger point covers every path that makes a
+   * controller leader, so the deferred listeners are never dropped. If they were (e.g. on failover,
+   * which never calls {@link #handleNewSession(String)}), the new leader would register no
+   * {@code /INSTANCES/<inst>/CURRENTSTATES} watches and MissingTopState would never clear.
    *
    * <p>It must run on a separate thread: the caller ({@code CallbackHandler.invoke}) holds
    * {@code synchronized(_manager)}, and the registration tasks acquire the same monitor via
@@ -1617,18 +1618,6 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     case SPECTATOR:
     default:
       break;
-    }
-
-    // Register deferred per-instance listeners in parallel. During INIT,
-    // checkLiveInstancesObservation() defers per-instance registration to avoid sequential
-    // ZK roundtrips while synchronized(_manager) is held by invoke(). Now that invoke() has
-    // returned and the lock is released, parallel worker threads can acquire it.
-    if (_controller != null) {
-      GenericHelixController.PendingInstanceListeners pending =
-          _controller.takePendingInstanceListeners();
-      if (pending != null && !pending.isEmpty()) {
-        registerPendingInstanceListeners(pending);
-      }
     }
 
     startTimerTasks();

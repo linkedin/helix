@@ -73,15 +73,16 @@ public class DistributedLeaderElection implements ControllerChangeListener {
       case INIT:
       case CALLBACK:
         acquireLeadership(_manager, controllerHelper);
-        if (changeContext.getType() == NotificationContext.Type.CALLBACK
-            && _manager instanceof ZKHelixManager) {
-          // Failover on an existing ZK session: the leader-znode change is delivered as a
-          // CALLBACK on the ZkClient event thread and never goes through
-          // ZKHelixManager.handleNewSession(), where new-session INIT registrations are drained.
-          // Register the per-instance listeners that addListenersToController() deferred during
-          // INIT here, or the new leader would set no per-instance CURRENTSTATES watches and
-          // MissingTopState would never clear. Runs on a background thread because we currently
-          // hold synchronized(_manager) via CallbackHandler.invoke().
+        // Register the per-instance listeners that addListenersToController() deferred during this
+        // leadership acquisition. onControllerChange is the single ControllerChangeListener for
+        // every controller (standalone and distributed) and fires for both INIT (a fresh ZK
+        // session) and CALLBACK (a standby taking over on an existing session). Draining here,
+        // instead of only in ZKHelixManager.handleNewSession(), covers every path that makes us
+        // leader, including failover, where handleNewSession() is never called and the deferred
+        // list would otherwise be dropped (leaving no per-instance CURRENTSTATES watches, so
+        // MissingTopState never clears). Runs on a background thread because we currently hold
+        // synchronized(_manager) via CallbackHandler.invoke(); the worker needs that same monitor.
+        if (_manager instanceof ZKHelixManager) {
           ((ZKHelixManager) _manager).registerDeferredInstanceListenersAsync(_controller);
         }
         break;

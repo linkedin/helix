@@ -1431,9 +1431,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       boolean isInit = changeContext.getType() == NotificationContext.Type.INIT;
 
       if (isInit) {
-        // During initial controller setup, defer per-instance listener registration.
-        // These will be registered in parallel in ZKHelixManager.handleNewSession()
-        // after handleNewSessionAsController() returns and invoke() releases the lock.
+        // During controller leadership acquisition, defer per-instance listener registration.
+        // These are registered in parallel by ZKHelixManager.registerDeferredInstanceListenersAsync(),
+        // triggered from DistributedLeaderElection.onControllerChange() for every leadership path
+        // (both new-session INIT and failover CALLBACK), after invoke() releases synchronized(_manager).
         Map<String, String> sessionToInstance = new HashMap<>();
         Set<String> newInstances = new HashSet<>();
 
@@ -1698,8 +1699,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   /**
    * Per-instance listener registrations deferred during initial controller setup.
-   * Collected by {@link #checkLiveInstancesObservation} during INIT for parallel
-   * registration in {@link org.apache.helix.manager.zk.ZKHelixManager#handleNewSession}.
+   * Collected by {@link #checkLiveInstancesObservation} during a leadership acquisition, then
+   * registered in parallel by
+   * {@code ZKHelixManager.registerDeferredInstanceListenersAsync}, which
+   * {@code DistributedLeaderElection.onControllerChange} triggers for every leadership path.
    */
   public static class PendingInstanceListeners {
     private final Map<String, String> _sessionToInstance;
