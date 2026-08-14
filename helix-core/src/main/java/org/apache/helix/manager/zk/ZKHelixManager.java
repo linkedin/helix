@@ -1190,6 +1190,43 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   // when many controllers acquire leadership at the same time.
   private static final int INIT_HANDLERS_PARALLELISM = 10;
 
+  /**
+   * Drain and register the per-instance listeners deferred by
+   * {@link GenericHelixController#checkLiveInstancesObservation} during INIT, off the caller's
+   * thread.
+   *
+   * <p>This is required for the failover path: when a standby controller is promoted on an
+   * existing ZK session (leader znode change -> {@code onControllerChange(CALLBACK)}), the
+   * promotion runs on the ZkClient event thread and never goes through
+   * {@link #handleNewSession(String)}, so the deferred listeners would otherwise be silently
+   * dropped and the new leader would register no {@code /INSTANCES/<inst>/CURRENTSTATES} watches.
+   *
+   * <p>It must run on a separate thread: the caller ({@code CallbackHandler.invoke}) holds
+   * {@code synchronized(_manager)}, and the registration tasks acquire the same monitor via
+   * {@link #addListener}. Handing the work to a background thread lets the caller unwind and
+   * release the lock before the tasks need it, avoiding deadlock.
+   */
+  void registerDeferredInstanceListenersAsync(GenericHelixController controller) {
+    if (controller == null) {
+      return;
+    }
+    GenericHelixController.PendingInstanceListeners pending =
+        controller.takePendingInstanceListeners();
+    if (pending == null || pending.isEmpty()) {
+      return;
+    }
+    Thread t = new Thread(() -> {
+      try {
+        registerPendingInstanceListeners(pending);
+      } catch (Exception e) {
+        LOG.error("Failed to register deferred per-instance listeners for cluster: " + _clusterName,
+            e);
+      }
+    }, "registerDeferredListeners-" + _clusterName);
+    t.setDaemon(true);
+    t.start();
+  }
+
   private void registerPendingInstanceListeners(
       GenericHelixController.PendingInstanceListeners pending) {
     long start = System.currentTimeMillis();
