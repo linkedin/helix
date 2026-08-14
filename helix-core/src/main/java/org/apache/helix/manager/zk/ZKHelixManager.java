@@ -434,9 +434,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
     PropertyType type = propertyKey.getType();
 
-    // Create handler with deferred init under the lock, then init outside the lock.
-    // This keeps the lock held only for the cheap handler creation, not the ZK roundtrip in
-    // init(). Critical for parallel per-instance listener registration during controller leadership.
+    // Create the handler with deferred init under the lock, then init() outside the lock. This
+    // keeps the lock held only for the cheap handler creation, not the ZK roundtrip in init() -
+    // needed so parallel per-instance registration during leadership does not serialize on this
+    // monitor. This opens a brief window where the handler is in _handlers but not yet initialized
+    // and the lock is released. That is safe: if a concurrent reset()/cleanup runs its FINALIZE
+    // invoke() on this handler, the handler's _expectTypes is still [INIT] (a fresh handler), so
+    // the FINALIZE is rejected by invoke()'s ordering guard as out-of-order and no-ops; init()
+    // then proceeds normally. On disconnect the ZkClient is closed, which drops any watch set in
+    // the window. init() itself is idempotent under its own synchronized(this).
     CallbackHandler newHandler;
     synchronized (this) {
       for (CallbackHandler handler : _handlers) {
@@ -1347,13 +1353,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     void run() throws Exception;
   }
 
-  // Per-instance registration is a ZK roundtrip and can hit a transient error (e.g. a brief
-  // connection loss) even though the underlying ZkClient retries at a lower level. Because
-  // checkLiveInstancesObservation has already advanced _lastSeen* for these instances, a lost
-  // registration would not be retried until the next leadership change, leaving that instance
-  // unobserved (a lingering MissingTopState). A small bounded retry closes that gap. addListener()
-  // is idempotent (it skips a path+listener that already exists), so re-running a partially
-  // succeeded step is safe.
+  // Scope note: addListener -> CallbackHandler.init() catches and logs ZK subscribe failures
+  // (it never rethrows), so a failed subscribe does NOT surface here. What this retry actually
+  // handles is addListener's own checkConnected() throwing when the manager is briefly
+  // disconnected mid-registration: if the connection is restored by the time we re-check, we
+  // retry and succeed. If it ultimately fails while still connected, we forget the instance from
+  // _lastSeen* so the next LiveInstanceChange re-registers it (keeping _lastSeen* reflecting only
+  // what registered). addListener is idempotent (skips a path+listener that already exists), so
+  // re-running a partially succeeded step is safe.
   private static final int PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS = 3;
   private static final long PER_INSTANCE_REGISTRATION_RETRY_BACKOFF_MS = 200;
 
@@ -1411,6 +1418,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     // (DistributedLeaderElection.onControllerChange -> registerDeferredInstanceListenersAsync).
     // Calling init() again would produce spurious WARN logs because _expectTypes no longer
     // contains INIT after the first init().
+    // Note: this parallelizes init() for ALL instance types on a new session (not just the
+    // controller leadership path), a change from the previous sequential loop. It is safe -
+    // each handler subscribes to an independent ZK path, callbacks serialize on
+    // synchronized(_manager) inside invoke(), and the pool is bounded - and one handler failing
+    // does not block the others.
     tmpHandlers.removeIf(CallbackHandler::isReady);
     if (tmpHandlers.isEmpty()) {
       return;
