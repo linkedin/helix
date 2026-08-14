@@ -1208,6 +1208,50 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       });
 
   /**
+   * Run {@code tasks} in parallel on a short-lived daemon pool (capped at
+   * {@link #INIT_HANDLERS_PARALLELISM}) and wait for all of them. A single task runs inline to
+   * avoid pool overhead. One task failing is logged and does not cancel the others; the pool is
+   * always shut down. Used by both the deferred per-instance registration and initHandlers so the
+   * submit / future.get / shutdown semantics live in one place.
+   */
+  private void runTasksInParallel(String threadNamePrefix, List<Runnable> tasks) {
+    if (tasks.isEmpty()) {
+      return;
+    }
+    if (tasks.size() == 1) {
+      tasks.get(0).run();
+      return;
+    }
+    int poolSize = Math.min(tasks.size(), INIT_HANDLERS_PARALLELISM);
+    ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
+      Thread t = new Thread(r, threadNamePrefix + "-" + _clusterName);
+      t.setDaemon(true);
+      return t;
+    });
+    try {
+      List<Future<?>> futures = new ArrayList<>(tasks.size());
+      for (Runnable task : tasks) {
+        futures.add(executor.submit(task));
+      }
+      for (Future<?> future : futures) {
+        try {
+          future.get();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          LOG.error("Interrupted while running {} tasks for cluster: {}", threadNamePrefix,
+              _clusterName, e);
+          break;
+        } catch (ExecutionException e) {
+          LOG.error("A {} task failed for cluster: {}", threadNamePrefix, _clusterName,
+              e.getCause());
+        }
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  /**
    * Drain and register the per-instance listeners deferred by
    * {@link GenericHelixController#checkLiveInstancesObservation} during a leadership acquisition,
    * off the caller's thread.
@@ -1280,35 +1324,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
           () -> _controller.forgetInstanceForReregistration(instance)));
     }
 
-    if (tasks.size() <= 1) {
-      tasks.forEach(Runnable::run);
-    } else {
-      int poolSize = Math.min(tasks.size(), INIT_HANDLERS_PARALLELISM);
-      ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
-        Thread t = new Thread(r, "registerInstanceListener-" + _clusterName);
-        t.setDaemon(true);
-        return t;
-      });
-      try {
-        List<Future<?>> futures = new ArrayList<>(tasks.size());
-        for (Runnable task : tasks) {
-          futures.add(executor.submit(task));
-        }
-        for (Future<?> future : futures) {
-          try {
-            future.get();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            LOG.error("Interrupted while registering per-instance listeners", e);
-            break;
-          } catch (ExecutionException e) {
-            LOG.error("Failed to register per-instance listener", e.getCause());
-          }
-        }
-      } finally {
-        executor.shutdownNow();
-      }
-    }
+    runTasksInParallel("registerInstanceListener", tasks);
     // End-to-end observability: the "acquired leadership ... took" log in DistributedLeaderElection
     // no longer covers per-instance registration, which now runs here. This log is the signal that
     // the controller is fully observing the cluster (all per-instance CURRENTSTATES watches set).
@@ -1391,49 +1407,24 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tmpHandlers = new ArrayList<>(handlers);
     }
 
-    // Skip handlers already initialized (e.g. by registerPendingInstanceListeners earlier
-    // in handleNewSession). Calling init() again would produce spurious WARN logs because
-    // _expectTypes no longer contains INIT after the first init().
+    // Skip handlers already initialized by the deferred per-instance registration
+    // (DistributedLeaderElection.onControllerChange -> registerDeferredInstanceListenersAsync).
+    // Calling init() again would produce spurious WARN logs because _expectTypes no longer
+    // contains INIT after the first init().
     tmpHandlers.removeIf(CallbackHandler::isReady);
     if (tmpHandlers.isEmpty()) {
       return;
     }
 
     long startTime = System.currentTimeMillis();
-    if (tmpHandlers.size() == 1) {
-      tmpHandlers.get(0).init();
-      LOG.info("initHandlers completed for cluster: " + _clusterName + ", handlers: 1, took: "
-          + (System.currentTimeMillis() - startTime) + " ms");
-      return;
+    List<Runnable> tasks = new ArrayList<>(tmpHandlers.size());
+    for (CallbackHandler handler : tmpHandlers) {
+      tasks.add(() -> {
+        handler.init();
+        LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
+      });
     }
-    int poolSize = Math.min(tmpHandlers.size(), INIT_HANDLERS_PARALLELISM);
-    ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
-      Thread t = new Thread(r, "initHandler-" + _clusterName);
-      t.setDaemon(true);
-      return t;
-    });
-    List<Future<?>> futures = new ArrayList<>(tmpHandlers.size());
-    try {
-      for (CallbackHandler handler : tmpHandlers) {
-        futures.add(executor.submit(() -> {
-          handler.init();
-          LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
-        }));
-      }
-      for (Future<?> future : futures) {
-        try {
-          future.get();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          LOG.error("Interrupted while initializing callback handlers", e);
-          break;
-        } catch (ExecutionException e) {
-          LOG.error("Failed to initialize callback handler", e.getCause());
-        }
-      }
-    } finally {
-      executor.shutdownNow();
-    }
+    runTasksInParallel("initHandler", tasks);
     LOG.info("initHandlers completed for cluster: " + _clusterName + ", handlers: "
         + tmpHandlers.size() + ", took: " + (System.currentTimeMillis() - startTime) + " ms");
   }
