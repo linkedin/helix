@@ -495,6 +495,13 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * Updates the number of partitions this instance actually hosts, as reported in its CurrentState.
    * This is the actual-state analog of {@link #updatePartitionCount(long)}, which reflects the
    * controller's target assignment.
+   * <p>
+   * Definition: partitions this instance has actually transitioned into a functional state, that
+   * is, any state other than the state model's initial state (typically OFFLINE). This is a measure
+   * of state machine progress, not of disk residency. Initial-state partitions are excluded on
+   * purpose: an instance that is live but stuck part way through its transitions would otherwise
+   * report the same count as a fully caught up one, which is exactly the condition this gauge
+   * exists to expose.
    * @param actualPartitionCount number of partitions on this instance from CurrentState, excluding
    *          initial-state (e.g. OFFLINE) partitions
    */
