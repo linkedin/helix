@@ -61,8 +61,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
     PARTITION_COUNT_GAUGE("PartitionGauge"),
     TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge"),
-    ACTIVE_STATE_PARTITION_COUNT_GAUGE("ActiveStatePartitionGauge"),
-    ACTIVE_STATE_TOP_STATE_PARTITION_COUNT_GAUGE("ActiveStateTopStatePartitionGauge"),
+    ACTUAL_PARTITION_COUNT_GAUGE("ActualPartitionGauge"),
+    ACTUAL_TOP_STATE_PARTITION_COUNT_GAUGE("ActualTopStatePartitionGauge"),
     DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge");
 
     private final String metricName;
@@ -96,8 +96,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _errorPartitionsGauge;
   private SimpleDynamicMetric<Long> _partitionCountGauge;
   private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
-  private SimpleDynamicMetric<Long> _activeStatePartitionCountGauge;
-  private SimpleDynamicMetric<Long> _activeStateTopStatePartitionCountGauge;
+  private SimpleDynamicMetric<Long> _actualPartitionCountGauge;
+  private SimpleDynamicMetric<Long> _actualTopStatePartitionCountGauge;
   private SimpleDynamicMetric<Long> _domainInfoValidGauge;
 
   // Instance Operation Duration Gauges (in milliseconds)
@@ -165,11 +165,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _topStatePartitionCountGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.TOP_STATE_PARTITION_COUNT_GAUGE.metricName(),
             0L);
-    _activeStatePartitionCountGauge =
-        new SimpleDynamicMetric<>(InstanceMonitorMetric.ACTIVE_STATE_PARTITION_COUNT_GAUGE.metricName(),
+    _actualPartitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.ACTUAL_PARTITION_COUNT_GAUGE.metricName(),
             0L);
-    _activeStateTopStatePartitionCountGauge = new SimpleDynamicMetric<>(
-        InstanceMonitorMetric.ACTIVE_STATE_TOP_STATE_PARTITION_COUNT_GAUGE.metricName(), 0L);
+    _actualTopStatePartitionCountGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.ACTUAL_TOP_STATE_PARTITION_COUNT_GAUGE.metricName(), 0L);
 
     // Initialize instance operation duration gauges
     _instanceOperationDurationEnableGauge = new SimpleDynamicMetric<>(
@@ -200,8 +200,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _errorPartitionsGauge,
         _partitionCountGauge,
         _topStatePartitionCountGauge,
-        _activeStatePartitionCountGauge,
-        _activeStateTopStatePartitionCountGauge,
+        _actualPartitionCountGauge,
+        _actualTopStatePartitionCountGauge,
         _instanceOperationDurationEnableGauge,
         _instanceOperationDurationDisableGauge,
         _instanceOperationDurationEvacuateGauge,
@@ -247,10 +247,10 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
   protected long getTopStatePartitionCount() { return _topStatePartitionCountGauge.getValue(); }
 
-  protected long getActiveStatePartitionCount() { return _activeStatePartitionCountGauge.getValue(); }
+  protected long getActualPartitionCount() { return _actualPartitionCountGauge.getValue(); }
 
-  protected long getActiveStateTopStatePartitionCount() {
-    return _activeStateTopStatePartitionCountGauge.getValue();
+  protected long getActualTopStatePartitionCount() {
+    return _actualTopStatePartitionCountGauge.getValue();
   }
 
   protected long getDomainInfoValid() { return _domainInfoValidGauge.getValue(); }
@@ -492,34 +492,45 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Updates the number of partitions this instance holds in an active state, as reported in its
-   * CurrentState. This is the observed-state counterpart of {@link #updatePartitionCount(long)},
-   * which reflects the controller's target assignment.
+   * Updates the number of partitions this instance actually holds, as reported in its CurrentState.
+   * This is the observed-state counterpart of {@link #updatePartitionCount(long)}, which reflects
+   * the controller's target assignment.
    * <p>
    * Definition: partitions this instance has transitioned into a functional state, that is, any
-   * state other than the state model's initial state (typically OFFLINE). This measures state
-   * machine progress, not disk residency: a partition may well occupy disk while sitting in the
-   * initial state, and it is deliberately not counted here. Initial-state partitions are excluded
-   * because an instance that is live but stuck part way through its transitions would otherwise
-   * report the same count as a fully caught up one, which is exactly the condition this gauge
-   * exists to expose.
-   * @param activeStatePartitionCount number of partitions on this instance from CurrentState,
-   *          excluding initial-state (e.g. OFFLINE) partitions
+   * state other than the state model's initial state (typically OFFLINE), plus the partitions that
+   * are in the initial state <i>because that is where the controller wants them</i>. The
+   * rebalancer parks a partition in the initial state when the instance is disabled, when that
+   * partition is disabled on the instance, or when the whole resource is disabled, and those
+   * partitions are counted: they are exactly where they are supposed to be.
+   * <p>
+   * A partition left in the initial state with no such reason is not counted, because it means the
+   * transition has either not finished or has failed. That is the condition this gauge exists to
+   * expose: without the exclusion, an instance stuck part way through its transitions would report
+   * the same count as a fully caught up one.
+   * <p>
+   * Note that this measures state machine progress, not disk residency. A partition may occupy
+   * disk while sitting in the initial state; whether it is counted here depends on whether being
+   * OFFLINE is intended, not on whether its data is present.
+   * @param actualPartitionCount number of partitions this instance holds according to CurrentState
    */
-  public synchronized void updateActiveStatePartitionCount(long activeStatePartitionCount) {
-    _activeStatePartitionCountGauge.updateValue(activeStatePartitionCount);
+  public synchronized void updateActualPartitionCount(long actualPartitionCount) {
+    _actualPartitionCountGauge.updateValue(actualPartitionCount);
   }
 
   /**
    * Updates the number of partitions this instance holds in the resource top state, as reported in
    * its CurrentState. This is the observed-state counterpart of
    * {@link #updateTopStatePartitionCount(long)}, which reflects the controller's target assignment.
-   * @param activeStateTopStatePartitionCount number of top-state partitions on this instance from
+   * <p>
+   * Unlike {@link #updateActualPartitionCount(long)}, this gauge has no disablement allowance to
+   * make: a disabled instance, partition, or resource has no top-state replica by design, so both
+   * this gauge and the target it is compared against are legitimately zero.
+   * @param actualTopStatePartitionCount number of top-state partitions on this instance from
    *          CurrentState
    */
-  public synchronized void updateActiveStateTopStatePartitionCount(
-      long activeStateTopStatePartitionCount) {
-    _activeStateTopStatePartitionCountGauge.updateValue(activeStateTopStatePartitionCount);
+  public synchronized void updateActualTopStatePartitionCount(
+      long actualTopStatePartitionCount) {
+    _actualTopStatePartitionCountGauge.updateValue(actualTopStatePartitionCount);
   }
 
   /**

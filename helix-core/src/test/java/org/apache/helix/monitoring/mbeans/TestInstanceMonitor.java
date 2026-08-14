@@ -398,7 +398,7 @@ public class TestInstanceMonitor {
   }
 
   @Test
-  public void testActiveStatePartitionCountMetrics() throws JMException {
+  public void testActualPartitionCountMetrics() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
     String testDomain = "testDomain:key=value";
@@ -406,34 +406,34 @@ public class TestInstanceMonitor {
         new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
 
     // Verify initial state
-    Assert.assertEquals(monitor.getActiveStatePartitionCount(), 0L);
-    Assert.assertEquals(monitor.getActiveStateTopStatePartitionCount(), 0L);
+    Assert.assertEquals(monitor.getActualPartitionCount(), 0L);
+    Assert.assertEquals(monitor.getActualTopStatePartitionCount(), 0L);
 
     // Update actual partition counts
-    monitor.updateActiveStatePartitionCount(15L);
-    monitor.updateActiveStateTopStatePartitionCount(4L);
+    monitor.updateActualPartitionCount(15L);
+    monitor.updateActualTopStatePartitionCount(4L);
 
     // Verify updated values
-    Assert.assertEquals(monitor.getActiveStatePartitionCount(), 15L);
-    Assert.assertEquals(monitor.getActiveStateTopStatePartitionCount(), 4L);
+    Assert.assertEquals(monitor.getActualPartitionCount(), 15L);
+    Assert.assertEquals(monitor.getActualTopStatePartitionCount(), 4L);
 
     // Actual gauges are independent from the target partition gauges
     monitor.updatePartitionCount(3L);
     monitor.updateTopStatePartitionCount(1L);
-    Assert.assertEquals(monitor.getActiveStatePartitionCount(), 15L);
-    Assert.assertEquals(monitor.getActiveStateTopStatePartitionCount(), 4L);
+    Assert.assertEquals(monitor.getActualPartitionCount(), 15L);
+    Assert.assertEquals(monitor.getActualTopStatePartitionCount(), 4L);
 
     // Update again with different values
-    monitor.updateActiveStatePartitionCount(22L);
-    monitor.updateActiveStateTopStatePartitionCount(9L);
-    Assert.assertEquals(monitor.getActiveStatePartitionCount(), 22L);
-    Assert.assertEquals(monitor.getActiveStateTopStatePartitionCount(), 9L);
+    monitor.updateActualPartitionCount(22L);
+    monitor.updateActualTopStatePartitionCount(9L);
+    Assert.assertEquals(monitor.getActualPartitionCount(), 22L);
+    Assert.assertEquals(monitor.getActualTopStatePartitionCount(), 9L);
 
     // Test with zero counts
-    monitor.updateActiveStatePartitionCount(0L);
-    monitor.updateActiveStateTopStatePartitionCount(0L);
-    Assert.assertEquals(monitor.getActiveStatePartitionCount(), 0L);
-    Assert.assertEquals(monitor.getActiveStateTopStatePartitionCount(), 0L);
+    monitor.updateActualPartitionCount(0L);
+    monitor.updateActualTopStatePartitionCount(0L);
+    Assert.assertEquals(monitor.getActualPartitionCount(), 0L);
+    Assert.assertEquals(monitor.getActualTopStatePartitionCount(), 0L);
 
     monitor.unregister();
   }

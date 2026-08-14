@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,7 @@ import com.google.common.collect.Sets;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -39,6 +41,7 @@ import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -87,8 +90,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             Map<String, Set<Message>> instanceMessageMap = Maps.newHashMap();
             Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
             Map<String, Long> instanceErrorPartitionCounts = Maps.newHashMap();
-            Map<String, Long> instanceActiveStatePartitionCounts = Maps.newHashMap();
-            Map<String, Long> instanceActiveStateTopStatePartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActualPartitionCounts = Maps.newHashMap();
+            Map<String, Long> instanceActualTopStatePartitionCounts = Maps.newHashMap();
             
             for (Map.Entry<String, InstanceConfig> e : instanceConfigMap.entrySet()) {
               String instanceName = e.getKey();
@@ -99,13 +102,13 @@ public class ReadClusterDataStage extends AbstractBaseStage {
                 instanceMessageMap.put(instanceName,
                     Sets.newHashSet(dataProvider.getMessages(instanceName).values()));
                 
-                // Count partitions this live instance holds in an active state, from CurrentState
+                // Count the partitions this live instance actually holds, from its CurrentState
                 InstancePartitionCounts partitionCounts =
                     computeInstancePartitionCounts(dataProvider, instanceName);
                 instanceErrorPartitionCounts.put(instanceName, partitionCounts.errorCount);
-                instanceActiveStatePartitionCounts.put(instanceName, partitionCounts.activeStatePartitionCount);
-                instanceActiveStateTopStatePartitionCounts.put(instanceName,
-                    partitionCounts.activeStateTopStatePartitionCount);
+                instanceActualPartitionCounts.put(instanceName, partitionCounts.actualPartitionCount);
+                instanceActualTopStatePartitionCounts.put(instanceName,
+                    partitionCounts.actualTopStatePartitionCount);
               }
               if (!config.getInstanceEnabled()) {
                 disabledInstanceSet.add(instanceName);
@@ -121,8 +124,8 @@ public class ReadClusterDataStage extends AbstractBaseStage {
             clusterStatusMonitor
                 .setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet,
                     disabledPartitions, oldDisabledPartitions, tags, instanceMessageMap,
-                    instanceConfigMap, instanceErrorPartitionCounts, instanceActiveStatePartitionCounts,
-                    instanceActiveStateTopStatePartitionCounts);
+                    instanceConfigMap, instanceErrorPartitionCounts, instanceActualPartitionCounts,
+                    instanceActualTopStatePartitionCounts);
             LogUtil.logDebug(logger, _eventId, "Complete cluster status monitors update.");
           }
           return null;
@@ -194,23 +197,25 @@ public class ReadClusterDataStage extends AbstractBaseStage {
    */
   static class InstancePartitionCounts {
     long errorCount = 0L;
-    long activeStatePartitionCount = 0L;
-    long activeStateTopStatePartitionCount = 0L;
+    long actualPartitionCount = 0L;
+    long actualTopStatePartitionCount = 0L;
   }
 
   /**
    * Compute per-instance partition counts from the instance's CurrentState in a single pass:
-   * the number of partitions in ERROR state, the number of partitions in an active state, and the
-   * number of those partitions in the resource top state.
+   * the number of partitions in ERROR state, the number of partitions the instance actually holds,
+   * and the number of those partitions in the resource top state.
    * <p>
-   * A partition counts as being in an "active state" when its current state is not the state
-   * model's initial state (typically OFFLINE), matching the convention already used by
-   * {@link org.apache.helix.monitoring.mbeans.PerInstanceResourceMonitor}. This tracks state
-   * machine progress rather than disk residency, so a partition that occupies disk while sitting
-   * in the initial state is not counted. DROPPED is also excluded defensively; participants delete
-   * the partition entry rather than persisting DROPPED, so it is not expected to appear here. A
-   * resource whose state model definition cannot be resolved is skipped, since its states cannot
-   * be interpreted.
+   * A partition counts as held when its current state is not the state model's initial state
+   * (typically OFFLINE), or when the initial state is the state the controller intends it to be in.
+   * The rebalancer deliberately parks a partition in the initial state when the instance is
+   * disabled, when that partition is disabled on the instance, or when the whole resource is
+   * disabled, so those partitions are counted: they are exactly where they are supposed to be. A
+   * partition left in the initial state with no such reason is not counted, because it means the
+   * transition has not finished or has failed. DROPPED is excluded defensively; participants
+   * delete the partition entry rather than persisting DROPPED, so it is not expected to appear
+   * here. A resource whose state model definition cannot be resolved is skipped, since its states
+   * cannot be interpreted.
    * @param dataProvider the data provider containing current state information
    * @param instanceName the name of the instance to check
    * @return the counts; all zero if the instance is not live. Resources that fail to be read are
@@ -235,13 +240,15 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       return counts;
     }
 
-    if (currentStateMap == null) {
+    if (currentStateMap == null || currentStateMap.isEmpty()) {
       return counts;
     }
 
+    DisabledPartitionInfo disabledInfo = readDisabledPartitionInfo(dataProvider, instanceName);
+
     for (Map.Entry<String, CurrentState> entry : currentStateMap.entrySet()) {
       try {
-        accumulatePartitionCounts(dataProvider, entry.getValue(), counts);
+        accumulatePartitionCounts(dataProvider, entry.getValue(), disabledInfo, counts);
       } catch (Exception e) {
         // Skip only the offending resource so one bad resource cannot zero out the whole instance.
         LogUtil.logWarn(logger, _eventId, "Failed to compute partition counts for instance: "
@@ -253,11 +260,75 @@ public class ReadClusterDataStage extends AbstractBaseStage {
   }
 
   /**
+   * Snapshot of the disablement that applies to a single instance, read once per instance so the
+   * per-partition loop stays a map lookup.
+   */
+  private static class DisabledPartitionInfo {
+    static final DisabledPartitionInfo NONE =
+        new DisabledPartitionInfo(false, Collections.emptyMap());
+
+    /** True when every partition on the instance is disabled, so all of them are held OFFLINE. */
+    final boolean instanceDisabled;
+    /** Partitions disabled on this instance, keyed by resource name. */
+    final Map<String, List<String>> disabledPartitionsByResource;
+
+    DisabledPartitionInfo(boolean instanceDisabled,
+        Map<String, List<String>> disabledPartitionsByResource) {
+      this.instanceDisabled = instanceDisabled;
+      this.disabledPartitionsByResource = disabledPartitionsByResource;
+    }
+  }
+
+  /**
+   * Read the disablement that applies to {@code instanceName}. The two instance-wide conditions
+   * mirror what {@link BaseControllerDataProvider} itself treats as "disabled for every partition":
+   * the DISABLE instance operation, and the ALL_RESOURCES disabled-partition key.
+   * @return the disablement snapshot, or {@link DisabledPartitionInfo#NONE} if it cannot be read
+   */
+  private DisabledPartitionInfo readDisabledPartitionInfo(BaseControllerDataProvider dataProvider,
+      String instanceName) {
+    try {
+      Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+      InstanceConfig instanceConfig =
+          instanceConfigMap == null ? null : instanceConfigMap.get(instanceName);
+      Map<String, List<String>> disabledPartitionsByResource = instanceConfig == null
+          ? Collections.emptyMap() : instanceConfig.getDisabledPartitionsMap();
+      Set<String> disabledInstances = dataProvider.getDisabledInstances();
+      boolean instanceDisabled =
+          (disabledInstances != null && disabledInstances.contains(instanceName))
+              || disabledPartitionsByResource
+                  .containsKey(InstanceConstants.ALL_RESOURCES_DISABLED_PARTITION_KEY);
+      return new DisabledPartitionInfo(instanceDisabled, disabledPartitionsByResource);
+    } catch (Exception e) {
+      // Degrade to "nothing is disabled" rather than losing the instance's counts entirely. The
+      // gauge then simply stops crediting intentionally OFFLINE partitions for this run.
+      LogUtil.logWarn(logger, _eventId,
+          "Failed to read disabled partition info for instance: " + instanceName, e);
+      return DisabledPartitionInfo.NONE;
+    }
+  }
+
+  /**
+   * Report whether the resource itself is disabled, in which case the rebalancer holds every one of
+   * its partitions in the initial state. A missing IdealState is not a disabled resource: it means
+   * the resource is being removed, so its partitions are on their way to DROPPED.
+   */
+  private static boolean isResourceDisabled(BaseControllerDataProvider dataProvider,
+      String resourceName) {
+    if (resourceName == null) {
+      return false;
+    }
+    IdealState idealState = dataProvider.getIdealState(resourceName);
+    return idealState != null && !idealState.isEnabled();
+  }
+
+  /**
    * Accumulate the partition counts contributed by a single resource's CurrentState into
    * {@code counts}.
    */
   private void accumulatePartitionCounts(BaseControllerDataProvider dataProvider,
-      CurrentState currentState, InstancePartitionCounts counts) {
+      CurrentState currentState, DisabledPartitionInfo disabledInfo,
+      InstancePartitionCounts counts) {
     if (currentState == null) {
       return;
     }
@@ -271,11 +342,10 @@ public class ReadClusterDataStage extends AbstractBaseStage {
     StateModelDefinition stateModelDef =
         stateModelDefRef == null ? null : dataProvider.getStateModelDef(stateModelDefRef);
     if (stateModelDef == null) {
-      // Without the state model we cannot tell active-state partitions from initial/dropped ones,
-      // so counting them would report a misleading value. Still count ERROR, which is model
-      // agnostic.
+      // Without the state model we cannot tell held partitions from initial/dropped ones, so
+      // counting them would report a misleading value. Still count ERROR, which is model agnostic.
       LogUtil.logWarn(logger, _eventId,
-          "Skipping active-state partition counts for resource: " + currentState.getResourceName()
+          "Skipping actual partition counts for resource: " + currentState.getResourceName()
               + ", unresolved state model definition: " + stateModelDefRef);
       for (String state : partitionStateMap.values()) {
         if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
@@ -285,28 +355,46 @@ public class ReadClusterDataStage extends AbstractBaseStage {
       return;
     }
 
+    String resourceName = currentState.getResourceName();
     String topState = stateModelDef.getTopState();
     String initialState = stateModelDef.getInitialState();
 
-    for (String state : partitionStateMap.values()) {
+    // Resolved once per resource rather than per partition. When the instance or the whole resource
+    // is disabled, every partition here is meant to sit in the initial state.
+    boolean allPartitionsHeldInitial =
+        disabledInfo.instanceDisabled || isResourceDisabled(dataProvider, resourceName);
+    Set<String> disabledPartitions = allPartitionsHeldInitial ? Collections.emptySet()
+        : toPartitionSet(disabledInfo.disabledPartitionsByResource.get(resourceName));
+
+    for (Map.Entry<String, String> partitionEntry : partitionStateMap.entrySet()) {
+      String state = partitionEntry.getValue();
       if (state == null) {
         continue;
       }
       if (HelixDefinedState.ERROR.name().equalsIgnoreCase(state)) {
         counts.errorCount++;
       }
-      // Initial-state (e.g. OFFLINE) partitions are not being served, so they do not count as
-      // active. This tracks state machine progress, not disk residency. DROPPED is excluded
-      // defensively only: on a successful drop the participant subtracts the partition entry from
-      // CurrentState instead of persisting DROPPED, so it should never be observed here.
-      if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)
-          || state.equalsIgnoreCase(initialState)) {
+      // DROPPED is excluded defensively only: on a successful drop the participant subtracts the
+      // partition entry from CurrentState instead of persisting DROPPED, so it should never be
+      // observed here.
+      if (HelixDefinedState.DROPPED.name().equalsIgnoreCase(state)) {
         continue;
       }
-      counts.activeStatePartitionCount++;
+      if (state.equalsIgnoreCase(initialState) && !allPartitionsHeldInitial
+          && !disabledPartitions.contains(partitionEntry.getKey())) {
+        // Sitting in the initial state (e.g. OFFLINE) with nothing disabled means the partition is
+        // not held: the transition has either not finished yet or has failed.
+        continue;
+      }
+      counts.actualPartitionCount++;
       if (topState != null && topState.equalsIgnoreCase(state)) {
-        counts.activeStateTopStatePartitionCount++;
+        counts.actualTopStatePartitionCount++;
       }
     }
+  }
+
+  private static Set<String> toPartitionSet(List<String> partitions) {
+    return partitions == null || partitions.isEmpty() ? Collections.emptySet()
+        : new HashSet<>(partitions);
   }
 }

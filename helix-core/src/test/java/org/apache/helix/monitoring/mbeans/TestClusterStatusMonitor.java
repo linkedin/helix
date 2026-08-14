@@ -634,8 +634,8 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
-  public void testSetInstanceActiveStatePartitionStatus() throws Exception {
-    String clusterName = "TestCluster_ActiveStatePartitionStatus";
+  public void testSetClusterInstanceStatusActualPartitionGauges() throws Exception {
+    String clusterName = "TestCluster_ActualPartitionStatus";
     ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
     monitor.active();
 
@@ -653,41 +653,41 @@ public class TestClusterStatusMonitor {
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
 
-    // Gauges default to 0 before any actual-state update.
+    // Gauges default to 0 before any actual partition count update.
     for (String instance : instanceSet) {
       ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
       Assert.assertTrue(_server.isRegistered(objName));
-      Assert.assertEquals(_server.getAttribute(objName, "ActiveStatePartitionGauge"), 0L);
-      Assert.assertEquals(_server.getAttribute(objName, "ActiveStateTopStatePartitionGauge"), 0L);
+      Assert.assertEquals(_server.getAttribute(objName, "ActualPartitionGauge"), 0L);
+      Assert.assertEquals(_server.getAttribute(objName, "ActualTopStatePartitionGauge"), 0L);
     }
 
     // instance_3 is intentionally absent, standing in for an instance that is not live.
-    Map<String, Long> activeStatePartitionCounts = Maps.newHashMap();
-    activeStatePartitionCounts.put("instance_0", 10L);
-    activeStatePartitionCounts.put("instance_1", 7L);
-    activeStatePartitionCounts.put("instance_2", 0L);
-    Map<String, Long> activeStateTopStatePartitionCounts = Maps.newHashMap();
-    activeStateTopStatePartitionCounts.put("instance_0", 4L);
-    activeStateTopStatePartitionCounts.put("instance_1", 3L);
-    activeStateTopStatePartitionCounts.put("instance_2", 0L);
+    Map<String, Long> actualPartitionCounts = Maps.newHashMap();
+    actualPartitionCounts.put("instance_0", 10L);
+    actualPartitionCounts.put("instance_1", 7L);
+    actualPartitionCounts.put("instance_2", 0L);
+    Map<String, Long> actualTopStatePartitionCounts = Maps.newHashMap();
+    actualTopStatePartitionCounts.put("instance_0", 4L);
+    actualTopStatePartitionCounts.put("instance_1", 3L);
+    actualTopStatePartitionCounts.put("instance_2", 0L);
 
     monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-        activeStatePartitionCounts, activeStateTopStatePartitionCounts);
+        actualPartitionCounts, actualTopStatePartitionCounts);
 
     ObjectName instance0 = monitor.getObjectName(monitor.getInstanceBeanName("instance_0"));
-    Assert.assertEquals(_server.getAttribute(instance0, "ActiveStatePartitionGauge"), 10L);
-    Assert.assertEquals(_server.getAttribute(instance0, "ActiveStateTopStatePartitionGauge"), 4L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualPartitionGauge"), 10L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualTopStatePartitionGauge"), 4L);
 
     ObjectName instance1 = monitor.getObjectName(monitor.getInstanceBeanName("instance_1"));
-    Assert.assertEquals(_server.getAttribute(instance1, "ActiveStatePartitionGauge"), 7L);
-    Assert.assertEquals(_server.getAttribute(instance1, "ActiveStateTopStatePartitionGauge"), 3L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualPartitionGauge"), 7L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualTopStatePartitionGauge"), 3L);
 
     // Instances missing from the supplied maps are reset to 0 rather than left stale.
     ObjectName instance3 = monitor.getObjectName(monitor.getInstanceBeanName("instance_3"));
-    Assert.assertEquals(_server.getAttribute(instance3, "ActiveStatePartitionGauge"), 0L);
-    Assert.assertEquals(_server.getAttribute(instance3, "ActiveStateTopStatePartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance3, "ActualPartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance3, "ActualTopStatePartitionGauge"), 0L);
 
     // The actual gauges are independent of the best-possible PartitionGauge on the same bean.
     Assert.assertEquals(_server.getAttribute(instance0, "PartitionGauge"), 0L);
@@ -698,10 +698,10 @@ public class TestClusterStatusMonitor {
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.singletonMap("instance_1", 5L), Collections.singletonMap("instance_1", 2L));
-    Assert.assertEquals(_server.getAttribute(instance0, "ActiveStatePartitionGauge"), 0L);
-    Assert.assertEquals(_server.getAttribute(instance0, "ActiveStateTopStatePartitionGauge"), 0L);
-    Assert.assertEquals(_server.getAttribute(instance1, "ActiveStatePartitionGauge"), 5L);
-    Assert.assertEquals(_server.getAttribute(instance1, "ActiveStateTopStatePartitionGauge"), 2L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualPartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualTopStatePartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualPartitionGauge"), 5L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualTopStatePartitionGauge"), 2L);
 
     // An instance registered for the first time gets its counts populated in the same call, so a
     // freshly registered bean never publishes 0 for partitions it is really hosting.
@@ -713,23 +713,23 @@ public class TestClusterStatusMonitor {
         Collections.singletonMap("instance_4", 9L), Collections.singletonMap("instance_4", 6L));
     ObjectName instance4 = monitor.getObjectName(monitor.getInstanceBeanName("instance_4"));
     Assert.assertTrue(_server.isRegistered(instance4));
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStatePartitionGauge"), 9L);
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStateTopStatePartitionGauge"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
 
     // Null maps mean "no information supplied" and must leave the existing gauges untouched,
     // so callers that do not compute these counts cannot zero them out.
     monitor.setClusterInstanceStatus(grownInstanceSet, grownInstanceSet, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), null, null);
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStatePartitionGauge"), 9L);
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStateTopStatePartitionGauge"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
 
     // The backward-compatible overload likewise leaves the actual gauges alone.
     monitor.setClusterInstanceStatus(grownInstanceSet, grownInstanceSet, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStatePartitionGauge"), 9L);
-    Assert.assertEquals(_server.getAttribute(instance4, "ActiveStateTopStatePartitionGauge"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
 
     monitor.reset();
     Assert.assertFalse(_server.isRegistered(clusterMonitorObjName));

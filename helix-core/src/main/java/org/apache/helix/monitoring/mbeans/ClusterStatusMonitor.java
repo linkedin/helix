@@ -348,24 +348,25 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
   /**
    * Update the gauges for all instances in the cluster, including the CurrentState-derived
-   * active-state partition gauges.
+   * actual partition gauges.
    * <p>
-   * The active-state partition counts are applied in the same {@code _instanceMonitorMap} critical
+   * The actual partition counts are applied in the same {@code _instanceMonitorMap} critical
    * section that registers and unregisters the instance beans. Updating them separately would leave
-   * a window in which a bean is registered but its active-state gauges have not been populated yet,
-   * so a live instance could briefly publish 0 for partitions it really holds.
+   * a window in which a bean is registered but its actual partition gauges have not been populated
+   * yet, so a live instance could briefly publish 0 for partitions it really holds.
    * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
-   * @param activeStatePartitionCounts instance name to number of partitions in a non-initial state,
-   *          or null to leave the active-state partition gauges untouched
-   * @param activeStateTopStatePartitionCounts instance name to number of top-state partitions, or
-   *          null to leave the active-state top-state partition gauges untouched
+   * @param actualPartitionCounts instance name to the number of partitions the instance actually
+   *          holds according to CurrentState, or null to leave the actual partition gauges
+   *          untouched
+   * @param actualTopStatePartitionCounts instance name to number of top-state partitions, or
+   *          null to leave the actual top-state partition gauges untouched
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
       Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
       Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
-      Map<String, Long> errorPartitionCounts, Map<String, Long> activeStatePartitionCounts,
-      Map<String, Long> activeStateTopStatePartitionCounts) {
+      Map<String, Long> errorPartitionCounts, Map<String, Long> actualPartitionCounts,
+      Map<String, Long> actualTopStatePartitionCounts) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -492,20 +493,20 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         }
       }
 
-      // Apply the CurrentState-derived active-state partition gauges while still holding the lock,
+      // Apply the CurrentState-derived actual partition gauges while still holding the lock,
       // so that bean registration and gauge population are observed together. Registered instances
       // absent from the supplied maps (for example, instances that are no longer live) are reset
       // to 0 rather than left holding a stale value.
-      if (activeStatePartitionCounts != null || activeStateTopStatePartitionCounts != null) {
+      if (actualPartitionCounts != null || actualTopStatePartitionCounts != null) {
         for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
           String instanceName = entry.getKey();
           InstanceMonitor bean = entry.getValue();
-          if (activeStatePartitionCounts != null) {
-            bean.updateActiveStatePartitionCount(activeStatePartitionCounts.getOrDefault(instanceName, 0L));
+          if (actualPartitionCounts != null) {
+            bean.updateActualPartitionCount(actualPartitionCounts.getOrDefault(instanceName, 0L));
           }
-          if (activeStateTopStatePartitionCounts != null) {
-            bean.updateActiveStateTopStatePartitionCount(
-                activeStateTopStatePartitionCounts.getOrDefault(instanceName, 0L));
+          if (actualTopStatePartitionCounts != null) {
+            bean.updateActualTopStatePartitionCount(
+                actualTopStatePartitionCounts.getOrDefault(instanceName, 0L));
           }
         }
       }
