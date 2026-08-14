@@ -32,6 +32,7 @@ import java.util.Timer;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -867,6 +868,10 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
        */
       stopTimerTasks();
 
+      // Stop the deferred per-instance registration worker; any in-flight/queued registration is
+      // moot once we are disconnecting (handlers are reset below).
+      _deferredRegistrationExecutor.shutdownNow();
+
       /**
        * shutdown thread pool first to avoid reset() being invoked in the middle of state
        * transition
@@ -1190,6 +1195,18 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   // when many controllers acquire leadership at the same time.
   private static final int INIT_HANDLERS_PARALLELISM = 10;
 
+  // A single reused daemon thread that runs the deferred per-instance registration off the
+  // leadership-acquisition (CallbackHandler.invoke) thread. Reused - rather than a fresh Thread
+  // per acquisition - so rapid leadership flapping cannot create unbounded threads; overlapping
+  // acquisitions of this manager serialize here (each still parallelizes internally via a pool).
+  // One per manager, so different clusters/sub-clusters still register concurrently.
+  private final ExecutorService _deferredRegistrationExecutor =
+      Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "registerDeferredListeners-" + getClusterName());
+        t.setDaemon(true);
+        return t;
+      });
+
   /**
    * Drain and register the per-instance listeners deferred by
    * {@link GenericHelixController#checkLiveInstancesObservation} during a leadership acquisition,
@@ -1216,16 +1233,21 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     if (pending == null || pending.isEmpty()) {
       return;
     }
-    Thread t = new Thread(() -> {
+    Runnable task = () -> {
       try {
         registerPendingInstanceListeners(pending);
       } catch (Exception e) {
         LOG.error("Failed to register deferred per-instance listeners for cluster: " + _clusterName,
             e);
       }
-    }, "registerDeferredListeners-" + _clusterName);
-    t.setDaemon(true);
-    t.start();
+    };
+    try {
+      _deferredRegistrationExecutor.submit(task);
+    } catch (RejectedExecutionException e) {
+      // Executor already shut down (manager disconnecting); nothing to observe anymore.
+      LOG.warn("Deferred registration rejected for cluster: {} - manager is shutting down",
+          _clusterName);
+    }
   }
 
   private void registerPendingInstanceListeners(
@@ -1293,6 +1315,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     LOG.info("Controller for cluster: {} finished per-instance watch registration and is now fully "
         + "observing the cluster (sessions: {}, instances: {}, took: {}ms)",
         _clusterName, sessionCount, instanceCount, System.currentTimeMillis() - start);
+
+    // Registration ran asynchronously after the controller became leader, so a current-state change
+    // that landed before a given instance's watch was set would not have notified us. Now that all
+    // per-instance watches are registered, force one cache-refreshing pipeline: the refresh reads
+    // current states directly from ZK, so anything missed during the registration window is picked
+    // up immediately instead of waiting for the next external event.
+    if (_controller != null) {
+      _controller.scheduleOnDemandRebalance(0, true);
+    }
   }
 
   /**
