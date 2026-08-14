@@ -1239,26 +1239,20 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     for (Map.Entry<String, String> entry : pending.getSessionToInstance().entrySet()) {
       String session = entry.getKey();
       String instanceName = entry.getValue();
-      tasks.add(() -> {
-        try {
-          addCurrentStateChangeListener(_controller, instanceName, session);
-          addTaskCurrentStateChangeListener(_controller, instanceName, session);
-        } catch (Exception e) {
-          LOG.error("Failed to register current-state listeners for instance: " + instanceName
-              + " with session: " + session, e);
-        }
-      });
+      tasks.add(() -> registerWithRetry(
+          "current-state listeners for instance " + instanceName + ", session " + session,
+          () -> {
+            addCurrentStateChangeListener(_controller, instanceName, session);
+            addTaskCurrentStateChangeListener(_controller, instanceName, session);
+          }));
     }
     for (String instance : pending.getNewInstances()) {
-      tasks.add(() -> {
-        try {
-          addMessageListener(_controller, instance);
-          addCustomizedStateRootChangeListener(_controller, instance);
-        } catch (Exception e) {
-          LOG.error("Failed to register message/customizedStateRoot listeners for instance: "
-              + instance, e);
-        }
-      });
+      tasks.add(() -> registerWithRetry(
+          "message/customizedStateRoot listeners for instance " + instance,
+          () -> {
+            addMessageListener(_controller, instance);
+            addCustomizedStateRootChangeListener(_controller, instance);
+          }));
     }
 
     if (tasks.size() <= 1) {
@@ -1290,9 +1284,62 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         executor.shutdownNow();
       }
     }
-    LOG.info("Registered per-instance listeners in parallel for cluster: {}, "
-        + "sessions: {}, instances: {}, took: {}ms",
+    // End-to-end observability: the "acquired leadership ... took" log in DistributedLeaderElection
+    // no longer covers per-instance registration, which now runs here. This log is the signal that
+    // the controller is fully observing the cluster (all per-instance CURRENTSTATES watches set).
+    LOG.info("Controller for cluster: {} finished per-instance watch registration and is now fully "
+        + "observing the cluster (sessions: {}, instances: {}, took: {}ms)",
         _clusterName, sessionCount, instanceCount, System.currentTimeMillis() - start);
+  }
+
+  /**
+   * A registration step that may throw a checked exception (each {@code addXxxListener} does a ZK
+   * roundtrip).
+   */
+  @FunctionalInterface
+  private interface RegistrationStep {
+    void run() throws Exception;
+  }
+
+  // Per-instance registration is a ZK roundtrip and can hit a transient error (e.g. a brief
+  // connection loss) even though the underlying ZkClient retries at a lower level. Because
+  // checkLiveInstancesObservation has already advanced _lastSeen* for these instances, a lost
+  // registration would not be retried until the next leadership change, leaving that instance
+  // unobserved (a lingering MissingTopState). A small bounded retry closes that gap. addListener()
+  // is idempotent (it skips a path+listener that already exists), so re-running a partially
+  // succeeded step is safe.
+  private static final int PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS = 3;
+  private static final long PER_INSTANCE_REGISTRATION_RETRY_BACKOFF_MS = 200;
+
+  private void registerWithRetry(String description, RegistrationStep step) {
+    for (int attempt = 1; attempt <= PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS; attempt++) {
+      try {
+        step.run();
+        return;
+      } catch (Exception e) {
+        if (!isConnected()) {
+          // Manager is disconnecting/losing leadership; retrying is pointless and the handlers
+          // will be reset by the teardown path. Stop quietly.
+          LOG.warn("Skipping registration of {} for cluster: {} - manager no longer connected",
+              description, _clusterName);
+          return;
+        }
+        if (attempt == PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS) {
+          LOG.error("Failed to register {} for cluster: {} after {} attempts. It will be retried on "
+              + "the next leadership change; until then this instance may not be observed.",
+              description, _clusterName, PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS, e);
+          return;
+        }
+        LOG.warn("Attempt {}/{} to register {} for cluster: {} failed; retrying", attempt,
+            PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS, description, _clusterName, e);
+        try {
+          Thread.sleep(PER_INSTANCE_REGISTRATION_RETRY_BACKOFF_MS);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+      }
+    }
   }
 
   void initHandlers(List<CallbackHandler> handlers) {
