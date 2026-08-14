@@ -1312,18 +1312,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     // End-to-end observability: the "acquired leadership ... took" log in DistributedLeaderElection
     // no longer covers per-instance registration, which now runs here. This log is the signal that
     // the controller is fully observing the cluster (all per-instance CURRENTSTATES watches set).
+    // No extra refresh is needed to catch changes that happened during the async registration
+    // window: registering each per-instance handler runs CallbackHandler.init(), which fires an
+    // INIT callback that reads the instance's current state at that moment and pushes a
+    // CurrentStateChange event to the pipeline. So the watch's own registration delivers whatever
+    // the state is when it registers, and all later changes notify normally.
     LOG.info("Controller for cluster: {} finished per-instance watch registration and is now fully "
         + "observing the cluster (sessions: {}, instances: {}, took: {}ms)",
         _clusterName, sessionCount, instanceCount, System.currentTimeMillis() - start);
-
-    // Registration ran asynchronously after the controller became leader, so a current-state change
-    // that landed before a given instance's watch was set would not have notified us. Now that all
-    // per-instance watches are registered, force one cache-refreshing pipeline: the refresh reads
-    // current states directly from ZK, so anything missed during the registration window is picked
-    // up immediately instead of waiting for the next external event.
-    if (_controller != null) {
-      _controller.scheduleOnDemandRebalance(0, true);
-    }
   }
 
   /**
