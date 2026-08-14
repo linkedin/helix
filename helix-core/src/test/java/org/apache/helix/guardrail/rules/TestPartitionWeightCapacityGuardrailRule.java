@@ -259,6 +259,30 @@ public class TestPartitionWeightCapacityGuardrailRule {
     Assert.assertTrue(result.getViolations().isEmpty());
   }
 
+  @Test
+  public void testMultipleViolationsAllReportedInFixedOrder() throws IOException {
+    // Both declared dimensions are over capacity. The rule must report both (not just the first) and
+    // in a stable order matching the cluster's capacity-key order, so a caller sees every problem in
+    // one response instead of fixing one, resubmitting, and discovering the next.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))));
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 5000, "BAR", 9000)));
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 2);
+    // Fixed order: FOO before BAR, matching the declared capacity-key order.
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("'FOO'"));
+    Assert.assertTrue(result.getViolations().get(1).getMessage().contains("'BAR'"));
+    // No force=true suggestion: forcing an unplaceable resource is what triggers the cluster-wide
+    // capacity deficit the rule exists to prevent.
+    Assert.assertFalse(result.getViolations().get(0).getMessage().contains("force"));
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     // Default to a single-partition resource so the canonical testResource_0 partition is real.

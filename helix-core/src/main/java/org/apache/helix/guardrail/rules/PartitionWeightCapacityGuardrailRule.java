@@ -20,7 +20,9 @@
 package org.apache.helix.guardrail.rules;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -56,6 +58,14 @@ import org.apache.helix.model.ResourceConfig;
  * independently against the best instance in that dimension. It is deliberately conservative so it
  * never blocks a resource that could plausibly be placed &mdash; it only fails the cases that are
  * provably impossible.
+ * <p>
+ * <b>Why this is enforced up front rather than left to rebalance.</b> An unplaceable WAGED resource
+ * is not a resource-local failure. Once it exists, the WAGED global rebalance fails to compute a
+ * baseline assignment for the whole cluster (a {@code CAPACITY_DEFICIT} error), so <em>no</em>
+ * resource added after it gets placed anywhere until the offending resource is dropped. Resources
+ * already assigned keep their assignment, so the breakage is silent. That cluster-wide blast radius
+ * is why this is a hard pre-write guard rail; it is also why callers should not reach for
+ * {@code force=true} to bypass it, as forcing the resource in is exactly what triggers the deficit.
  * <p>
  * Only weights for the resource's <em>real</em> partitions are evaluated. A resource's
  * {@code PARTITION_CAPACITY_MAP} is operator-supplied and may carry stale or mistyped entries naming
@@ -153,9 +163,17 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
 
     Map<String, Integer> defaultPartitionWeight = clusterConfig.getDefaultPartitionWeightMap();
     Set<String> realPartitions = realPartitionNames(context.getProposedIdealState());
-    for (Map.Entry<String, Map<String, Integer>> partitionEntry : partitionCapacityMap.entrySet()) {
-      String partitionName = partitionEntry.getKey();
 
+    // Evaluate partitions in a deterministic order (the DEFAULT placeholder first, then the rest in
+    // natural order) rather than HashMap iteration order, so that when several partitions or
+    // dimensions are over capacity the set and order of reported violations is stable between runs.
+    List<String> orderedPartitions = new ArrayList<>(partitionCapacityMap.keySet());
+    orderedPartitions.sort(
+        Comparator.comparing((String p) -> !ResourceConfig.DEFAULT_PARTITION_KEY.equals(p))
+            .thenComparing(Comparator.<String>naturalOrder()));
+
+    List<Violation> violations = new ArrayList<>();
+    for (String partitionName : orderedPartitions) {
       // Skip weights for partitions this resource does not actually have. The capacity map is
       // operator-supplied and can carry stale/typo'd entries; WAGED ignores them at placement time,
       // so blocking on them would be a false positive stricter than the write path we front. When
@@ -169,11 +187,14 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
       // Effective weight = cluster default weight overridden by this partition's explicit weight,
       // mirroring WagedValidationUtil#validateAndGetPartitionCapacity.
       Map<String, Integer> effectiveWeight = new HashMap<>(defaultPartitionWeight);
-      effectiveWeight.putAll(partitionEntry.getValue());
+      effectiveWeight.putAll(partitionCapacityMap.get(partitionName));
 
-      // Only the cluster's declared capacity dimensions are meaningful to WAGED placement. A
-      // required dimension missing from the weight is a key-coverage problem enforced separately by
-      // addResourceWithWeight, so it is skipped here rather than reported as an over-weight.
+      // Only the cluster's declared capacity dimensions are meaningful to WAGED placement, and
+      // capacityKeys is a List, so iterating it gives a fixed dimension order. A required dimension
+      // missing from the weight is a key-coverage problem enforced separately by
+      // addResourceWithWeight, so it is skipped here rather than reported as an over-weight. Every
+      // over-capacity dimension is collected (not just the first) so a caller sees all problems in
+      // one response instead of fixing one and resubmitting to discover the next.
       for (String dimension : capacityKeys) {
         Integer weight = effectiveWeight.get(dimension);
         if (weight == null) {
@@ -195,21 +216,23 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
           // report it as unscoped for a clearer message.
           String reportedPartition =
               ResourceConfig.DEFAULT_PARTITION_KEY.equals(partitionName) ? null : partitionName;
-          return ValidationResult.infeasible(Violation.newBuilder(RULE_ID)
+          // Intentionally no force=true hint: forcing an unplaceable resource in is what triggers
+          // the cluster-wide CAPACITY_DEFICIT described in the class javadoc, so the message only
+          // points at the safe remedies.
+          violations.add(Violation.newBuilder(RULE_ID)
               .resource(proposedResourceConfig.getResourceName())
               .partition(reportedPartition)
               .message(String.format(
                   "Partition weight %d for dimension '%s' exceeds the largest single instance "
                       + "capacity %d in that dimension, making %s permanently unplaceable. Lower the "
-                      + "weight, raise instance capacity, or use force=true to override.", weight,
-                  dimension, maxCapacity,
+                      + "weight or raise instance capacity.", weight, dimension, maxCapacity,
                   reportedPartition == null ? "every partition" : "partition " + reportedPartition))
               .build());
         }
       }
     }
 
-    return ValidationResult.feasible();
+    return violations.isEmpty() ? ValidationResult.feasible() : ValidationResult.of(violations);
   }
 
   /**

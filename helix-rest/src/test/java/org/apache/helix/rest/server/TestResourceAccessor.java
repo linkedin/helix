@@ -614,7 +614,7 @@ public class TestResourceAccessor extends AbstractTestClass {
    * cluster/instance capacity configuration is saved and restored so this test does not perturb the
    * other resource tests that share {@value #CLUSTER_NAME}.
    */
-  @Test
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
   public void testAddWagedResourceWeightGuardrail() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
 
@@ -764,6 +764,89 @@ public class TestResourceAccessor extends AbstractTestClass {
     ResourceConfig resourceConfig = new ResourceConfig(resourceName);
     resourceConfig.setPartitionCapacityMap(partitionWeights);
     return resourceConfig;
+  }
+
+  private static ResourceConfig rawWagedResourceConfig(String resourceName,
+      Map<String, Map<String, Integer>> partitionWeights) throws IOException {
+    // Build PARTITION_CAPACITY_MAP directly on the record, bypassing
+    // ResourceConfig#setPartitionCapacityMap so values it would reject (e.g. negatives) can be
+    // exercised through the raw-ZNRecord path the endpoint actually uses.
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    Map<String, String> rawCapacityRecord = new HashMap<>();
+    for (Map.Entry<String, Map<String, Integer>> entry : partitionWeights.entrySet()) {
+      rawCapacityRecord.put(entry.getKey(), OBJECT_MAPPER.writeValueAsString(entry.getValue()));
+    }
+    resourceConfig.getRecord().setMapField(
+        ResourceConfig.ResourceConfigProperty.PARTITION_CAPACITY_MAP.name(), rawCapacityRecord);
+    return resourceConfig;
+  }
+
+  /**
+   * Structural checks (IdealState/ResourceConfig name match, non-negative weights) run before the
+   * guard rail, so a dry-run reflects them and a structurally invalid request never reaches ZK.
+   * Capacity configuration is saved and restored so this test does not perturb the other resource
+   * tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testWagedStructuralChecksAppliedBeforeGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    String resourceName = "structuralCheckResource";
+    try {
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      Map<String, Integer> instanceCapacity = ImmutableMap.of("FOO", 100, "BAR", 100);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instanceCapacity);
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // 1) Name mismatch is a structural failure. Even a dry-run must report it (400) instead of
+      // returning a feasible verdict for a request that would then fail for real.
+      Map<String, Map<String, Integer>> withinCapacity = ImmutableMap.of(
+          ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 100, "BAR", 100));
+      Response mismatchDryRun = putWagedResource(resourceName,
+          wagedResourceConfig("someOtherName", withinCapacity), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(mismatchDryRun.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(resourceName));
+
+      // 2) Negative weights are rejected (400) even though they do not exceed capacity, and even
+      // though the endpoint builds the ResourceConfig from a raw ZNRecord that bypasses
+      // ResourceConfig#setPartitionCapacityMap's own negative check.
+      Response negative = putWagedResource(resourceName,
+          rawWagedResourceConfig(resourceName, ImmutableMap.of(
+              ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", -5, "BAR", 100))),
+          Collections.emptyMap());
+      Assert.assertEquals(negative.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(resourceName));
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resourceName);
+      } catch (Exception ignored) {
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test(dependsOnMethods = "testAddResourceWithWeight")
