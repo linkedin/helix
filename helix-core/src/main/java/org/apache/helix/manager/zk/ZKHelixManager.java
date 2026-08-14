@@ -1245,7 +1245,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
           () -> {
             addCurrentStateChangeListener(_controller, instanceName, session);
             addTaskCurrentStateChangeListener(_controller, instanceName, session);
-          }));
+          },
+          () -> _controller.forgetSessionForReregistration(session)));
     }
     for (String instance : pending.getNewInstances()) {
       tasks.add(() -> registerWithRetry(
@@ -1253,7 +1254,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
           () -> {
             addMessageListener(_controller, instance);
             addCustomizedStateRootChangeListener(_controller, instance);
-          }));
+          },
+          () -> _controller.forgetInstanceForReregistration(instance)));
     }
 
     if (tasks.size() <= 1) {
@@ -1312,7 +1314,8 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   private static final int PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS = 3;
   private static final long PER_INSTANCE_REGISTRATION_RETRY_BACKOFF_MS = 200;
 
-  private void registerWithRetry(String description, RegistrationStep step) {
+  private void registerWithRetry(String description, RegistrationStep step,
+      Runnable onFinalFailure) {
     for (int attempt = 1; attempt <= PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS; attempt++) {
       try {
         step.run();
@@ -1326,9 +1329,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
           return;
         }
         if (attempt == PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS) {
-          LOG.error("Failed to register {} for cluster: {} after {} attempts. It will be retried on "
-              + "the next leadership change; until then this instance may not be observed.",
+          // Give up after retries, but forget it from the controller's last-seen set so it is not
+          // treated as already-registered: the next LiveInstanceChange will re-register it. This
+          // keeps _lastSeen* reflecting only what actually registered.
+          LOG.error("Failed to register {} for cluster: {} after {} attempts; clearing it from "
+              + "last-seen so the next live-instance change re-registers it.",
               description, _clusterName, PER_INSTANCE_REGISTRATION_MAX_ATTEMPTS, e);
+          if (onFinalFailure != null) {
+            onFinalFailure.run();
+          }
           return;
         }
         LOG.warn("Attempt {}/{} to register {} for cluster: {} failed; retrying", attempt,

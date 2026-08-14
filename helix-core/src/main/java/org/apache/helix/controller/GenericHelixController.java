@@ -1731,4 +1731,40 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     _pendingInstanceListeners = null;
     return result;
   }
+
+  /**
+   * Drop a session from the last-seen set so its per-instance current-state and task-current-state
+   * listeners are re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred
+   * parallel registration for this session ultimately failed, so {@code _lastSeenSessions} reflects
+   * only sessions whose listeners actually registered (not ones that were merely attempted).
+   * Uses the same {@code synchronized(_lastSeenInstances)} monitor as
+   * {@link #checkLiveInstancesObservation} to stay consistent with the diffing logic.
+   */
+  public void forgetSessionForReregistration(String session) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> sessions = _lastSeenSessions.get();
+      if (sessions != null && sessions.containsKey(session)) {
+        Map<String, LiveInstance> updated = new HashMap<>(sessions);
+        updated.remove(session);
+        _lastSeenSessions.set(updated);
+      }
+    }
+  }
+
+  /**
+   * Drop an instance from the last-seen set so its message and customized-state-root listeners are
+   * re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred parallel
+   * registration for this instance ultimately failed, so {@code _lastSeenInstances} reflects only
+   * instances whose listeners actually registered.
+   */
+  public void forgetInstanceForReregistration(String instance) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> instances = _lastSeenInstances.get();
+      if (instances != null && instances.containsKey(instance)) {
+        Map<String, LiveInstance> updated = new HashMap<>(instances);
+        updated.remove(instance);
+        _lastSeenInstances.set(updated);
+      }
+    }
+  }
 }

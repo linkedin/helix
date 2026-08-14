@@ -123,4 +123,61 @@ public class TestCheckLiveInstancesObservationDeferred {
     // Second take returns null
     Assert.assertNull(controller.takePendingInstanceListeners());
   }
+
+  @Test
+  public void testForgetTriggersReRegistrationOnNextChange() throws Exception {
+    GenericHelixController controller = new GenericHelixController("testCluster");
+
+    HelixManager manager = mock(HelixManager.class);
+    when(manager.getClusterName()).thenReturn("testCluster");
+    when(manager.getInstanceName()).thenReturn("controller0");
+    HelixDataAccessor accessor = mock(HelixDataAccessor.class);
+    when(manager.getHelixDataAccessor()).thenReturn(accessor);
+
+    // INIT with 3 instances - all deferred, _lastSeen populated.
+    List<LiveInstance> liveInstances = createMockLiveInstances(3);
+    NotificationContext initContext = new NotificationContext(manager);
+    initContext.setType(NotificationContext.Type.INIT);
+    controller.checkLiveInstancesObservation(liveInstances, initContext);
+    controller.takePendingInstanceListeners(); // pretend the async registration ran
+
+    // A CALLBACK with the SAME instances registers nothing new - they are already in _lastSeen.
+    NotificationContext cb1 = new NotificationContext(manager);
+    cb1.setType(NotificationContext.Type.CALLBACK);
+    controller.checkLiveInstancesObservation(liveInstances, cb1);
+    verify(manager, never()).addCurrentStateChangeListener(
+        org.mockito.ArgumentMatchers.any(
+            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+        org.mockito.ArgumentMatchers.eq("instance1"),
+        org.mockito.ArgumentMatchers.eq("session1"));
+
+    // Simulate that registration for instance1/session1 failed: forget it.
+    controller.forgetSessionForReregistration("session1");
+    controller.forgetInstanceForReregistration("instance1");
+
+    // The next CALLBACK with the same instances must now re-register ONLY instance1/session1.
+    NotificationContext cb2 = new NotificationContext(manager);
+    cb2.setType(NotificationContext.Type.CALLBACK);
+    controller.checkLiveInstancesObservation(liveInstances, cb2);
+
+    verify(manager).addCurrentStateChangeListener(
+        org.mockito.ArgumentMatchers.any(
+            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+        org.mockito.ArgumentMatchers.eq("instance1"),
+        org.mockito.ArgumentMatchers.eq("session1"));
+    verify(manager).addTaskCurrentStateChangeListener(
+        org.mockito.ArgumentMatchers.any(
+            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+        org.mockito.ArgumentMatchers.eq("instance1"),
+        org.mockito.ArgumentMatchers.eq("session1"));
+    verify(manager).addMessageListener(
+        org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
+        org.mockito.ArgumentMatchers.eq("instance1"));
+    // A different instance that did NOT fail must not be re-registered.
+    verify(manager, never()).addCurrentStateChangeListener(
+        org.mockito.ArgumentMatchers.any(
+            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+        org.mockito.ArgumentMatchers.eq("instance0"),
+        org.mockito.ArgumentMatchers.eq("session0"));
+  }
 }
