@@ -304,6 +304,7 @@ public class ResourceAccessor extends AbstractHelixResource {
         }
 
         ResourceConfig proposedResourceConfig = new ResourceConfig(resourceConfigRecord);
+        IdealState proposedIdealState = new IdealState(idealStateRecord);
 
         // Guard rail: block (or simulate) adding a resource whose partition weight exceeds the
         // largest single instance's capacity in any dimension, which would make it permanently
@@ -311,6 +312,7 @@ public class ResourceAccessor extends AbstractHelixResource {
         GuardrailContext context = GuardrailContext.newBuilder(clusterId)
             .dataAccessor(getDataAccssor(clusterId))
             .proposedResourceConfig(proposedResourceConfig)
+            .proposedIdealState(proposedIdealState)
             .build();
         GuardrailPipeline pipeline =
             new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
@@ -321,8 +323,7 @@ public class ResourceAccessor extends AbstractHelixResource {
 
         // Add using HelixAdmin API
         try {
-          admin.addResourceWithWeight(clusterId, new IdealState(idealStateRecord),
-              proposedResourceConfig);
+          admin.addResourceWithWeight(clusterId, proposedIdealState, proposedResourceConfig);
         } catch (HelixException e) {
           String errMsg = String.format("Failed to add resource %s with weight in cluster %s!",
               idealStateRecord.getId(), clusterId);

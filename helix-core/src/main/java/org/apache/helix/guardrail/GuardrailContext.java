@@ -20,6 +20,7 @@
 package org.apache.helix.guardrail;
 
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 
 /**
@@ -29,21 +30,23 @@ import org.apache.helix.model.ResourceConfig;
  * cluster state ({@link ReadOnlyDataAccessor}) for the target cluster, and the target instance name
  * for instance-scoped operations. When rules need the actual object a mutation would write (rather
  * than only current cluster state read through the accessor), that <em>proposed</em> object is
- * supplied here as well; {@code proposedResourceConfig} is the first such field. New object types
- * (e.g. a proposed instance config) are added the same way, through the {@link Builder}, without
- * breaking existing rules.
+ * supplied here as well; {@code proposedResourceConfig} and {@code proposedIdealState} are the first
+ * such fields. New object types (e.g. a proposed instance config) are added the same way, through
+ * the {@link Builder}, without breaking existing rules.
  */
 public class GuardrailContext {
   private final String clusterName;
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
   private final ResourceConfig proposedResourceConfig;
+  private final IdealState proposedIdealState;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
+    this.proposedIdealState = builder.proposedIdealState;
   }
 
   public String getClusterName() {
@@ -68,6 +71,18 @@ public class GuardrailContext {
     return proposedResourceConfig;
   }
 
+  /**
+   * The ideal state a mutation proposes to write, or {@code null} if the operation is not
+   * resource-scoped. Rules read the resource's structure (e.g. its partition count / names) from
+   * here rather than from ZK, since the object does not exist in ZK yet at pre-validation time. Note
+   * that a freshly-proposed ideal state has no computed assignment yet: its partition <em>count</em>
+   * ({@link IdealState#getNumPartitions()}) is set, but its per-partition preference lists are still
+   * empty, so {@link IdealState#getPartitionSet()} may be empty at this point.
+   */
+  public IdealState getProposedIdealState() {
+    return proposedIdealState;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -77,6 +92,7 @@ public class GuardrailContext {
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
     private ResourceConfig proposedResourceConfig;
+    private IdealState proposedIdealState;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -94,6 +110,11 @@ public class GuardrailContext {
 
     public Builder proposedResourceConfig(ResourceConfig proposedResourceConfig) {
       this.proposedResourceConfig = proposedResourceConfig;
+      return this;
+    }
+
+    public Builder proposedIdealState(IdealState proposedIdealState) {
+      this.proposedIdealState = proposedIdealState;
       return this;
     }
 

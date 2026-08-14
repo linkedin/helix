@@ -22,8 +22,10 @@ package org.apache.helix.guardrail.rules;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.PropertyKey;
 import org.apache.helix.guardrail.GuardrailContext;
@@ -32,6 +34,7 @@ import org.apache.helix.guardrail.ReadOnlyDataAccessor;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 
@@ -52,6 +55,15 @@ import org.apache.helix.model.ResourceConfig;
  * independently against the best instance in that dimension. It is deliberately conservative so it
  * never blocks a resource that could plausibly be placed &mdash; it only fails the cases that are
  * provably impossible.
+ * <p>
+ * Only weights for the resource's <em>real</em> partitions are evaluated. A resource's
+ * {@code PARTITION_CAPACITY_MAP} is operator-supplied and may carry stale or mistyped entries naming
+ * partitions the resource does not actually have (e.g. leftovers after lowering
+ * {@code NUM_PARTITIONS}). WAGED ignores such ghost entries at placement time and
+ * {@code ZKHelixAdmin.validateWeightForResourceConfig} tolerates them on the write path, so this
+ * rule skips any weight-map key that is neither {@code DEFAULT} nor a real partition of the proposed
+ * ideal state &mdash; blocking on a partition that will never exist would be a false positive
+ * stricter than the operation it fronts.
  */
 public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "PARTITION_WEIGHT_EXCEEDS_INSTANCE_CAPACITY";
@@ -123,8 +135,20 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
     }
 
     Map<String, Integer> defaultPartitionWeight = clusterConfig.getDefaultPartitionWeightMap();
+    Set<String> realPartitions = realPartitionNames(context.getProposedIdealState());
     for (Map.Entry<String, Map<String, Integer>> partitionEntry : partitionCapacityMap.entrySet()) {
       String partitionName = partitionEntry.getKey();
+
+      // Skip weights for partitions this resource does not actually have. The capacity map is
+      // operator-supplied and can carry stale/typo'd entries; WAGED ignores them at placement time,
+      // so blocking on them would be a false positive stricter than the write path we front. When
+      // the real partition list is unknown (no proposed ideal state) we cannot tell ghosts apart,
+      // so every entry is evaluated as before.
+      if (!ResourceConfig.DEFAULT_PARTITION_KEY.equals(partitionName) && realPartitions != null
+          && !realPartitions.contains(partitionName)) {
+        continue;
+      }
+
       // Effective weight = cluster default weight overridden by this partition's explicit weight,
       // mirroring WagedValidationUtil#validateAndGetPartitionCapacity.
       Map<String, Integer> effectiveWeight = new HashMap<>(defaultPartitionWeight);
@@ -159,5 +183,33 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
     }
 
     return ValidationResult.feasible();
+  }
+
+  /**
+   * The names of the partitions the proposed resource actually has, or {@code null} if they cannot
+   * be determined (no proposed ideal state supplied).
+   * <p>
+   * A freshly-proposed WAGED ideal state carries {@code NUM_PARTITIONS} but no computed assignment,
+   * so its preference lists &mdash; and therefore {@link IdealState#getPartitionSet()} &mdash; are
+   * still empty at pre-validation time. When that is the case the names are reconstructed from the
+   * partition count using Helix's canonical {@code <resource>_<index>} scheme (the same naming the
+   * controller applies in {@code ResourceComputationStage}). If preference lists are already
+   * populated (e.g. a CUSTOMIZED ideal state), those partition names are used directly.
+   */
+  private static Set<String> realPartitionNames(IdealState idealState) {
+    if (idealState == null) {
+      return null;
+    }
+    Set<String> declaredPartitions = idealState.getPartitionSet();
+    if (declaredPartitions != null && !declaredPartitions.isEmpty()) {
+      return declaredPartitions;
+    }
+    int numPartitions = idealState.getNumPartitions();
+    String resourceName = idealState.getResourceName();
+    Set<String> partitionNames = new HashSet<>();
+    for (int i = 0; i < numPartitions; i++) {
+      partitionNames.add(resourceName + "_" + i);
+    }
+    return partitionNames;
   }
 }

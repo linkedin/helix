@@ -32,6 +32,7 @@ import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
@@ -44,7 +45,7 @@ import static org.mockito.Mockito.when;
 /**
  * Unit tests for {@link PartitionWeightCapacityGuardrailRule}. Cluster state (cluster config +
  * instance configs) is supplied through a mocked {@link HelixDataAccessor}; the proposed resource
- * config is passed directly through the {@link GuardrailContext}.
+ * config and ideal state are passed directly through the {@link GuardrailContext}.
  */
 public class TestPartitionWeightCapacityGuardrailRule {
   private static final String CLUSTER = "testCluster";
@@ -174,11 +175,63 @@ public class TestPartitionWeightCapacityGuardrailRule {
     Assert.assertTrue(result.isFeasible());
   }
 
+  @Test
+  public void testGhostPartitionKeyIsIgnored() throws IOException {
+    // The capacity map names a partition (testResource_99999) the resource does not have: only _0
+    // and _1 are real. WAGED ignores such stale/typo'd entries at placement time, so this rule must
+    // too, even though the ghost's weight (1000) far exceeds the largest instance capacity (100).
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 50),
+        RESOURCE + "_99999", ImmutableMap.of("FOO", 1000)));
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig, 2));
+
+    Assert.assertTrue(result.isFeasible());
+    Assert.assertTrue(result.getViolations().isEmpty());
+  }
+
+  @Test
+  public void testRealPartitionStillFlaggedAlongsideGhost() throws IOException {
+    // Skipping ghosts must not mask a genuinely unplaceable real partition: testResource_99999 is
+    // ignored, but the real testResource_1 override (999 > 100) is still caught.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 50),
+        RESOURCE + "_99999", ImmutableMap.of("FOO", 1000),
+        RESOURCE + "_1", ImmutableMap.of("FOO", 999)));
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig, 2));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), PartitionWeightCapacityGuardrailRule.RULE_ID);
+    Assert.assertEquals(violation.getPartitionName(), RESOURCE + "_1");
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
+    // Default to a single-partition resource so the canonical testResource_0 partition is real.
+    return contextWith(dataAccessor, proposedResourceConfig, 1);
+  }
+
+  private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
+      ResourceConfig proposedResourceConfig, int numPartitions) {
+    // Mirror a freshly-proposed WAGED ideal state: partition count is set but the assignment (and
+    // thus getPartitionSet()) is still empty, so the rule reconstructs names from numPartitions.
+    IdealState idealState = new IdealState(RESOURCE);
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setNumPartitions(numPartitions);
     return GuardrailContext.newBuilder(CLUSTER)
         .dataAccessor(dataAccessor)
         .proposedResourceConfig(proposedResourceConfig)
+        .proposedIdealState(idealState)
         .build();
   }
 
