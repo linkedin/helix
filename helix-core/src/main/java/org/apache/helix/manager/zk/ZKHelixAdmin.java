@@ -1677,7 +1677,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       return false;
     }
     try {
-      createZKPaths(clusterName);
+      createZKPaths(clusterName, acl);
     } catch (Exception e) {
       logger.error("Error creating cluster:" + clusterName, e);
       return false;
@@ -1686,49 +1686,69 @@ public class ZKHelixAdmin implements HelixAdmin {
     return true;
   }
 
-  private void createZKPaths(String clusterName) {
+  private void createZKPaths(String clusterName, List<ACL> acl) {
     String path;
 
     // IDEAL STATE
-    _zkClient.createPersistent(PropertyPathBuilder.idealState(clusterName));
+    createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
-    _zkClient.createPersistent(path, true);
+    createPersistent(path, true, acl);
     _zkClient.writeData(path, new ZNRecord(clusterName));
     path = PropertyPathBuilder.instanceConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     path = PropertyPathBuilder.resourceConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     path = PropertyPathBuilder.customizedStateConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     // PROPERTY STORE
     path = PropertyPathBuilder.propertyStore(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     // LIVE INSTANCES
-    _zkClient.createPersistent(PropertyPathBuilder.liveInstance(clusterName));
+    createPersistent(PropertyPathBuilder.liveInstance(clusterName), false, acl);
     // MEMBER INSTANCES
-    _zkClient.createPersistent(PropertyPathBuilder.instance(clusterName));
+    createPersistent(PropertyPathBuilder.instance(clusterName), false, acl);
     // External view
-    _zkClient.createPersistent(PropertyPathBuilder.externalView(clusterName));
+    createPersistent(PropertyPathBuilder.externalView(clusterName), false, acl);
     // State model definition
-    _zkClient.createPersistent(PropertyPathBuilder.stateModelDef(clusterName));
+    createPersistent(PropertyPathBuilder.stateModelDef(clusterName), false, acl);
 
     // controller
-    _zkClient.createPersistent(PropertyPathBuilder.controller(clusterName));
+    createPersistent(PropertyPathBuilder.controller(clusterName), false, acl);
     path = PropertyPathBuilder.controllerHistory(clusterName);
     final ZNRecord emptyHistory = new ZNRecord(PropertyType.HISTORY.toString());
     final List<String> emptyList = new ArrayList<String>();
     emptyHistory.setListField(clusterName, emptyList);
-    _zkClient.createPersistent(path, emptyHistory);
+    createPersistent(path, emptyHistory, acl);
 
     path = PropertyPathBuilder.controllerMessage(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
 
     path = PropertyPathBuilder.controllerStatusUpdate(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
 
     path = PropertyPathBuilder.controllerError(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
+  }
+
+  /**
+   * Creates a persistent node, applying the given ACL when one is supplied. A null or empty ACL
+   * falls back to the ZkClient default, preserving the behavior of clusters created without ACLs.
+   */
+  private void createPersistent(String path, boolean createParents, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      _zkClient.createPersistent(path, createParents);
+    } else {
+      _zkClient.createPersistent(path, createParents, acl);
+    }
+  }
+
+  private void createPersistent(String path, Object data, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      _zkClient.createPersistent(path, data);
+    } else {
+      _zkClient.createPersistent(path, data, acl);
+    }
   }
 
   @Override

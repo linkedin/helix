@@ -386,11 +386,30 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     // cluster config content is still written after the root is created with the custom ACL
     Assert.assertNotNull(_gZkClient.readData(PropertyPathBuilder.clusterConfig(clusterName), true));
 
-    // ZooKeeper does not propagate ACLs to children, so nodes below the root keep the ZkClient
-    // default ACL. This documents the boundary of what the ACL argument protects.
-    Assert.assertEquals(getAcl(PropertyPathBuilder.idealState(clusterName)),
-        ZooDefs.Ids.OPEN_ACL_UNSAFE);
-    Assert.assertEquals(getAcl(PropertyPathBuilder.clusterConfig(clusterName)),
+    // every cluster metadata node created by addCluster carries the ACL as well. ZooKeeper has no
+    // ACL inheritance, so protecting only the root would leave all cluster data world writable.
+    for (String path : new String[] {
+        PropertyPathBuilder.idealState(clusterName), PropertyPathBuilder.clusterConfig(clusterName),
+        PropertyPathBuilder.instanceConfig(clusterName),
+        PropertyPathBuilder.resourceConfig(clusterName),
+        PropertyPathBuilder.customizedStateConfig(clusterName),
+        PropertyPathBuilder.propertyStore(clusterName),
+        PropertyPathBuilder.liveInstance(clusterName), PropertyPathBuilder.instance(clusterName),
+        PropertyPathBuilder.externalView(clusterName),
+        PropertyPathBuilder.stateModelDef(clusterName), PropertyPathBuilder.controller(clusterName),
+        PropertyPathBuilder.controllerHistory(clusterName),
+        PropertyPathBuilder.controllerMessage(clusterName),
+        PropertyPathBuilder.controllerStatusUpdate(clusterName),
+        PropertyPathBuilder.controllerError(clusterName)
+    }) {
+      Assert.assertEquals(getAcl(path), acl, "unexpected ACL on " + path);
+    }
+
+    // nodes created after addCluster returns are not covered, since they are created by other
+    // code paths that do not know about this ACL. This documents the boundary of the argument.
+    tool.addStateModelDef(clusterName, "MasterSlave", MasterSlaveSMD.build());
+    Assert.assertEquals(
+        getAcl(PropertyPathBuilder.stateModelDef(clusterName) + "/MasterSlave"),
         ZooDefs.Ids.OPEN_ACL_UNSAFE);
 
     deleteCluster(clusterName);
@@ -433,8 +452,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   /**
-   * Creates a cluster whose root is owned by a digest user and verifies, with a second client that
-   * does not present those credentials, what the root ACL actually protects.
+   * Creates a cluster owned by a digest user and verifies, with a second client that does not
+   * present those credentials, that both the root and the cluster metadata nodes below it are
+   * protected.
    */
   @Test
   public void testAddClusterAclEnforcement() throws Exception {
@@ -507,19 +527,37 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       Assert.assertTrue(authorizedClient.exists(rootPath));
       Assert.assertTrue(authorizedClient.exists(idealStatePath));
 
-      // However the nodes below the root were created with the default open ACL, so the same
-      // unauthorized session can still read and modify everything inside the cluster.
-      Assert.assertEquals(getAcl(unauthorizedClient, idealStatePath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+      // The nodes below the root carry the same ACL, so the unauthorized session cannot read or
+      // modify cluster data either. Without this, the root ACL would only protect the top level
+      // znodes while leaving every piece of cluster state world writable.
+      Assert.assertEquals(getAcl(rawZooKeeper(authorizedClient), idealStatePath), acl);
       String clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterName);
-      Assert.assertNotNull(unauthorizedClient.getData(clusterConfigPath, false, new Stat()),
-          "Cluster config is readable by an unauthorized session");
-      unauthorizedClient.setData(clusterConfigPath, new byte[0], -1);
-      String injectedIdealState = idealStatePath + "/injectedResource";
-      unauthorizedClient.create(injectedIdealState, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
-          CreateMode.PERSISTENT);
-      Assert.assertTrue(authorizedClient.exists(injectedIdealState),
-          "An unauthorized session was able to add a resource to the cluster");
-      unauthorizedClient.delete(injectedIdealState, -1);
+      try {
+        unauthorizedClient.getData(clusterConfigPath, false, new Stat());
+        Assert.fail("Expected reading the cluster config to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+      try {
+        unauthorizedClient.setData(clusterConfigPath, new byte[0], -1);
+        Assert.fail("Expected overwriting the cluster config to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+      try {
+        unauthorizedClient.create(idealStatePath + "/injectedResource", new byte[0],
+            ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        Assert.fail("Expected injecting a resource into the cluster to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+      // and it cannot hand itself permissions by rewriting a child ACL
+      try {
+        unauthorizedClient.setACL(idealStatePath, ZooDefs.Ids.OPEN_ACL_UNSAFE, -1);
+        Assert.fail("Expected rewriting the ACL of a cluster node to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
 
       // The owner of the root ACL can still tear the cluster down.
       authorizedClient.deleteRecursively(rootPath);

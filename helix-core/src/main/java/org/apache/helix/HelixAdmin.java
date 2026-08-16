@@ -112,15 +112,22 @@ public interface HelixAdmin {
   boolean addCluster(String clusterName, boolean recreateIfExists);
 
   /**
-   * Add a cluster whose root metadata store node is created with the given ACLs
+   * Add a cluster whose metadata store nodes are created with the given ACLs
    * @param clusterName
    * @param recreateIfExists If the cluster already exists, it will delete it and recreate
-   * @param acl ACLs applied to the cluster root node ("/{clusterName}"). If null or empty, the
-   *            default ACL of the underlying metadata store client is used, making this equivalent
-   *            to {@link #addCluster(String, boolean)}. Note that ZooKeeper does not propagate ACLs
-   *            to children, so the nodes created underneath the root keep the client default ACL.
-   *            The ACL is only applied when the root node is created by this call; the ACL of a
-   *            pre-existing cluster is left untouched unless recreateIfExists is true.
+   * @param acl ACLs applied to the cluster root node ("/{clusterName}") and to every cluster
+   *            metadata node created underneath it by this call. If null or empty, the default ACL
+   *            of the underlying metadata store client is used, making this equivalent to
+   *            {@link #addCluster(String, boolean)}. ZooKeeper does not propagate ACLs to children,
+   *            so nodes created after this call (resources, instances, live instances, ...) are
+   *            NOT covered and keep the client default ACL. The ACL is only applied when the nodes
+   *            are created by this call; the ACL of a pre-existing cluster is left untouched unless
+   *            recreateIfExists is true.
+   *            <p>
+   *            The supplied ACL must grant the calling client CREATE on the root, otherwise cluster
+   *            creation fails part way through and leaves an incomplete cluster behind. Deployments
+   *            running a server-side ACL provider that assigns ACLs on create may ignore this
+   *            argument entirely.
    * @return true if successfully created, or if cluster already exists
    * @throws UnsupportedOperationException if a non-empty ACL is supplied and the implementation
    *         does not support custom ACLs
