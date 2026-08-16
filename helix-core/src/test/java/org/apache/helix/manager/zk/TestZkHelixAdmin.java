@@ -106,6 +106,9 @@ import org.testng.annotations.Test;
 
 public class TestZkHelixAdmin extends ZkUnitTestBase {
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+  // ZooKeeper exposes scheme names only through AuthenticationProvider#getScheme, so there is no
+  // public constant to reuse here
+  private static final String DIGEST_SCHEME = "digest";
 
   @BeforeClass
   public void beforeClass() {
@@ -407,9 +410,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     // nodes created after addCluster returns are not covered, since they are created by other
     // code paths that do not know about this ACL. This documents the boundary of the argument.
-    tool.addStateModelDef(clusterName, "MasterSlave", MasterSlaveSMD.build());
+    tool.addStateModelDef(clusterName, MasterSlaveSMD.name, MasterSlaveSMD.build());
     Assert.assertEquals(
-        getAcl(PropertyPathBuilder.stateModelDef(clusterName) + "/MasterSlave"),
+        getAcl(PropertyPathBuilder.stateModelDef(clusterName) + "/" + MasterSlaveSMD.name),
         ZooDefs.Ids.OPEN_ACL_UNSAFE);
 
     deleteCluster(clusterName);
@@ -469,7 +472,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     // only the digest user gets full permissions on the cluster root
     List<ACL> acl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
-        new Id("digest", DigestAuthenticationProvider.generateDigest(owner + ":" + password))));
+        new Id(DIGEST_SCHEME, DigestAuthenticationProvider.generateDigest(owner + ":" + password))));
 
     HelixZkClient.ZkClientConfig clientConfig = new HelixZkClient.ZkClientConfig();
     clientConfig.setZkSerializer(new ZNRecordSerializer());
@@ -478,7 +481,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     ZooKeeper unauthorizedClient = null;
     try {
       ((org.apache.helix.zookeeper.zkclient.ZkClient) authorizedClient)
-          .addAuthInfo("digest", credentials);
+          .addAuthInfo(DIGEST_SCHEME, credentials);
       if (authorizedClient.exists(rootPath)) {
         authorizedClient.deleteRecursively(rootPath);
       }
