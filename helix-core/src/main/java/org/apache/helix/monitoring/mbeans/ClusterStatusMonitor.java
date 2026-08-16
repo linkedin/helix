@@ -341,6 +341,32 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
       Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
       Map<String, Long> errorPartitionCounts) {
+    setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet, disabledPartitions,
+        oldDisabledPartitions, tags, instanceMessageMap, instanceConfigMap, errorPartitionCounts,
+        null, null);
+  }
+
+  /**
+   * Update the gauges for all instances in the cluster, including the CurrentState-derived
+   * actual partition gauges.
+   * <p>
+   * The actual partition counts are applied in the same {@code _instanceMonitorMap} critical
+   * section that registers and unregisters the instance beans. Updating them separately would leave
+   * a window in which a bean is registered but its actual partition gauges have not been populated
+   * yet, so a live instance could briefly publish 0 for partitions it really holds.
+   * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
+   * @param actualPartitionCounts instance name to the number of partitions the instance actually
+   *          holds according to CurrentState, or null to leave the actual partition gauges
+   *          untouched
+   * @param actualTopStatePartitionCounts instance name to number of top-state partitions, or
+   *          null to leave the actual top-state partition gauges untouched
+   */
+  public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
+      Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
+      Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
+      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
+      Map<String, Long> errorPartitionCounts, Map<String, Long> actualPartitionCounts,
+      Map<String, Long> actualTopStatePartitionCounts) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -463,6 +489,24 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           } else {
             // If operation is not in the map (shouldn't happen), default to ENABLE
             _perOperationInstanceCount.get(InstanceConstants.InstanceOperation.ENABLE).incrementAndGet();
+          }
+        }
+      }
+
+      // Apply the CurrentState-derived actual partition gauges while still holding the lock,
+      // so that bean registration and gauge population are observed together. Registered instances
+      // absent from the supplied maps (for example, instances that are no longer live) are reset
+      // to 0 rather than left holding a stale value.
+      if (actualPartitionCounts != null || actualTopStatePartitionCounts != null) {
+        for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
+          String instanceName = entry.getKey();
+          InstanceMonitor bean = entry.getValue();
+          if (actualPartitionCounts != null) {
+            bean.updateActualPartitionCount(actualPartitionCounts.getOrDefault(instanceName, 0L));
+          }
+          if (actualTopStatePartitionCounts != null) {
+            bean.updateActualTopStatePartitionCount(
+                actualTopStatePartitionCounts.getOrDefault(instanceName, 0L));
           }
         }
       }
