@@ -631,6 +631,7 @@ public class TestResourceAccessor extends AbstractTestClass {
     String blockedResource = "guardrailBlockedWagedResource";
     String forcedResource = "guardrailForcedWagedResource";
     String validResource = "guardrailValidWagedResource";
+    String disabledResource = "guardrailDisabledWagedResource";
 
     try {
       // Declare two capacity dimensions and give every instance capacity 100 in each.
@@ -646,6 +647,19 @@ public class TestResourceAccessor extends AbstractTestClass {
       // FOO weight 1000 exceeds the largest instance's FOO capacity (100): permanently unplaceable.
       Map<String, Map<String, Integer>> overWeight = ImmutableMap.of(
           ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1000, "BAR", 100));
+
+      // 0) Opt-in: the guard rail is disabled by default, so an over-capacity resource is allowed
+      //    through and actually created even without force=true.
+      Response disabled = putWagedResource(disabledResource,
+          wagedResourceConfig(disabledResource, overWeight), Collections.emptyMap());
+      Assert.assertEquals(disabled.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(disabledResource));
+
+      // Enable the guard rail for the remainder of the test (opt-in per cluster).
+      clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      clusterConfig.setPartitionWeightGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
 
       // 1) Enforcement: blocked with 400 + verdict, and nothing written to ZK.
       Response blocked = putWagedResource(blockedResource,
@@ -686,15 +700,18 @@ public class TestResourceAccessor extends AbstractTestClass {
           .contains(validResource));
     } finally {
       // Drop any resources this test created (blockedResource was never created; ignore failures).
-      for (String resource : Arrays.asList(forcedResource, validResource, blockedResource)) {
+      for (String resource : Arrays.asList(forcedResource, validResource, disabledResource,
+          blockedResource)) {
         try {
           _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resource);
         } catch (Exception ignored) {
         }
       }
-      // Restore cluster + instance capacity configuration to its original values.
+      // Restore cluster + instance capacity configuration to its original values, and disable the
+      // opt-in guard rail again so it does not leak into other tests sharing this cluster.
       ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
       restore.setInstanceCapacityKeys(originalCapacityKeys);
+      restore.setPartitionWeightGuardrailEnabled(false);
       _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
       for (String instance : instances) {
         InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);

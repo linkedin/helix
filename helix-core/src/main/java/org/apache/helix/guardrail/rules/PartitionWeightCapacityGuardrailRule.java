@@ -75,6 +75,14 @@ import org.apache.helix.model.ResourceConfig;
  * rule skips any weight-map key that is neither {@code DEFAULT} nor a real partition of the proposed
  * ideal state &mdash; blocking on a partition that will never exist would be a false positive
  * stricter than the operation it fronts.
+ * <p>
+ * <b>Opt-in.</b> This guard rail runs only when the cluster explicitly enables it via
+ * {@link ClusterConfig#setPartitionWeightGuardrailEnabled(boolean)}; it is disabled by default. That
+ * makes turning it on a deliberate per-cluster decision and, just as importantly, gives operators a
+ * single-config-change kill switch: if the rule ever produces a false positive, disabling it via
+ * ClusterConfig immediately backs it out for every caller with no client change and no helix-rest
+ * redeploy. When the cluster has it disabled the rule returns feasible before reading any instance
+ * config, so a disabled cluster is never exposed to the fail-closed instance-config scan below.
  */
 public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "PARTITION_WEIGHT_EXCEEDS_INSTANCE_CAPACITY";
@@ -104,6 +112,14 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
     if (clusterConfig == null) {
       // No cluster config to interpret weights against; defer to downstream validation.
+      return ValidationResult.feasible();
+    }
+
+    if (!clusterConfig.isPartitionWeightGuardrailEnabled()) {
+      // Opt-in guard rail, disabled by default. Returning here (before the instance-config scan
+      // below) is also the kill switch: disabling the rule via ClusterConfig backs it out for every
+      // caller with a single config change, and a disabled cluster never runs the fail-closed
+      // instance-config read, so one unreadable znode cannot take addWagedResource down.
       return ValidationResult.feasible();
     }
 

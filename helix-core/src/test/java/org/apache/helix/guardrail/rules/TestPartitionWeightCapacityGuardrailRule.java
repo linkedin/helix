@@ -41,6 +41,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -100,6 +101,46 @@ public class TestPartitionWeightCapacityGuardrailRule {
     ValidationResult result = rule.validate(contextWith(dataAccessor,
         resourceConfig(ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY,
             ImmutableMap.of("FOO", 1000)))));
+    Assert.assertTrue(result.isFeasible());
+  }
+
+  @Test
+  public void testGuardrailDisabledByDefaultShortCircuits() throws IOException {
+    // The guard rail is opt-in: with the flag left unset (its default), an over-capacity weight that
+    // would otherwise be flagged is allowed through, AND the fail-closed instance-config scan is
+    // never performed. getChildValues is stubbed to throw so this test fails loudly if the
+    // short-circuit ever regresses and the rule reaches the scan on a disabled cluster.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    // Flag intentionally left unset -> defaults to false.
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+    doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    doThrow(new RuntimeException("instance-config scan must not run when the guard rail is disabled"))
+        .when(dataAccessor).getChildValues(BUILDER.instanceConfigs(), true);
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor,
+        resourceConfig(ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY,
+            ImmutableMap.of("FOO", 5000)))));
+    Assert.assertTrue(result.isFeasible());
+  }
+
+  @Test
+  public void testGuardrailExplicitlyDisabledAllowsOverCapacity() throws IOException {
+    // Explicitly setting the flag to false is equivalent to leaving it unset: an over-capacity
+    // weight that the enabled rule would flag is allowed through.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    clusterConfig.setPartitionWeightGuardrailEnabled(false);
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+    doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    doReturn(ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))))
+        .when(dataAccessor).getChildValues(BUILDER.instanceConfigs(), true);
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor,
+        resourceConfig(ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY,
+            ImmutableMap.of("FOO", 5000)))));
     Assert.assertTrue(result.isFeasible());
   }
 
@@ -394,6 +435,11 @@ public class TestPartitionWeightCapacityGuardrailRule {
 
   private HelixDataAccessor mockAccessor(ClusterConfig clusterConfig,
       List<InstanceConfig> instanceConfigs) {
+    // The guard rail is opt-in (disabled by default) on a real cluster, but these unit tests exist
+    // to exercise its enforcement, which only runs when enabled. Enable it here so each enforcement
+    // test does not have to repeat it; the disabled-cluster behavior is covered explicitly by the
+    // testGuardrail*Disabled* cases, which build their accessor without this helper.
+    clusterConfig.setPartitionWeightGuardrailEnabled(true);
     HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
     when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
     doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
