@@ -507,6 +507,9 @@ public abstract class AbstractTaskDispatcher {
     _clusterStatusMonitor.updateJobCounters(jobCfg, TaskState.TIMED_OUT);
     _rebalanceScheduler.removeScheduledRebalance(jobResource);
     TaskUtil.cleanupJobIdealStateExtView(_manager.getHelixDataAccessor(), jobResource);
+    // Aggregate the terminal state of every task into a job-level summary (computed after INIT
+    // tasks are marked TASK_ABORTED above so the counts reflect the final states).
+    jobCtx.updateTaskStatusSummary();
     // New pipeline trigger for workflow status update
     // TODO: Enhance the pipeline and remove this because this operation is expansive
     RebalanceUtil.scheduleOnDemandPipeline(_manager.getClusterName(),0L,false);
@@ -529,6 +532,10 @@ public abstract class AbstractTaskDispatcher {
     // New pipeline trigger for workflow status update
     // TODO: Enhance the pipeline and remove this because this operation is expansive
     RebalanceUtil.scheduleOnDemandPipeline(_manager.getClusterName(),0L,false);
+
+    // Aggregate the terminal state of every task into a job-level summary (computed after INIT
+    // tasks are marked TASK_ABORTED above so the counts reflect the final states).
+    jobContext.updateTaskStatusSummary();
   }
 
   // Compute real assignment from theoretical calculation with applied throttling
@@ -935,6 +942,10 @@ public abstract class AbstractTaskDispatcher {
       reportControllerInducedDelay(dataProvider, _clusterStatusMonitor, workflowConfig, jobConfig,
           currentTime);
     }
+
+    // Aggregate the terminal state of every task into a job-level summary so that partial failures
+    // remain visible even though the job itself is COMPLETED (e.g. FailureThreshold set high).
+    jobContext.updateTaskStatusSummary();
   }
 
   protected void markJobFailed(String jobName, JobContext jobContext, WorkflowConfig workflowConfig,
