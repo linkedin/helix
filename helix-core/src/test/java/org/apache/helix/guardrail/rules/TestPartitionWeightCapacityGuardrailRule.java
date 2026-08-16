@@ -21,6 +21,7 @@ package org.apache.helix.guardrail.rules;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -283,6 +284,83 @@ public class TestPartitionWeightCapacityGuardrailRule {
     Assert.assertFalse(result.getViolations().get(0).getMessage().contains("force"));
   }
 
+  @Test
+  public void testCustomizedIdealStatePartitionsUsedDirectly() throws IOException {
+    // A CUSTOMIZED ideal state already carries its partitions (in its map fields), so
+    // getPartitionSet() is non-empty and realPartitionNames returns those names directly rather than
+    // reconstructing <resource>_<index> from the partition count. A weight on one of those real
+    // partitions is evaluated, while a canonical-scheme name that is NOT among them is a ghost.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    IdealState idealState = new IdealState(RESOURCE);
+    idealState.setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
+    idealState.setPartitionState("realPartition", "instance0", "MASTER");
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1),
+        "realPartition", ImmutableMap.of("FOO", 5000),
+        RESOURCE + "_0", ImmutableMap.of("FOO", 5000)));
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig, idealState));
+
+    // Only the real (declared) partition is reported; RESOURCE_0 is a ghost under this ideal state.
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Assert.assertEquals(result.getViolations().get(0).getPartitionName(), "realPartition");
+  }
+
+  @Test
+  public void testZeroPartitionsSkipsAllExplicitWeights() throws IOException {
+    // NUM_PARTITIONS=0 with an empty assignment reconstructs an empty partition set, so every
+    // explicit per-partition weight names a partition the resource does not have and is skipped as a
+    // ghost. The verdict is feasible even though the weight would exceed capacity for a real
+    // partition.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ResourceConfig resourceConfig = resourceConfig(ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1),
+        RESOURCE + "_0", ImmutableMap.of("FOO", 5000)));
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig, 0));
+    Assert.assertTrue(result.isFeasible());
+  }
+
+  @Test
+  public void testViolationsCappedWithSuppressedCount() throws IOException {
+    // A resource that breaches capacity on many partitions at once must not enumerate every
+    // violation; the list is capped and a trailing summary records how many were omitted.
+    int partitionCount = 150;
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    Map<String, Map<String, Integer>> weights = new HashMap<>();
+    weights.put(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1));
+    for (int i = 0; i < partitionCount; i++) {
+      weights.put(RESOURCE + "_" + i, ImmutableMap.of("FOO", 5000));
+    }
+    ResourceConfig resourceConfig = resourceConfig(weights);
+
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, resourceConfig, partitionCount));
+
+    Assert.assertFalse(result.isFeasible());
+    // 100 enumerated violations plus a single trailing summary entry.
+    Assert.assertEquals(result.getViolations().size(), 101);
+    Violation summary = result.getViolations().get(result.getViolations().size() - 1);
+    Assert.assertTrue(summary.getMessage().contains("150"));
+    Assert.assertTrue(summary.getMessage().contains("omitted"));
+    // The summary is not scoped to any single partition.
+    Assert.assertNull(summary.getPartitionName());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     // Default to a single-partition resource so the canonical testResource_0 partition is real.
@@ -300,6 +378,17 @@ public class TestPartitionWeightCapacityGuardrailRule {
         .dataAccessor(dataAccessor)
         .proposedResourceConfig(proposedResourceConfig)
         .proposedIdealState(idealState)
+        .build();
+  }
+
+  private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
+      ResourceConfig proposedResourceConfig, IdealState proposedIdealState) {
+    // Use a caller-supplied ideal state (e.g. a CUSTOMIZED one with an already-populated partition
+    // set) instead of one reconstructed from a partition count.
+    return GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .proposedResourceConfig(proposedResourceConfig)
+        .proposedIdealState(proposedIdealState)
         .build();
   }
 

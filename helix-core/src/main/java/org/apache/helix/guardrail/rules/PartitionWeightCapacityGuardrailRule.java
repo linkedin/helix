@@ -79,6 +79,13 @@ import org.apache.helix.model.ResourceConfig;
 public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "PARTITION_WEIGHT_EXCEEDS_INSTANCE_CAPACITY";
 
+  // Upper bound on the number of individual weight violations enumerated in a single verdict. A
+  // resource that sets explicit per-partition weights can breach capacity on every partition and
+  // dimension at once (e.g. a 10k-partition, 3-dimension resource is ~30k violations), which would
+  // otherwise produce a multi-megabyte 400 response. Beyond this cap the extra violations are
+  // summarized in a single trailing entry that records how many were omitted.
+  private static final int MAX_REPORTED_VIOLATIONS = 100;
+
   @Override
   public String getId() {
     return RULE_ID;
@@ -173,6 +180,7 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
             .thenComparing(Comparator.<String>naturalOrder()));
 
     List<Violation> violations = new ArrayList<>();
+    int totalViolations = 0;
     for (String partitionName : orderedPartitions) {
       // Skip weights for partitions this resource does not actually have. The capacity map is
       // operator-supplied and can carry stale/typo'd entries; WAGED ignores them at placement time,
@@ -202,16 +210,27 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
         }
         Integer maxCapacity = maxInstanceCapacity.get(dimension);
         if (maxCapacity == null) {
-          // No assignable instance advertises capacity for this dimension. That is an instance-side
-          // misconfiguration (a cluster-declared capacity key missing from the instances), which
-          // WagedValidationUtil#validateAndGetInstanceCapacity already reports against the instances.
-          // Treating the absent dimension as capacity 0 here would blame the resource author for an
-          // instance problem and tell them to lower a weight that cannot go below 0. It is also
-          // inconsistent with the weight == null skip above, where missing key coverage is likewise
-          // deferred to that separate validation. So skip this dimension rather than over-block.
+          // No assignable instance advertises capacity for this dimension: a cluster-declared
+          // capacity key that is missing from every instance. This is an instance-side
+          // misconfiguration, not a fault of the resource being added, so we deliberately skip it
+          // rather than fail the add. Treating the absent dimension as capacity 0 would blame the
+          // resource author and tell them to lower a weight that cannot go below 0, and in this
+          // state every WAGED resource is already unplaceable, not just this one.
+          //
+          // This gap is intentionally left uncovered here: nothing on the addResourceWithWeight
+          // path validates instance-side capacity coverage. WagedValidationUtil#
+          // validateAndGetInstanceCapacity runs only inside the rebalancer and from the separate
+          // validateInstancesForWagedRebalance admin call, neither of which is on this path, so such
+          // a resource is accepted at add time and only surfaces later as a WAGED placement failure.
           continue;
         }
         if (weight > maxCapacity) {
+          totalViolations++;
+          // Enumerate at most MAX_REPORTED_VIOLATIONS; any overflow is summarized after the loop so
+          // a pathological resource cannot return a multi-megabyte body.
+          if (violations.size() >= MAX_REPORTED_VIOLATIONS) {
+            continue;
+          }
           // DEFAULT_PARTITION_KEY is a placeholder for "every partition", not a real partition, so
           // report it as unscoped for a clearer message.
           String reportedPartition =
@@ -232,7 +251,23 @@ public class PartitionWeightCapacityGuardrailRule implements GuardrailRule {
       }
     }
 
-    return violations.isEmpty() ? ValidationResult.feasible() : ValidationResult.of(violations);
+    if (violations.isEmpty()) {
+      return ValidationResult.feasible();
+    }
+    if (totalViolations > violations.size()) {
+      // More partitions/dimensions breached capacity than we enumerated. Record the overflow so the
+      // caller knows the list is truncated and by how much, instead of silently dropping them.
+      int reported = violations.size();
+      violations.add(Violation.newBuilder(RULE_ID)
+          .resource(proposedResourceConfig.getResourceName())
+          .message(String.format(
+              "Showing the first %d of %d partition-weight violations; %d were omitted to bound the "
+                  + "response size. The omitted violations are further partitions breaching the same "
+                  + "dimension(s); fix the reported dimensions and resubmit.",
+              reported, totalViolations, totalViolations - reported))
+          .build());
+    }
+    return ValidationResult.of(violations);
   }
 
   /**
