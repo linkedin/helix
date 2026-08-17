@@ -97,4 +97,8 @@ public class SystemPropertyKeys {
 
   // Stage thread pool size for parallel stage execution
   public static final String STAGE_THREAD_POOL_SIZE = "helix.stage.threadpool.size";
+
+  // Thread-pool parallelism for registering deferred per-instance listeners during controller
+  // leadership acquisition
+  public static final String INIT_HANDLERS_PARALLELISM = "helix.manager.initHandlers.parallelism";
 }

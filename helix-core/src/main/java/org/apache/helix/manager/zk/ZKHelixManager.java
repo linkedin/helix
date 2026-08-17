@@ -1195,11 +1195,13 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         + ", instanceTye: " + _instanceType + ", cluster: " + _clusterName);
   }
 
-  // Per-instance listener registration does one ZK roundtrip per handler. The pool is
-  // capped at 10: all threads share one ZkClient (one ZK connection, no new connections),
-  // so this bounds concurrent in-flight requests on the shared ZK ensemble, which matters
-  // when many controllers acquire leadership at the same time.
-  private static final int INIT_HANDLERS_PARALLELISM = 10;
+  // Per-instance listener registration does one ZK roundtrip per handler. All threads share one
+  // ZkClient (one ZK connection, no new connections), so this bounds concurrent in-flight requests
+  // on the shared ZK ensemble, which matters when many controllers acquire leadership at the same
+  // time. Read from the JVM system property so it can be tuned per deployment without a code change;
+  // defaults to 10 (and falls back to 10 on a missing/invalid/non-positive value).
+  private static final int INIT_HANDLERS_PARALLELISM =
+      HelixUtil.getSystemPropertyAsInt(SystemPropertyKeys.INIT_HANDLERS_PARALLELISM, 10);
 
   // A single reused daemon thread that runs the deferred per-instance registration off the
   // leadership-acquisition (CallbackHandler.invoke) thread. Reused - rather than a fresh Thread
