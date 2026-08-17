@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -47,6 +48,9 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -240,13 +244,25 @@ public class ResourceAccessor extends AbstractHelixResource {
       @DefaultValue("DEFAULT") @QueryParam("rebalanceStrategy") String rebalanceStrategy,
       @DefaultValue("0") @QueryParam("bucketSize") int bucketSize,
       @DefaultValue("-1") @QueryParam("maxPartitionsPerInstance") int maxPartitionsPerInstance,
-      @DefaultValue("addResource") @QueryParam("command") String command, String content) {
+      @DefaultValue("addResource") @QueryParam("command") String command,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     // Get the command. If not provided, the default would be "addResource"
     Command cmd;
     try {
       cmd = Command.valueOf(command);
     } catch (Exception e) {
       return badRequest("Invalid command : " + command);
+    }
+    // force and dryRun are only honored by commands that run a guard rail pipeline (currently only
+    // addWagedResource). For any other command they are silently ignored and, worse, dryRun=true on
+    // a plain addResource would still perform a real write — the opposite of a simulation. Reject
+    // them up front for unsupported commands so callers are never misled into thinking a mutation
+    // was simulated or its violations overridden.
+    if ((force || dryRun) && cmd != Command.addWagedResource) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'addWagedResource' command, "
+              + "not '%s'.", command));
     }
     HelixAdmin admin = getHelixAdmin();
     try {
@@ -296,10 +312,38 @@ public class ResourceAccessor extends AbstractHelixResource {
           _logger.error("Input does not contain both IdealState and ResourceConfig!");
           return badRequest("Input does not contain both IdealState and ResourceConfig!");
         }
+
+        ResourceConfig proposedResourceConfig = new ResourceConfig(resourceConfigRecord);
+        IdealState proposedIdealState = new IdealState(idealStateRecord);
+
+        // Cheap, local structural validation before any ZK-backed guard rail work. Running it here
+        // means these failures are reflected by a dry-run (instead of a misleading feasible verdict)
+        // and are caught before the guard rail's instance-config scan, so a structurally invalid
+        // request never reaches ZooKeeper.
+        Optional<Response> structuralError =
+            validateWagedResourceStructure(proposedIdealState, proposedResourceConfig);
+        if (structuralError.isPresent()) {
+          return structuralError.get();
+        }
+
+        // Guard rail: block (or simulate) adding a resource whose partition weight exceeds the
+        // largest single instance's capacity in any dimension, which would make it permanently
+        // unplaceable. force=true overrides; dryRun=true only reports the verdict without writing.
+        GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(getDataAccssor(clusterId))
+            .proposedResourceConfig(proposedResourceConfig)
+            .proposedIdealState(proposedIdealState)
+            .build();
+        GuardrailPipeline pipeline =
+            new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
+        Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
+
         // Add using HelixAdmin API
         try {
-          admin.addResourceWithWeight(clusterId, new IdealState(idealStateRecord),
-              new ResourceConfig(resourceConfigRecord));
+          admin.addResourceWithWeight(clusterId, proposedIdealState, proposedResourceConfig);
         } catch (HelixException e) {
           String errMsg = String.format("Failed to add resource %s with weight in cluster %s!",
               idealStateRecord.getId(), clusterId);
@@ -316,6 +360,49 @@ public class ResourceAccessor extends AbstractHelixResource {
       return serverError(e);
     }
     return OK();
+  }
+
+  /**
+   * Cheap, local (no ZooKeeper) structural checks for an addWagedResource request. Returns a
+   * {@code 400} response if the request is malformed, or {@link Optional#empty()} if it is
+   * structurally sound. These are validated before the guard rail pipeline so that a dry-run
+   * reflects them and a structurally invalid request never triggers the guard rail's instance-config
+   * read.
+   */
+  private Optional<Response> validateWagedResourceStructure(IdealState idealState,
+      ResourceConfig resourceConfig) {
+    // IdealState and ResourceConfig must describe the same resource. addResourceWithWeight enforces
+    // this on the write path, but checking here means a dry-run reports it instead of returning a
+    // feasible verdict for a request that would then fail for real.
+    if (!idealState.getResourceName().equals(resourceConfig.getResourceName())) {
+      return Optional.of(badRequest(String.format(
+          "Resource names in IdealState (%s) and ResourceConfig (%s) are different!",
+          idealState.getResourceName(), resourceConfig.getResourceName())));
+    }
+
+    // Partition weights must be non-negative. ResourceConfig#setPartitionCapacityMap rejects
+    // negatives, but this endpoint constructs the ResourceConfig straight from a raw ZNRecord and
+    // bypasses that setter, so a negative weight would otherwise slip through (the guard rail's
+    // "weight > capacity" check does not catch it either). Validate it explicitly.
+    Map<String, Map<String, Integer>> partitionCapacityMap;
+    try {
+      partitionCapacityMap = resourceConfig.getPartitionCapacityMap();
+    } catch (IOException e) {
+      return Optional.of(badRequest(String.format(
+          "Could not parse partition weight map for resource %s: %s",
+          resourceConfig.getResourceName(), e.getMessage())));
+    }
+    for (Map.Entry<String, Map<String, Integer>> partitionEntry : partitionCapacityMap.entrySet()) {
+      for (Map.Entry<String, Integer> dimensionEntry : partitionEntry.getValue().entrySet()) {
+        if (dimensionEntry.getValue() != null && dimensionEntry.getValue() < 0) {
+          return Optional.of(badRequest(String.format(
+              "Partition weight for resource %s, partition '%s', dimension '%s' is negative (%d); "
+                  + "weights must be non-negative.", resourceConfig.getResourceName(),
+              partitionEntry.getKey(), dimensionEntry.getKey(), dimensionEntry.getValue())));
+        }
+      }
+    }
+    return Optional.empty();
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)

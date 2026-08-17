@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -43,6 +44,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -602,6 +604,266 @@ public class TestResourceAccessor extends AbstractTestClass {
     put("clusters/" + CLUSTER_NAME + "/resources/" + invalidResourceName,
         ImmutableMap.of("command", "addWagedResource"), entity,
         Response.Status.BAD_REQUEST.getStatusCode());
+  }
+
+  /**
+   * Guard rail: adding a WAGED resource whose partition weight exceeds the largest single instance's
+   * capacity in any dimension is rejected before the resource is written to ZooKeeper, because such
+   * a resource is permanently unplaceable. Verifies enforcement (400 + verdict), dry-run (200 +
+   * verdict, no write), force bypass (created), and the within-capacity happy path (created). The
+   * cluster/instance capacity configuration is saved and restored so this test does not perturb the
+   * other resource tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testAddWagedResourceWeightGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    String blockedResource = "guardrailBlockedWagedResource";
+    String forcedResource = "guardrailForcedWagedResource";
+    String validResource = "guardrailValidWagedResource";
+    String disabledResource = "guardrailDisabledWagedResource";
+
+    try {
+      // Declare two capacity dimensions and give every instance capacity 100 in each.
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      Map<String, Integer> instanceCapacity = ImmutableMap.of("FOO", 100, "BAR", 100);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instanceCapacity);
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // FOO weight 1000 exceeds the largest instance's FOO capacity (100): permanently unplaceable.
+      Map<String, Map<String, Integer>> overWeight = ImmutableMap.of(
+          ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1000, "BAR", 100));
+
+      // 0) Opt-in: the guard rail is disabled by default, so an over-capacity resource is allowed
+      //    through and actually created even without force=true.
+      Response disabled = putWagedResource(disabledResource,
+          wagedResourceConfig(disabledResource, overWeight), Collections.emptyMap());
+      Assert.assertEquals(disabled.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(disabledResource));
+
+      // Enable the guard rail for the remainder of the test (opt-in per cluster).
+      clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      clusterConfig.setPartitionWeightGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+      // 1) Enforcement: blocked with 400 + verdict, and nothing written to ZK.
+      Response blocked = putWagedResource(blockedResource,
+          wagedResourceConfig(blockedResource, overWeight), Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(PartitionWeightCapacityGuardrailRule.RULE_ID));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+
+      // 2) Dry-run: always 200 with the same infeasible verdict, and still nothing written.
+      Response dryRun = putWagedResource(blockedResource,
+          wagedResourceConfig(blockedResource, overWeight), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(PartitionWeightCapacityGuardrailRule.RULE_ID));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+
+      // 3) force=true bypasses the guard rail: the over-weight resource is actually created.
+      Response forced = putWagedResource(forcedResource,
+          wagedResourceConfig(forcedResource, overWeight), ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(forcedResource));
+
+      // 4) A resource within capacity passes the guard rail and is created normally.
+      Map<String, Map<String, Integer>> withinCapacity = ImmutableMap.of(
+          ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 100, "BAR", 100));
+      Response valid = putWagedResource(validResource,
+          wagedResourceConfig(validResource, withinCapacity), Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(validResource));
+    } finally {
+      // Drop any resources this test created (blockedResource was never created; ignore failures).
+      for (String resource : Arrays.asList(forcedResource, validResource, disabledResource,
+          blockedResource)) {
+        try {
+          _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resource);
+        } catch (Exception ignored) {
+        }
+      }
+      // Restore cluster + instance capacity configuration to its original values, and disable the
+      // opt-in guard rail again so it does not leak into other tests sharing this cluster.
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      restore.setPartitionWeightGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * force/dryRun are only meaningful for the addWagedResource command, which is the only one that
+   * runs a guard rail pipeline. On any other command they were silently ignored, so dryRun=true on a
+   * plain addResource still performed a real write. They must now be rejected with 400 and create
+   * nothing.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testDryRunAndForceRejectedForNonWagedCommand() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String dryRunResource = "dryRunRejectedResource";
+    put("clusters/" + CLUSTER_NAME + "/resources/" + dryRunResource,
+        ImmutableMap.of("command", "addResource", "numPartitions", "1", "stateModelRef",
+            "OnlineOffline", "dryRun", "true"),
+        Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+        .contains(dryRunResource));
+
+    String forceResource = "forceRejectedResource";
+    put("clusters/" + CLUSTER_NAME + "/resources/" + forceResource,
+        ImmutableMap.of("command", "addResource", "numPartitions", "1", "stateModelRef",
+            "OnlineOffline", "force", "true"),
+        Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+        .contains(forceResource));
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private Response putWagedResource(String resourceName, ResourceConfig resourceConfig,
+      Map<String, Object> flags) throws IOException {
+    IdealState idealState = new IdealState(resourceName);
+    idealState.getRecord().getSimpleFields().putAll(_gSetupTool.getClusterManagementTool()
+        .getResourceIdealState(CLUSTER_NAME, RESOURCE_NAME).getRecord().getSimpleFields());
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    idealState.setNumPartitions(1);
+
+    Map<String, ZNRecord> inputMap = ImmutableMap.of(
+        ResourceAccessor.ResourceProperties.idealState.name(), idealState.getRecord(),
+        ResourceAccessor.ResourceProperties.resourceConfig.name(), resourceConfig.getRecord());
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(inputMap), MediaType.APPLICATION_JSON_TYPE);
+
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/resources/" + resourceName)
+        .queryParam("command", "addWagedResource");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().put(entity);
+  }
+
+  private static ResourceConfig wagedResourceConfig(String resourceName,
+      Map<String, Map<String, Integer>> partitionWeights) throws IOException {
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    resourceConfig.setPartitionCapacityMap(partitionWeights);
+    return resourceConfig;
+  }
+
+  private static ResourceConfig rawWagedResourceConfig(String resourceName,
+      Map<String, Map<String, Integer>> partitionWeights) throws IOException {
+    // Build PARTITION_CAPACITY_MAP directly on the record, bypassing
+    // ResourceConfig#setPartitionCapacityMap so values it would reject (e.g. negatives) can be
+    // exercised through the raw-ZNRecord path the endpoint actually uses.
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    Map<String, String> rawCapacityRecord = new HashMap<>();
+    for (Map.Entry<String, Map<String, Integer>> entry : partitionWeights.entrySet()) {
+      rawCapacityRecord.put(entry.getKey(), OBJECT_MAPPER.writeValueAsString(entry.getValue()));
+    }
+    resourceConfig.getRecord().setMapField(
+        ResourceConfig.ResourceConfigProperty.PARTITION_CAPACITY_MAP.name(), rawCapacityRecord);
+    return resourceConfig;
+  }
+
+  /**
+   * Structural checks (IdealState/ResourceConfig name match, non-negative weights) run before the
+   * guard rail, so a dry-run reflects them and a structurally invalid request never reaches ZK.
+   * Capacity configuration is saved and restored so this test does not perturb the other resource
+   * tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testWagedStructuralChecksAppliedBeforeGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    String resourceName = "structuralCheckResource";
+    try {
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      Map<String, Integer> instanceCapacity = ImmutableMap.of("FOO", 100, "BAR", 100);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instanceCapacity);
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // 1) Name mismatch is a structural failure. Even a dry-run must report it (400) instead of
+      // returning a feasible verdict for a request that would then fail for real.
+      Map<String, Map<String, Integer>> withinCapacity = ImmutableMap.of(
+          ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 100, "BAR", 100));
+      Response mismatchDryRun = putWagedResource(resourceName,
+          wagedResourceConfig("someOtherName", withinCapacity), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(mismatchDryRun.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(resourceName));
+
+      // 2) Negative weights are rejected (400) even though they do not exceed capacity, and even
+      // though the endpoint builds the ResourceConfig from a raw ZNRecord that bypasses
+      // ResourceConfig#setPartitionCapacityMap's own negative check.
+      Response negative = putWagedResource(resourceName,
+          rawWagedResourceConfig(resourceName, ImmutableMap.of(
+              ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", -5, "BAR", 100))),
+          Collections.emptyMap());
+      Assert.assertEquals(negative.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(resourceName));
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resourceName);
+      } catch (Exception ignored) {
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test(dependsOnMethods = "testAddResourceWithWeight")

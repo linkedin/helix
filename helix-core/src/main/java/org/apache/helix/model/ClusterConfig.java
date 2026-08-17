@@ -130,6 +130,12 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_CAPACITY_MAP,
     // The default partition weights if no weight is configured in the Resource Config node.
     DEFAULT_PARTITION_WEIGHT_MAP,
+    // Opt-in toggle for the helix-rest PartitionWeightCapacityGuardrailRule, which pre-validates an
+    // addWagedResource request and rejects a resource whose partition weight exceeds the largest
+    // single instance capacity (making it permanently unplaceable). Disabled by default so enabling
+    // it is a deliberate per-cluster decision; it can be turned off again with a single ClusterConfig
+    // change (no client change or helix-rest redeploy) to back out a false positive.
+    PARTITION_WEIGHT_GUARDRAIL_ENABLED,
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
@@ -1190,6 +1196,31 @@ public class ClusterConfig extends HelixProperty {
   public void setDefaultPartitionWeightMap(Map<String, Integer> weightDataMap)
       throws IllegalArgumentException {
     setDefaultCapacityMap(ClusterConfigProperty.DEFAULT_PARTITION_WEIGHT_MAP, weightDataMap);
+  }
+
+  /**
+   * Whether the helix-rest partition-weight capacity guard rail is enabled for this cluster. When
+   * enabled, an addWagedResource request is pre-validated and rejected before any ZooKeeper write if
+   * a partition weight exceeds the largest single instance capacity in any dimension (which would
+   * make the resource permanently unplaceable and stall the WAGED global rebalance cluster-wide).
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without
+   * changing any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isPartitionWeightGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest partition-weight capacity guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setPartitionWeightGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), enabled);
   }
 
   private Map<String, Integer> getDefaultCapacityMap(ClusterConfigProperty capacityPropertyType) {
