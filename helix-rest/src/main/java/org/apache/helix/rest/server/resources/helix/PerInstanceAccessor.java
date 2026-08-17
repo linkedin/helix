@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -776,8 +777,12 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
 
-    List<String> resources =
-        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId));
+    // getChildNames() returns an immutable Collections.emptyList() when the znode is absent, so the
+    // result must be copied into a mutable list before addAll() below. Without the copy, an instance
+    // whose CURRENTSTATES/{sessionId} znode does not exist while TASKCURRENTSTATES/{sessionId} is
+    // non-empty throws UnsupportedOperationException, which surfaces as an HTTP 500.
+    List<String> resources = new ArrayList<>(
+        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId)));
     resources.addAll(accessor
         .getChildNames(accessor.keyBuilder().taskCurrentStates(instanceName, currentSessionId)));
     if (resources.size() > 0) {
