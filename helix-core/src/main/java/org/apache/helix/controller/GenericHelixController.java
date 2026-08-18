@@ -46,6 +46,7 @@ import org.apache.helix.HelixManager;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
+import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.api.listeners.ClusterConfigChangeListener;
 import org.apache.helix.api.listeners.ControllerChangeListener;
@@ -153,6 +154,14 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   // Maps session -> instanceName for current-state/task-current-state listeners,
   // and a set of instance names for message/customized-state-root listeners.
   private volatile PendingInstanceListeners _pendingInstanceListeners;
+
+  // Feature gate (default OFF) for the deferred + parallel per-instance listener registration
+  // during leadership acquisition (CICP-34606). Read once here so a whole leadership epoch is
+  // decided consistently. When off, checkLiveInstancesObservation registers inline exactly as
+  // before (legacy), and the controller drain in ZKHelixManager never runs (_pendingInstanceListeners
+  // stays null). Flip on per deployment via the system property to ramp on a canary.
+  private final boolean _parallelInstanceRegistrationEnabled =
+      Boolean.getBoolean(SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED);
 
   // map that stores the mapping between instance and the customized state types available on that
   //instance
@@ -1430,11 +1439,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
       boolean isInit = changeContext.getType() == NotificationContext.Type.INIT;
 
-      if (isInit) {
-        // During controller leadership acquisition, defer per-instance listener registration.
-        // These are registered in parallel by ZKHelixManager.registerDeferredInstanceListenersAsync(),
-        // triggered from DistributedLeaderElection.onControllerChange() for every leadership path
-        // (both new-session INIT and failover CALLBACK), after invoke() releases synchronized(_manager).
+      if (isInit && _parallelInstanceRegistrationEnabled) {
+        // Feature ON: during controller leadership acquisition, defer per-instance listener
+        // registration. These are registered in parallel by
+        // ZKHelixManager.registerDeferredInstanceListenersAsync(), triggered from
+        // DistributedLeaderElection.onControllerChange() for every leadership path (both new-session
+        // INIT and failover CALLBACK), after invoke() releases synchronized(_manager).
         Map<String, String> sessionToInstance = new HashMap<>();
         Set<String> newInstances = new HashSet<>();
 
@@ -1452,7 +1462,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         logger.info("Deferred {} session listeners and {} instance listeners for parallel registration",
             sessionToInstance.size(), newInstances.size());
       } else {
-        // Incremental path: register inline (typically 0-1 new instances per event)
+        // Legacy/inline path. Runs when the feature is OFF (any leadership INIT registers inline,
+        // exactly as before this change) OR for the incremental CALLBACK path (typically 0-1 new
+        // instances per event). On INIT with the flag off, lastSessions/lastInstances are null so
+        // every live instance is registered here inline via the unchanged addXxxListener path.
         for (String session : curSessions.keySet()) {
           if (lastSessions == null || !lastSessions.containsKey(session)) {
             String instanceName = curSessions.get(session).getInstanceName();

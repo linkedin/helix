@@ -430,19 +430,26 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   @Override
   public void addListener(Object listener, PropertyKey propertyKey, ChangeType changeType,
       EventType[] eventType) {
+    // Public listener registration for ALL callers (participants, spectators, controllers):
+    // init() runs INSIDE the lock via the CallbackHandler constructor (the original pre-CICP-34606
+    // behavior). Only the controller's deferred parallel drain uses the initOutsideLock=true
+    // variant, so participants and spectators are never affected by that change.
+    addListenerInternal(listener, propertyKey, changeType, eventType, false);
+  }
+
+  // Shared implementation. When initOutsideLock is false, the CallbackHandler constructor calls
+  // init() while we still hold the monitor (original behavior). When true, we create the handler
+  // with deferred init under the lock and call init() AFTER releasing it - used ONLY by the
+  // controller's parallel per-instance registration so its workers do not serialize on this
+  // monitor. The post-lock window is safe: a fresh handler's _expectTypes is [INIT], so a
+  // concurrent reset()'s FINALIZE invoke() is rejected by invoke()'s ordering guard; on disconnect
+  // the ZkClient is closed, dropping any watch set in the window.
+  private void addListenerInternal(Object listener, PropertyKey propertyKey, ChangeType changeType,
+      EventType[] eventType, boolean initOutsideLock) {
     checkConnected(_waitForConnectedTimeout);
 
     PropertyType type = propertyKey.getType();
 
-    // Create the handler with deferred init under the lock, then init() outside the lock. This
-    // keeps the lock held only for the cheap handler creation, not the ZK roundtrip in init() -
-    // needed so parallel per-instance registration during leadership does not serialize on this
-    // monitor. This opens a brief window where the handler is in _handlers but not yet initialized
-    // and the lock is released. That is safe: if a concurrent reset()/cleanup runs its FINALIZE
-    // invoke() on this handler, the handler's _expectTypes is still [INIT] (a fresh handler), so
-    // the FINALIZE is rejected by invoke()'s ordering guard as out-of-order and no-ops; init()
-    // then proceeds normally. On disconnect the ZkClient is closed, which drops any watch set in
-    // the window. init() itself is idempotent under its own synchronized(this).
     CallbackHandler newHandler;
     synchronized (this) {
       for (CallbackHandler handler : _handlers) {
@@ -458,13 +465,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
       newHandler =
           new CallbackHandler(this, _zkclient, propertyKey, listener, eventType, changeType,
-              _callbackMonitors.get(changeType), true);
+              _callbackMonitors.get(changeType), initOutsideLock);
 
       _handlers.add(newHandler);
       LOG.info("Added listener: " + listener + " for type: " + type + " to path: "
           + newHandler.getPath());
     }
-    newHandler.init();
+    if (initOutsideLock) {
+      newHandler.init();
+    }
   }
 
   @Override
@@ -875,8 +884,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       stopTimerTasks();
 
       // Stop the deferred per-instance registration worker; any in-flight/queued registration is
-      // moot once we are disconnecting (handlers are reset below).
-      _deferredRegistrationExecutor.shutdownNow();
+      // moot once we are disconnecting (handlers are reset below). Null it so a later connect()
+      // lazily rebuilds a live executor - a shutdown one would reject every future registration.
+      synchronized (_deferredRegistrationExecutorLock) {
+        if (_deferredRegistrationExecutor != null) {
+          _deferredRegistrationExecutor.shutdownNow();
+          _deferredRegistrationExecutor = null;
+        }
+      }
 
       /**
        * shutdown thread pool first to avoid reset() being invoked in the middle of state
@@ -1203,17 +1218,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   private static final int INIT_HANDLERS_PARALLELISM =
       HelixUtil.getSystemPropertyAsInt(SystemPropertyKeys.INIT_HANDLERS_PARALLELISM, 10);
 
-  // A single reused daemon thread that runs the deferred per-instance registration off the
-  // leadership-acquisition (CallbackHandler.invoke) thread. Reused - rather than a fresh Thread
-  // per acquisition - so rapid leadership flapping cannot create unbounded threads; overlapping
-  // acquisitions of this manager serialize here (each still parallelizes internally via a pool).
-  // One per manager, so different clusters/sub-clusters still register concurrently.
-  private final ExecutorService _deferredRegistrationExecutor =
-      Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "registerDeferredListeners-" + getClusterName());
-        t.setDaemon(true);
-        return t;
-      });
+  // Lazily (re)created single daemon thread that runs the deferred per-instance registration off
+  // the leadership-acquisition (CallbackHandler.invoke) thread. Lazy so a manager with the feature
+  // OFF never spawns it; rebuildable so a manager that disconnected (shutdownNow in disconnect())
+  // and later reconnected still gets a LIVE executor. Without the rebuild, every post-reconnect
+  // leadership acquisition would be rejected and the new leader would register zero per-instance
+  // CURRENTSTATES watches (the MissingTopState failure this change is meant to prevent).
+  // Guarded by _deferredRegistrationExecutorLock.
+  private final Object _deferredRegistrationExecutorLock = new Object();
+  private ExecutorService _deferredRegistrationExecutor;
 
   /**
    * Run {@code tasks} in parallel on a short-lived daemon pool (capped at
@@ -1293,12 +1306,25 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
             e);
       }
     };
-    try {
-      _deferredRegistrationExecutor.submit(task);
-    } catch (RejectedExecutionException e) {
-      // Executor already shut down (manager disconnecting); nothing to observe anymore.
-      LOG.warn("Deferred registration rejected for cluster: {} - manager is shutting down",
-          _clusterName);
+    synchronized (_deferredRegistrationExecutorLock) {
+      // Lazily (re)create the worker so a reconnected manager (disconnect() nulled it) still
+      // registers, and so a manager with the feature OFF never spawns the thread at all.
+      if (_deferredRegistrationExecutor == null || _deferredRegistrationExecutor.isShutdown()) {
+        _deferredRegistrationExecutor = Executors.newSingleThreadExecutor(r -> {
+          Thread t = new Thread(r, "registerDeferredListeners-" + getClusterName());
+          t.setDaemon(true);
+          return t;
+        });
+      }
+      try {
+        _deferredRegistrationExecutor.submit(task);
+      } catch (RejectedExecutionException e) {
+        // Should not happen now that we rebuild a live executor above; if it ever does, the new
+        // leader may register zero per-instance watches (MissingTopState risk), so make it loud.
+        LOG.error("Deferred per-instance listener registration was REJECTED for cluster: {}; the "
+            + "new leader may not observe per-instance current states - investigate.", _clusterName,
+            e);
+      }
     }
   }
 
@@ -1317,8 +1343,16 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tasks.add(() -> registerWithRetry(
           "current-state listeners for instance " + instanceName + ", session " + session,
           () -> {
-            addCurrentStateChangeListener(_controller, instanceName, session);
-            addTaskCurrentStateChangeListener(_controller, instanceName, session);
+            // Use the initOutsideLock variant so these parallel workers do not serialize on the
+            // manager monitor. This is the ONLY caller that inits outside the lock; participants
+            // and spectators keep the original addListener() path.
+            addListenerInternal(_controller,
+                new PropertyKey.Builder(_clusterName).currentStates(instanceName, session),
+                ChangeType.CURRENT_STATE, new EventType[] { EventType.NodeChildrenChanged }, true);
+            addListenerInternal(_controller,
+                new PropertyKey.Builder(_clusterName).taskCurrentStates(instanceName, session),
+                ChangeType.TASK_CURRENT_STATE, new EventType[] { EventType.NodeChildrenChanged },
+                true);
           },
           () -> _controller.forgetSessionForReregistration(session)));
     }
@@ -1326,8 +1360,13 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tasks.add(() -> registerWithRetry(
           "message/customizedStateRoot listeners for instance " + instance,
           () -> {
-            addMessageListener(_controller, instance);
-            addCustomizedStateRootChangeListener(_controller, instance);
+            addListenerInternal(_controller,
+                new PropertyKey.Builder(_clusterName).messages(instance),
+                ChangeType.MESSAGE, new EventType[] { EventType.NodeChildrenChanged }, true);
+            addListenerInternal(_controller,
+                new PropertyKey.Builder(_clusterName).customizedStatesRoot(instance),
+                ChangeType.CUSTOMIZED_STATE_ROOT, new EventType[] { EventType.NodeChildrenChanged },
+                true);
           },
           () -> _controller.forgetInstanceForReregistration(instance)));
     }
@@ -1405,42 +1444,17 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   }
 
   void initHandlers(List<CallbackHandler> handlers) {
-    // Copy the handler list under the lock to protect against concurrent modification.
-    // Release the lock before calling handler.init() because init() -> invoke() acquires
-    // synchronized(_manager) which is the same lock as synchronized(this).
-    List<CallbackHandler> tmpHandlers;
     synchronized (this) {
-      if (handlers == null || handlers.isEmpty()) {
-        return;
+      if (handlers != null) {
+        // get a copy of the list and iterate over the copy list
+        // in case handler.init() modifies the original handler list
+        List<CallbackHandler> tmpHandlers = new ArrayList<>(handlers);
+        for (CallbackHandler handler : tmpHandlers) {
+          handler.init();
+          LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
+        }
       }
-      tmpHandlers = new ArrayList<>(handlers);
     }
-
-    // Skip handlers already initialized by the deferred per-instance registration
-    // (DistributedLeaderElection.onControllerChange -> registerDeferredInstanceListenersAsync).
-    // Calling init() again would produce spurious WARN logs because _expectTypes no longer
-    // contains INIT after the first init().
-    // Note: this parallelizes init() for ALL instance types on a new session (not just the
-    // controller leadership path), a change from the previous sequential loop. It is safe -
-    // each handler subscribes to an independent ZK path, callbacks serialize on
-    // synchronized(_manager) inside invoke(), and the pool is bounded - and one handler failing
-    // does not block the others.
-    tmpHandlers.removeIf(CallbackHandler::isReady);
-    if (tmpHandlers.isEmpty()) {
-      return;
-    }
-
-    long startTime = System.currentTimeMillis();
-    List<Runnable> tasks = new ArrayList<>(tmpHandlers.size());
-    for (CallbackHandler handler : tmpHandlers) {
-      tasks.add(() -> {
-        handler.init();
-        LOG.info("init handler: " + handler.getPath() + ", " + handler.getListener());
-      });
-    }
-    runTasksInParallel("initHandler", tasks);
-    LOG.info("initHandlers completed for cluster: " + _clusterName + ", handlers: "
-        + tmpHandlers.size() + ", took: " + (System.currentTimeMillis() - startTime) + " ms");
   }
 
   void resetHandlers(boolean isShutdown) {

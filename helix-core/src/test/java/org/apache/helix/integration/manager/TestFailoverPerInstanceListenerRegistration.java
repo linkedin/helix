@@ -25,6 +25,7 @@ import java.util.List;
 import org.apache.helix.HelixManager;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.manager.zk.CallbackHandler;
@@ -36,6 +37,8 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 /**
@@ -46,6 +49,30 @@ import org.testng.annotations.Test;
  * MissingTopState stays up.
  */
 public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
+
+  private static final String FEATURE_FLAG =
+      SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED;
+
+  // The feature is default-OFF and read once when a controller's GenericHelixController is built
+  // (in connect()), so enable it before any controller connects, and clear it afterwards.
+  @BeforeMethod
+  public void enableFeature() {
+    System.setProperty(FEATURE_FLAG, "true");
+  }
+
+  @AfterMethod
+  public void clearFeature() {
+    System.clearProperty(FEATURE_FLAG);
+  }
+
+  // Number of live instances currently in the cluster - the exact number of per-instance
+  // CURRENTSTATES handlers a fully-observing leader must hold (one per live instance).
+  private int liveInstanceCount(String clusterName) {
+    ZKHelixDataAccessor accessor =
+        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+    List<String> live = accessor.getChildNames(accessor.keyBuilder().liveInstances());
+    return live == null ? 0 : live.size();
+  }
 
   @SuppressWarnings("unchecked")
   private int countCurrentStateHandlers(HelixManager mgr, String clusterName) throws Exception {
@@ -120,16 +147,19 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       Assert.assertFalse(newLeader.getInstanceName().equals(leader.getInstanceName()),
           "leadership did not move on round " + round);
 
-      // Core assertion: the new leader actually registered per-instance CURRENTSTATES watches.
-      // Registration is async; poll briefly. Without the fix this stays 0 forever.
+      // Core assertion: the new leader registered a per-instance CURRENTSTATES watch for EVERY live
+      // instance (not just > 0 - a partial registration is a bug). Registration is async; poll.
       final HelixManager nl = newLeader;
+      final int expected = liveInstanceCount(clusterName);
+      Assert.assertTrue(expected > 0, "no live instances to observe on round " + round);
       boolean registered = TestHelper.verify(
-          () -> countCurrentStateHandlers(nl, clusterName) > 0, 15000);
+          () -> countCurrentStateHandlers(nl, clusterName) == expected, 15000);
       int csHandlers = countCurrentStateHandlers(newLeader, clusterName);
       Assert.assertTrue(registered,
-          "new leader " + newLeader.getInstanceName()
-              + " registered NO per-instance CURRENTSTATES handlers after failover round " + round
-              + " (had " + csHandlers + ") — MissingTopState would never clear");
+          "new leader " + newLeader.getInstanceName() + " had " + csHandlers
+              + " per-instance CURRENTSTATES handlers after failover round " + round + ", expected "
+              + expected + " (one per live instance) - partial/zero registration, MissingTopState "
+              + "would not clear");
       System.out.println("Round " + round + ": new leader " + newLeader.getInstanceName()
           + " has " + csHandlers + " per-instance CURRENTSTATES handlers");
 
@@ -194,13 +224,15 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
         "leadership did not move");
 
     final HelixManager nl = newLeader;
+    final int expected = liveInstanceCount(clusterName);
+    Assert.assertTrue(expected > 0, "no live instances to observe");
     boolean registered = TestHelper.verify(
-        () -> countCurrentStateHandlers(nl, clusterName) > 0, 15000);
+        () -> countCurrentStateHandlers(nl, clusterName) == expected, 15000);
     int csHandlers = countCurrentStateHandlers(newLeader, clusterName);
     Assert.assertTrue(registered,
-        "new STANDALONE leader " + newLeader.getInstanceName()
-            + " registered NO per-instance CURRENTSTATES handlers after failover (had " + csHandlers
-            + ") — MissingTopState would never clear");
+        "new STANDALONE leader " + newLeader.getInstanceName() + " had " + csHandlers
+            + " per-instance CURRENTSTATES handlers after failover, expected " + expected
+            + " (one per live instance) - partial/zero registration, MissingTopState would not clear");
     System.out.println("STANDALONE: new leader " + newLeader.getInstanceName() + " has " + csHandlers
         + " per-instance CURRENTSTATES handlers");
 
@@ -210,6 +242,73 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       if (c.isConnected()) {
         c.disconnect();
       }
+    }
+    for (MockParticipantManager p : participants) {
+      p.syncStop();
+    }
+    deleteCluster(clusterName);
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  /**
+   * Reconnect regression (CICP-34606): a controller that disconnects and reconnects must still
+   * register per-instance watches on the next leadership acquisition. The deferred-registration
+   * executor is shut down on disconnect(); if it is not rebuilt on connect(), every post-reconnect
+   * acquisition is rejected and the reconnected leader observes nothing. Before the fix the 2nd
+   * connect registered 0 CURRENTSTATES handlers.
+   */
+  @Test
+  public void reconnectedControllerReregistersPerInstanceWatches() throws Exception {
+    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    int nParticipants = 3;
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
+        5, // resources
+        8, // partitions per resource
+        nParticipants, 2, "MasterSlave", true);
+
+    MockParticipantManager[] participants = new MockParticipantManager[nParticipants];
+    for (int i = 0; i < nParticipants; i++) {
+      participants[i] =
+          new MockParticipantManager(ZK_ADDR, clusterName, "localhost_" + (12918 + i));
+      participants[i].syncStart();
+    }
+
+    // A single standalone controller; connect -> disconnect -> connect on the SAME manager.
+    ZKHelixManager controller =
+        new ZKHelixManager(clusterName, "controller_0", InstanceType.CONTROLLER, ZK_ADDR);
+    ZkHelixClusterVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(clusterName).setZkClient(_gZkClient).build();
+
+    // 1st connect: becomes leader, one CURRENTSTATES handler per live participant.
+    controller.connect();
+    Assert.assertTrue(verifier.verifyByPolling(), "initial convergence failed");
+    final int expected = liveInstanceCount(clusterName);
+    Assert.assertTrue(expected > 0, "no live instances to observe");
+    Assert.assertTrue(
+        TestHelper.verify(() -> countCurrentStateHandlers(controller, clusterName) == expected,
+            15000),
+        "1st connect registered " + countCurrentStateHandlers(controller, clusterName)
+            + " CURRENTSTATES handlers, expected " + expected);
+
+    // Disconnect then reconnect the SAME manager.
+    controller.disconnect();
+    controller.connect();
+    Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after reconnect");
+
+    // 2nd connect MUST re-register ALL per-instance watches (the bug registered 0 here).
+    boolean ok = TestHelper.verify(
+        () -> countCurrentStateHandlers(controller, clusterName) == expected, 15000);
+    int afterReconnect = countCurrentStateHandlers(controller, clusterName);
+    Assert.assertTrue(ok, "after reconnect the controller had " + afterReconnect
+        + " per-instance CURRENTSTATES handlers, expected " + expected
+        + " - reconnected leader observes nothing (dead deferred-registration executor)");
+    System.out.println("RECONNECT: controller has " + afterReconnect
+        + " per-instance CURRENTSTATES handlers after reconnect (expected " + expected + ")");
+
+    if (controller.isConnected()) {
+      controller.disconnect();
     }
     for (MockParticipantManager p : participants) {
       p.syncStop();
