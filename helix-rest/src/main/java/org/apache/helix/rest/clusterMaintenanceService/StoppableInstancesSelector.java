@@ -292,22 +292,32 @@ public class StoppableInstancesSelector {
   }
 
   /**
-   * Collect instances within the cluster where the instance operation is set to EVACUATE, SWAP_IN, or UNKNOWN.
-   * And return them as a set.
+   * Collect the instances that the stoppable check should presume to be already stopped, i.e. the
+   * instances passed in by the caller plus the instances whose InstanceOperation is one of
+   * {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}. Replicas hosted on these instances
+   * are not counted as active replicas of their siblings.
+   * <p>
+   * SWAP_IN and UNKNOWN are unroutable, so those instances stop serving traffic as soon as the
+   * operation is set and their replicas really are gone. EVACUATE is deliberately not included: an
+   * evacuating instance stays in the RoutingTableProvider and keeps serving its replicas until a
+   * replacement has been bootstrapped elsewhere, so counting it as stopped fails the min active
+   * replica check for its siblings even though every replica is still active. A caller that does
+   * want an evacuating instance treated as stopped can pass it in toBeStoppedInstances.
    *
    * @param toBeStoppedInstances A list of instances we presume to be stopped.
    */
   private Set<String> findToBeStoppedInstances(List<String> toBeStoppedInstances) {
     Set<String> toBeStoppedInstancesSet = new HashSet<>(toBeStoppedInstances);
+    PropertyKey.Builder propertyKeyBuilder = _dataAccessor.keyBuilder();
     Set<String> allInstances = _clusterTopology.getAllInstances();
     for (String instance : allInstances) {
-      PropertyKey.Builder propertyKeyBuilder = _dataAccessor.keyBuilder();
       InstanceConfig instanceConfig =
           _dataAccessor.getProperty(propertyKeyBuilder.instanceConfig(instance));
-      InstanceConstants.InstanceOperation operation = instanceConfig.getInstanceOperation().getOperation();
-      if (operation == InstanceConstants.InstanceOperation.EVACUATE
-          || operation == InstanceConstants.InstanceOperation.SWAP_IN
-          || operation == InstanceConstants.InstanceOperation.UNKNOWN) {
+      if (instanceConfig == null) {
+        continue;
+      }
+      if (InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+          instanceConfig.getInstanceOperation().getOperation())) {
         toBeStoppedInstancesSet.add(instance);
       }
     }

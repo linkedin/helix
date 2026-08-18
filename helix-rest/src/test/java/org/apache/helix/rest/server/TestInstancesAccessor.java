@@ -323,23 +323,27 @@ public class TestInstancesAccessor extends AbstractTestClass {
         STOPPABLE_CLUSTER2).post(this, Entity.entity(content, MediaType.APPLICATION_JSON_TYPE));
     JsonNode jsonNode = OBJECT_MAPPER.readTree(response.readEntity(String.class));
 
-    Set<String> stoppableSet = getStringSet(jsonNode,
-        InstancesAccessor.InstancesProperties.instance_stoppable_parallel.name());
-    Assert.assertTrue(stoppableSet.contains("instance12")
-        && stoppableSet.contains("instance11") && stoppableSet.contains("instance10"));
+    try {
+      Set<String> stoppableSet = getStringSet(jsonNode,
+          InstancesAccessor.InstancesProperties.instance_stoppable_parallel.name());
+      Assert.assertTrue(stoppableSet.contains("instance12")
+          && stoppableSet.contains("instance11") && stoppableSet.contains("instance10"));
+      // instance0 and instance1 are evacuating, but they stay routable and keep serving their
+      // replicas until a replacement is bootstrapped, so their siblings are still above min active
+      // replicas and remain stoppable.
+      Assert.assertTrue(stoppableSet.contains("instance13"));
+      Assert.assertTrue(stoppableSet.contains("instance14"));
 
-    JsonNode nonStoppableInstances = jsonNode.get(
-        InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
-        ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
-    instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance0, instanceConfig);
-    instanceConfig1.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
+      JsonNode nonStoppableInstances = jsonNode.get(
+          InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
+      Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
+          ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
+    } finally {
+      instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+      _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance0, instanceConfig);
+      instanceConfig1.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+      _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -783,10 +787,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode nonStoppableInstances = jsonNode.get(
         InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
+    // instance0 and instance1 are evacuating but still host their replicas, so they keep their
+    // siblings above min active replicas.
+    Assert.assertTrue(stoppableSet.contains("instance13"));
+    Assert.assertTrue(stoppableSet.contains("instance14"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
         ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
@@ -840,8 +844,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode nonStoppableInstances = jsonNode.get(
         InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
+    // instance0 is evacuating but still hosts its replicas, so it keeps its siblings above min
+    // active replicas. instance1 is SWAP_IN, which is not serving traffic and stays presumed
+    // stopped.
+    Assert.assertTrue(stoppableSet.contains("instance13"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
         ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
