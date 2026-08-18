@@ -47,8 +47,10 @@ import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
@@ -1480,6 +1482,58 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     // The below calls should successfully return
     body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources/{}")
         .isBodyReturnExpected(true).format(CLUSTER_NAME, INSTANCE_NAME, dbName).get(this);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * When the CURRENTSTATES/{sessionId} znode is absent, getChildNames() returns an immutable
+   * Collections.emptyList(), and the subsequent addAll() of a non-empty task current state list
+   * used to throw UnsupportedOperationException, which surfaced as an HTTP 500.
+   */
+  @Test(dependsOnMethods = "testGetResourcesOnInstance")
+  public void testGetResourcesOnInstanceWithOnlyTaskCurrentStates() throws JsonProcessingException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = "localhost_" + TestHelper.getTestMethodName();
+    addParticipant(CLUSTER_NAME, instanceName);
+
+    try {
+      HelixDataAccessor accessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
+      LiveInstance liveInstance =
+          accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+      Assert.assertNotNull(liveInstance);
+      String sessionId = liveInstance.getEphemeralOwner();
+
+      // Remove CURRENTSTATES/{sessionId} so that getChildNames() hits ZkNoNodeException and
+      // returns the immutable Collections.emptyList(). Note that a znode which merely exists
+      // with zero children yields a mutable list and would not reproduce this.
+      String currentStatesPath =
+          accessor.keyBuilder().currentStates(instanceName, sessionId).getPath();
+      _baseAccessor.remove(currentStatesPath, 0);
+      // Assert the znode is absent rather than merely childless: getChildNames() returns an
+      // immutable list only for an absent znode, so an existing-but-empty znode would not
+      // reproduce the failure even though it is also empty.
+      Assert.assertFalse(_baseAccessor.exists(currentStatesPath, 0));
+
+      // Give the instance a task current state so that addAll()'s argument is non-empty.
+      String taskResource = "TaskResource_" + TestHelper.getTestMethodName();
+      CurrentState taskCurrentState = new CurrentState(taskResource);
+      taskCurrentState.setSessionId(sessionId);
+      taskCurrentState.setStateModelDefRef("Task");
+      taskCurrentState.setState("0", "COMPLETED");
+      Assert.assertTrue(accessor.setProperty(
+          accessor.keyBuilder().taskCurrentState(instanceName, sessionId, taskResource),
+          taskCurrentState));
+
+      String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
+          .isBodyReturnExpected(true).format(CLUSTER_NAME, instanceName).get(this);
+      JsonNode node = OBJECT_MAPPER.readTree(body);
+      ArrayNode resources =
+          (ArrayNode) node.get(PerInstanceAccessor.PerInstanceProperties.resources.name());
+      Assert.assertEquals(resources.size(), 1);
+      Assert.assertEquals(resources.get(0).asText(), taskResource);
+    } finally {
+      dropParticipant(CLUSTER_NAME, instanceName);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

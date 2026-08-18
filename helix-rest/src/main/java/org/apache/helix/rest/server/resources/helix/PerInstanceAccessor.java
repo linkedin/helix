@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -772,12 +773,22 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    // The liveInstances check above is a separate read, so the instance can drop in between and
+    // leave this null. Treat that as not live instead of throwing an NPE, which would surface as
+    // another HTTP 500.
+    if (liveInstance == null) {
+      return null;
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
 
-    List<String> resources =
-        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId));
+    // getChildNames() returns an immutable Collections.emptyList() when the znode is absent, so the
+    // result must be copied into a mutable list before addAll() below. Without the copy, an instance
+    // whose CURRENTSTATES/{sessionId} znode does not exist while TASKCURRENTSTATES/{sessionId} is
+    // non-empty throws UnsupportedOperationException, which surfaces as an HTTP 500.
+    List<String> resources = new ArrayList<>(
+        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId)));
     resources.addAll(accessor
         .getChildNames(accessor.keyBuilder().taskCurrentStates(instanceName, currentSessionId)));
     if (resources.size() > 0) {
@@ -800,6 +811,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    if (liveInstance == null) {
+      return notFound();
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
