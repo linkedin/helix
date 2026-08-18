@@ -773,6 +773,12 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    // The liveInstances check above is a separate read, so the instance can drop in between and
+    // leave this null. Treat that as not live instead of throwing an NPE, which would surface as
+    // another HTTP 500.
+    if (liveInstance == null) {
+      return null;
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
@@ -805,6 +811,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    if (liveInstance == null) {
+      return notFound();
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();

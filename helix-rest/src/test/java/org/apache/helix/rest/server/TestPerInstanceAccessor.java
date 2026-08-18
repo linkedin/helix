@@ -1506,11 +1506,13 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
       // Remove CURRENTSTATES/{sessionId} so that getChildNames() hits ZkNoNodeException and
       // returns the immutable Collections.emptyList(). Note that a znode which merely exists
       // with zero children yields a mutable list and would not reproduce this.
-      _baseAccessor
-          .remove(accessor.keyBuilder().currentStates(instanceName, sessionId).getPath(), 0);
-      Assert.assertTrue(
-          accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, sessionId))
-              .isEmpty());
+      String currentStatesPath =
+          accessor.keyBuilder().currentStates(instanceName, sessionId).getPath();
+      _baseAccessor.remove(currentStatesPath, 0);
+      // Assert the znode is absent rather than merely childless: getChildNames() returns an
+      // immutable list only for an absent znode, so an existing-but-empty znode would not
+      // reproduce the failure even though it is also empty.
+      Assert.assertFalse(_baseAccessor.exists(currentStatesPath, 0));
 
       // Give the instance a task current state so that addAll()'s argument is non-empty.
       String taskResource = "TaskResource_" + TestHelper.getTestMethodName();
