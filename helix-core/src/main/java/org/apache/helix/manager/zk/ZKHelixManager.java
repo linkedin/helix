@@ -1210,13 +1210,15 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         + ", instanceTye: " + _instanceType + ", cluster: " + _clusterName);
   }
 
-  // Per-instance listener registration does one ZK roundtrip per handler. All threads share one
-  // ZkClient (one ZK connection, no new connections), so this bounds concurrent in-flight requests
-  // on the shared ZK ensemble, which matters when many controllers acquire leadership at the same
-  // time. Read from the JVM system property so it can be tuned per deployment without a code change;
-  // defaults to 10 (and falls back to 10 on a missing/invalid/non-positive value).
-  private static final int INIT_HANDLERS_PARALLELISM =
-      HelixUtil.getSystemPropertyAsInt(SystemPropertyKeys.INIT_HANDLERS_PARALLELISM, 10);
+  // Thread-pool size for the controller's parallel per-instance listener registration. Registration
+  // does one ZK roundtrip per handler and all threads share one ZkClient (one ZK connection, no new
+  // connections), so this bounds concurrent in-flight requests on the shared ZK ensemble, which
+  // matters when many controllers acquire leadership at the same time. Read from the JVM system
+  // property so it can be tuned per deployment without a code change; defaults to 10 (and falls back
+  // to 10 on a missing/invalid/non-positive value).
+  private static final int INSTANCE_LISTENER_REGISTRATION_PARALLELISM =
+      HelixUtil.getSystemPropertyAsInt(
+          SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_THREADS, 10);
 
   // Lazily (re)created single daemon thread that runs the deferred per-instance registration off
   // the leadership-acquisition (CallbackHandler.invoke) thread. Lazy so a manager with the feature
@@ -1230,10 +1232,10 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
   /**
    * Run {@code tasks} in parallel on a short-lived daemon pool (capped at
-   * {@link #INIT_HANDLERS_PARALLELISM}) and wait for all of them. A single task runs inline to
-   * avoid pool overhead. One task failing is logged and does not cancel the others; the pool is
-   * always shut down. Used by both the deferred per-instance registration and initHandlers so the
-   * submit / future.get / shutdown semantics live in one place.
+   * {@link #INSTANCE_LISTENER_REGISTRATION_PARALLELISM}) and wait for all of them. A single task
+   * runs inline to avoid pool overhead. One task failing is logged and does not cancel the others;
+   * the pool is always shut down. The number of tasks is bounded (one per live instance/session),
+   * so the pool's work queue cannot grow without bound.
    */
   private void runTasksInParallel(String threadNamePrefix, List<Runnable> tasks) {
     if (tasks.isEmpty()) {
@@ -1243,7 +1245,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       tasks.get(0).run();
       return;
     }
-    int poolSize = Math.min(tasks.size(), INIT_HANDLERS_PARALLELISM);
+    int poolSize = Math.min(tasks.size(), INSTANCE_LISTENER_REGISTRATION_PARALLELISM);
     ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
       Thread t = new Thread(r, threadNamePrefix + "-" + _clusterName);
       t.setDaemon(true);

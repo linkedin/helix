@@ -53,16 +53,24 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
   private static final String FEATURE_FLAG =
       SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED;
 
+  private String _prevFlag;
+
   // The feature is default-OFF and read once when a controller's GenericHelixController is built
-  // (in connect()), so enable it before any controller connects, and clear it afterwards.
+  // (in connect()), so enable it before any controller connects, and restore the prior value
+  // afterwards (not a blanket clear) so it cannot leak into other test classes in the fork.
   @BeforeMethod
   public void enableFeature() {
+    _prevFlag = System.getProperty(FEATURE_FLAG);
     System.setProperty(FEATURE_FLAG, "true");
   }
 
   @AfterMethod
-  public void clearFeature() {
-    System.clearProperty(FEATURE_FLAG);
+  public void restoreFeature() {
+    if (_prevFlag == null) {
+      System.clearProperty(FEATURE_FLAG);
+    } else {
+      System.setProperty(FEATURE_FLAG, _prevFlag);
+    }
   }
 
   // Number of live instances currently in the cluster - the exact number of per-instance

@@ -25,16 +25,24 @@ public class TestCheckLiveInstancesObservationDeferred {
   private static final String FEATURE_FLAG =
       SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED;
 
+  private String _prevFlag;
+
   // The feature gate is read once when GenericHelixController is constructed, so set it before each
-  // test builds its controller. Tests that need the feature OFF clear it at their own start.
+  // test builds its controller. Tests that need the feature OFF clear it at their own start. Restore
+  // the prior value (not a blanket clear) so this cannot leak into other test classes in the fork.
   @BeforeMethod
   public void enableFeature() {
+    _prevFlag = System.getProperty(FEATURE_FLAG);
     System.setProperty(FEATURE_FLAG, "true");
   }
 
   @AfterMethod
-  public void clearFeature() {
-    System.clearProperty(FEATURE_FLAG);
+  public void restoreFeature() {
+    if (_prevFlag == null) {
+      System.clearProperty(FEATURE_FLAG);
+    } else {
+      System.setProperty(FEATURE_FLAG, _prevFlag);
+    }
   }
 
   private List<LiveInstance> createMockLiveInstances(int count) {
