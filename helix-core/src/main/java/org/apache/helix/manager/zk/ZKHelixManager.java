@@ -1215,10 +1215,13 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   // connections), so this bounds concurrent in-flight requests on the shared ZK ensemble, which
   // matters when many controllers acquire leadership at the same time. Read from the JVM system
   // property so it can be tuned per deployment without a code change; defaults to 10 (and falls back
-  // to 10 on a missing/invalid/non-positive value).
+  // to 10 on a missing/invalid/non-positive value). Hard-capped so an over-large override cannot
+  // flood the shared ZK ensemble with concurrent subscribes.
+  private static final int MAX_INSTANCE_LISTENER_REGISTRATION_PARALLELISM = 64;
   private static final int INSTANCE_LISTENER_REGISTRATION_PARALLELISM =
-      HelixUtil.getSystemPropertyAsInt(
-          SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_THREADS, 10);
+      Math.min(MAX_INSTANCE_LISTENER_REGISTRATION_PARALLELISM,
+          HelixUtil.getSystemPropertyAsInt(
+              SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_THREADS, 10));
 
   // Lazily (re)created single daemon thread that runs the deferred per-instance registration off
   // the leadership-acquisition (CallbackHandler.invoke) thread. Lazy so a manager with the feature

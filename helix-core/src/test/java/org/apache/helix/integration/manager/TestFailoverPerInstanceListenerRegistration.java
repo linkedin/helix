@@ -21,8 +21,10 @@ package org.apache.helix.integration.manager;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.helix.HelixManager;
+import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.SystemPropertyKeys;
@@ -33,7 +35,9 @@ import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.mock.participant.MockMSModelFactory;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
+import org.apache.helix.spectator.RoutingTableProvider;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.testng.Assert;
@@ -318,6 +322,71 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     if (controller.isConnected()) {
       controller.disconnect();
     }
+    for (MockParticipantManager p : participants) {
+      p.syncStop();
+    }
+    deleteCluster(clusterName);
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  /**
+   * Containment (CICP-34606): the feature only changes the controller's per-instance registration.
+   * Every OTHER addListener caller must be unaffected with the flag ON. A spectator's
+   * RoutingTableProvider registers external-view / live-instance / config listeners through the same
+   * shared addListener() path (18 APIs / 27 call sites) - with the feature ON it must still work
+   * end-to-end (watches fire, routing table populates), proving participants/spectators are not
+   * touched by the init-outside-lock change.
+   */
+  @Test
+  public void spectatorRoutingTableWorksWithFeatureOn() throws Exception {
+    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    int nParticipants = 3;
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
+        3, // resources -> TestDB0, TestDB1, TestDB2
+        8, // partitions per resource
+        nParticipants, 2, "MasterSlave", true);
+
+    MockParticipantManager[] participants = new MockParticipantManager[nParticipants];
+    for (int i = 0; i < nParticipants; i++) {
+      participants[i] =
+          new MockParticipantManager(ZK_ADDR, clusterName, "localhost_" + (12918 + i));
+      participants[i].syncStart();
+    }
+    ClusterControllerManager controller =
+        new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
+    controller.syncStart();
+
+    // Spectator whose RoutingTableProvider registers listeners through the shared addListener().
+    HelixManager spectator =
+        HelixManagerFactory.getZKHelixManager(clusterName, "spectator", InstanceType.SPECTATOR,
+            ZK_ADDR);
+    spectator.connect();
+    RoutingTableProvider rtp = new RoutingTableProvider(spectator);
+    spectator.addExternalViewChangeListener(rtp);
+    spectator.addLiveInstanceChangeListener(rtp);
+    spectator.addInstanceConfigChangeListener(rtp);
+
+    ZkHelixClusterVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(clusterName).setZkClient(_gZkClient).build();
+    Assert.assertTrue(verifier.verifyByPolling(), "cluster did not converge");
+
+    // With the feature ON, the spectator's listeners (added via the unchanged addListener path)
+    // must still fire and populate the routing table.
+    boolean populated = TestHelper.verify(() -> {
+      Set<InstanceConfig> masters = rtp.getInstances("TestDB0", "MASTER");
+      return masters != null && !masters.isEmpty();
+    }, 15000);
+    Set<InstanceConfig> masters = rtp.getInstances("TestDB0", "MASTER");
+    Assert.assertTrue(populated,
+        "spectator routing table did not populate with the feature ON (masters="
+            + (masters == null ? "null" : masters.size()) + ") - a non-controller addListener path "
+            + "was affected by the change");
+
+    rtp.shutdown();
+    spectator.disconnect();
+    controller.syncStop();
     for (MockParticipantManager p : participants) {
       p.syncStop();
     }
