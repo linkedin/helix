@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -973,12 +974,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
   }
 
   @Test
-  public void testGetInstancesUnableToAcceptOnlineReplicas() throws IOException {
+  public void testGetInstancesUnableToAcceptOnlineReplicas() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
 
-    // Dedicated cluster so the population asserted here is not perturbed by other tests. No
-    // participants are started, so every routable instance is offline and counts against the
-    // budget unless it carries a valid instance-operation maintenance marker.
+    // Dedicated cluster so the population asserted here is not perturbed by other tests.
     String clusterName = "TestOfflineBudgetCluster";
     _gSetupTool.addCluster(clusterName, true);
     _clusters.add(clusterName);
@@ -988,35 +987,35 @@ public class TestInstancesAccessor extends AbstractTestClass {
       _gSetupTool.addInstanceToCluster(clusterName, instance);
     }
 
-    // Baseline: all 5 instances are offline and unmarked, so all 5 count.
-    JsonNode node = OBJECT_MAPPER.readTree(
-        new JerseyUriRequestBuilder(
-            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
-            .isBodyReturnExpected(true).format(clusterName).get(this));
-    Assert.assertEquals(
-        getSortedStringList(node,
-            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
-                .name()), sorted(instances));
+    // Baseline: no participants are running, so all 5 instances are offline and unmarked and all
+    // 5 count.
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName), sorted(instances));
+
+    // Liveness alone is not enough to be excluded; the instance must be enabled AND live. Start
+    // participants for obInstance3 and obInstance4, then mark obInstance4 DISABLE. obInstance3
+    // (ENABLE + live) must drop out of the population, obInstance4 (live but DISABLE) must stay.
+    // These two assertions are what pin the enabled-and-live rule: without a live participant the
+    // rule is inert and the whole test passes even if liveness is never read.
+    startInstances(clusterName, new TreeSet<>(Arrays.asList("obInstance3", "obInstance4")), 2);
+    setInstanceOperation(clusterName, "obInstance4", InstanceConstants.InstanceOperation.DISABLE);
+
+    List<String> expectedAfterStart =
+        sorted(Arrays.asList("obInstance0", "obInstance1", "obInstance2", "obInstance4"));
+    Assert.assertTrue(
+        TestHelper.verify(() -> fetchOfflineBudgetPopulation(clusterName).equals(
+            expectedAfterStart), TestHelper.WAIT_DURATION),
+        "An enabled and live instance must be excluded, and a live DISABLE instance must still "
+            + "count; got " + fetchOfflineBudgetPopulation(clusterName));
 
     // A valid marker exempts an instance; an expired marker does not. A SWAP_IN instance is
     // never counted regardless of marker state.
     long nowMs = System.currentTimeMillis();
     setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance0", nowMs + 600_000L);
     setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance1", nowMs - 1L);
-    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(clusterName, "obInstance2");
-    swapInConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
-        .setOperation(InstanceConstants.InstanceOperation.SWAP_IN).build());
-    _configAccessor.setInstanceConfig(clusterName, "obInstance2", swapInConfig);
+    setInstanceOperation(clusterName, "obInstance2", InstanceConstants.InstanceOperation.SWAP_IN);
 
-    node = OBJECT_MAPPER.readTree(
-        new JerseyUriRequestBuilder(
-            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
-            .isBodyReturnExpected(true).format(clusterName).get(this));
-    Assert.assertEquals(
-        getSortedStringList(node,
-            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
-                .name()),
-        sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        sorted(Arrays.asList("obInstance1", "obInstance4")),
         "Valid marker and SWAP_IN must be excluded; the expired marker must still count");
 
     // The population is a property of the instances alone. Changing the budget thresholds the
@@ -1025,25 +1024,36 @@ public class TestInstancesAccessor extends AbstractTestClass {
     clusterConfig.setMaxOfflineInstancesAllowed(1);
     clusterConfig.setNumOfflineInstancesForAutoExit(0);
     _configAccessor.setClusterConfig(clusterName, clusterConfig);
-    node = OBJECT_MAPPER.readTree(
-        new JerseyUriRequestBuilder(
-            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
-            .isBodyReturnExpected(true).format(clusterName).get(this));
-    Assert.assertEquals(
-        getSortedStringList(node,
-            InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas
-                .name()),
-        sorted(Arrays.asList("obInstance1", "obInstance3", "obInstance4")),
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        sorted(Arrays.asList("obInstance1", "obInstance4")),
         "Offline-budget thresholds must not affect which instances are counted");
 
-    // An unknown cluster must 404 like every other command on this route, not 500. Resolving the
-    // cluster through ConfigAccessor instead of the request's HelixDataAccessor would throw here.
+    // An unknown cluster must 404 rather than answer with an empty population, which would read
+    // as "the whole offline budget is free". This deliberately differs from getAllInstances and
+    // validateWeight on this route, which both answer 200 with an empty body.
     new JerseyUriRequestBuilder(
         "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
         .format("TestOfflineBudgetClusterDoesNotExist").get(this);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private List<String> fetchOfflineBudgetPopulation(String clusterName) throws IOException {
+    JsonNode node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    return getSortedStringList(node,
+        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas.name());
+  }
+
+  private void setInstanceOperation(String clusterName, String instanceName,
+      InstanceConstants.InstanceOperation operation) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder().setOperation(operation).build());
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
   }
 
   private void setInstanceOperationMaintenanceUntilMs(String clusterName, String instanceName,

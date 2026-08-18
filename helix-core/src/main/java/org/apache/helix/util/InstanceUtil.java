@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -329,9 +330,6 @@ public class InstanceUtil {
    */
   private static Set<String> getEnabledLiveInstances(
       Map<String, InstanceConfig> instanceConfigMap, Collection<String> liveInstanceNames) {
-    if (instanceConfigMap == null || liveInstanceNames == null) {
-      return new HashSet<>();
-    }
     Set<String> enabledLiveInstances = new HashSet<>();
     for (String instanceName : liveInstanceNames) {
       InstanceConfig config = instanceConfigMap.get(instanceName);
@@ -366,15 +364,32 @@ public class InstanceUtil {
    * helix-rest exposes the same computation read-only so clients never have to reimplement
    * (and drift from) these rules.
    *
+   * <p><b>The caller owns the definition of "live", and it is not always the raw
+   * {@code /LIVEINSTANCES} membership.</b> While the cluster is in maintenance mode and
+   * {@code OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE} is set to a non-negative value, the
+   * controller's {@code BaseControllerDataProvider#getLiveInstances()} withholds instances that
+   * had been offline longer than that window, and keeps withholding them for the remainder of
+   * the maintenance mode even after they come back up. That exclusion is sticky controller
+   * state accumulated across pipeline runs, so a caller reading ZooKeeper directly cannot
+   * reconstruct it and will pass a strictly larger live set, yielding a strictly smaller
+   * population than the controller counts. The two agree whenever the cluster is out of
+   * maintenance mode or the timeout is unset (the default, {@code -1}).
+   *
    * @param instanceConfigMap all instance configs in the cluster, keyed by instance name.
-   * @param liveInstanceNames names of the currently live instances.
+   *                          Must not be null; an empty map yields an empty population.
+   * @param liveInstanceNames names of the currently live instances, as defined by the caller
+   *                          (see above). Must not be null.
    * @param nowMs current wall-clock millis used for marker-expiry comparison.
    * @return a fresh modifiable set of instance names.
    */
   public static Set<String> getInstancesUnableToAcceptOnlineReplicas(
       Map<String, InstanceConfig> instanceConfigMap, Collection<String> liveInstanceNames,
       long nowMs) {
-    if (instanceConfigMap == null || instanceConfigMap.isEmpty()) {
+    // Null is rejected rather than treated as empty: an empty population reads as "the whole
+    // offline budget is free", which is the most dangerous answer this method can give.
+    Objects.requireNonNull(instanceConfigMap, "instanceConfigMap must not be null");
+    Objects.requireNonNull(liveInstanceNames, "liveInstanceNames must not be null");
+    if (instanceConfigMap.isEmpty()) {
       return new HashSet<>();
     }
     Set<String> result = instanceConfigMap.entrySet().stream()

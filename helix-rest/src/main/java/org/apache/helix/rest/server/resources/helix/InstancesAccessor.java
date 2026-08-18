@@ -220,6 +220,17 @@ public class InstancesAccessor extends AbstractHelixResource {
    * already available from the cluster-config endpoint, and the resulting maintenance state is
    * available from the maintenance-signal endpoint; deriving either here would hand clients a
    * prediction where an authoritative answer already exists.
+   *
+   * <p><b>Known divergence from the controller.</b> Liveness here is the raw
+   * {@code /LIVEINSTANCES} membership read from ZooKeeper. The controller instead uses
+   * {@code BaseControllerDataProvider#getLiveInstances()}, which — while the cluster is in
+   * maintenance mode and {@code OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE} is non-negative —
+   * withholds instances that had been offline longer than that window for the remainder of the
+   * maintenance mode, even after they come back up. That exclusion is sticky state accumulated
+   * across pipeline runs, so this endpoint cannot reconstruct it from a point-in-time read and
+   * will report a strictly smaller population than the controller counts. The two agree
+   * whenever the cluster is out of maintenance mode or the timeout is unset (the default,
+   * {@code -1}).
    */
   private Response
   getInstancesUnableToAcceptOnlineReplicas(String clusterId,
@@ -237,9 +248,14 @@ public class InstancesAccessor extends AbstractHelixResource {
       HelixDataAccessor accessor) {
     // An unknown cluster must not fall through to an empty population: to a client, "no instances
     // counted" reads as "the whole offline budget is free". The caller's null check cannot catch
-    // it because HelixDataAccessor#getChildNames normalizes a missing path to an empty list, so
-    // resolve the cluster explicitly, the same way ClusterAccessor does. ConfigAccessor is not
-    // used here because it throws on an unknown cluster, which would surface as a 500.
+    // it because HelixDataAccessor#getChildNames normalizes a missing path to an empty list.
+    //
+    // Note this deliberately differs from the other commands on this route: getAllInstances and
+    // validateWeight both answer 200 with an empty body for a cluster that does not exist. That
+    // is arguably wrong for them too, but changing it is a breaking change to a long-standing
+    // API and belongs in its own change; a new command carries no such compatibility debt, and
+    // here the empty answer is actively unsafe. ConfigAccessor is not used to resolve the
+    // cluster because it throws on an unknown cluster, which would surface as a 500.
     if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
       return notFound();
     }
