@@ -19,7 +19,6 @@ package org.apache.helix.integration.manager;
  * under the License.
  */
 
-import java.util.Date;
 import java.util.List;
 import java.util.Set;
 
@@ -46,7 +45,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 /**
- * Focused validation for CICP-34606: when a standby distributed controller is promoted on an
+ * Focused validation: when a standby distributed controller is promoted on an
  * existing ZK session (failover via CALLBACK, not a new session), the per-instance listeners that
  * {@code checkLiveInstancesObservation} defers during INIT must still be registered. Otherwise the
  * new leader sets no {@code /INSTANCES/<inst>/CURRENTSTATES} watches, never observes replies, and
@@ -124,7 +123,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
   public void failoverRegistersPerInstanceWatchesAndObservesState() throws Exception {
     String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
     int n = 4; // nodes, each a CONTROLLER_PARTICIPANT (participant + controller candidate)
-    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
 
     // Multiple resources so per-instance CURRENTSTATES fan-out is non-trivial.
     TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
@@ -148,7 +146,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     // Repeated failover (churn) — the KSAP scenario this PR targets.
     for (int round = 0; round < 3; round++) {
       HelixManager leader = currentLeader(controllers, clusterName);
-      System.out.println("Round " + round + ": killing leader " + leader.getInstanceName());
       leader.disconnect();
 
       // A new leader must take over on its EXISTING session (CALLBACK failover path).
@@ -172,8 +169,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
               + " per-instance CURRENTSTATES handlers after failover round " + round + ", expected "
               + expected + " (one per live instance) - partial/zero registration, MissingTopState "
               + "would not clear");
-      System.out.println("Round " + round + ": new leader " + newLeader.getInstanceName()
-          + " has " + csHandlers + " per-instance CURRENTSTATES handlers");
 
       // Prove the watches are FUNCTIONAL: bounce a participant, forcing current-state changes the
       // new leader must observe to rebuild the external view.
@@ -188,7 +183,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       }
     }
     deleteCluster(clusterName);
-    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
   /**
@@ -201,7 +195,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
   public void standaloneFailoverRegistersPerInstanceWatches() throws Exception {
     String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
     int nParticipants = 3;
-    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
 
     TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
         5, // resources
@@ -227,7 +220,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     Assert.assertTrue(verifier.verifyByPolling(), "initial convergence failed");
 
     HelixManager leader = currentLeader(controllers, clusterName);
-    System.out.println("STANDALONE: killing leader " + leader.getInstanceName());
     leader.disconnect();
 
     Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after standalone failover");
@@ -245,8 +237,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
         "new STANDALONE leader " + newLeader.getInstanceName() + " had " + csHandlers
             + " per-instance CURRENTSTATES handlers after failover, expected " + expected
             + " (one per live instance) - partial/zero registration, MissingTopState would not clear");
-    System.out.println("STANDALONE: new leader " + newLeader.getInstanceName() + " has " + csHandlers
-        + " per-instance CURRENTSTATES handlers");
 
     Assert.assertTrue(verifier.verifyByPolling(), "post-failover state observation failed");
 
@@ -259,11 +249,10 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       p.syncStop();
     }
     deleteCluster(clusterName);
-    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
   /**
-   * Reconnect regression (CICP-34606): a controller that disconnects and reconnects must still
+   * Reconnect regression: a controller that disconnects and reconnects must still
    * register per-instance watches on the next leadership acquisition. The deferred-registration
    * executor is shut down on disconnect(); if it is not rebuilt on connect(), every post-reconnect
    * acquisition is rejected and the reconnected leader observes nothing. Before the fix the 2nd
@@ -273,7 +262,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
   public void reconnectedControllerReregistersPerInstanceWatches() throws Exception {
     String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
     int nParticipants = 3;
-    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
 
     TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
         5, // resources
@@ -316,8 +304,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     Assert.assertTrue(ok, "after reconnect the controller had " + afterReconnect
         + " per-instance CURRENTSTATES handlers, expected " + expected
         + " - reconnected leader observes nothing (dead deferred-registration executor)");
-    System.out.println("RECONNECT: controller has " + afterReconnect
-        + " per-instance CURRENTSTATES handlers after reconnect (expected " + expected + ")");
 
     if (controller.isConnected()) {
       controller.disconnect();
@@ -326,11 +312,10 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       p.syncStop();
     }
     deleteCluster(clusterName);
-    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
   /**
-   * Containment (CICP-34606): the feature only changes the controller's per-instance registration.
+   * Containment: the feature only changes the controller's per-instance registration.
    * Every OTHER addListener caller must be unaffected with the flag ON. A spectator's
    * RoutingTableProvider registers external-view / live-instance / config listeners through the same
    * shared addListener() path (18 APIs / 27 call sites) - with the feature ON it must still work
@@ -341,7 +326,6 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
   public void spectatorRoutingTableWorksWithFeatureOn() throws Exception {
     String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
     int nParticipants = 3;
-    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
 
     TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
         3, // resources -> TestDB0, TestDB1, TestDB2
@@ -391,6 +375,5 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
       p.syncStop();
     }
     deleteCluster(clusterName);
-    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 }

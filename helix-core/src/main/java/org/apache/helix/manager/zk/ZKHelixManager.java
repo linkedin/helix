@@ -431,7 +431,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   public void addListener(Object listener, PropertyKey propertyKey, ChangeType changeType,
       EventType[] eventType) {
     // Public listener registration for ALL callers (participants, spectators, controllers):
-    // init() runs INSIDE the lock via the CallbackHandler constructor (the original pre-CICP-34606
+    // init() runs INSIDE the lock via the CallbackHandler constructor (the original legacy
     // behavior). Only the controller's deferred parallel drain uses the initOutsideLock=true
     // variant, so participants and spectators are never affected by that change.
     addListenerInternal(listener, propertyKey, changeType, eventType, false);

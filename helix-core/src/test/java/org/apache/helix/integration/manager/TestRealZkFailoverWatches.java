@@ -24,7 +24,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -49,7 +48,7 @@ import org.testng.SkipException;
 import org.testng.annotations.Test;
 
 /**
- * REAL-ZooKeeper validation for CICP-34606 (NOT the embedded TestingZooKeeper used by the rest of
+ * REAL-ZooKeeper validation (NOT the embedded TestingZooKeeper used by the rest of
  * the suite). Requires an externally running ZK ensemble whose client port is passed via
  * -DrealZkAddr=host:port (default localhost:2199) and whose 4lw whitelist enables {@code wchp}.
  *
@@ -184,8 +183,6 @@ public class TestRealZkFailoverWatches {
     String clusterName = "RealZk_" + (flagOn ? "flagOn" : "flagOff") + "_"
         + System.currentTimeMillis();
     int nParticipants = 5;
-    System.out.println("=== START real-ZK scenario flagOn=" + flagOn + " cluster=" + clusterName
-        + " zk=" + REAL_ZK + " at " + new Date() + " ===");
     try {
       TestHelper.setupCluster(clusterName, REAL_ZK, 12918, "localhost", "TestDB",
           5, // resources
@@ -219,16 +216,11 @@ public class TestRealZkFailoverWatches {
       TestHelper.verify(
           () -> serverSideCurrentStateWatchPaths(clusterName).size() >= expected, 15000);
       Set<String> before = serverSideCurrentStateWatchPaths(clusterName);
-      System.out.println("[flagOn=" + flagOn + "] initial leader " + leader0.getInstanceName()
-          + " -> server-side CURRENTSTATES watch paths=" + before.size()
-          + " client-side handlers=" + clientSideCurrentStateHandlers(leader0, clusterName)
-          + " (expected >= " + expected + ")");
       Assert.assertTrue(before.size() >= expected,
           "initial leader had " + before.size() + " server-side CURRENTSTATES watches, expected >= "
               + expected);
 
       // Failover: kill the leader; standby must take over on its EXISTING session (CALLBACK path).
-      System.out.println("[flagOn=" + flagOn + "] killing leader " + leader0.getInstanceName());
       leader0.disconnect();
       Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after failover (flagOn="
           + flagOn + ")");
@@ -242,12 +234,12 @@ public class TestRealZkFailoverWatches {
           () -> serverSideCurrentStateWatchPaths(cn).size() >= expectedAfter, 20000);
       Set<String> after = serverSideCurrentStateWatchPaths(clusterName);
       int clientAfter = clientSideCurrentStateHandlers(leader1, clusterName);
-      System.out.println("[flagOn=" + flagOn + "] NEW leader " + leader1.getInstanceName()
-          + " -> server-side CURRENTSTATES watch paths=" + after.size()
-          + " client-side handlers=" + clientAfter + " (expected >= " + expectedAfter + ")");
       Assert.assertTrue(ok, "after failover new leader had " + after.size()
           + " server-side CURRENTSTATES watches, expected >= " + expectedAfter
           + " (MissingTopState would not clear)");
+      Assert.assertTrue(clientAfter >= expectedAfter,
+          "new leader client-side CURRENTSTATES handlers=" + clientAfter + ", expected >= "
+              + expectedAfter + " (server-side watch paths=" + after.size() + ")");
 
       // Prove functional: cluster stays converged (leader is observing current-state replies).
       Assert.assertTrue(verifier.verifyByPolling(), "post-failover observation failed (flagOn="
@@ -261,8 +253,6 @@ public class TestRealZkFailoverWatches {
       for (MockParticipantManager p : participants) {
         p.syncStop();
       }
-      System.out.println("=== END real-ZK scenario flagOn=" + flagOn + " -> post-failover "
-          + "server-side watches=" + after.size() + " ===");
       return after.size();
     } finally {
       try {

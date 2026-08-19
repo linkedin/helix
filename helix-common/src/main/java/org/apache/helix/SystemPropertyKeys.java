@@ -99,12 +99,12 @@ public class SystemPropertyKeys {
   public static final String STAGE_THREAD_POOL_SIZE = "helix.stage.threadpool.size";
 
   // Feature gate (default OFF) for the controller's deferred + parallel per-instance listener
-  // registration during leadership acquisition (CICP-34606). When off, the controller registers
+  // registration during leadership acquisition. When off, the controller registers
   // per-instance listeners inline exactly as before, and no participant/spectator path is affected.
   public static final String CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED =
       "helix.controller.parallelInstanceListenerRegistration.enabled";
 
-  // Thread-pool size for the controller's parallel per-instance listener registration (CICP-34606).
+  // Thread-pool size for the controller's parallel per-instance listener registration.
   // Only used when the feature above is enabled; defaults to 10.
   public static final String CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_THREADS =
       "helix.controller.parallelInstanceListenerRegistration.threads";

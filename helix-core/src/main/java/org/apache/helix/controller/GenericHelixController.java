@@ -156,7 +156,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private volatile PendingInstanceListeners _pendingInstanceListeners;
 
   // Feature gate (default OFF) for the deferred + parallel per-instance listener registration
-  // during leadership acquisition (CICP-34606). Read once here so a whole leadership epoch is
+  // during leadership acquisition. Read once here so a whole leadership epoch is
   // decided consistently. When off, checkLiveInstancesObservation registers inline exactly as
   // before (legacy), and the controller drain in ZKHelixManager never runs (_pendingInstanceListeners
   // stays null). Flip on per deployment via the system property to ramp on a canary.
