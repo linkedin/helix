@@ -1381,7 +1381,7 @@ public class TestInstanceOperation extends ZkTestBase {
     _gSetupTool.getClusterManagementTool().setInstanceConfig(CLUSTER_NAME, instanceToSwapInName, swapInInstanceConfig);
 
     // Assert successfully complete swap
-    verifier(() -> _gSetupTool.getClusterManagementTool().canCompleteSwap(CLUSTER_NAME, instanceToSwapOutName), 30000);
+    verifier(() -> _gSetupTool.getClusterManagementTool().canCompleteSwap(CLUSTER_NAME, instanceToSwapOutName), TestHelper.WAIT_DURATION);
     Assert.assertTrue(_gSetupTool.getClusterManagementTool()
         .completeSwapIfPossible(CLUSTER_NAME, instanceToSwapOutName, false));
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
@@ -1492,7 +1492,7 @@ public class TestInstanceOperation extends ZkTestBase {
         continue;
       }
       verifier(() -> ((_dataAccessor.getChildNames(
-          _dataAccessor.keyBuilder().messages(participant))).isEmpty()), 30000);
+          _dataAccessor.keyBuilder().messages(participant))).isEmpty()), TestHelper.WAIT_DURATION);
     }
     Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
     Assert.assertFalse(_admin.isReadyForPreparingJoiningCluster(CLUSTER_NAME, instanceToEvacuate));
@@ -1545,7 +1545,7 @@ public class TestInstanceOperation extends ZkTestBase {
 
     // message should be pending at the to evacuate participant
     verifier(() -> ((_dataAccessor.getChildNames(
-        _dataAccessor.keyBuilder().messages(instanceToEvacuate))).isEmpty()), 30000);
+        _dataAccessor.keyBuilder().messages(instanceToEvacuate))).isEmpty()), TestHelper.WAIT_DURATION);
     Assert.assertFalse(_admin.isEvacuateFinished(CLUSTER_NAME, instanceToEvacuate));
 
     // cancel evacuation
@@ -1708,7 +1708,7 @@ public class TestInstanceOperation extends ZkTestBase {
         }
       }
       return true;
-    }, 30000);
+    }, TestHelper.WAIT_DURATION);
 
     removeOfflineOrInactiveInstances();
     addParticipant(PARTICIPANT_PREFIX + "_" + _nextStartPort);
@@ -1767,7 +1767,7 @@ public class TestInstanceOperation extends ZkTestBase {
     _gSetupTool.getClusterManagementTool().setInstanceOperation(CLUSTER_NAME,
         toDisableThenEvacuateInstanceName, InstanceConstants.InstanceOperation.EVACUATE);
 
-    verifier(() -> _admin.isEvacuateFinished(CLUSTER_NAME, toDisableThenEvacuateInstanceName), 30000);
+    verifier(() -> _admin.isEvacuateFinished(CLUSTER_NAME, toDisableThenEvacuateInstanceName), TestHelper.WAIT_DURATION);
     int downwardSTCountAfterEvacuateComplete = stateTransitionCountStateModelFactory.getDownwardStateTransitionCounter();
 
     // Assert node received no upward state transitions after evacuation was called on already disabled node

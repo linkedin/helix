@@ -162,12 +162,13 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
 
     boolean result =
         ClusterStateVerifier
-            .verifyByPolling(new MasterNbInExtViewVerifier(ZK_ADDR, CLUSTER_NAME));
+            .verifyByPolling(new MasterNbInExtViewVerifier(ZK_ADDR, CLUSTER_NAME),
+                TestHelper.WAIT_DURATION);
     Assert.assertTrue(result);
     HelixDataAccessor accessor = _participants[0].getHelixDataAccessor();
 
-    TestHelper.verify(() -> verify(accessor, idealState, factories), 5000);
-    Assert.assertTrue(verify(accessor, idealState, factories));
+    Assert.assertTrue(TestHelper.verify(
+        () -> verify(accessor, idealState, factories), TestHelper.WAIT_DURATION));
   }
 
   private boolean verify(HelixDataAccessor accessor, IdealState idealState,
