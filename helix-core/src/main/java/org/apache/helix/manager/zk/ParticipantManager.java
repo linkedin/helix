@@ -312,7 +312,12 @@ public class ParticipantManager {
             _clusterName);
 
         Stat stat = new Stat();
-        ZNRecord record = _zkclient.readData(liveInstancePath, stat, true);
+        // watch=false: this read only checks whether a stale live-instance node still exists; no
+        // listener consumes a watch here. A one-shot (watch=true) read would throw under a
+        // persist-watcher client (validateNativeZkWatcherType), which a CONTROLLER_PARTICIPANT uses
+        // when the persist-recursive watch flag is on -> it would abort new-session handling on the
+        // duplicate-live-instance race (fast controller restart).
+        ZNRecord record = _zkclient.readData(liveInstancePath, stat, false);
         if (record == null) {
           /**
            * live-instance is gone as we check it, retry create live-instance

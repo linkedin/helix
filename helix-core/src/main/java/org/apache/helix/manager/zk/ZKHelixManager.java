@@ -1522,6 +1522,14 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
         .setMonitorInstanceName(_instanceName)
         .setMonitorRootPathOnly(isMonitorRootPathOnly());
 
+    // When the persist-recursive participant-state watch is enabled, the controller's client must run
+    // in persistent-watcher mode so CallbackHandler can install one recursive watch per subtree.
+    if (Boolean.getBoolean(SystemPropertyKeys.PARTICIPANT_STATE_PERSIST_RECURSIVE_WATCH_ENABLED)
+        && (_instanceType == InstanceType.CONTROLLER
+            || _instanceType == InstanceType.CONTROLLER_PARTICIPANT)) {
+      clientConfig.setUsePersistWatcher(true);
+    }
+
     if (_instanceType == InstanceType.ADMINISTRATOR) {
       return resolveZkClient(SharedZkClientFactory.getInstance(), _realmAwareZkConnectionConfig,
           clientConfig);

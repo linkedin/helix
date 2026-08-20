@@ -38,6 +38,7 @@ import org.apache.helix.zookeeper.zkclient.IZkDataListener;
 import org.apache.helix.zookeeper.zkclient.ZkConnection;
 import org.apache.helix.zookeeper.zkclient.callback.ZkAsyncCallbacks;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
+import org.apache.helix.zookeeper.zkclient.RecursivePersistListener;
 import org.apache.helix.zookeeper.zkclient.serialize.PathBasedZkSerializer;
 import org.apache.helix.zookeeper.zkclient.serialize.ZkSerializer;
 import org.apache.zookeeper.CreateMode;
@@ -107,7 +108,8 @@ public class DedicatedZkClient implements RealmAwareZkClient {
     _rawZkClient = new ZkClient(zkConnection, (int) clientConfig.getConnectInitTimeout(),
         clientConfig.getOperationRetryTimeout(), clientConfig.getZkSerializer(),
         clientConfig.getMonitorType(), clientConfig.getMonitorKey(),
-        clientConfig.getMonitorInstanceName(), clientConfig.isMonitorRootPathOnly());
+        clientConfig.getMonitorInstanceName(), clientConfig.isMonitorRootPathOnly(), true,
+        clientConfig.isUsePersistWatcher());
   }
 
   @Override
@@ -159,6 +161,18 @@ public class DedicatedZkClient implements RealmAwareZkClient {
   @Override
   public void unsubscribeAll() {
     _rawZkClient.unsubscribeAll();
+  }
+
+  @Override
+  public void subscribePersistRecursiveListener(String path, RecursivePersistListener listener) {
+    checkIfPathContainsShardingKey(path);
+    _rawZkClient.subscribePersistRecursiveListener(path, listener);
+  }
+
+  @Override
+  public void unsubscribePersistRecursiveListener(String path, RecursivePersistListener listener) {
+    checkIfPathContainsShardingKey(path);
+    _rawZkClient.unsubscribePersistRecursiveListener(path, listener);
   }
 
   @Override
