@@ -266,15 +266,15 @@ public class ZKHelixAdmin implements HelixAdmin {
     String instanceName = instanceConfig.getInstanceName();
 
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
-    if (!_zkClient.exists(instanceConfigPath)) {
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    boolean hasConfig = _zkClient.exists(instanceConfigPath);
+    boolean hasInstance = _zkClient.exists(instancePath);
+    // dropInstancePathsRecursively is no longer atomic (config is deleted before
+    // the subtree). A retry after a partial drop may find the config already
+    // gone but the subtree still present; treat that as a resume case.
+    if (!hasConfig && !hasInstance) {
       throw new HelixException(
           "Node " + instanceName + " does not exist in config for cluster " + clusterName);
-    }
-
-    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
-    if (!_zkClient.exists(instancePath)) {
-      throw new HelixException(
-          "Node " + instanceName + " does not exist in instances for cluster " + clusterName);
     }
 
     String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
@@ -286,13 +286,34 @@ public class ZKHelixAdmin implements HelixAdmin {
     dropInstancePathsRecursively(clusterName, instanceName);
   }
 
+  // Two-phase drop. Previously a single deleteRecursivelyAtomic([instance, config])
+  // built one multi() packet whose size grew O(#znodes); on instances with ~13K
+  // accumulated MESSAGES it crossed the 4 MB jute.maxbuffer limit, surfaced as
+  // CONNECTIONLOSS, and the default 24h ZkClient retry timeout pinned the Helix
+  // REST Jetty thread pool until restart.
+  //
+  // Phase 1: delete InstanceConfig first. This makes the instance non-Assignable,
+  //   so the controller stops generating new state-transition messages while the
+  //   subtree delete is in flight.
+  // Phase 2: deleteRecursively on /INSTANCES/{instance}. ZkClient.deleteRecursively
+  //   batches internally to stay within jute.maxbuffer.
+  //
+  // Trade-off: this is no longer atomic. If the JVM dies between Phase 1 and the
+  // end of Phase 2, a stale /INSTANCES/{instance} subtree remains. The next
+  // dropInstance call resumes cleanup; dropInstance's existence check above is
+  // relaxed to allow the resume case where InstanceConfig is already gone.
   private void dropInstancePathsRecursively(String clusterName, String instanceName) {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     int retryCnt = 0;
     while (true) {
       try {
-        _zkClient.deleteRecursivelyAtomic(Arrays.asList(instancePath, instanceConfigPath));
+        // Phase 1
+        if (_zkClient.exists(instanceConfigPath)) {
+          _zkClient.delete(instanceConfigPath);
+        }
+        // Phase 2
+        _zkClient.deleteRecursively(instancePath);
         return;
       } catch (ZkClientException e) {
         if (retryCnt < 3 && e.getCause() instanceof ZkException && e.getCause()
