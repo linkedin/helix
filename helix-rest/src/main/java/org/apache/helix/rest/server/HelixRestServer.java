@@ -47,6 +47,7 @@ import org.apache.helix.rest.server.authValidator.NoopAuthValidator;
 import org.apache.helix.rest.server.filters.AuditLogFilter;
 import org.apache.helix.rest.server.filters.CORSFilter;
 import org.apache.helix.rest.server.filters.ClusterAuthFilter;
+import org.apache.helix.rest.server.filters.HelixZKAdminAuthFilter;
 import org.apache.helix.rest.server.filters.NamespaceAuthFilter;
 import org.apache.helix.rest.server.resources.helix.AbstractHelixResource;
 import org.apache.helix.rest.server.resources.metadata.NamespacesAccessor;
@@ -227,6 +228,7 @@ public class HelixRestServer {
     }
     cfg.register(new AuditLogFilter(_auditLoggers));
     cfg.register(new ClusterAuthFilter(_clusterAuthValidator));
+    cfg.register(new HelixZKAdminAuthFilter(_clusterAuthValidator));
     cfg.register(new NamespaceAuthFilter(_namespaceAuthValidator));
     return cfg;
   }

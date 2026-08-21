@@ -59,11 +59,13 @@ public class TestAuthValidator extends AbstractTestClass {
 
   private static String CLASSNAME_TEST_DEFAULT_AUTH = "testDefaultAuthValidator";
   private static String CLASSNAME_TEST_CST_AUTH = "testCustomAuthValidator";
+  private static String CLASSNAME_TEST_ADMIN_AUTH = "testHelixZKAdminAuthValidator";
 
   @AfterClass
   public void afterClass() {
     TestHelper.dropCluster(CLASSNAME_TEST_DEFAULT_AUTH, _gZkClient);
     TestHelper.dropCluster(CLASSNAME_TEST_CST_AUTH, _gZkClient);
+    TestHelper.dropCluster(CLASSNAME_TEST_ADMIN_AUTH, _gZkClient);
   }
 
   @Test
@@ -121,6 +123,67 @@ public class TestAuthValidator extends AbstractTestClass {
     sendRequestAndValidate(request, Response.Status.OK.getStatusCode());
     request = buildRequest("/clusters", HttpConstants.RestVerbs.GET, "");
     sendRequestAndValidate(request, Response.Status.FORBIDDEN.getStatusCode());
+
+    server.shutdown();
+    _httpClient.close();
+  }
+
+  /*
+   * Verifies that endpoints annotated with @HelixZKAdminAuth (e.g. deleteInstance) are additionally
+   * gated on the helix-zk-admin role via AuthValidator.validate(request, role), while non-admin
+   * endpoints are unaffected.
+   */
+  @Test(dependsOnMethods = "testCustomAuthValidator")
+  public void testHelixZKAdminAuthValidator() throws IOException, InterruptedException {
+    int newPort = getBaseUri().getPort() + 2;
+    _mockBaseUri = HttpConstants.HTTP_PROTOCOL_PREFIX + getBaseUri().getHost() + ":" + newPort;
+    _httpClient = HttpClients.createDefault();
+
+    List<HelixRestNamespace> namespaces = new ArrayList<>();
+    namespaces.add(new HelixRestNamespace(HelixRestNamespace.DEFAULT_NAMESPACE_NAME,
+        HelixRestNamespace.HelixMetadataStoreType.ZOOKEEPER, ZK_ADDR, true));
+
+    // Cluster/namespace auth passes for every request, but the admin-role check is rejected.
+    AuthValidator mockAuthValidatorAdminReject = Mockito.mock(AuthValidator.class);
+    when(mockAuthValidatorAdminReject.validate(any())).thenReturn(true);
+    when(mockAuthValidatorAdminReject.validate(any(), any())).thenReturn(false);
+
+    HelixRestServer server =
+        new HelixRestServer(namespaces, newPort, getBaseUri().getPath(), Collections.emptyList(),
+            mockAuthValidatorAdminReject, mockAuthValidatorAdminReject, new NoopAclRegister());
+    server.start();
+
+    // Non-admin endpoint (create cluster) is allowed since regular cluster auth passes.
+    HttpUriRequest request =
+        buildRequest("/clusters/" + CLASSNAME_TEST_ADMIN_AUTH, HttpConstants.RestVerbs.PUT, "");
+    sendRequestAndValidate(request, Response.Status.CREATED.getStatusCode());
+
+    // Admin-only endpoint (delete instance) is forbidden because the admin-role check fails.
+    request = buildRequest(
+        "/clusters/" + CLASSNAME_TEST_ADMIN_AUTH + "/instances/dummyInstance_12000",
+        HttpConstants.RestVerbs.DELETE, "");
+    sendRequestAndValidate(request, Response.Status.FORBIDDEN.getStatusCode());
+
+    server.shutdown();
+    _httpClient.close();
+
+    // Now grant the admin role; the delete instance endpoint must no longer be rejected by auth.
+    AuthValidator mockAuthValidatorAdminAccept = Mockito.mock(AuthValidator.class);
+    when(mockAuthValidatorAdminAccept.validate(any())).thenReturn(true);
+    when(mockAuthValidatorAdminAccept.validate(any(), any())).thenReturn(true);
+
+    server =
+        new HelixRestServer(namespaces, newPort, getBaseUri().getPath(), Collections.emptyList(),
+            mockAuthValidatorAdminAccept, mockAuthValidatorAdminAccept, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+
+    request = buildRequest(
+        "/clusters/" + CLASSNAME_TEST_ADMIN_AUTH + "/instances/dummyInstance_12000",
+        HttpConstants.RestVerbs.DELETE, "");
+    HttpResponse response = _httpClient.execute(request);
+    Assert.assertTrue(response.getStatusLine().getStatusCode() != Response.Status.FORBIDDEN
+        .getStatusCode());
 
     server.shutdown();
     _httpClient.close();
