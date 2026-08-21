@@ -203,9 +203,24 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
         .isFeasible());
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // Simulation paths.
-  // ---------------------------------------------------------------------------------------------
+  @Test
+  public void testAnyLiveInstanceWagedResourceIsExempt() {
+    // An ANY_LIVEINSTANCE resource keeps exactly one replica per live instance, so removing an
+    // instance is a by-design N->N-1 reduction, never a capacity deficit. The rule must exempt such
+    // a resource; here it is the only WAGED resource, so after the exemption there is nothing to
+    // simulate and the (expensive) provider must never run.
+    ClusterConfig clusterConfig = enabledClusterConfig();
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+    doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    doReturn(assignableInstance(INSTANCE)).when(dataAccessor)
+        .getProperty(BUILDER.instanceConfig(INSTANCE));
+    doReturn(ImmutableList.of(anyLiveInstanceWagedIdealState(RESOURCE))).when(dataAccessor)
+        .getChildValues(BUILDER.idealStates(), true);
+    Assert.assertTrue(rule.validate(
+        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, PROVIDER_MUST_NOT_RUN))
+        .isFeasible());
+  }
 
   @Test
   public void testEvacuateFeasibleWhenReplicasFitElsewhere() {
@@ -394,6 +409,13 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   private static IdealState wagedIdealState(String resource) {
     IdealState idealState = new IdealState(resource);
     idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    return idealState;
+  }
+
+  private static IdealState anyLiveInstanceWagedIdealState(String resource) {
+    IdealState idealState = wagedIdealState(resource);
+    // "ANY_LIVEINSTANCE" is exactly what IdealState.getReplicas() returns for such resources.
+    idealState.setReplicas("ANY_LIVEINSTANCE");
     return idealState;
   }
 

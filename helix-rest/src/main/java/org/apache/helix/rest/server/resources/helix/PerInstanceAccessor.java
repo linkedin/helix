@@ -543,23 +543,30 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           // for it. force=true overrides the verdict (draining a failing node is often mandatory);
           // dryRun=true reports the verdict without writing. The provider keeps the ZK-accessor
           // plumbing for the read-only WAGED what-if here in the REST layer.
-          WagedAssignmentProvider wagedAssignmentProvider =
-              (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                  .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
-                      new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                      liveInstances, idealStates, resourceConfigs);
-          GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
-              .dataAccessor(getDataAccssor(clusterId))
-              .instanceName(instanceName)
-              .proposedInstanceOperation(instanceOperation)
-              .wagedAssignmentProvider(wagedAssignmentProvider)
-              .build();
-          GuardrailPipeline setInstanceOperationPipeline =
-              new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
-          Optional<Response> setInstanceOperationPreflight =
-              preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
-          if (setInstanceOperationPreflight.isPresent()) {
-            return setInstanceOperationPreflight.get();
+          //
+          // Skip the (relatively expensive) double WAGED what-if entirely for a real force write:
+          // force overrides any verdict anyway, so an operator force-draining a failing node must
+          // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
+          // dryRun still computes the verdict (even together with force) so it can be previewed.
+          if (dryRun || !force) {
+            WagedAssignmentProvider wagedAssignmentProvider =
+                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                        liveInstances, idealStates, resourceConfigs);
+            GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(getDataAccssor(clusterId))
+                .instanceName(instanceName)
+                .proposedInstanceOperation(instanceOperation)
+                .wagedAssignmentProvider(wagedAssignmentProvider)
+                .build();
+            GuardrailPipeline setInstanceOperationPipeline =
+                new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+            Optional<Response> setInstanceOperationPreflight =
+                preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
+            if (setInstanceOperationPreflight.isPresent()) {
+              return setInstanceOperationPreflight.get();
+            }
           }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
               new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,

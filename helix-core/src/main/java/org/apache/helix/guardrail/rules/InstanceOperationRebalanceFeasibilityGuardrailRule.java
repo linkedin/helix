@@ -94,6 +94,22 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
  * The disabled path returns feasible before any WAGED simulation or fail-closed ZK read, so a disabled
  * cluster is never exposed to the (relatively expensive) what-if or to read failures, and the flag
  * doubles as a single-config-change kill switch to back out a false positive.
+ * <p>
+ * <b>Scope and limitations.</b>
+ * <ul>
+ *   <li><b>Best-effort, not atomic admission control.</b> The verdict is computed from a cluster
+ *       snapshot and the actual write happens afterwards, so two concurrent drains could each be
+ *       certified against four-remaining-instances and both proceed. Treat this as a strong safety
+ *       net that catches the common single-operation mistake, not as a serialized invariant.</li>
+ *   <li><b>{@code ANY_LIVEINSTANCE} resources are exempt.</b> They keep one replica per live instance,
+ *       so removing an instance never forces a replica to relocate; their by-design N&rarr;N-1
+ *       reduction is not a deficit and would otherwise be a false rejection.</li>
+ *   <li><b>Fail-closed on an uncomputable baseline.</b> If the baseline what-if itself cannot be
+ *       computed (e.g. a transient metadata-store error, or a cluster already unable to rebalance),
+ *       the request is blocked with a {@code force=true}-able message rather than silently allowed;
+ *       this trades a possible false block (recoverable via force) for never certifying a write that
+ *       could not be validated.</li>
+ * </ul>
  */
 public class InstanceOperationRebalanceFeasibilityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "INSTANCE_OPERATION_CAUSES_WAGED_UNPLACEABLE";
@@ -168,10 +184,20 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
     List<IdealState> wagedIdealStates = new ArrayList<>();
     for (IdealState idealState : dataAccessor.<IdealState>getChildValues(keyBuilder.idealStates(),
         true)) {
-      if (idealState != null && WagedRebalancer.class.getName()
+      if (idealState == null || !WagedRebalancer.class.getName()
           .equals(idealState.getRebalancerClassName())) {
-        wagedIdealStates.add(idealState);
+        continue;
       }
+      // ANY_LIVEINSTANCE resources keep exactly one replica per live instance, so removing an
+      // instance simply drops that instance's own replica -- no replica has to relocate onto the
+      // remaining instances, hence such a resource can never be made unplaceable by this operation.
+      // Skip it so its intentional, by-design N->N-1 reduction is not mistaken for a capacity
+      // deficit (which would be a false rejection).
+      if (ResourceConfig.ResourceConfigConstants.ANY_LIVEINSTANCE.name()
+          .equalsIgnoreCase(idealState.getReplicas())) {
+        continue;
+      }
+      wagedIdealStates.add(idealState);
     }
     if (wagedIdealStates.isEmpty()) {
       // No WAGED resources: there is no WAGED global rebalance for this operation to break.
@@ -213,14 +239,27 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
       }
     }
     if (!replaced) {
-      // The target's config was not in the listed instance configs (a race with a concurrent
-      // change); include the candidate so the simulated state reflects the proposed operation.
+      // The target's config was not in the bulk instance-config read (a race with a concurrent
+      // change). Keep the two simulations symmetric: the candidate must include the mutated copy,
+      // and the baseline must include the target as it is now (assignable). Otherwise both pools
+      // would be effectively identical -- WAGED ignores the non-assignable candidate -- and the diff
+      // would falsely pass. Including both makes the diff reflect only this operation.
       candidateInstanceConfigs.add(candidateConfig);
+      baselineInstanceConfigs = new ArrayList<>(baselineInstanceConfigs);
+      baselineInstanceConfigs.add(currentConfig);
     }
+
+    // Simulate against a copy of the cluster config with delayed rebalance disabled, so the what-if
+    // reflects the eventual steady state (every live instance participating) rather than a transient
+    // delay window in which a temporarily-down-but-still-"active" instance could mask a real deficit.
+    // Mirrors ResourceAssignmentOptimizerAccessor's what-if setup.
+    ClusterConfig simulationClusterConfig =
+        new ClusterConfig(new ZNRecord(clusterConfig.getRecord()));
+    simulationClusterConfig.setDelayRebalaceEnabled(false);
 
     Map<String, ResourceAssignment> baseline;
     try {
-      baseline = provider.computeTargetAssignment(clusterConfig, baselineInstanceConfigs,
+      baseline = provider.computeTargetAssignment(simulationClusterConfig, baselineInstanceConfigs,
           liveInstances, wagedIdealStates, wagedResourceConfigs);
     } catch (Exception e) {
       // No baseline to compare against: the cluster may already be unable to compute a WAGED
@@ -238,7 +277,7 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
 
     Map<String, ResourceAssignment> candidate;
     try {
-      candidate = provider.computeTargetAssignment(clusterConfig, candidateInstanceConfigs,
+      candidate = provider.computeTargetAssignment(simulationClusterConfig, candidateInstanceConfigs,
           liveInstances, wagedIdealStates, wagedResourceConfigs);
     } catch (Exception e) {
       // Applying the operation makes WAGED unable to compute any assignment at all (e.g. a
