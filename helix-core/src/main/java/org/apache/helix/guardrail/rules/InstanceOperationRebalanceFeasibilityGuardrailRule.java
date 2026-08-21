@@ -19,16 +19,21 @@
 
 package org.apache.helix.guardrail.rules;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
@@ -94,6 +99,25 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
  * The disabled path returns feasible before any WAGED simulation or fail-closed ZK read, so a disabled
  * cluster is never exposed to the (relatively expensive) what-if or to read failures, and the flag
  * doubles as a single-config-change kill switch to back out a false positive.
+ * <p>
+ * <b>Cheap pre-checks short-circuit the common failures without a simulation.</b> Before running the
+ * (relatively expensive) double WAGED what-if, two sound O(instances&times;keys) arithmetic checks run
+ * against the post-operation assignable pool, each mirroring a WAGED <em>hard</em>-constraint failure
+ * exactly:
+ * <ul>
+ *   <li><b>Replica-count pigeonhole.</b> {@code SamePartitionOnInstanceConstraint} forbids two replicas
+ *       of a partition on one instance, so a resource with {@code R} replicas needs {@code R} distinct
+ *       assignable instances. If fewer remain, WAGED throws {@code NO_CANDIDATE_NODE} &mdash; we block
+ *       up-front.</li>
+ *   <li><b>Aggregate capacity.</b> WAGED throws {@code CAPACITY_DEFICIT} when the total weight of all
+ *       WAGED replicas exceeds the summed capacity of the assignable nodes for any capacity key. We
+ *       recompute that same global necessary condition using WAGED's own resolvers
+ *       ({@link WagedValidationUtil}/{@link WagedRebalanceUtil}) so the numbers are identical.</li>
+ * </ul>
+ * Both are <em>sound</em>: a block here is one the candidate simulation would also produce, just faster
+ * and with a clearer message. When inputs are ambiguous (missing/malformed weights, non-enumerable
+ * partitions) the pre-check yields to the full what-if rather than risk a false block, and both run only
+ * when the target is currently live (an already-dead instance removes nothing from WAGED's pool).
  * <p>
  * <b>Scope and limitations.</b>
  * <ul>
@@ -226,6 +250,38 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
       liveInstances = Collections.emptyList();
     }
 
+    // Cheap, sound pre-checks: block obvious infeasibility without running the WAGED what-if. Both
+    // mirror a WAGED hard-constraint failure exactly, so any block here is one the candidate
+    // simulation would also produce. They run only when the target is currently live (and thus in
+    // WAGED's eligible pool); draining an already-dead instance removes nothing, so we defer to the
+    // simulation, which correctly reports no change.
+    Set<String> liveInstanceSet = new HashSet<>(liveInstances);
+    if (liveInstanceSet.contains(instanceName)) {
+      // The eligible pool after the operation: assignable AND live, excluding the drained target.
+      List<InstanceConfig> remainingAssignableInstances = new ArrayList<>();
+      for (InstanceConfig instanceConfig : baselineInstanceConfigs) {
+        if (instanceConfig == null || instanceName.equals(instanceConfig.getInstanceName())
+            || !instanceConfig.isAssignable()
+            || !liveInstanceSet.contains(instanceConfig.getInstanceName())) {
+          continue;
+        }
+        remainingAssignableInstances.add(instanceConfig);
+      }
+      int remainingAssignableCount = remainingAssignableInstances.size();
+
+      ValidationResult countVerdict = precheckReplicaCount(wagedIdealStates, remainingAssignableCount,
+          proposedOp, instanceName, context.getClusterName());
+      if (countVerdict != null) {
+        return countVerdict;
+      }
+      ValidationResult capacityVerdict = precheckAggregateCapacity(wagedIdealStates,
+          resourceConfigByName, remainingAssignableInstances, remainingAssignableCount, clusterConfig,
+          proposedOp, instanceName, context.getClusterName());
+      if (capacityVerdict != null) {
+        return capacityVerdict;
+      }
+    }
+
     // Candidate instance-config list = baseline with the target replaced by its mutated copy.
     List<InstanceConfig> candidateInstanceConfigs =
         new ArrayList<>(baselineInstanceConfigs.size() + 1);
@@ -344,6 +400,145 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
           .build());
     }
     return ValidationResult.of(violations);
+  }
+
+  /**
+   * (a) Sound replica-count pre-check. Returns an infeasible result naming every WAGED resource that
+   * would need more distinct assignable instances than remain after the operation (each such resource
+   * makes WAGED throw {@code NO_CANDIDATE_NODE}); returns {@code null} when inconclusive so the caller
+   * proceeds to the full what-if. {@code ANY_LIVEINSTANCE} resources are already excluded upstream, so
+   * their replica count is never compared here.
+   */
+  private ValidationResult precheckReplicaCount(List<IdealState> wagedIdealStates,
+      int remainingAssignableCount, InstanceConstants.InstanceOperation proposedOp, String instanceName,
+      String clusterName) {
+    List<Violation> violations = new ArrayList<>();
+    for (IdealState idealState : wagedIdealStates) {
+      int replicaCount = idealState.getReplicaCount(remainingAssignableCount);
+      if (replicaCount > remainingAssignableCount) {
+        violations.add(Violation.newBuilder(RULE_ID).resource(idealState.getResourceName()).message(
+            String.format(
+                "Operation %s on instance %s would leave %d assignable instance(s) in cluster %s, but "
+                    + "WAGED resource %s needs %d distinct assignable instances to place every replica "
+                    + "of each partition; the rebalance would fail to place them (NO_CANDIDATE_NODE). "
+                    + "Add assignable capacity, or retry with force=true to override.", proposedOp,
+                instanceName, remainingAssignableCount, clusterName, idealState.getResourceName(),
+                replicaCount)).build());
+        if (violations.size() >= MAX_REPORTED_VIOLATIONS) {
+          break;
+        }
+      }
+    }
+    return violations.isEmpty() ? null : ValidationResult.of(violations);
+  }
+
+  /**
+   * (b) Sound aggregate-capacity pre-check. Mirrors WAGED's global {@code CAPACITY_DEFICIT} condition
+   * (see {@code ConstraintBasedAlgorithm}): if the total weight of all WAGED replicas exceeds the
+   * summed capacity of the post-operation assignable nodes for any capacity key, WAGED cannot compute
+   * an assignment. Demand and capacity are resolved with WAGED's own utilities so the numbers are
+   * identical to the rebalancer's. Returns an infeasible result on a deficit, or {@code null} when the
+   * check is inconclusive (no capacity model, or missing/malformed/ non-enumerable weights) so the
+   * caller defers to the full what-if rather than risk a false block.
+   */
+  private ValidationResult precheckAggregateCapacity(List<IdealState> wagedIdealStates,
+      Map<String, ResourceConfig> resourceConfigByName,
+      List<InstanceConfig> remainingAssignableInstances, int remainingAssignableCount,
+      ClusterConfig clusterConfig, InstanceConstants.InstanceOperation proposedOp, String instanceName,
+      String clusterName) {
+    List<String> capacityKeys = clusterConfig.getInstanceCapacityKeys();
+    if (capacityKeys == null || capacityKeys.isEmpty()) {
+      // No capacity model configured -> WAGED performs no capacity check -> nothing to pre-validate.
+      return null;
+    }
+
+    // Summed capacity of the post-operation assignable node pool, per key.
+    Map<String, Long> availableCapacity = new HashMap<>();
+    for (InstanceConfig instanceConfig : remainingAssignableInstances) {
+      Map<String, Integer> nodeCapacity;
+      try {
+        nodeCapacity =
+            WagedValidationUtil.validateAndGetInstanceCapacity(clusterConfig, instanceConfig);
+      } catch (Exception e) {
+        // A node is missing required capacity keys: a pre-existing misconfiguration, not an effect of
+        // this operation. Skip the capacity pre-check and defer to the full what-if.
+        return null;
+      }
+      for (String key : capacityKeys) {
+        Integer value = nodeCapacity.get(key);
+        if (value != null) {
+          availableCapacity.merge(key, value.longValue(), Long::sum);
+        }
+      }
+    }
+
+    // Total demand of all WAGED replicas, per key, computed exactly as WAGED does.
+    Map<String, Long> requiredCapacity = new HashMap<>();
+    for (IdealState idealState : wagedIdealStates) {
+      ResourceConfig resourceConfig = resourceConfigByName.get(idealState.getResourceName());
+      int replicaCount = idealState.getReplicaCount(remainingAssignableCount);
+      if (replicaCount <= 0) {
+        continue;
+      }
+      Map<String, Map<String, Integer>> partitionCapacityMap;
+      try {
+        partitionCapacityMap = resourceConfig == null ? Collections.emptyMap()
+            : resourceConfig.getPartitionCapacityMap();
+      } catch (IOException e) {
+        return null; // malformed weights -> defer to the what-if
+      }
+      boolean hasPerPartitionOverrides = partitionCapacityMap.keySet().stream()
+          .anyMatch(partition -> !ResourceConfig.DEFAULT_PARTITION_KEY.equals(partition));
+      try {
+        if (hasPerPartitionOverrides) {
+          // Non-uniform weights: sum each partition's exact weight. If the partitions cannot be
+          // enumerated (e.g. a freshly-created resource with no computed assignment yet), skip rather
+          // than risk an inexact (possibly false) block.
+          Set<String> partitions = idealState.getPartitionSet();
+          if (partitions == null || partitions.isEmpty()) {
+            return null;
+          }
+          for (String partition : partitions) {
+            Map<String, Integer> weight =
+                WagedRebalanceUtil.fetchCapacityUsage(partition, resourceConfig, clusterConfig);
+            addWeightedDemand(requiredCapacity, capacityKeys, weight, (long) replicaCount);
+          }
+        } else {
+          // Uniform default weight: demand = numPartitions * replicaCount * defaultWeight.
+          Map<String, Integer> weight = WagedRebalanceUtil
+              .fetchCapacityUsage(ResourceConfig.DEFAULT_PARTITION_KEY, resourceConfig, clusterConfig);
+          long multiplier = (long) idealState.getNumPartitions() * replicaCount;
+          addWeightedDemand(requiredCapacity, capacityKeys, weight, multiplier);
+        }
+      } catch (Exception e) {
+        return null; // any weight-resolution problem -> defer to the what-if (never a false block)
+      }
+    }
+
+    List<Violation> violations = new ArrayList<>();
+    for (String key : capacityKeys) {
+      long demand = requiredCapacity.getOrDefault(key, 0L);
+      long available = availableCapacity.getOrDefault(key, 0L);
+      if (demand > available) {
+        violations.add(Violation.newBuilder(RULE_ID).message(String.format(
+            "Operation %s on instance %s would leave cluster %s with %d unit(s) of capacity key '%s' "
+                + "across its assignable instances, but its WAGED resources require %d; the rebalance "
+                + "would fail (CAPACITY_DEFICIT). Free up or add '%s' capacity, or retry with "
+                + "force=true to override.", proposedOp, instanceName, clusterName, available, key,
+            demand, key)).build());
+      }
+    }
+    return violations.isEmpty() ? null : ValidationResult.of(violations);
+  }
+
+  private static void addWeightedDemand(Map<String, Long> demand, List<String> capacityKeys,
+      Map<String, Integer> weight, long multiplier) {
+    for (String key : capacityKeys) {
+      Integer unit = weight.get(key);
+      if (unit != null && unit != 0) {
+        demand.merge(key, unit.longValue() * multiplier, Long::sum);
+      }
+    }
   }
 
   /**
