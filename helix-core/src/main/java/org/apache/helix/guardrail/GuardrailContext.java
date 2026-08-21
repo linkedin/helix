@@ -20,6 +20,7 @@
 package org.apache.helix.guardrail;
 
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 
@@ -40,6 +41,8 @@ public class GuardrailContext {
   private final String instanceName;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
+  private final InstanceConstants.InstanceOperation proposedInstanceOperation;
+  private final WagedAssignmentProvider wagedAssignmentProvider;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -47,6 +50,8 @@ public class GuardrailContext {
     this.instanceName = builder.instanceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
+    this.proposedInstanceOperation = builder.proposedInstanceOperation;
+    this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
   }
 
   public String getClusterName() {
@@ -83,6 +88,25 @@ public class GuardrailContext {
     return proposedIdealState;
   }
 
+  /**
+   * The instance operation a mutation proposes to set on {@link #getInstanceName()}, or {@code null}
+   * if the operation is not an instance-operation change. Rules read the to-be-written operation from
+   * here (rather than from ZK) since the change has not been applied yet at pre-validation time.
+   */
+  public InstanceConstants.InstanceOperation getProposedInstanceOperation() {
+    return proposedInstanceOperation;
+  }
+
+  /**
+   * A read-only seam for computing a WAGED what-if assignment, or {@code null} if the endpoint did
+   * not supply one. Rules that need to simulate a rebalance (rather than only read current state)
+   * call through this so that ZooKeeper-connection plumbing stays in the REST layer and the rule
+   * remains a pure, unit-testable function. See {@link WagedAssignmentProvider}.
+   */
+  public WagedAssignmentProvider getWagedAssignmentProvider() {
+    return wagedAssignmentProvider;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -93,6 +117,8 @@ public class GuardrailContext {
     private String instanceName;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
+    private InstanceConstants.InstanceOperation proposedInstanceOperation;
+    private WagedAssignmentProvider wagedAssignmentProvider;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -115,6 +141,17 @@ public class GuardrailContext {
 
     public Builder proposedIdealState(IdealState proposedIdealState) {
       this.proposedIdealState = proposedIdealState;
+      return this;
+    }
+
+    public Builder proposedInstanceOperation(
+        InstanceConstants.InstanceOperation proposedInstanceOperation) {
+      this.proposedInstanceOperation = proposedInstanceOperation;
+      return this;
+    }
+
+    public Builder wagedAssignmentProvider(WagedAssignmentProvider wagedAssignmentProvider) {
+      this.wagedAssignmentProvider = wagedAssignmentProvider;
       return this;
     }
 

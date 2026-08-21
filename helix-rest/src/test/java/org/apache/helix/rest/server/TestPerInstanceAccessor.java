@@ -42,13 +42,17 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
+import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -818,6 +822,108 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
       }
       return !responseForAllPartitions.contains(Boolean.FALSE);
     }, TestHelper.WAIT_DURATION);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Verifies the opt-in instance-operation rebalance-feasibility guard rail on
+   * {@code setInstanceOperation}. Uses a self-contained WAGED cluster whose replica count equals
+   * the assignable-instance count, so moving any one instance out of the assignable pool (EVACUATE)
+   * leaves too few instances to place every replica -> a deterministic placement deficit the guard
+   * rail must catch before writing to ZooKeeper.
+   */
+  @Test(dependsOnMethods = "updateInstance")
+  public void setInstanceOperationRebalanceFeasibilityGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterInstanceOpGuardrail";
+    String capacityKey = "CU";
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+
+    _gSetupTool.addCluster(cluster, true);
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceCapacityKeys(Collections.singletonList(capacityKey));
+    clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(capacityKey, 100));
+    clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(capacityKey, 1));
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13100 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    String resource = "TestDB_WAGED";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+        IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(1);
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build();
+    Assert.assertTrue(verifier.verifyByPolling(),
+        "cluster should converge before enabling the guard rail");
+
+    // Enable the opt-in guard rail.
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(true);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. Enabled: EVACUATE would leave a partition under-placed -> 400 and nothing written.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "EVACUATE must not be written when the guard rail blocks it");
+
+    // 2. dryRun: returns a 200 verdict naming the rule, still writes nothing.
+    Response dryRunResponse = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    String verdictBody = dryRunResponse.readEntity(String.class);
+    Assert.assertTrue(
+        verdictBody.contains(InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID),
+        "dry-run verdict should carry the rule id, but was: " + verdictBody);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the verdict and writes EVACUATE.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&force=true")
+        .format(cluster, target).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, target).getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.EVACUATE, "force=true should write EVACUATE");
+
+    // 4. Disabled flag: the same otherwise-blocked operation is allowed (guard rail short-circuits).
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(false);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+    String secondTarget = instances.get(1);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .format(cluster, secondTarget).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, secondTarget).getInstanceOperation()
+            .getOperation(), InstanceConstants.InstanceOperation.EVACUATE,
+        "with the guard rail disabled, EVACUATE should be written");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
