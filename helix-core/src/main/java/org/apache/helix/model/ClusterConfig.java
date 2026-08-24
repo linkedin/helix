@@ -242,7 +242,7 @@ public class ClusterConfig extends HelixProperty {
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
   private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
   // Default for CONTROLLER_PIPELINE_STALL_THRESHOLD_MS when unset.
-  private final static long DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS = 5000L; // 5 seconds
+  private final static long DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
 
   /**
    * Instantiate for a specific cluster
@@ -842,9 +842,16 @@ public class ClusterConfig extends HelixProperty {
    * Set the wedged-controller stall threshold: a non-empty controller event queue that has not
    * completed a pipeline run within this many ms is reported as stalled by
    * ControllerPipelineStalledGauge.
-   * @param thresholdMs threshold in milliseconds
+   * @param thresholdMs threshold in milliseconds; must be positive
+   * @throws IllegalArgumentException if {@code thresholdMs <= 0}. Rejecting non-positive values at
+   *         the write path keeps the persisted config from silently diverging from live behaviour
+   *         (the monitor ignores non-positive updates and keeps its previous/default threshold).
    */
   public void setControllerPipelineStallThresholdMs(long thresholdMs) {
+    if (thresholdMs <= 0) {
+      throw new IllegalArgumentException(
+          "CONTROLLER_PIPELINE_STALL_THRESHOLD_MS must be positive, got " + thresholdMs);
+    }
     _record.setLongField(ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
         thresholdMs);
   }

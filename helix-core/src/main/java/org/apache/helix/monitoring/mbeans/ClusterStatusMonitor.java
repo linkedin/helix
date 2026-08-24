@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import javax.management.JMException;
 import javax.management.MBeanServer;
@@ -105,10 +106,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // Stall threshold (ms): a non-empty event queue whose pipeline has not completed within this many
   // ms is treated as a wedged ("zombie leader") controller. Sourced from ClusterConfig
   // (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) and pushed by GenericHelixController each pipeline run;
-  // uses the default until first reported.
-  private static final long DEFAULT_PIPELINE_STALL_THRESHOLD_MS = 5000L;
+  // uses the default until first reported. Deliberately larger than the worst-case single pipeline
+  // run so a long-but-healthy rebalance (which can legitimately take minutes) is not mis-flagged;
+  // detection of a truly stuck-but-alive thread is therefore bounded by this threshold, while a dead
+  // pipeline thread is caught immediately via the liveness check below.
+  private static final long DEFAULT_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
   private AtomicLong _pipelineStallThresholdMs =
       new AtomicLong(DEFAULT_PIPELINE_STALL_THRESHOLD_MS);
+  // Liveness check for the DEFAULT controller-event pipeline thread, wired by GenericHelixController
+  // as () -> _eventThread == null || _eventThread.isAlive(). Read lazily at gauge-read time so a
+  // dead processing thread is detected even though the thread itself can no longer report anything.
+  // Null when not wired (e.g. unit tests or a controller without the DEFAULT pipeline), in which
+  // case the gauge falls back to the stall-threshold signal alone.
+  private volatile BooleanSupplier _pipelineLivenessSupplier = null;
 
   // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
   // enum value so reads on never-incremented categories return 0 instead of NPE.
@@ -1521,6 +1531,16 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  /**
+   * Wire the DEFAULT controller-event pipeline liveness check used by
+   * {@link #getControllerPipelineStalledGauge()}. Supplied by GenericHelixController as
+   * {@code () -> _eventThread == null || _eventThread.isAlive()} so a dead processing thread on a
+   * still-leader controller is reported as wedged immediately, independent of the stall threshold.
+   */
+  public void setPipelineLivenessSupplier(BooleanSupplier livenessSupplier) {
+    _pipelineLivenessSupplier = livenessSupplier;
+  }
+
   @Override
   public long getRebalanceFailureCounter() {
     return _rebalanceFailureCount.get();
@@ -1543,14 +1563,26 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
 
   @Override
   public long getControllerPipelineStalledGauge() {
+    // Healthy when there is no pending work: an empty queue means the pipeline is keeping up (or is
+    // legitimately idle), so nothing to flag.
+    if (_controllerEventQueueSizeGauge.get() <= 0) {
+      return 0L;
+    }
+    // Definitive zombie: the controller still holds queued events (and, since this MBean is only
+    // registered while it is the leader, still holds leadership) but the DEFAULT pipeline thread is
+    // dead. This is caught immediately, with no dependence on the stall threshold, and does not
+    // false-positive on a busy controller (whose thread is always alive).
+    BooleanSupplier liveness = _pipelineLivenessSupplier;
+    if (liveness != null && !liveness.getAsBoolean()) {
+      return 1L;
+    }
+    // Best-effort fallback for a thread that is alive but not making progress (e.g. hung or looping
+    // inside a run, or not picking the next event off the queue): no pipeline run has completed
+    // within the stall threshold. The threshold is set above the worst-case healthy run so a long
+    // legitimate rebalance is not mis-flagged; a truly stuck-but-alive thread is caught once the
+    // threshold elapses. Computed lazily on read so it stays correct even without any setter firing.
     long lastEnd = _lastPipelineEndTimestamp.get();
-    // 0 = not stalled: either the queue is empty (idle is healthy) or no pipeline has completed yet
-    // (no baseline). 1 = a non-empty queue whose DEFAULT pipeline has not completed within the
-    // stall threshold, i.e. the controller holds events but is not draining them (wedged / "zombie
-    // leader"). Computed lazily on read so it stays correct even if the pipeline thread is dead and
-    // no setter runs.
-    if (_controllerEventQueueSizeGauge.get() > 0 && lastEnd > 0
-        && (System.currentTimeMillis() - lastEnd) > _pipelineStallThresholdMs.get()) {
+    if (lastEnd > 0 && (System.currentTimeMillis() - lastEnd) > _pipelineStallThresholdMs.get()) {
       return 1L;
     }
     return 0L;

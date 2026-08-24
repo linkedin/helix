@@ -965,16 +965,52 @@ public class TestClusterStatusMonitor {
   @Test
   public void testControllerPipelineStalledGaugeOneWhenWedged() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledWedgedCluster");
-    // Non-empty queue whose pipeline last completed longer ago than the stall threshold (5s):
-    // the controller holds events but is not draining them, i.e. wedged.
+    // Non-empty queue whose pipeline last completed longer ago than the (explicitly set) stall
+    // threshold: the controller holds events but is not draining them, i.e. wedged.
+    monitor.setPipelineStallThresholdMs(5000L);
     monitor.setControllerEventQueueSizeGauge(3L);
     monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
   }
 
   @Test
+  public void testControllerPipelineStalledGaugeOneWhenPipelineThreadDead() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadThreadCluster");
+    // Queue has pending work and a pipeline completed just now (well within the threshold), but the
+    // DEFAULT pipeline thread is dead: the definitive zombie is flagged immediately, no threshold
+    // wait, and independent of how recent the last completion was.
+    monitor.setControllerEventQueueSizeGauge(1L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    monitor.setPipelineLivenessSupplier(() -> false);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroDuringLongHealthyRun() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledLongRunCluster");
+    // A long-but-healthy rebalance: the thread is alive, the queue has events piled up behind the
+    // in-progress run, and the last completion is 2 minutes ago. With the default threshold (5 min)
+    // above the worst-case run, this must NOT be flagged (the reviewer's false-positive scenario).
+    monitor.setControllerEventQueueSizeGauge(4L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 120000L);
+    monitor.setPipelineLivenessSupplier(() -> true);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenThreadDeadButQueueEmpty() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadIdleCluster");
+    // Even a dead thread is not "wedged" when there is no pending work to process.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 600000L);
+    monitor.setPipelineLivenessSupplier(() -> false);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
   public void testControllerPipelineStalledGaugeResetsToZeroOnLeadershipChange() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledResetCluster");
+    monitor.setPipelineStallThresholdMs(5000L);
     monitor.setControllerEventQueueSizeGauge(3L);
     monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);

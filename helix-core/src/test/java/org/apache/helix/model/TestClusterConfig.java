@@ -51,10 +51,20 @@ public class TestClusterConfig {
   @Test
   public void testControllerPipelineStallThresholdMsDefaultAndRoundTrip() {
     ClusterConfig testConfig = new ClusterConfig("testId");
-    // Defaults to 5000ms when unset.
-    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 5000L);
+    // Defaults to 5 minutes when unset (set above the worst-case healthy pipeline run).
+    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 300000L);
     testConfig.setControllerPipelineStallThresholdMs(30000L);
     Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 30000L);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testControllerPipelineStallThresholdMsRejectsZero() {
+    new ClusterConfig("testId").setControllerPipelineStallThresholdMs(0L);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testControllerPipelineStallThresholdMsRejectsNegative() {
+    new ClusterConfig("testId").setControllerPipelineStallThresholdMs(-1L);
   }
 
   @Test

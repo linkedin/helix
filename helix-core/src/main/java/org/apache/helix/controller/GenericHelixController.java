@@ -721,6 +721,13 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       _eventThread = new ClusterEventProcessor(_resourceControlDataProvider, _eventQueue,
           "default-" + clusterName);
       initPipeline(_eventThread, _resourceControlDataProvider);
+      // Wire the pipeline liveness check so ControllerPipelineStalledGauge can report a dead DEFAULT
+      // processing thread (a leader that stopped processing entirely) immediately, read lazily at
+      // metric-scrape time even though the dead thread can no longer report anything itself.
+      _clusterStatusMonitor.setPipelineLivenessSupplier(() -> {
+        Thread eventThread = _eventThread;
+        return eventThread == null || eventThread.isAlive();
+      });
       logger.info("Initialized {} pipeline", Pipeline.Type.DEFAULT.name());
     } else {
       _eventQueue = null;
