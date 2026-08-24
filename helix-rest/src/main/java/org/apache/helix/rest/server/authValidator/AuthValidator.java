@@ -30,12 +30,16 @@ public interface AuthValidator {
    * This is used by role-restricted endpoints (e.g. those annotated with
    * {@code @HelixAdminAuth}) to enforce that only a specific role may access them.
    * <p>
-   * The default implementation delegates to {@link #validate(ContainerRequestContext)} so existing
-   * validators remain backward-compatible. This is a deliberate fail-closed default: a validator
-   * that has not opted into role awareness still applies its base authorization check, so an
-   * endpoint guarded solely by a role annotation (with no other auth filter) is never left open.
-   * Implementations that need to enforce role-based access should override this method and grant
-   * access only when the caller holds {@code role}.
+   * The default implementation is a backward-compatible <b>no-op</b>: it delegates to
+   * {@link #validate(ContainerRequestContext)} and ignores {@code role}, so it adds no role-based
+   * restriction of its own. In particular, for an endpoint that is also covered by the base
+   * authorization (such as one annotated with {@code @ClusterAuth}) this simply runs that same
+   * check again, so any caller who passes base authorization also passes the role check.
+   * <p>
+   * To actually enforce a role, provide an {@link AuthValidator} that <b>overrides</b> this method
+   * and grants access only when the caller holds {@code role}. When the configured validator does
+   * not override it, {@code HelixRestServer} logs a startup warning so operators are not misled into
+   * believing role-restricted endpoints are enforced.
    *
    * @param request the incoming request context
    * @param role the role required to access the endpoint (e.g. {@code helix-admin})

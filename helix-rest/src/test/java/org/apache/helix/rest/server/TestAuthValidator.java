@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -34,6 +35,7 @@ import org.apache.helix.rest.acl.NoopAclRegister;
 import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.authValidator.AuthValidator;
+import org.apache.helix.rest.server.filters.HelixAdminAuthFilter;
 import org.apache.helix.rest.server.resources.helix.ClusterAccessor;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpDelete;
@@ -129,64 +131,108 @@ public class TestAuthValidator extends AbstractTestClass {
   }
 
   /*
-   * Verifies that endpoints annotated with @HelixAdminAuth (e.g. deleteInstance) are additionally
-   * gated on the helix-admin role via AuthValidator.validate(request, role), while non-admin
-   * endpoints are unaffected.
+   * Verifies the @HelixAdminAuth gate on deleteInstance end-to-end against a real HelixRestServer:
+   *  - a real validator that only implements validate(request) exercises the interface's default
+   *    delegation (a Mockito mock would stub that default out): base=false -> 403, base=true -> 200
+   *    (the default adds no role restriction, matching the documented no-op);
+   *  - a real validator that overrides validate(request, role) enforces the role: reject -> 403,
+   *    accept -> 200 (a real delete), and the filter forwards exactly HELIX_ADMIN_ROLE;
+   *  - the sibling GET getInstanceById (not annotated) is never gated, proving @HelixAdminAuth is
+   *    scoped to the method and not the whole resource.
+   * Real clusters/instances are created so DELETE/GET reach the actual handlers and return real
+   * status codes (deleting a non-existent instance would 400 regardless of the auth outcome).
    */
   @Test(dependsOnMethods = "testCustomAuthValidator")
   public void testHelixAdminAuthValidator() throws IOException, InterruptedException {
     int newPort = getBaseUri().getPort() + 2;
     _mockBaseUri = HttpConstants.HTTP_PROTOCOL_PREFIX + getBaseUri().getHost() + ":" + newPort;
-    _httpClient = HttpClients.createDefault();
 
     List<HelixRestNamespace> namespaces = new ArrayList<>();
     namespaces.add(new HelixRestNamespace(HelixRestNamespace.DEFAULT_NAMESPACE_NAME,
         HelixRestNamespace.HelixMetadataStoreType.ZOOKEEPER, ZK_ADDR, true));
 
-    // Cluster/namespace auth passes for every request, but the admin-role check is rejected.
-    AuthValidator mockAuthValidatorAdminReject = Mockito.mock(AuthValidator.class);
-    when(mockAuthValidatorAdminReject.validate(any())).thenReturn(true);
-    when(mockAuthValidatorAdminReject.validate(any(), any())).thenReturn(false);
+    String cluster = CLASSNAME_TEST_ADMIN_AUTH;
+    _gSetupTool.addCluster(cluster, true);
+    String probeInstance = "probeInstance_12000";           // survives; used for the sibling GET
+    String adminDeleteInstance = "adminDelInstance_12001";   // deleted by the role-granting validator
+    String delegateDeleteInstance = "delegateDelInstance_12002"; // deleted via default delegation
+    _gSetupTool.addInstanceToCluster(cluster, probeInstance);
+    _gSetupTool.addInstanceToCluster(cluster, adminDeleteInstance);
+    _gSetupTool.addInstanceToCluster(cluster, delegateDeleteInstance);
 
-    HelixRestServer server =
-        new HelixRestServer(namespaces, newPort, getBaseUri().getPath(), Collections.emptyList(),
-            mockAuthValidatorAdminReject, mockAuthValidatorAdminReject, new NoopAclRegister());
-    server.start();
-
-    // Non-admin endpoint (create cluster) is allowed since regular cluster auth passes.
-    HttpUriRequest request =
-        buildRequest("/clusters/" + CLASSNAME_TEST_ADMIN_AUTH, HttpConstants.RestVerbs.PUT, "");
-    sendRequestAndValidate(request, Response.Status.CREATED.getStatusCode());
-
-    // Admin-only endpoint (delete instance) is forbidden because the admin-role check fails.
-    request = buildRequest(
-        "/clusters/" + CLASSNAME_TEST_ADMIN_AUTH + "/instances/dummyInstance_12000",
-        HttpConstants.RestVerbs.DELETE, "");
-    sendRequestAndValidate(request, Response.Status.FORBIDDEN.getStatusCode());
-
-    server.shutdown();
-    _httpClient.close();
-
-    // Now grant the admin role; the delete instance endpoint must no longer be rejected by auth.
-    AuthValidator mockAuthValidatorAdminAccept = Mockito.mock(AuthValidator.class);
-    when(mockAuthValidatorAdminAccept.validate(any())).thenReturn(true);
-    when(mockAuthValidatorAdminAccept.validate(any(), any())).thenReturn(true);
-
-    server =
-        new HelixRestServer(namespaces, newPort, getBaseUri().getPath(), Collections.emptyList(),
-            mockAuthValidatorAdminAccept, mockAuthValidatorAdminAccept, new NoopAclRegister());
+    // (1) Override REJECTS the admin role: base auth passes but the role check denies -> 403.
+    RoleAwareAuthValidator roleReject = new RoleAwareAuthValidator(false);
+    HelixRestServer server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), roleReject, roleReject, new NoopAclRegister());
     server.start();
     _httpClient = HttpClients.createDefault();
+    try {
+      // deleteInstance is @HelixAdminAuth -> forbidden even though the instance exists.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      // The filter must forward exactly HELIX_ADMIN_ROLE (not just some arbitrary string).
+      Assert.assertEquals(roleReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+      // getInstanceById on the SAME resource is not @HelixAdminAuth -> not gated -> 200, not 403.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.GET, ""),
+          Response.Status.OK.getStatusCode());
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
 
-    request = buildRequest(
-        "/clusters/" + CLASSNAME_TEST_ADMIN_AUTH + "/instances/dummyInstance_12000",
-        HttpConstants.RestVerbs.DELETE, "");
-    HttpResponse response = _httpClient.execute(request);
-    Assert.assertTrue(response.getStatusLine().getStatusCode() != Response.Status.FORBIDDEN
-        .getStatusCode());
+    // (2) Override GRANTS the admin role: deleteInstance succeeds with a real 200 OK.
+    RoleAwareAuthValidator roleAccept = new RoleAwareAuthValidator(true);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), roleAccept, roleAccept, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + adminDeleteInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(roleAccept.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
 
-    server.shutdown();
-    _httpClient.close();
+    // (3) Real base-only validator exercises the interface default (which a mock would stub out):
+    // base denies -> 403; base allows -> 200. The 200 documents that the default is a no-op and an
+    // override is required to actually restrict the admin role.
+    BaseOnlyAuthValidator baseDeny = new BaseOnlyAuthValidator(false);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), baseDeny, baseDeny, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
+
+    BaseOnlyAuthValidator baseAllow = new BaseOnlyAuthValidator(true);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), baseAllow, baseAllow, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + delegateDeleteInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.OK.getStatusCode());
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
   }
 
   private HttpUriRequest buildRequest(String urlSuffix, HttpConstants.RestVerbs requestMethod,
@@ -212,5 +258,52 @@ public class TestAuthValidator extends AbstractTestClass {
     Assert.assertEquals(response.getStatusLine().getStatusCode(), expectedResponseCode);
   }
 
+  /**
+   * A real {@link AuthValidator} that only implements {@link #validate(ContainerRequestContext)}
+   * and does NOT override the role-aware overload, so it exercises the interface's default
+   * delegation. A Mockito mock cannot stand in here because it stubs the default method out.
+   */
+  private static class BaseOnlyAuthValidator implements AuthValidator {
+    private final boolean _allowBase;
+
+    BaseOnlyAuthValidator(boolean allowBase) {
+      _allowBase = allowBase;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request) {
+      return _allowBase;
+    }
+  }
+
+  /**
+   * A real {@link AuthValidator} whose base check always passes but which overrides the role-aware
+   * overload to grant access only for the exact {@link HelixAdminAuthFilter#HELIX_ADMIN_ROLE}
+   * string (when {@code grantRole} is true). It records the last role it was asked about so tests
+   * can assert the filter forwards the expected role.
+   */
+  private static class RoleAwareAuthValidator implements AuthValidator {
+    private final boolean _grantRole;
+    private volatile String _lastRole;
+
+    RoleAwareAuthValidator(boolean grantRole) {
+      _grantRole = grantRole;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request) {
+      return true;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request, String role) {
+      _lastRole = role;
+      return _grantRole && HelixAdminAuthFilter.HELIX_ADMIN_ROLE.equals(role);
+    }
+
+    String getLastRole() {
+      return _lastRole;
+    }
+  }
 
 }

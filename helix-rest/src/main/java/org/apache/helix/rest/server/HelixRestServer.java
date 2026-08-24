@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import javax.net.ssl.SSLContext;
+import javax.ws.rs.container.ContainerRequestContext;
 
 import com.codahale.metrics.Clock;
 import com.codahale.metrics.MetricRegistry;
@@ -152,6 +153,7 @@ public class HelixRestServer {
     _clusterAuthValidator = clusterAuthValidator;
     _namespaceAuthValidator = namespaceAuthValidator;
     _aclRegister = aclRegister;
+    warnIfRoleValidationNotOverridden(_clusterAuthValidator);
 
     // Initialize all namespaces.
     // If there is not a default namespace (namespace.isDefault() is false),
@@ -185,6 +187,36 @@ public class HelixRestServer {
         shutdown();
       }
     }));
+  }
+
+  /**
+   * Logs a warning when the configured {@link AuthValidator} does not override
+   * {@link AuthValidator#validate(ContainerRequestContext, String)}. In that case role-restricted
+   * endpoints (e.g. those annotated with {@code @HelixAdminAuth}) fall back to the default no-op
+   * that only runs the base authorization check, so they are not actually gated on any role.
+   * Surfacing this at startup prevents operators from assuming role enforcement is in effect.
+   */
+  private static void warnIfRoleValidationNotOverridden(AuthValidator authValidator) {
+    if (authValidator == null) {
+      return;
+    }
+    boolean overridden;
+    try {
+      overridden = !authValidator.getClass()
+          .getMethod("validate", ContainerRequestContext.class, String.class)
+          .isDefault();
+    } catch (NoSuchMethodException e) {
+      // Should never happen: validate(ContainerRequestContext, String) is declared on AuthValidator.
+      overridden = false;
+    }
+    if (!overridden) {
+      LOG.warn(
+          "AuthValidator {} does not override validate(ContainerRequestContext, String); "
+              + "role-restricted endpoints such as those annotated with @HelixAdminAuth are NOT "
+              + "enforced beyond the base authorization check. Provide an AuthValidator that "
+              + "overrides validate(request, role) to enforce role-based access.",
+          authValidator.getClass().getName());
+    }
   }
 
   private void prepareServlet(HelixRestNamespace namespace, ServletType type) {
