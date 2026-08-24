@@ -27,12 +27,12 @@ import javax.ws.rs.NameBinding;
 
 
 /**
- * Name-binding annotation that restricts an endpoint to callers holding the Helix ZK admin role.
- * Endpoints annotated with this are additionally guarded by {@link HelixZKAdminAuthFilter}, which
- * only permits requests authorized for {@link HelixZKAdminAuthFilter#HELIX_ZK_ADMIN_ROLE}.
+ * Name-binding annotation that restricts an endpoint to callers holding the Helix admin role.
+ * Endpoints annotated with this are additionally guarded by {@link HelixAdminAuthFilter}, which
+ * only permits requests authorized for {@link HelixAdminAuthFilter#HELIX_ADMIN_ROLE}.
  */
 @NameBinding
 @Target({ElementType.TYPE, ElementType.METHOD})
 @Retention(RetentionPolicy.RUNTIME)
-public @interface HelixZKAdminAuth {
+public @interface HelixAdminAuth {
 }

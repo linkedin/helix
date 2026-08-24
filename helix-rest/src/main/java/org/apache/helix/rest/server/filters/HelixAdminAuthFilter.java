@@ -28,27 +28,27 @@ import org.apache.helix.rest.server.authValidator.AuthValidator;
 
 
 /**
- * Request filter for endpoints annotated with {@link HelixZKAdminAuth}. It enforces that the caller
- * is authorized for the {@link #HELIX_ZK_ADMIN_ROLE} role by delegating to
+ * Request filter for endpoints annotated with {@link HelixAdminAuth}. It enforces that the caller
+ * is authorized for the {@link #HELIX_ADMIN_ROLE} role by delegating to
  * {@link AuthValidator#validate(ContainerRequestContext, String)}. Requests that are not authorized
  * for the role are rejected with {@code 403 Forbidden}.
  */
-@HelixZKAdminAuth
+@HelixAdminAuth
 @Provider
-public class HelixZKAdminAuthFilter implements ContainerRequestFilter {
+public class HelixAdminAuthFilter implements ContainerRequestFilter {
 
   /** Role required to invoke admin-only cluster endpoints such as dropping an instance. */
-  public static final String HELIX_ZK_ADMIN_ROLE = "helix-zk-admin";
+  public static final String HELIX_ADMIN_ROLE = "helix-admin";
 
   private final AuthValidator _authValidator;
 
-  public HelixZKAdminAuthFilter(AuthValidator authValidator) {
+  public HelixAdminAuthFilter(AuthValidator authValidator) {
     _authValidator = authValidator;
   }
 
   @Override
   public void filter(ContainerRequestContext request) {
-    if (!_authValidator.validate(request, HELIX_ZK_ADMIN_ROLE)) {
+    if (!_authValidator.validate(request, HELIX_ADMIN_ROLE)) {
       request.abortWith(Response.status(Response.Status.FORBIDDEN).build());
     }
   }

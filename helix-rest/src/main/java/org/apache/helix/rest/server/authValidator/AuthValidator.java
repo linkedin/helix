@@ -28,14 +28,17 @@ public interface AuthValidator {
   /**
    * Validate whether the caller of the given request is authorized to act with the specified role.
    * This is used by role-restricted endpoints (e.g. those annotated with
-   * {@code @HelixZKAdminAuth}) to enforce that only a specific role may access them.
+   * {@code @HelixAdminAuth}) to enforce that only a specific role may access them.
    * <p>
    * The default implementation delegates to {@link #validate(ContainerRequestContext)} so existing
-   * validators remain backward-compatible. Implementations that need to enforce role-based access
-   * should override this method and grant access only when the caller holds {@code role}.
+   * validators remain backward-compatible. This is a deliberate fail-closed default: a validator
+   * that has not opted into role awareness still applies its base authorization check, so an
+   * endpoint guarded solely by a role annotation (with no other auth filter) is never left open.
+   * Implementations that need to enforce role-based access should override this method and grant
+   * access only when the caller holds {@code role}.
    *
    * @param request the incoming request context
-   * @param role the role required to access the endpoint (e.g. {@code helix-zk-admin})
+   * @param role the role required to access the endpoint (e.g. {@code helix-admin})
    * @return true if the caller is authorized for the given role
    */
   default boolean validate(ContainerRequestContext request, String role) {

@@ -59,7 +59,7 @@ public class TestAuthValidator extends AbstractTestClass {
 
   private static String CLASSNAME_TEST_DEFAULT_AUTH = "testDefaultAuthValidator";
   private static String CLASSNAME_TEST_CST_AUTH = "testCustomAuthValidator";
-  private static String CLASSNAME_TEST_ADMIN_AUTH = "testHelixZKAdminAuthValidator";
+  private static String CLASSNAME_TEST_ADMIN_AUTH = "testHelixAdminAuthValidator";
 
   @AfterClass
   public void afterClass() {
@@ -129,12 +129,12 @@ public class TestAuthValidator extends AbstractTestClass {
   }
 
   /*
-   * Verifies that endpoints annotated with @HelixZKAdminAuth (e.g. deleteInstance) are additionally
-   * gated on the helix-zk-admin role via AuthValidator.validate(request, role), while non-admin
+   * Verifies that endpoints annotated with @HelixAdminAuth (e.g. deleteInstance) are additionally
+   * gated on the helix-admin role via AuthValidator.validate(request, role), while non-admin
    * endpoints are unaffected.
    */
   @Test(dependsOnMethods = "testCustomAuthValidator")
-  public void testHelixZKAdminAuthValidator() throws IOException, InterruptedException {
+  public void testHelixAdminAuthValidator() throws IOException, InterruptedException {
     int newPort = getBaseUri().getPort() + 2;
     _mockBaseUri = HttpConstants.HTTP_PROTOCOL_PREFIX + getBaseUri().getHost() + ":" + newPort;
     _httpClient = HttpClients.createDefault();
