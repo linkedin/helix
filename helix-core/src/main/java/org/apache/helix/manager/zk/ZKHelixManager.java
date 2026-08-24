@@ -441,9 +441,10 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   // init() while we still hold the monitor (original behavior). When true, we create the handler
   // with deferred init under the lock and call init() AFTER releasing it - used ONLY by the
   // controller's parallel per-instance registration so its workers do not serialize on this
-  // monitor. The post-lock window is safe: a fresh handler's _expectTypes is [INIT], so a
-  // concurrent reset()'s FINALIZE invoke() is rejected by invoke()'s ordering guard; on disconnect
-  // the ZkClient is closed, dropping any watch set in the window.
+  // monitor. Because init() runs outside the lock, a concurrent removeListener()/reset() can pull
+  // the fresh handler out of _handlers during the window; its FINALIZE is dropped by invoke()'s
+  // ordering guard (a fresh handler still expects INIT), so we re-check tracking after init() and
+  // reset() the handler ourselves if it was removed, rather than leak its watch (see below).
   private void addListenerInternal(Object listener, PropertyKey propertyKey, ChangeType changeType,
       EventType[] eventType, boolean initOutsideLock) {
     checkConnected(_waitForConnectedTimeout);
@@ -473,6 +474,20 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     }
     if (initOutsideLock) {
       newHandler.init();
+      // init() ran outside the lock, so a concurrent removeListener()/reset() (e.g.
+      // checkLiveInstancesObservation dropping the keys for an instance that died mid-drain) could
+      // have removed this handler from _handlers during the window. A fresh handler still expects
+      // INIT, so that reset()'s FINALIZE was rejected by invoke()'s ordering guard and did NOT
+      // unsubscribe the watch init() just set - leaving it subscribed but untracked. Re-check under
+      // the lock; if it is gone, reset() it now (init() advanced _expectTypes past INIT, so FINALIZE
+      // is accepted and tears the watch down) instead of leaking the watch until the session ends.
+      boolean stillTracked;
+      synchronized (this) {
+        stillTracked = _handlers.contains(newHandler);
+      }
+      if (!stillTracked) {
+        newHandler.reset();
+      }
     }
   }
 
