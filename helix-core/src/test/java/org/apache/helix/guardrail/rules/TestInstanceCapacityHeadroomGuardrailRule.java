@@ -21,6 +21,7 @@ package org.apache.helix.guardrail.rules;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -90,6 +91,7 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
   public void testNoCapacityKeysIsFeasible() {
     // Cluster does not use the WAGED capacity model.
     ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
     HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
         ImmutableList.of(instanceConfig(TARGET, ImmutableMap.of("FOO", 100))),
         ImmutableList.of(), ImmutableList.of());
@@ -189,9 +191,11 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
         ImmutableList.of(wagedIdealState(RESOURCE, 10, 2)),
         ImmutableList.of(resourceConfig(RESOURCE, ImmutableMap.of("FOO", 13, "BAR", 18))));
 
-    // FOO 100 -> 80: supply_after FOO = 280 >= demand 260; BAR is untouched so it is not checked.
-    ValidationResult result =
-        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 80))));
+    // FOO 100 -> 80 while BAR is re-sent unchanged at 100. updateInstanceConfig replaces the whole
+    // capacity map, so BAR must be included to stay at 100; supply_after FOO = 280 >= demand 260 and
+    // BAR is not reduced, so only FOO is checked.
+    ValidationResult result = rule.validate(
+        contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 80, "BAR", 100))));
     Assert.assertTrue(result.isFeasible());
   }
 
@@ -307,6 +311,95 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     Assert.assertTrue(result.getViolations().get(0).getMessage().contains("6000000000"));
   }
 
+  @Test
+  public void testGuardrailDisabledByDefaultIsFeasible() throws IOException {
+    // The guard rail is opt-in: with the flag left at its default (off), even an over-reduction that
+    // would otherwise be blocked (cf. testReductionBelowDemandIsInfeasible) is allowed through. This
+    // is the kill switch operators rely on to back the rule out during an incident.
+    ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
+    clusterConfig.setInstanceCapacityKeys(ImmutableList.of("FOO"));
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig, threeInstances(100),
+        ImmutableList.of(wagedIdealState(RESOURCE, 10, 2)),
+        ImmutableList.of(resourceConfig(RESOURCE, ImmutableMap.of("FOO", 13))));
+
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 50))));
+    Assert.assertTrue(result.isFeasible());
+  }
+
+  @Test
+  public void testDroppedDimensionIsTreatedAsReduction() throws IOException {
+    // updateInstanceConfig REPLACES the whole capacity map, so a payload that omits BAR wipes BAR on
+    // the target even though FOO is unchanged. supply_after BAR = 0 + 100 + 100 = 200 < demand 360, so
+    // dropping an entire dimension (the most destructive change) must be blocked, not silently passed.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 100, "BAR", 100)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(wagedIdealState(RESOURCE, 10, 2)),
+        ImmutableList.of(resourceConfig(RESOURCE, ImmutableMap.of("FOO", 13, "BAR", 18))));
+
+    // Delta keeps FOO at 100 but omits BAR entirely.
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 100))));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), InstanceCapacityHeadroomGuardrailRule.RULE_ID);
+    Assert.assertTrue(violation.getMessage().contains("BAR"));
+    Assert.assertTrue(violation.getMessage().contains("200"));
+    Assert.assertTrue(violation.getMessage().contains("360"));
+  }
+
+  @Test
+  public void testPerPartitionWeightsBelowDefaultAreNotOvercounted() throws IOException {
+    // 30 partitions x 10 replicas. The resource DEFAULT weight is 100, but every partition overrides it
+    // to 1, so real demand is 30 * 1 * 10 = 300 (not the 100 * 30 * 10 = 30000 a DEFAULT-only read
+    // would compute). supply_after = 150 + 200 + 200 = 550 >= 300, so reducing instance0 200 -> 150 is
+    // safe and must be allowed; the old DEFAULT-only estimate would have wrongly blocked it.
+    ClusterConfig clusterConfig = clusterConfig("FOO");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 200))),
+        ImmutableList.of(wagedIdealState(RESOURCE, 30, 10)),
+        ImmutableList.of(resourceConfigWithOverrides(RESOURCE, ImmutableMap.of("FOO", 100), 30,
+            ImmutableMap.of("FOO", 1))));
+
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 150))));
+    Assert.assertTrue(result.isFeasible());
+  }
+
+  @Test
+  public void testMultipleShortDimensionsAllReportedWorstFirst() throws IOException {
+    // Reducing both FOO and BAR leaves both short: FOO 250 < 260 (deficit 10), BAR 250 < 360 (deficit
+    // 110). Both must be reported in one verdict, worst deficit first (BAR before FOO), so the operator
+    // fixes everything in a single pass instead of one 400 at a time.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 100, "BAR", 100)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(wagedIdealState(RESOURCE, 10, 2)),
+        ImmutableList.of(resourceConfig(RESOURCE, ImmutableMap.of("FOO", 13, "BAR", 18))));
+
+    ValidationResult result = rule.validate(
+        contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 50, "BAR", 50))));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 2);
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("BAR"));
+    Assert.assertTrue(result.getViolations().get(1).getMessage().contains("FOO"));
+    // Defect #6: no force=true hint, since forcing the reduction through is what causes the shortfall.
+    Assert.assertFalse(result.getViolations().get(0).getMessage().contains("force"));
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       InstanceConfig proposedInstanceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -331,6 +424,8 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
   private static ClusterConfig clusterConfig(String... capacityKeys) {
     ClusterConfig clusterConfig = new ClusterConfig(CLUSTER);
     clusterConfig.setInstanceCapacityKeys(Arrays.asList(capacityKeys));
+    // The guard rail is opt-in (disabled by default); enable it so the behavioral tests exercise it.
+    clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
     return clusterConfig;
   }
 
@@ -374,6 +469,19 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     ResourceConfig resourceConfig = new ResourceConfig(resource);
     resourceConfig.setPartitionCapacityMap(
         ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, defaultWeight));
+    return resourceConfig;
+  }
+
+  private static ResourceConfig resourceConfigWithOverrides(String resource,
+      Map<String, Integer> defaultWeight, int numPartitions, Map<String, Integer> perPartitionWeight)
+      throws IOException {
+    Map<String, Map<String, Integer>> capacityMap = new HashMap<>();
+    capacityMap.put(ResourceConfig.DEFAULT_PARTITION_KEY, defaultWeight);
+    for (int i = 0; i < numPartitions; i++) {
+      capacityMap.put(resource + "_" + i, perPartitionWeight);
+    }
+    ResourceConfig resourceConfig = new ResourceConfig(resource);
+    resourceConfig.setPartitionCapacityMap(capacityMap);
     return resourceConfig;
   }
 }

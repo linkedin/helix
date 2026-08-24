@@ -1052,6 +1052,9 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     try {
       // supply = (# instances) * 100 in dimension FOO. With 10 instances that is 1000.
       clusterConfig.setInstanceCapacityKeys(Collections.singletonList("FOO"));
+      // The guard rail is opt-in (disabled by default); enable it for this cluster so the endpoint
+      // actually enforces the capacity-reduction check below.
+      clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
       _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
       for (String instance : instances) {
         InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
@@ -1116,6 +1119,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
       ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
       restore.setInstanceCapacityKeys(
           originalCapacityKeys == null ? new ArrayList<>() : originalCapacityKeys);
+      restore.setInstanceCapacityHeadroomGuardrailEnabled(false);
       _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
       for (String instance : instances) {
         InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
