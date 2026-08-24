@@ -11,6 +11,7 @@ import org.apache.helix.model.LiveInstance;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.mock;
@@ -56,8 +57,19 @@ public class TestCheckLiveInstancesObservationDeferred {
     return instances;
   }
 
-  @Test
-  public void testInitDefersPerInstanceListenerRegistration() throws Exception {
+  @DataProvider(name = "featureFlag")
+  public static Object[][] featureFlag() {
+    // flagOn true  -> INIT defers every per-instance listener (0 inline)
+    // flagOn false -> INIT registers all per-instance listeners inline (legacy), defers nothing
+    return new Object[][] {{true}, {false}};
+  }
+
+  @Test(dataProvider = "featureFlag")
+  public void testInitRegistration(boolean flagOn) throws Exception {
+    // @BeforeMethod set the flag ON; clear it for the OFF case before the controller reads it.
+    if (!flagOn) {
+      System.clearProperty(FEATURE_FLAG);
+    }
     GenericHelixController controller = new GenericHelixController("testCluster");
 
     HelixManager manager = mock(HelixManager.class);
@@ -66,33 +78,43 @@ public class TestCheckLiveInstancesObservationDeferred {
     HelixDataAccessor accessor = mock(HelixDataAccessor.class);
     when(manager.getHelixDataAccessor()).thenReturn(accessor);
 
-    List<LiveInstance> liveInstances = createMockLiveInstances(5);
-
+    int count = 4;
+    List<LiveInstance> liveInstances = createMockLiveInstances(count);
     NotificationContext initContext = new NotificationContext(manager);
     initContext.setType(NotificationContext.Type.INIT);
-
     controller.checkLiveInstancesObservation(liveInstances, initContext);
 
-    // No addXxxListener calls should have been made on the manager
-    verify(manager, never()).addCurrentStateChangeListener(
-        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString(),
-        org.mockito.ArgumentMatchers.anyString());
-    verify(manager, never()).addMessageListener(
-        org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
-        org.mockito.ArgumentMatchers.anyString());
+    if (flagOn) {
+      // Feature ON: nothing registered inline - everything deferred.
+      verify(manager, never()).addCurrentStateChangeListener(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString(),
+          org.mockito.ArgumentMatchers.anyString());
+      verify(manager, never()).addMessageListener(
+          org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
+          org.mockito.ArgumentMatchers.anyString());
 
-    // Pending listeners should be populated
-    GenericHelixController.PendingInstanceListeners pending =
-        controller.takePendingInstanceListeners();
-    Assert.assertNotNull(pending);
-    Assert.assertFalse(pending.isEmpty());
-    Assert.assertEquals(pending.getSessionToInstance().size(), 5);
-    Assert.assertEquals(pending.getNewInstances().size(), 5);
-
-    // Verify instance-to-session mapping
-    for (int i = 0; i < 5; i++) {
-      Assert.assertEquals(pending.getSessionToInstance().get("session" + i), "instance" + i);
-      Assert.assertTrue(pending.getNewInstances().contains("instance" + i));
+      GenericHelixController.PendingInstanceListeners pending =
+          controller.takePendingInstanceListeners();
+      Assert.assertNotNull(pending);
+      Assert.assertFalse(pending.isEmpty());
+      Assert.assertEquals(pending.getSessionToInstance().size(), count);
+      Assert.assertEquals(pending.getNewInstances().size(), count);
+      for (int i = 0; i < count; i++) {
+        Assert.assertEquals(pending.getSessionToInstance().get("session" + i), "instance" + i);
+        Assert.assertTrue(pending.getNewInstances().contains("instance" + i));
+      }
+      // The take clears the pending set: a second take returns null.
+      Assert.assertNull(controller.takePendingInstanceListeners());
+    } else {
+      // Feature OFF (legacy): every instance registered inline via the unchanged path, none deferred.
+      Assert.assertNull(controller.takePendingInstanceListeners());
+      verify(manager, times(count)).addCurrentStateChangeListener(
+          org.mockito.ArgumentMatchers.any(
+              org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+          org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+      verify(manager, times(count)).addMessageListener(
+          org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
+          org.mockito.ArgumentMatchers.anyString());
     }
   }
 
@@ -125,30 +147,19 @@ public class TestCheckLiveInstancesObservationDeferred {
 
     controller.checkLiveInstancesObservation(updatedInstances, callbackContext);
 
-    // No pending listeners should be created for CALLBACK type
+    // No pending listeners should be created for CALLBACK type (nothing deferred)...
     Assert.assertNull(controller.takePendingInstanceListeners());
-  }
 
-  @Test
-  public void testTakePendingClearsState() {
-    GenericHelixController controller = new GenericHelixController("testCluster");
-
-    HelixManager manager = mock(HelixManager.class);
-    when(manager.getClusterName()).thenReturn("testCluster");
-    when(manager.getInstanceName()).thenReturn("controller0");
-    HelixDataAccessor accessor = mock(HelixDataAccessor.class);
-    when(manager.getHelixDataAccessor()).thenReturn(accessor);
-
-    List<LiveInstance> liveInstances = createMockLiveInstances(3);
-    NotificationContext initContext = new NotificationContext(manager);
-    initContext.setType(NotificationContext.Type.INIT);
-    controller.checkLiveInstancesObservation(liveInstances, initContext);
-
-    // First take returns the pending data
-    Assert.assertNotNull(controller.takePendingInstanceListeners());
-
-    // Second take returns null
-    Assert.assertNull(controller.takePendingInstanceListeners());
+    // ...and the new instance must actually be registered INLINE via the else branch (not merely
+    // "not deferred") - a no-op'd inline path would still pass the assertNull above.
+    verify(manager).addCurrentStateChangeListener(
+        org.mockito.ArgumentMatchers.any(
+            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
+        org.mockito.ArgumentMatchers.eq("instance3"),
+        org.mockito.ArgumentMatchers.eq("session3"));
+    verify(manager).addMessageListener(
+        org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
+        org.mockito.ArgumentMatchers.eq("instance3"));
   }
 
   @Test
@@ -206,33 +217,5 @@ public class TestCheckLiveInstancesObservationDeferred {
             org.apache.helix.api.listeners.CurrentStateChangeListener.class),
         org.mockito.ArgumentMatchers.eq("instance0"),
         org.mockito.ArgumentMatchers.eq("session0"));
-  }
-
-  @Test
-  public void testFeatureOffRegistersInlineOnInit() throws Exception {
-    // Feature OFF (constructor reads the flag): INIT must register inline (legacy), never defer.
-    System.clearProperty(FEATURE_FLAG);
-    GenericHelixController controller = new GenericHelixController("testClusterOff");
-
-    HelixManager manager = mock(HelixManager.class);
-    when(manager.getClusterName()).thenReturn("testClusterOff");
-    when(manager.getInstanceName()).thenReturn("controller0");
-    HelixDataAccessor accessor = mock(HelixDataAccessor.class);
-    when(manager.getHelixDataAccessor()).thenReturn(accessor);
-
-    List<LiveInstance> liveInstances = createMockLiveInstances(4);
-    NotificationContext initContext = new NotificationContext(manager);
-    initContext.setType(NotificationContext.Type.INIT);
-    controller.checkLiveInstancesObservation(liveInstances, initContext);
-
-    // Nothing deferred, and all 4 instances registered inline via the unchanged addXxxListener path.
-    Assert.assertNull(controller.takePendingInstanceListeners());
-    verify(manager, times(4)).addCurrentStateChangeListener(
-        org.mockito.ArgumentMatchers.any(
-            org.apache.helix.api.listeners.CurrentStateChangeListener.class),
-        org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
-    verify(manager, times(4)).addMessageListener(
-        org.mockito.ArgumentMatchers.any(org.apache.helix.api.listeners.MessageListener.class),
-        org.mockito.ArgumentMatchers.anyString());
   }
 }

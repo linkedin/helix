@@ -843,6 +843,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     }
 
     try {
+      synchronized (_deferredRegistrationExecutorLock) {
+        // Fresh connect: allow the deferred-registration executor to be (re)built for the new
+        // session, undoing the shutting-down latch a prior disconnect() set.
+        _deferredRegistrationShuttingDown = false;
+      }
       createClient();
       _messagingService.onConnected();
     } catch (Exception e) {
@@ -887,6 +892,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       // moot once we are disconnecting (handlers are reset below). Null it so a later connect()
       // lazily rebuilds a live executor - a shutdown one would reject every future registration.
       synchronized (_deferredRegistrationExecutorLock) {
+        _deferredRegistrationShuttingDown = true;
         if (_deferredRegistrationExecutor != null) {
           _deferredRegistrationExecutor.shutdownNow();
           _deferredRegistrationExecutor = null;
@@ -1232,6 +1238,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   // Guarded by _deferredRegistrationExecutorLock.
   private final Object _deferredRegistrationExecutorLock = new Object();
   private ExecutorService _deferredRegistrationExecutor;
+  // Set true while disconnect() tears the executor down, so an in-flight leadership callback that
+  // reaches the (re)build path concurrently does not resurrect a fresh executor right after
+  // disconnect nulled it (which would leak an idle daemon thread). Cleared in connect() so a
+  // genuine reconnect still rebuilds. Guarded by _deferredRegistrationExecutorLock.
+  private boolean _deferredRegistrationShuttingDown;
 
   /**
    * Run {@code tasks} in parallel on a short-lived daemon pool (capped at
@@ -1312,6 +1323,11 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       }
     };
     synchronized (_deferredRegistrationExecutorLock) {
+      // A concurrent disconnect() is tearing the executor down; do not resurrect it here, or the
+      // rebuilt executor would outlive the disconnect as a leaked idle daemon thread.
+      if (_deferredRegistrationShuttingDown) {
+        return;
+      }
       // Lazily (re)create the worker so a reconnected manager (disconnect() nulled it) still
       // registers, and so a manager with the feature OFF never spawns the thread at all.
       if (_deferredRegistrationExecutor == null || _deferredRegistrationExecutor.isShutdown()) {

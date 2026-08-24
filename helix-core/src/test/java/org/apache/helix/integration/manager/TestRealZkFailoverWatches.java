@@ -25,19 +25,11 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Set;
 
 import org.apache.helix.HelixManager;
-import org.apache.helix.InstanceType;
-import org.apache.helix.PropertyKey;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.TestHelper;
-import org.apache.helix.manager.zk.CallbackHandler;
-import org.apache.helix.manager.zk.ZKHelixDataAccessor;
-import org.apache.helix.manager.zk.ZKHelixManager;
-import org.apache.helix.manager.zk.ZkBaseDataAccessor;
-import org.apache.helix.model.LiveInstance;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
@@ -89,6 +81,8 @@ public class TestRealZkFailoverWatches {
     }
   }
 
+  // ---- server-side watch accounting (client-side counts come from the shared support class) ----
+
   // Distinct server-side watch paths of the form /<cluster>/INSTANCES/<inst>/CURRENTSTATES...
   private static Set<String> serverSideCurrentStateWatchPaths(String clusterName) throws Exception {
     String wchp = send4lw("wchp");
@@ -100,49 +94,6 @@ public class TestRealZkFailoverWatches {
       }
     }
     return paths;
-  }
-
-  // ---- client-side cross-check (same accounting the embedded test uses) -----------------------
-
-  @SuppressWarnings("unchecked")
-  private static int clientSideCurrentStateHandlers(HelixManager mgr, String clusterName)
-      throws Exception {
-    java.lang.reflect.Field f = ZKHelixManager.class.getDeclaredField("_handlers");
-    f.setAccessible(true);
-    List<CallbackHandler> handlers = (List<CallbackHandler>) f.get(mgr);
-    int count = 0;
-    synchronized (mgr) {
-      for (CallbackHandler h : new java.util.ArrayList<>(handlers)) {
-        String p = h.getPath();
-        if (p.contains("/" + clusterName + "/INSTANCES/") && p.contains("/CURRENTSTATES")) {
-          count++;
-        }
-      }
-    }
-    return count;
-  }
-
-  private static int liveInstanceCount(HelixZkClient zkClient, String clusterName) {
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(zkClient));
-    List<String> live = accessor.getChildNames(accessor.keyBuilder().liveInstances());
-    return live == null ? 0 : live.size();
-  }
-
-  private static HelixManager currentLeader(HelixZkClient zkClient, HelixManager[] controllers,
-      String clusterName) {
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(zkClient));
-    PropertyKey.Builder kb = accessor.keyBuilder();
-    LiveInstance leader = accessor.getProperty(kb.controllerLeader());
-    Assert.assertNotNull(leader, "no controller leader");
-    for (HelixManager c : controllers) {
-      if (c.getInstanceName().equals(leader.getId())) {
-        return c;
-      }
-    }
-    Assert.fail("leader " + leader.getId() + " not among controllers");
-    return null;
   }
 
   private HelixZkClient newRealZkClient() {
@@ -209,10 +160,11 @@ public class TestRealZkFailoverWatches {
       Assert.assertTrue(verifier.verifyByPolling(), "initial convergence failed (flagOn=" + flagOn
           + ")");
 
-      int expected = liveInstanceCount(zkClient, clusterName);
+      int expected = PerInstanceListenerTestSupport.liveInstanceCount(zkClient, clusterName);
       Assert.assertTrue(expected > 0, "no live instances");
 
-      HelixManager leader0 = currentLeader(zkClient, controllers, clusterName);
+      HelixManager leader0 =
+          PerInstanceListenerTestSupport.currentLeader(zkClient, controllers, clusterName);
       TestHelper.verify(
           () -> serverSideCurrentStateWatchPaths(clusterName).size() >= expected, 15000);
       Set<String> before = serverSideCurrentStateWatchPaths(clusterName);
@@ -224,16 +176,18 @@ public class TestRealZkFailoverWatches {
       leader0.disconnect();
       Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after failover (flagOn="
           + flagOn + ")");
-      HelixManager leader1 = currentLeader(zkClient, controllers, clusterName);
+      HelixManager leader1 =
+          PerInstanceListenerTestSupport.currentLeader(zkClient, controllers, clusterName);
       Assert.assertFalse(leader1.getInstanceName().equals(leader0.getInstanceName()),
           "leadership did not move");
 
-      int expectedAfter = liveInstanceCount(zkClient, clusterName);
+      int expectedAfter = PerInstanceListenerTestSupport.liveInstanceCount(zkClient, clusterName);
       final String cn = clusterName;
       boolean ok = TestHelper.verify(
           () -> serverSideCurrentStateWatchPaths(cn).size() >= expectedAfter, 20000);
       Set<String> after = serverSideCurrentStateWatchPaths(clusterName);
-      int clientAfter = clientSideCurrentStateHandlers(leader1, clusterName);
+      int clientAfter =
+          PerInstanceListenerTestSupport.countCurrentStateHandlers(leader1, clusterName);
       Assert.assertTrue(ok, "after failover new leader had " + after.size()
           + " server-side CURRENTSTATES watches, expected >= " + expectedAfter
           + " (MissingTopState would not clear)");
@@ -267,12 +221,6 @@ public class TestRealZkFailoverWatches {
         System.setProperty(FEATURE_FLAG, prev);
       }
     }
-  }
-
-  @Test
-  public void realZkFailoverRegistersServerSideWatchesFeatureOn() throws Exception {
-    int on = runScenario(true);
-    Assert.assertTrue(on > 0, "flag ON produced no server-side CURRENTSTATES watches after failover");
   }
 
   @Test

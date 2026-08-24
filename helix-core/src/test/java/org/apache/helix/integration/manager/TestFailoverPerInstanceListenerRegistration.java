@@ -19,29 +19,24 @@ package org.apache.helix.integration.manager;
  * under the License.
  */
 
-import java.util.List;
 import java.util.Set;
 
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
-import org.apache.helix.PropertyKey;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
-import org.apache.helix.manager.zk.CallbackHandler;
-import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKHelixManager;
-import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.mock.participant.MockMSModelFactory;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.model.LiveInstance;
 import org.apache.helix.spectator.RoutingTableProvider;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -76,177 +71,145 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     }
   }
 
-  // Number of live instances currently in the cluster - the exact number of per-instance
-  // CURRENTSTATES handlers a fully-observing leader must hold (one per live instance).
-  private int liveInstanceCount(String clusterName) {
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
-    List<String> live = accessor.getChildNames(accessor.keyBuilder().liveInstances());
-    return live == null ? 0 : live.size();
+  @DataProvider(name = "failoverTopology")
+  public static Object[][] failoverTopology() {
+    // "COMBINED"   -> CONTROLLER_PARTICIPANT nodes (each node is both a leader candidate and a host)
+    // "STANDALONE" -> separate CONTROLLER controllers + MockParticipant hosts
+    return new Object[][] {{"COMBINED"}, {"STANDALONE"}};
   }
 
-  @SuppressWarnings("unchecked")
-  private int countCurrentStateHandlers(HelixManager mgr, String clusterName) throws Exception {
-    java.lang.reflect.Field f = ZKHelixManager.class.getDeclaredField("_handlers");
-    f.setAccessible(true);
-    List<CallbackHandler> handlers = (List<CallbackHandler>) f.get(mgr);
-    int count = 0;
-    synchronized (mgr) {
-      for (CallbackHandler h : new java.util.ArrayList<>(handlers)) {
-        String p = h.getPath();
-        // per-instance current-state watch path: /<cluster>/INSTANCES/<inst>/CURRENTSTATES...
-        if (p.contains("/" + clusterName + "/INSTANCES/") && p.contains("/CURRENTSTATES")) {
-          count++;
+  // Disconnect one live host (not the current leader) so its MasterSlave partitions must be
+  // reassigned, and return its instance name. Used to prove the new leader's freshly-registered
+  // per-instance CURRENTSTATES watches actually fire (the cluster can only re-converge if it does).
+  private String bounceANonLeaderHost(boolean combined, HelixManager[] controllers,
+      MockParticipantManager[] participants, String leaderName) {
+    if (combined) {
+      for (HelixManager c : controllers) {
+        if (c.isConnected() && !c.getInstanceName().equals(leaderName)) {
+          c.disconnect();
+          return c.getInstanceName();
+        }
+      }
+    } else {
+      for (MockParticipantManager p : participants) {
+        if (p.isConnected() && !p.getInstanceName().equals(leaderName)) {
+          p.syncStop();
+          return p.getInstanceName();
         }
       }
     }
-    return count;
-  }
-
-  private HelixManager currentLeader(HelixManager[] controllers, String clusterName)
-      throws Exception {
-    ZKHelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
-    PropertyKey.Builder kb = accessor.keyBuilder();
-    LiveInstance leader = accessor.getProperty(kb.controllerLeader());
-    Assert.assertNotNull(leader, "no controller leader");
-    for (HelixManager c : controllers) {
-      if (c.getInstanceName().equals(leader.getId())) {
-        return c;
-      }
-    }
-    Assert.fail("leader " + leader.getId() + " not among controllers");
     return null;
   }
 
-  @Test
-  public void failoverRegistersPerInstanceWatchesAndObservesState() throws Exception {
-    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
-    int n = 4; // nodes, each a CONTROLLER_PARTICIPANT (participant + controller candidate)
+  /**
+   * Failover validation across both controller topologies (data-provided): when the leader dies and
+   * a standby is promoted on its EXISTING ZK session (CALLBACK, not a new session), the new leader
+   * must (a) register one per-instance {@code /INSTANCES/<inst>/CURRENTSTATES} watch for EVERY live
+   * instance, and (b) those watches must actually FIRE - proven by bouncing a non-leader MasterSlave
+   * host and requiring the cluster to re-converge (only possible if the leader observes the surviving
+   * hosts' current-state changes). Otherwise MissingTopState stays up.
+   */
+  @Test(dataProvider = "failoverTopology")
+  public void failoverRegistersPerInstanceWatchesAndObservesState(String topology) throws Exception {
+    String clusterName =
+        TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName() + "_" + topology;
+    boolean combined = "COMBINED".equals(topology);
+    int nNodes = 4; // hosts
 
     // Multiple resources so per-instance CURRENTSTATES fan-out is non-trivial.
     TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
         5, // resources
         8, // partitions per resource
-        n, 2, "MasterSlave", true);
+        nNodes, 2, "MasterSlave", true);
 
-    HelixManager[] controllers = new HelixManager[n];
-    for (int i = 0; i < n; i++) {
-      controllers[i] = new ZKHelixManager(clusterName, "localhost_" + (12918 + i),
-          InstanceType.CONTROLLER_PARTICIPANT, ZK_ADDR);
-      controllers[i].getStateMachineEngine().registerStateModelFactory("MasterSlave",
-          new MockMSModelFactory());
-      controllers[i].connect();
-    }
-
-    BestPossibleExternalViewVerifier verifier =
-        new BestPossibleExternalViewVerifier.Builder(clusterName).setZkAddress(ZK_ADDR).build();
-    Assert.assertTrue(verifier.verifyByZkCallback(30000), "initial convergence failed");
-
-    // Repeated failover (churn) — the KSAP scenario this PR targets.
-    for (int round = 0; round < 3; round++) {
-      HelixManager leader = currentLeader(controllers, clusterName);
-      leader.disconnect();
-
-      // A new leader must take over on its EXISTING session (CALLBACK failover path).
-      Assert.assertTrue(verifier.verifyByZkCallback(30000),
-          "convergence failed after failover round " + round);
-
-      HelixManager newLeader = currentLeader(controllers, clusterName);
-      Assert.assertFalse(newLeader.getInstanceName().equals(leader.getInstanceName()),
-          "leadership did not move on round " + round);
-
-      // Core assertion: the new leader registered a per-instance CURRENTSTATES watch for EVERY live
-      // instance (not just > 0 - a partial registration is a bug). Registration is async; poll.
-      final HelixManager nl = newLeader;
-      final int expected = liveInstanceCount(clusterName);
-      Assert.assertTrue(expected > 0, "no live instances to observe on round " + round);
-      boolean registered = TestHelper.verify(
-          () -> countCurrentStateHandlers(nl, clusterName) == expected, 15000);
-      int csHandlers = countCurrentStateHandlers(newLeader, clusterName);
-      Assert.assertTrue(registered,
-          "new leader " + newLeader.getInstanceName() + " had " + csHandlers
-              + " per-instance CURRENTSTATES handlers after failover round " + round + ", expected "
-              + expected + " (one per live instance) - partial/zero registration, MissingTopState "
-              + "would not clear");
-
-      // Prove the watches are FUNCTIONAL: bounce a participant, forcing current-state changes the
-      // new leader must observe to rebuild the external view.
-      // (verifier re-convergence below exercises exactly that path.)
-      Assert.assertTrue(verifier.verifyByZkCallback(30000),
-          "post-failover state observation failed on round " + round);
-    }
-
-    for (HelixManager c : controllers) {
-      if (c.isConnected()) {
-        c.disconnect();
+    HelixManager[] controllers;
+    MockParticipantManager[] participants = null; // only used for STANDALONE
+    if (combined) {
+      // Each node is a CONTROLLER_PARTICIPANT: both a leadership candidate and a resource host.
+      controllers = new HelixManager[nNodes];
+      for (int i = 0; i < nNodes; i++) {
+        ZKHelixManager m = new ZKHelixManager(clusterName, "localhost_" + (12918 + i),
+            InstanceType.CONTROLLER_PARTICIPANT, ZK_ADDR);
+        m.getStateMachineEngine().registerStateModelFactory("MasterSlave", new MockMSModelFactory());
+        m.connect();
+        controllers[i] = m;
       }
+    } else {
+      // Separate participant hosts + two STANDALONE controllers competing for leadership.
+      participants = new MockParticipantManager[nNodes];
+      for (int i = 0; i < nNodes; i++) {
+        participants[i] =
+            new MockParticipantManager(ZK_ADDR, clusterName, "localhost_" + (12918 + i));
+        participants[i].syncStart();
+      }
+      ClusterControllerManager c0 =
+          new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
+      ClusterControllerManager c1 =
+          new ClusterControllerManager(ZK_ADDR, clusterName, "controller_1");
+      c0.syncStart();
+      c1.syncStart();
+      controllers = new HelixManager[] {c0, c1};
     }
-    deleteCluster(clusterName);
-  }
-
-  /**
-   * STANDALONE variant (InstanceType.CONTROLLER, separate participants). Pratyush noted the bug
-   * also hits STANDALONE controllers on every failover. Two standalone controllers compete for
-   * leadership; participants host the resources. Kill the leader and assert the new standalone
-   * leader registers per-instance CURRENTSTATES watches over the existing session (CALLBACK path).
-   */
-  @Test
-  public void standaloneFailoverRegistersPerInstanceWatches() throws Exception {
-    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
-    int nParticipants = 3;
-
-    TestHelper.setupCluster(clusterName, ZK_ADDR, 12918, "localhost", "TestDB",
-        5, // resources
-        8, // partitions per resource
-        nParticipants, 2, "MasterSlave", true);
-
-    MockParticipantManager[] participants = new MockParticipantManager[nParticipants];
-    for (int i = 0; i < nParticipants; i++) {
-      participants[i] =
-          new MockParticipantManager(ZK_ADDR, clusterName, "localhost_" + (12918 + i));
-      participants[i].syncStart();
-    }
-
-    // Two STANDALONE controllers (InstanceType.CONTROLLER) competing for leadership.
-    ClusterControllerManager c0 = new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
-    ClusterControllerManager c1 = new ClusterControllerManager(ZK_ADDR, clusterName, "controller_1");
-    c0.syncStart();
-    c1.syncStart();
-    HelixManager[] controllers = new HelixManager[] {c0, c1};
 
     ZkHelixClusterVerifier verifier =
         new BestPossibleExternalViewVerifier.Builder(clusterName).setZkClient(_gZkClient).build();
-    Assert.assertTrue(verifier.verifyByPolling(), "initial convergence failed");
+    Assert.assertTrue(verifier.verifyByZkCallback(30000),
+        "initial convergence failed (" + topology + ")");
 
-    HelixManager leader = currentLeader(controllers, clusterName);
-    leader.disconnect();
+    // Failover: kill the leader; a standby must take over on its EXISTING session (CALLBACK path).
+    HelixManager oldLeader =
+        PerInstanceListenerTestSupport.currentLeader(_gZkClient, controllers, clusterName);
+    oldLeader.disconnect();
 
-    Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after standalone failover");
-    HelixManager newLeader = currentLeader(controllers, clusterName);
-    Assert.assertFalse(newLeader.getInstanceName().equals(leader.getInstanceName()),
-        "leadership did not move");
+    Assert.assertTrue(verifier.verifyByZkCallback(30000),
+        "convergence failed after failover (" + topology + ")");
+    HelixManager newLeader =
+        PerInstanceListenerTestSupport.currentLeader(_gZkClient, controllers, clusterName);
+    Assert.assertFalse(newLeader.getInstanceName().equals(oldLeader.getInstanceName()),
+        "leadership did not move (" + topology + ")");
 
-    final HelixManager nl = newLeader;
-    final int expected = liveInstanceCount(clusterName);
-    Assert.assertTrue(expected > 0, "no live instances to observe");
-    boolean registered = TestHelper.verify(
-        () -> countCurrentStateHandlers(nl, clusterName) == expected, 15000);
-    int csHandlers = countCurrentStateHandlers(newLeader, clusterName);
+    // Exact-count assertion: one CURRENTSTATES watch per live instance (not just > 0 - a partial
+    // registration is a bug). Registration is async; poll.
+    final int expected =
+        PerInstanceListenerTestSupport.liveInstanceCount(_gZkClient, clusterName);
+    Assert.assertTrue(expected > 0, "no live instances to observe (" + topology + ")");
+    boolean registered = TestHelper.verify(() -> PerInstanceListenerTestSupport
+        .countCurrentStateHandlers(newLeader, clusterName) == expected, 15000);
+    int csHandlers =
+        PerInstanceListenerTestSupport.countCurrentStateHandlers(newLeader, clusterName);
     Assert.assertTrue(registered,
-        "new STANDALONE leader " + newLeader.getInstanceName() + " had " + csHandlers
+        "new leader " + newLeader.getInstanceName() + " had " + csHandlers
             + " per-instance CURRENTSTATES handlers after failover, expected " + expected
-            + " (one per live instance) - partial/zero registration, MissingTopState would not clear");
+            + " (one per live instance) - partial/zero registration, MissingTopState would not clear ("
+            + topology + ")");
 
-    Assert.assertTrue(verifier.verifyByPolling(), "post-failover state observation failed");
+    // Prove the freshly-registered watches actually FIRE: bounce a live non-leader MasterSlave host.
+    // Its partitions must be reassigned, which the new leader can only drive by observing the
+    // surviving hosts' CURRENTSTATE changes through the per-instance watches it just registered.
+    String bounced =
+        bounceANonLeaderHost(combined, controllers, participants, newLeader.getInstanceName());
+    Assert.assertNotNull(bounced, "no non-leader host to bounce (" + topology + ")");
+    final int expectedAfterBounce = expected - 1;
+    Assert.assertTrue(verifier.verifyByZkCallback(30000),
+        "cluster did not re-converge after bouncing host " + bounced + " (" + topology
+            + ") - the new leader's per-instance CURRENTSTATES watches did not fire");
+    Assert.assertTrue(
+        TestHelper.verify(() -> PerInstanceListenerTestSupport
+            .liveInstanceCount(_gZkClient, clusterName) == expectedAfterBounce, 15000),
+        "live-instance count did not drop to " + expectedAfterBounce + " after bounce (" + topology
+            + ")");
 
+    if (participants != null) {
+      for (MockParticipantManager p : participants) {
+        if (p.isConnected()) {
+          p.syncStop();
+        }
+      }
+    }
     for (HelixManager c : controllers) {
       if (c.isConnected()) {
         c.disconnect();
       }
-    }
-    for (MockParticipantManager p : participants) {
-      p.syncStop();
     }
     deleteCluster(clusterName);
   }
@@ -284,12 +247,14 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     // 1st connect: becomes leader, one CURRENTSTATES handler per live participant.
     controller.connect();
     Assert.assertTrue(verifier.verifyByPolling(), "initial convergence failed");
-    final int expected = liveInstanceCount(clusterName);
+    final int expected =
+        PerInstanceListenerTestSupport.liveInstanceCount(_gZkClient, clusterName);
     Assert.assertTrue(expected > 0, "no live instances to observe");
     Assert.assertTrue(
-        TestHelper.verify(() -> countCurrentStateHandlers(controller, clusterName) == expected,
-            15000),
-        "1st connect registered " + countCurrentStateHandlers(controller, clusterName)
+        TestHelper.verify(() -> PerInstanceListenerTestSupport
+            .countCurrentStateHandlers(controller, clusterName) == expected, 15000),
+        "1st connect registered "
+            + PerInstanceListenerTestSupport.countCurrentStateHandlers(controller, clusterName)
             + " CURRENTSTATES handlers, expected " + expected);
 
     // Disconnect then reconnect the SAME manager.
@@ -298,9 +263,10 @@ public class TestFailoverPerInstanceListenerRegistration extends ZkTestBase {
     Assert.assertTrue(verifier.verifyByPolling(), "convergence failed after reconnect");
 
     // 2nd connect MUST re-register ALL per-instance watches (the bug registered 0 here).
-    boolean ok = TestHelper.verify(
-        () -> countCurrentStateHandlers(controller, clusterName) == expected, 15000);
-    int afterReconnect = countCurrentStateHandlers(controller, clusterName);
+    boolean ok = TestHelper.verify(() -> PerInstanceListenerTestSupport
+        .countCurrentStateHandlers(controller, clusterName) == expected, 15000);
+    int afterReconnect =
+        PerInstanceListenerTestSupport.countCurrentStateHandlers(controller, clusterName);
     Assert.assertTrue(ok, "after reconnect the controller had " + afterReconnect
         + " per-instance CURRENTSTATES handlers, expected " + expected
         + " - reconnected leader observes nothing (dead deferred-registration executor)");
