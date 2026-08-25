@@ -27,25 +27,25 @@ public interface AuthValidator {
 
   /**
    * Validate whether the caller of the given request is authorized to act with the specified role.
-   * This is used by role-restricted endpoints (e.g. those annotated with
-   * {@code @HelixAdminAuth}) to enforce that only a specific role may access them.
+   * This is used by role-restricted endpoints (e.g. those annotated with {@code @HelixAdminAuth})
+   * to enforce that only a specific role may access them.
    * <p>
-   * The default implementation is a backward-compatible <b>no-op</b>: it delegates to
-   * {@link #validate(ContainerRequestContext)} and ignores {@code role}, so it adds no role-based
-   * restriction of its own. In particular, for an endpoint that is also covered by the base
-   * authorization (such as one annotated with {@code @ClusterAuth}) this simply runs that same
-   * check again, so any caller who passes base authorization also passes the role check.
+   * This method is intentionally <b>abstract</b>: every {@link AuthValidator} must implement it
+   * explicitly and grant access only when the caller holds {@code role}. It is deliberately not a
+   * default that delegates to {@link #validate(ContainerRequestContext)} — such a default fails
+   * open, silently re-running only the base authorization so any caller who passes base auth also
+   * passes the role check.
    * <p>
-   * To actually enforce a role, provide an {@link AuthValidator} that <b>overrides</b> this method
-   * and grants access only when the caller holds {@code role}. When the configured validator does
-   * not override it, {@code HelixRestServer} logs a startup warning so operators are not misled into
-   * believing role-restricted endpoints are enforced.
+   * The abstract contract matters most for <b>decorators</b> — a validator that wraps another one
+   * (for quota, metrics, etc.). A decorator MUST forward this call to its delegate
+   * (e.g. {@code delegate.validate(request, role)}); forwarding only
+   * {@link #validate(ContainerRequestContext)} would skip the wrapped role check and silently
+   * disable the gate. Keeping this method abstract forces every implementor — decorators
+   * included — to make that choice at compile time instead of inheriting a fail-open default.
    *
    * @param request the incoming request context
    * @param role the role required to access the endpoint (e.g. {@code helix-admin})
    * @return true if the caller is authorized for the given role
    */
-  default boolean validate(ContainerRequestContext request, String role) {
-    return validate(request);
-  }
+  boolean validate(ContainerRequestContext request, String role);
 }

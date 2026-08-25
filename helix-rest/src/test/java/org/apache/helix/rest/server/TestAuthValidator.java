@@ -132,13 +132,14 @@ public class TestAuthValidator extends AbstractTestClass {
 
   /*
    * Verifies the @HelixAdminAuth gate on deleteInstance end-to-end against a real HelixRestServer:
-   *  - a real validator that only implements validate(request) exercises the interface's default
-   *    delegation (a Mockito mock would stub that default out): base=false -> 403, base=true -> 200
-   *    (the default adds no role restriction, matching the documented no-op);
-   *  - a real validator that overrides validate(request, role) enforces the role: reject -> 403,
+   *  - a real validator that implements validate(request, role) enforces the role: reject -> 403,
    *    accept -> 200 (a real delete), and the filter forwards exactly HELIX_ADMIN_ROLE;
    *  - the sibling GET getInstanceById (not annotated) is never gated, proving @HelixAdminAuth is
-   *    scoped to the method and not the whole resource.
+   *    scoped to the method and not the whole resource;
+   *  - a decorator that wraps a role-aware validator (mimicking a quota/metrics wrapper) and
+   *    forwards validate(request, role) keeps the gate intact: reject-through-wrapper -> 403,
+   *    accept-through-wrapper -> 200. Because validate(request, role) is abstract, a decorator
+   *    cannot silently skip the role check by forwarding only validate(request).
    * Real clusters/instances are created so DELETE/GET reach the actual handlers and return real
    * status codes (deleting a non-existent instance would 400 regardless of the auth outcome).
    */
@@ -155,10 +156,10 @@ public class TestAuthValidator extends AbstractTestClass {
     _gSetupTool.addCluster(cluster, true);
     String probeInstance = "probeInstance_12000";           // survives; used for the sibling GET
     String adminDeleteInstance = "adminDelInstance_12001";   // deleted by the role-granting validator
-    String delegateDeleteInstance = "delegateDelInstance_12002"; // deleted via default delegation
+    String wrappedDeleteInstance = "wrappedDelInstance_12002"; // deleted through a granting decorator
     _gSetupTool.addInstanceToCluster(cluster, probeInstance);
     _gSetupTool.addInstanceToCluster(cluster, adminDeleteInstance);
-    _gSetupTool.addInstanceToCluster(cluster, delegateDeleteInstance);
+    _gSetupTool.addInstanceToCluster(cluster, wrappedDeleteInstance);
 
     // (1) Override REJECTS the admin role: base auth passes but the role check denies -> 403.
     RoleAwareAuthValidator roleReject = new RoleAwareAuthValidator(false);
@@ -201,12 +202,15 @@ public class TestAuthValidator extends AbstractTestClass {
       _httpClient.close();
     }
 
-    // (3) Real base-only validator exercises the interface default (which a mock would stub out):
-    // base denies -> 403; base allows -> 200. The 200 documents that the default is a no-op and an
-    // override is required to actually restrict the admin role.
-    BaseOnlyAuthValidator baseDeny = new BaseOnlyAuthValidator(false);
+    // (3) A decorator that wraps a role-aware validator must forward validate(request, role). This
+    // mimics an internal quota/metrics wrapper. Reject-through-wrapper still denies the delete
+    // (403), directly refuting the "200 through a wrapper" bypass; the wrapper cannot skip the role
+    // check because validate(request, role) is abstract (forwarding only validate(request) would
+    // not compile as a complete AuthValidator).
+    RoleAwareAuthValidator innerReject = new RoleAwareAuthValidator(false);
+    ForwardingDecorator decoratedReject = new ForwardingDecorator(innerReject);
     server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
-        Collections.emptyList(), baseDeny, baseDeny, new NoopAclRegister());
+        Collections.emptyList(), decoratedReject, decoratedReject, new NoopAclRegister());
     server.start();
     _httpClient = HttpClients.createDefault();
     try {
@@ -214,21 +218,26 @@ public class TestAuthValidator extends AbstractTestClass {
           buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
               HttpConstants.RestVerbs.DELETE, ""),
           Response.Status.FORBIDDEN.getStatusCode());
+      // The role reached the delegate through the wrapper (not swallowed by the decorator).
+      Assert.assertEquals(innerReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
     } finally {
       server.shutdown();
       _httpClient.close();
     }
 
-    BaseOnlyAuthValidator baseAllow = new BaseOnlyAuthValidator(true);
+    // Accept-through-wrapper: the same decorator over a granting validator allows the delete (200).
+    RoleAwareAuthValidator innerAccept = new RoleAwareAuthValidator(true);
+    ForwardingDecorator decoratedAccept = new ForwardingDecorator(innerAccept);
     server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
-        Collections.emptyList(), baseAllow, baseAllow, new NoopAclRegister());
+        Collections.emptyList(), decoratedAccept, decoratedAccept, new NoopAclRegister());
     server.start();
     _httpClient = HttpClients.createDefault();
     try {
       sendRequestAndValidate(
-          buildRequest("/clusters/" + cluster + "/instances/" + delegateDeleteInstance,
+          buildRequest("/clusters/" + cluster + "/instances/" + wrappedDeleteInstance,
               HttpConstants.RestVerbs.DELETE, ""),
           Response.Status.OK.getStatusCode());
+      Assert.assertEquals(innerAccept.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
     } finally {
       server.shutdown();
       _httpClient.close();
@@ -259,20 +268,26 @@ public class TestAuthValidator extends AbstractTestClass {
   }
 
   /**
-   * A real {@link AuthValidator} that only implements {@link #validate(ContainerRequestContext)}
-   * and does NOT override the role-aware overload, so it exercises the interface's default
-   * delegation. A Mockito mock cannot stand in here because it stubs the default method out.
+   * A decorator that wraps another {@link AuthValidator}, mimicking an internal quota/metrics
+   * wrapper. It forwards BOTH overloads to its delegate. Because {@code validate(request, role)} is
+   * abstract, the compiler forces this class to implement it; forwarding it to the delegate is what
+   * keeps a wrapped role check from being silently skipped.
    */
-  private static class BaseOnlyAuthValidator implements AuthValidator {
-    private final boolean _allowBase;
+  private static class ForwardingDecorator implements AuthValidator {
+    private final AuthValidator _delegate;
 
-    BaseOnlyAuthValidator(boolean allowBase) {
-      _allowBase = allowBase;
+    ForwardingDecorator(AuthValidator delegate) {
+      _delegate = delegate;
     }
 
     @Override
     public boolean validate(ContainerRequestContext request) {
-      return _allowBase;
+      return _delegate.validate(request);
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request, String role) {
+      return _delegate.validate(request, role);
     }
   }
 
