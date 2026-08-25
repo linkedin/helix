@@ -21,6 +21,7 @@ package org.apache.helix.rest.server.filters;
 
 import java.util.Set;
 
+import javax.ws.rs.HttpMethod;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
 import javax.ws.rs.core.Response;
@@ -63,13 +64,22 @@ public class HelixAdminAuthFilter implements ContainerRequestFilter {
 
   @Override
   public void filter(ContainerRequestContext request) {
-    // Command-dispatched handlers (updateCluster, updateInstance) are annotated with
-    // @HelixAdminAuth but expose both destructive and non-destructive commands through the
-    // "command" query param. Only gate the destructive ones. A request with no "command" param
-    // (e.g. the single-purpose deleteInstance endpoint) is always gated.
-    String command = request.getUriInfo().getQueryParameters().getFirst("command");
-    if (command != null && !ADMIN_ONLY_COMMANDS.contains(command)) {
-      return;
+    // The command-dispatched write handlers (updateInstance, updateCluster) are POSTs that expose
+    // both destructive and non-destructive operations through the "command" query param; for those,
+    // gate only the destructive commands so unrelated operations (enable/disable/...) are not
+    // over-restricted. Every other @HelixAdminAuth endpoint is single-purpose and is always gated.
+    //
+    // The POST check is load-bearing, not cosmetic: deleteInstance (a DELETE) does not bind a
+    // "command" @QueryParam, so JAX-RS ignores a stray "?command=..." on it -- but this filter reads
+    // the param straight off the request URI. Without the method guard, "DELETE .../{instance}
+    // ?command=enable" would hit the early return and skip the role check while deleteInstance still
+    // runs. Because this filter runs post-matching, the HTTP method corresponds exactly to the
+    // matched handler (DELETE -> deleteInstance; POST -> updateInstance/updateCluster).
+    if (HttpMethod.POST.equals(request.getMethod())) {
+      String command = request.getUriInfo().getQueryParameters().getFirst("command");
+      if (command != null && !ADMIN_ONLY_COMMANDS.contains(command)) {
+        return;
+      }
     }
     if (!_authValidator.validate(request, HELIX_ADMIN_ROLE)) {
       request.abortWith(Response.status(Response.Status.FORBIDDEN).build());

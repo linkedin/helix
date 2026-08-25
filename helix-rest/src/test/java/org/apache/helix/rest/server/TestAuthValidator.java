@@ -173,6 +173,14 @@ public class TestAuthValidator extends AbstractTestClass {
           buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
               HttpConstants.RestVerbs.DELETE, ""),
           Response.Status.FORBIDDEN.getStatusCode());
+      // A stray "command" query param must NOT let deleteInstance skip the gate: deleteInstance does
+      // not bind @QueryParam("command"), so JAX-RS ignores it, but the filter must still gate the
+      // DELETE. This aborts at the filter (403) and never reaches the handler, so probeInstance is
+      // NOT deleted (the sibling GET below still returns 200).
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance + "?command=enable",
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
       // The filter must forward exactly HELIX_ADMIN_ROLE (not just some arbitrary string).
       Assert.assertEquals(roleReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
       // getInstanceById on the SAME resource is not @HelixAdminAuth -> not gated -> 200, not 403.

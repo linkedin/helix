@@ -19,6 +19,7 @@ package org.apache.helix.rest.server.filters;
  * under the License.
  */
 
+import javax.ws.rs.HttpMethod;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MultivaluedHashMap;
 import javax.ws.rs.core.MultivaluedMap;
@@ -32,15 +33,18 @@ import org.testng.annotations.Test;
 
 /**
  * Unit tests for {@link HelixAdminAuthFilter}'s command-aware gating. These are pure Mockito tests
- * (no server, no ZooKeeper) that assert exactly when the filter enforces the helix-admin role:
- * always for a request with no {@code command} (the single-purpose deleteInstance endpoint) and for
- * the destructive commands ({@code purgeOfflineParticipants}, {@code forceKillInstance}) that ride
- * on the multi-command updateCluster/updateInstance handlers, but never for other commands on those
- * handlers.
+ * (no server, no ZooKeeper) that assert exactly when the filter enforces the helix-admin role.
+ *
+ * <p>The gate is skipped for one case only: a {@code POST} carrying a non-destructive
+ * {@code command} (the multi-command updateInstance/updateCluster handlers doing e.g.
+ * enable/disable). Everything else is gated: {@code POST} with a destructive command, and every
+ * non-POST request regardless of any query param. The non-POST rule matters because
+ * {@code deleteInstance} (a {@code DELETE}) does not bind a {@code command} param, so a stray
+ * {@code ?command=...} on it must not skip the role check.
  */
 public class TestHelixAdminAuthFilter {
 
-  private static ContainerRequestContext mockRequest(String command) {
+  private static ContainerRequestContext mockRequest(String method, String command) {
     ContainerRequestContext request = Mockito.mock(ContainerRequestContext.class);
     UriInfo uriInfo = Mockito.mock(UriInfo.class);
     MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
@@ -49,6 +53,7 @@ public class TestHelixAdminAuthFilter {
     }
     Mockito.when(uriInfo.getQueryParameters()).thenReturn(params);
     Mockito.when(request.getUriInfo()).thenReturn(uriInfo);
+    Mockito.when(request.getMethod()).thenReturn(method);
     return request;
   }
 
@@ -59,10 +64,10 @@ public class TestHelixAdminAuthFilter {
   }
 
   @Test
-  public void noCommandRequestIsGated() {
-    // A request with no "command" (e.g. DELETE .../instances/{name}) must always run the role check.
+  public void deleteInstanceShapeIsGated() {
+    // DELETE .../instances/{name} with no command -> always run the role check.
     AuthValidator validator = validatorReturning(true);
-    ContainerRequestContext request = mockRequest(null);
+    ContainerRequestContext request = mockRequest(HttpMethod.DELETE, null);
 
     new HelixAdminAuthFilter(validator).filter(request);
 
@@ -71,10 +76,26 @@ public class TestHelixAdminAuthFilter {
   }
 
   @Test
+  public void deleteInstanceWithStrayCommandParamIsStillGated() {
+    // The bypass Pratyush found: deleteInstance does not bind @QueryParam("command"), so JAX-RS
+    // ignores a stray "?command=enable", but the filter reads it off the URI. The gate must NOT be
+    // skipped just because a command string is present on a non-POST request.
+    for (String strayCommand : new String[] {"enable", "disable", "purgeOfflineParticipants"}) {
+      AuthValidator validator = validatorReturning(true);
+      ContainerRequestContext request = mockRequest(HttpMethod.DELETE, strayCommand);
+
+      new HelixAdminAuthFilter(validator).filter(request);
+
+      Mockito.verify(validator).validate(request, HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+      Mockito.verify(request, Mockito.never()).abortWith(Mockito.any());
+    }
+  }
+
+  @Test
   public void destructiveCommandsAreGated() {
     for (String command : new String[] {"purgeOfflineParticipants", "forceKillInstance"}) {
       AuthValidator validator = validatorReturning(true);
-      ContainerRequestContext request = mockRequest(command);
+      ContainerRequestContext request = mockRequest(HttpMethod.POST, command);
 
       new HelixAdminAuthFilter(validator).filter(request);
 
@@ -85,11 +106,11 @@ public class TestHelixAdminAuthFilter {
 
   @Test
   public void nonDestructiveCommandsAreNotGated() {
-    // Non-destructive commands on the same multi-command handlers must not be role-gated, otherwise
+    // Non-destructive commands on the POST multi-command handlers must not be role-gated, otherwise
     // annotating updateCluster/updateInstance would over-restrict unrelated operations.
     for (String command : new String[] {"enable", "disable", "activate", "addInstanceTag"}) {
       AuthValidator validator = validatorReturning(false);
-      ContainerRequestContext request = mockRequest(command);
+      ContainerRequestContext request = mockRequest(HttpMethod.POST, command);
 
       new HelixAdminAuthFilter(validator).filter(request);
 
@@ -101,7 +122,7 @@ public class TestHelixAdminAuthFilter {
   @Test
   public void deniedRoleOnDestructiveCommandIsForbidden() {
     AuthValidator validator = validatorReturning(false);
-    ContainerRequestContext request = mockRequest("purgeOfflineParticipants");
+    ContainerRequestContext request = mockRequest(HttpMethod.POST, "purgeOfflineParticipants");
 
     new HelixAdminAuthFilter(validator).filter(request);
 
@@ -110,9 +131,21 @@ public class TestHelixAdminAuthFilter {
   }
 
   @Test
-  public void deniedRoleOnNoCommandIsForbidden() {
+  public void deniedRoleOnDeleteInstanceIsForbidden() {
     AuthValidator validator = validatorReturning(false);
-    ContainerRequestContext request = mockRequest(null);
+    ContainerRequestContext request = mockRequest(HttpMethod.DELETE, null);
+
+    new HelixAdminAuthFilter(validator).filter(request);
+
+    Mockito.verify(request).abortWith(Mockito.argThat(
+        (Response response) -> response.getStatus() == Response.Status.FORBIDDEN.getStatusCode()));
+  }
+
+  @Test
+  public void deniedRoleOnDeleteWithStrayCommandIsForbidden() {
+    // The bypass closed: even with a stray "?command=enable", a denied role still yields 403.
+    AuthValidator validator = validatorReturning(false);
+    ContainerRequestContext request = mockRequest(HttpMethod.DELETE, "enable");
 
     new HelixAdminAuthFilter(validator).filter(request);
 
@@ -123,7 +156,7 @@ public class TestHelixAdminAuthFilter {
   @Test
   public void grantedRoleIsNotForbidden() {
     AuthValidator validator = validatorReturning(true);
-    ContainerRequestContext request = mockRequest("forceKillInstance");
+    ContainerRequestContext request = mockRequest(HttpMethod.POST, "forceKillInstance");
 
     new HelixAdminAuthFilter(validator).filter(request);
 
