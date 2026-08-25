@@ -154,6 +154,65 @@ public class TestHelixAdminAuthFilter {
   }
 
   @Test
+  public void duplicateCommandParamUsesFirstValue() {
+    // Defense against the filter/handler read-divergence bug class: the filter reads
+    // getQueryParameters().getFirst("command"), and a single-String @QueryParam binds the FIRST
+    // value too, so the filter and the handler always agree on which command applies.
+    // First value non-destructive -> not gated (matches the handler running that first command).
+    AuthValidator validatorA = validatorReturning(false);
+    ContainerRequestContext requestA = Mockito.mock(ContainerRequestContext.class);
+    UriInfo uriInfoA = Mockito.mock(UriInfo.class);
+    MultivaluedMap<String, String> paramsA = new MultivaluedHashMap<>();
+    paramsA.add("command", "enable");
+    paramsA.add("command", "purgeOfflineParticipants");
+    Mockito.when(uriInfoA.getQueryParameters()).thenReturn(paramsA);
+    Mockito.when(requestA.getUriInfo()).thenReturn(uriInfoA);
+    Mockito.when(requestA.getMethod()).thenReturn(HttpMethod.POST);
+    new HelixAdminAuthFilter(validatorA).filter(requestA);
+    Mockito.verify(validatorA, Mockito.never()).validate(Mockito.any(), Mockito.anyString());
+
+    // First value destructive -> gated.
+    AuthValidator validatorB = validatorReturning(true);
+    ContainerRequestContext requestB = Mockito.mock(ContainerRequestContext.class);
+    UriInfo uriInfoB = Mockito.mock(UriInfo.class);
+    MultivaluedMap<String, String> paramsB = new MultivaluedHashMap<>();
+    paramsB.add("command", "purgeOfflineParticipants");
+    paramsB.add("command", "enable");
+    Mockito.when(uriInfoB.getQueryParameters()).thenReturn(paramsB);
+    Mockito.when(requestB.getUriInfo()).thenReturn(uriInfoB);
+    Mockito.when(requestB.getMethod()).thenReturn(HttpMethod.POST);
+    new HelixAdminAuthFilter(validatorB).filter(requestB);
+    Mockito.verify(validatorB).validate(requestB, HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+  }
+
+  @Test
+  public void postWithNoCommandIsGated() {
+    // A POST with no command cannot dispatch to a non-destructive operation (updateInstance/
+    // updateCluster reject a null command with 400), so gating it is correct and fails closed.
+    AuthValidator validator = validatorReturning(true);
+    ContainerRequestContext request = mockRequest(HttpMethod.POST, null);
+
+    new HelixAdminAuthFilter(validator).filter(request);
+
+    Mockito.verify(validator).validate(request, HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+  }
+
+  @Test
+  public void nonPostVerbsAreAlwaysGatedRegardlessOfCommand() {
+    // Only POST consults the command param. Any other verb on a @HelixAdminAuth endpoint (today only
+    // DELETE deleteInstance, but PUT/GET too if annotated later) is always gated, so a stray command
+    // param can never open a bypass on a non-POST endpoint. Fails closed by construction.
+    for (String method : new String[] {HttpMethod.DELETE, HttpMethod.PUT, HttpMethod.GET}) {
+      AuthValidator validator = validatorReturning(true);
+      ContainerRequestContext request = mockRequest(method, "enable");
+
+      new HelixAdminAuthFilter(validator).filter(request);
+
+      Mockito.verify(validator).validate(request, HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+    }
+  }
+
+  @Test
   public void grantedRoleIsNotForbidden() {
     AuthValidator validator = validatorReturning(true);
     ContainerRequestContext request = mockRequest(HttpMethod.POST, "forceKillInstance");

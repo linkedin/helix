@@ -37,15 +37,17 @@ import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.authValidator.AuthValidator;
 import org.apache.helix.rest.server.filters.HelixAdminAuthFilter;
 import org.apache.helix.rest.server.resources.helix.ClusterAccessor;
-import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -181,6 +183,20 @@ public class TestAuthValidator extends AbstractTestClass {
           buildRequest("/clusters/" + cluster + "/instances/" + probeInstance + "?command=enable",
               HttpConstants.RestVerbs.DELETE, ""),
           Response.Status.FORBIDDEN.getStatusCode());
+      // The sibling instance-removal COMMANDS on the multi-command POST handlers are gated too:
+      // purgeOfflineParticipants (updateCluster) and forceKillInstance (updateInstance). With the
+      // role denied these abort at the filter (403) and never reach the destructive handler, so no
+      // cluster state is mutated (probeInstance still exists for the GET below). This proves the
+      // @HelixAdminAuth wiring on updateCluster/updateInstance end-to-end, not just in the unit test.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "?command=purgeOfflineParticipants&duration=0",
+              HttpConstants.RestVerbs.POST, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      sendRequestAndValidate(
+          buildRequest(
+              "/clusters/" + cluster + "/instances/" + probeInstance + "?command=forceKillInstance",
+              HttpConstants.RestVerbs.POST, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
       // The filter must forward exactly HELIX_ADMIN_ROLE (not just some arbitrary string).
       Assert.assertEquals(roleReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
       // getInstanceById on the SAME resource is not @HelixAdminAuth -> not gated -> 200, not 403.
@@ -260,6 +276,14 @@ public class TestAuthValidator extends AbstractTestClass {
         HttpPut httpPut = new HttpPut(url);
         httpPut.setEntity(new StringEntity(jsonEntity, ContentType.APPLICATION_JSON));
         return httpPut;
+      case POST:
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setEntity(new StringEntity(jsonEntity, ContentType.APPLICATION_JSON));
+        // When the auth filter aborts a POST with 403, the request entity is left undrained. With
+        // HTTP/1.1 keep-alive the pooled connection cannot be safely reused and the next request on
+        // it would deadlock, so force the server to close the connection after responding.
+        httpPost.setHeader("Connection", "close");
+        return httpPost;
       case DELETE:
         return new HttpDelete(url);
       case GET:
@@ -271,8 +295,13 @@ public class TestAuthValidator extends AbstractTestClass {
 
   private void sendRequestAndValidate(HttpUriRequest request, int expectedResponseCode)
       throws IllegalArgumentException, IOException {
-    HttpResponse response = _httpClient.execute(request);
-    Assert.assertEquals(response.getStatusLine().getStatusCode(), expectedResponseCode);
+    // Use try-with-resources so the response (and its underlying connection) is always released
+    // back to the pool. Otherwise every call leaks a leased connection and, once the default
+    // per-route pool (2) is exhausted, the next request blocks forever waiting to lease one.
+    try (CloseableHttpResponse response = _httpClient.execute(request)) {
+      Assert.assertEquals(response.getStatusLine().getStatusCode(), expectedResponseCode);
+      EntityUtils.consumeQuietly(response.getEntity());
+    }
   }
 
   /**
