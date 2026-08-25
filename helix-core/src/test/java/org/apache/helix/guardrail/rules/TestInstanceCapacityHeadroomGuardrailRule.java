@@ -400,6 +400,69 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     Assert.assertFalse(result.getViolations().get(0).getMessage().contains("force"));
   }
 
+  @Test
+  public void testGhostPartitionKeysDoNotUndercountDemand() throws IOException {
+    // The partition-capacity map only requires DEFAULT, so it can carry stale/mistyped keys that are
+    // not real partitions. Demand must be summed over the resource's real partitions
+    // (testResource_0..9), not the map keys. 10 partitions x 1 replica, DEFAULT weight 10, with _0/_1/_2
+    // overridden to 30/20/5 and five ghost keys (_90.._94) at 1: real demand = 30 + 20 + 5 + 7*10 = 125.
+    // Counting the ghosts as partitions would compute only 80 and wrongly allow a reduction to supply 90.
+    Map<String, Map<String, Integer>> capacityMap = new HashMap<>();
+    capacityMap.put(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 10));
+    capacityMap.put(RESOURCE + "_0", ImmutableMap.of("FOO", 30));
+    capacityMap.put(RESOURCE + "_1", ImmutableMap.of("FOO", 20));
+    capacityMap.put(RESOURCE + "_2", ImmutableMap.of("FOO", 5));
+    for (int i = 90; i < 95; i++) {
+      capacityMap.put(RESOURCE + "_" + i, ImmutableMap.of("FOO", 1));
+    }
+
+    ClusterConfig clusterConfig = clusterConfig("FOO");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 15)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 15))),
+        ImmutableList.of(wagedIdealState(RESOURCE, 10, 1)),
+        ImmutableList.of(resourceConfigWithPartitionMap(RESOURCE, capacityMap)));
+
+    // Reduce instance0 200 -> 60: supply_after = 60 + 15 + 15 = 90, below the real demand 125.
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 60))));
+
+    Assert.assertFalse(result.isFeasible());
+    // The verdict must cite the real demand 125, proving the ghost keys were not counted (counting them
+    // would compute 80 and pass this reduction).
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("125"));
+  }
+
+  @Test
+  public void testGhostPartitionKeysDoNotOvercountDemand() throws IOException {
+    // The mirror case: a map padded with many ghost keys must not inflate demand and block a safe
+    // reduction. 10 partitions x 1 replica, DEFAULT weight 10, no real overrides but 100 ghost keys
+    // (testResource_1000..1099) at 10: real demand = 10 * 10 = 100. Counting the ghosts as partitions
+    // would compute 1000 and wrongly reject a reduction to supply 150.
+    Map<String, Map<String, Integer>> capacityMap = new HashMap<>();
+    capacityMap.put(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 10));
+    for (int i = 1000; i < 1100; i++) {
+      capacityMap.put(RESOURCE + "_" + i, ImmutableMap.of("FOO", 10));
+    }
+
+    ClusterConfig clusterConfig = clusterConfig("FOO");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 50)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 50))),
+        ImmutableList.of(wagedIdealState(RESOURCE, 10, 1)),
+        ImmutableList.of(resourceConfigWithPartitionMap(RESOURCE, capacityMap)));
+
+    // Reduce instance0 200 -> 50: supply_after = 50 + 50 + 50 = 150, at or above the real demand 100.
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 50))));
+
+    Assert.assertTrue(result.isFeasible());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       InstanceConfig proposedInstanceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -480,6 +543,13 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     for (int i = 0; i < numPartitions; i++) {
       capacityMap.put(resource + "_" + i, perPartitionWeight);
     }
+    ResourceConfig resourceConfig = new ResourceConfig(resource);
+    resourceConfig.setPartitionCapacityMap(capacityMap);
+    return resourceConfig;
+  }
+
+  private static ResourceConfig resourceConfigWithPartitionMap(String resource,
+      Map<String, Map<String, Integer>> capacityMap) throws IOException {
     ResourceConfig resourceConfig = new ResourceConfig(resource);
     resourceConfig.setPartitionCapacityMap(capacityMap);
     return resourceConfig;

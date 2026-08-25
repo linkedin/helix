@@ -70,9 +70,11 @@ import org.apache.helix.model.ResourceConfig;
  * <b>Scope.</b> This rule only evaluates changes to the instance capacity map. It deliberately does
  * not reason about instance-operation transitions (for example EVACUATE, DISABLE, or SWAP) that pull
  * an instance out of the WAGED assignable pool and thereby remove its entire capacity from supply:
- * those requests carry no capacity map, and their placement feasibility is owned by the dedicated
- * InstanceOperationRebalanceFeasibilityGuardrailRule. A single request that both reduces capacity and
- * changes the instance operation is certified here only for its capacity reduction.
+ * those requests carry no capacity map, so this rule takes no position on them, and a single request
+ * that both reduces capacity and changes the instance operation is certified here only for its
+ * capacity reduction. That instance-operation feasibility check is <em>not yet covered</em> by any
+ * guard rail on this branch; it is being added separately (helix PR #230, tracked under epic
+ * CICP-51232).
  */
 public class InstanceCapacityHeadroomGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "INSTANCE_CAPACITY_BELOW_CLUSTER_DEMAND";
@@ -99,8 +101,8 @@ public class InstanceCapacityHeadroomGuardrailRule implements GuardrailRule {
     Map<String, Integer> deltaCapacity = proposedDelta.getInstanceCapacityMap();
     if (deltaCapacity.isEmpty()) {
       // The update does not touch capacity (e.g. a topology-only change, or an instance-operation
-      // change such as EVACUATE/DISABLE). Out of scope here: instance-operation feasibility is owned
-      // by InstanceOperationRebalanceFeasibilityGuardrailRule.
+      // change such as EVACUATE/DISABLE). Out of scope here, and instance-operation feasibility is not
+      // yet covered by any guard rail on this branch (added separately in PR #230, epic CICP-51232).
       return ValidationResult.feasible();
     }
 
@@ -266,16 +268,21 @@ public class InstanceCapacityHeadroomGuardrailRule implements GuardrailRule {
 
   /**
    * Sums, per requested dimension, the capacity every existing WAGED resource is committed to:
-   * {@code replicas * sum over partitions of that partition's weight}. Each partition's weight is
-   * resolved the way the WAGED rebalancer does in
+   * {@code replicas * sum over the resource's real partitions of that partition's weight}. Each
+   * partition's weight is resolved the way the WAGED rebalancer does in
    * {@link WagedValidationUtil#validateAndGetPartitionCapacity}: a partition the resource lists
-   * explicitly uses its own weight, every other partition falls back to the resource's mandatory
+   * explicitly uses its own weight, every other partition falls back to the resource's
    * {@code DEFAULT_PARTITION_KEY} weight, both layered over the cluster default. Reading only the
    * DEFAULT weight (a flat {@code numPartitions * default}) would over-count when per-partition
    * overrides sit below the default and under-count when they sit above, so the real per-partition
-   * weights are summed instead. The partition <em>count</em> still comes from the declared
-   * {@code numPartitions}, keeping the estimate independent of whether the controller has yet computed
-   * an assignment (a freshly created resource's preference lists may still be empty). Non-WAGED
+   * weights are summed instead.
+   * <p>
+   * The partitions summed over are the resource's <em>real</em> partitions (its declared partition
+   * set, or the canonical {@code {resource}_{i}} names synthesized from {@code numPartitions} when the
+   * controller has not computed an assignment yet), <em>not</em> the keys of the partition-capacity
+   * map. {@code setPartitionCapacityMap} only requires the {@code DEFAULT} entry, so that map can
+   * carry stale or mistyped keys that are not real partitions; counting those would both charge demand
+   * for phantom partitions and push real partitions out of the DEFAULT-weight bucket. Non-WAGED
    * resources and dimensions a resource does not declare are ignored (key coverage is enforced
    * separately by add-time validation).
    */
@@ -307,25 +314,21 @@ public class InstanceCapacityHeadroomGuardrailRule implements GuardrailRule {
       if (numPartitions <= 0 || replicaCount <= 0) {
         continue;
       }
-      // Sum each partition's real weight, mirroring WagedValidationUtil.validateAndGetPartitionCapacity:
-      // an explicitly listed partition uses its own weight; every other partition falls back to the
-      // resource's DEFAULT_PARTITION_KEY weight (both layered over the cluster default). Reading only
-      // the DEFAULT weight would over- or under-count whenever per-partition overrides differ from it.
+      // Sum each real partition's weight, mirroring WagedValidationUtil.validateAndGetPartitionCapacity:
+      // a partition the resource lists explicitly uses its own weight; every other partition falls back
+      // to the resource's DEFAULT_PARTITION_KEY weight (both layered over the cluster default). Iterate
+      // the resource's REAL partitions (by name), not the capacity map's keys: setPartitionCapacityMap
+      // only requires DEFAULT, so the map can carry stale/mistyped keys that are not real partitions.
+      // Counting those would both charge demand for phantom partitions and push real partitions out of
+      // the DEFAULT-weight bucket, mis-sizing demand in either direction.
       Map<String, Map<String, Integer>> partitionWeights = resourceConfig.getPartitionCapacityMap();
-      Map<String, Integer> defaultWeight = new HashMap<>(defaultPartitionWeight);
-      defaultWeight.putAll(partitionWeights.getOrDefault(ResourceConfig.DEFAULT_PARTITION_KEY,
-          Collections.emptyMap()));
-
-      // Partitions the resource lists explicitly are counted at their own weight; the DEFAULT pseudo-
-      // partition is not a real partition and is excluded from the count.
-      int overriddenPartitions = 0;
-      for (Map.Entry<String, Map<String, Integer>> entry : partitionWeights.entrySet()) {
-        if (ResourceConfig.DEFAULT_PARTITION_KEY.equals(entry.getKey())) {
-          continue;
-        }
-        overriddenPartitions++;
+      Map<String, Integer> defaultPartitionOverride =
+          partitionWeights.getOrDefault(ResourceConfig.DEFAULT_PARTITION_KEY, Collections.emptyMap());
+      for (String partitionName : realPartitionNames(idealState)) {
+        // Effective weight = cluster default <- (this partition's explicit weight, else the resource
+        // DEFAULT weight), the priority WagedValidationUtil.validateAndGetPartitionCapacity applies.
         Map<String, Integer> weight = new HashMap<>(defaultPartitionWeight);
-        weight.putAll(entry.getValue());
+        weight.putAll(partitionWeights.getOrDefault(partitionName, defaultPartitionOverride));
         for (String dimension : dimensions) {
           Integer dimensionWeight = weight.get(dimension);
           if (dimensionWeight != null) {
@@ -333,18 +336,27 @@ public class InstanceCapacityHeadroomGuardrailRule implements GuardrailRule {
           }
         }
       }
-
-      // The remaining partitions (declared count minus those with explicit overrides) use the resource
-      // DEFAULT weight. Clamp at zero in case stale overrides outnumber the declared partitions.
-      int defaultPartitions = Math.max(0, numPartitions - overriddenPartitions);
-      for (String dimension : dimensions) {
-        Integer dimensionWeight = defaultWeight.get(dimension);
-        if (dimensionWeight != null) {
-          demand.merge(dimension,
-              (long) dimensionWeight * defaultPartitions * replicaCount, Long::sum);
-        }
-      }
     }
     return demand;
+  }
+
+  /**
+   * The resource's real partition names: its declared partition set when the controller has already
+   * populated one, otherwise the canonical {@code {resource}_{i}} names synthesized from the declared
+   * partition count. Used so demand is summed over actual partitions rather than the partition-capacity
+   * map's keys, which may include stale or mistyped entries that are not real partitions.
+   */
+  private static Set<String> realPartitionNames(IdealState idealState) {
+    Set<String> declaredPartitions = idealState.getPartitionSet();
+    if (declaredPartitions != null && !declaredPartitions.isEmpty()) {
+      return declaredPartitions;
+    }
+    int numPartitions = idealState.getNumPartitions();
+    String resourceName = idealState.getResourceName();
+    Set<String> partitionNames = new HashSet<>();
+    for (int i = 0; i < numPartitions; i++) {
+      partitionNames.add(resourceName + "_" + i);
+    }
+    return partitionNames;
   }
 }
