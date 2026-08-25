@@ -72,6 +72,7 @@ import org.apache.helix.rest.acl.AclRegister;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.filters.NamespaceAuth;
 import org.apache.helix.rest.server.json.cluster.ClusterTopology;
 import org.apache.helix.rest.server.service.ClusterService;
@@ -229,6 +230,7 @@ public class ClusterAccessor extends AbstractHelixResource {
   }
 
   @ClusterAuth
+  @HelixAdminAuth
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @POST

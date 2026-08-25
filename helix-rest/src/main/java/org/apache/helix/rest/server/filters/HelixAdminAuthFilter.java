@@ -19,12 +19,15 @@ package org.apache.helix.rest.server.filters;
  * under the License.
  */
 
+import java.util.Set;
+
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.ext.Provider;
 
 import org.apache.helix.rest.server.authValidator.AuthValidator;
+import org.apache.helix.rest.server.resources.AbstractResource;
 
 
 /**
@@ -40,6 +43,18 @@ public class HelixAdminAuthFilter implements ContainerRequestFilter {
   /** Role required to invoke admin-only cluster endpoints such as dropping an instance. */
   public static final String HELIX_ADMIN_ROLE = "helix-admin";
 
+  /**
+   * Destructive {@code command} values on multi-command handlers (e.g. {@code updateCluster} and
+   * {@code updateInstance}) that remove or forcibly take down an instance and therefore require the
+   * {@link #HELIX_ADMIN_ROLE} role. Non-destructive commands on those handlers are not gated.
+   *
+   * <p>This is an allow-list: a new destructive command added to one of those handlers must be
+   * added here too, otherwise it will not be role-gated.
+   */
+  private static final Set<String> ADMIN_ONLY_COMMANDS = Set.of(
+      AbstractResource.Command.purgeOfflineParticipants.name(),
+      AbstractResource.Command.forceKillInstance.name());
+
   private final AuthValidator _authValidator;
 
   public HelixAdminAuthFilter(AuthValidator authValidator) {
@@ -48,6 +63,14 @@ public class HelixAdminAuthFilter implements ContainerRequestFilter {
 
   @Override
   public void filter(ContainerRequestContext request) {
+    // Command-dispatched handlers (updateCluster, updateInstance) are annotated with
+    // @HelixAdminAuth but expose both destructive and non-destructive commands through the
+    // "command" query param. Only gate the destructive ones. A request with no "command" param
+    // (e.g. the single-purpose deleteInstance endpoint) is always gated.
+    String command = request.getUriInfo().getQueryParameters().getFirst("command");
+    if (command != null && !ADMIN_ONLY_COMMANDS.contains(command)) {
+      return;
+    }
     if (!_authValidator.validate(request, HELIX_ADMIN_ROLE)) {
       request.abortWith(Response.status(Response.Status.FORBIDDEN).build());
     }
