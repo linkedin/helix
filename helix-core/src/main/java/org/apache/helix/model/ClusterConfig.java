@@ -1233,15 +1233,11 @@ public class ClusterConfig extends HelixProperty {
 
   /**
    * Whether the helix-rest instance-operation rebalance-feasibility guard rail is enabled for this
-   * cluster. When enabled, a {@code setInstanceOperation} request that would move the target instance
-   * out of the WAGED assignable pool is pre-validated with a read-only WAGED what-if: if it would
-   * leave one or more partitions unable to place all their replicas on the remaining assignable
-   * instances, the request is rejected before it is written to ZooKeeper (rather than being accepted
-   * and only surfacing later as a WAGED rebalance failure).
-   * <p>
-   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
-   * turned off again with a single ClusterConfig change to back out a false positive without changing
-   * any client or redeploying helix-rest.
+   * cluster. When enabled, a {@code setInstanceOperation} that would drain the target out of the WAGED
+   * assignable pool is pre-validated with a read-only what-if and rejected before the ZooKeeper write
+   * if it would leave partitions unable to place all their replicas (rather than only surfacing later
+   * as a WAGED rebalance failure). Disabled by default: an opt-in, per-cluster decision that can be
+   * turned off again with a single ClusterConfig change to back out a false positive.
    * @return true if the guard rail is enabled; false (the default) otherwise.
    */
   public boolean isInstanceOperationRebalanceGuardrailEnabled() {

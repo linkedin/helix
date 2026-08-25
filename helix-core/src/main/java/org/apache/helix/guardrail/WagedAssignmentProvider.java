@@ -30,21 +30,16 @@ import org.apache.helix.model.ResourceConfig;
 
 /**
  * A read-only seam that lets a {@link GuardrailRule} ask "what stable (preference-list) assignment
- * would the WAGED rebalancer compute for these inputs?" without the rule itself holding
- * ZooKeeper-connection objects.
+ * would the WAGED rebalancer compute for these inputs?" without holding ZooKeeper-connection objects.
  * <p>
- * The read-only WAGED what-if computation (see {@code HelixUtil.getTargetAssignmentForWagedFullAuto})
- * requires low-level metadata-store accessors ({@code ZkBucketDataAccessor} / {@code BaseDataAccessor})
- * that are neither exposed by {@link ReadOnlyDataAccessor} nor safe to hand a pure validation rule --
- * and, in realm-aware deployments, are only reachable through the REST layer's live client. This
- * interface keeps that plumbing in the REST layer: the endpoint supplies an implementation (typically
- * a thin lambda over the WAGED util), while the rule stays a pure function of the inputs it gathers
- * through its read-only accessor. That also makes the rule unit-testable with a stubbed provider,
- * with no ZooKeeper required.
+ * The WAGED what-if (see {@code HelixUtil.getTargetAssignmentForWagedFullAuto}) needs low-level
+ * metadata-store accessors that {@link ReadOnlyDataAccessor} does not expose and that, in realm-aware
+ * deployments, are only reachable through the REST layer's live client. Keeping that plumbing behind
+ * this interface lets the endpoint supply an implementation (typically a thin lambda over the WAGED
+ * util) while the rule stays a pure, unit-testable function of its inputs.
  * <p>
- * Implementations must be read-only: computing an assignment must not mutate cluster state. They may
- * throw when the rebalancer cannot compute an assignment at all (e.g. a cluster-wide
- * {@code CAPACITY_DEFICIT}); callers treat a thrown exception as "no assignment could be produced".
+ * Implementations must be read-only and may throw when no assignment can be computed (e.g. a
+ * cluster-wide {@code CAPACITY_DEFICIT}); callers treat a thrown exception as "no assignment produced".
  */
 @FunctionalInterface
 public interface WagedAssignmentProvider {

@@ -50,90 +50,35 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
- * Guard rail that blocks a {@code setInstanceOperation} request when moving the target instance out
+ * Guard rail that blocks a {@code setInstanceOperation} request when draining the target instance out
  * of the WAGED <em>assignable pool</em> would leave one or more partitions unable to place all their
- * replicas &mdash; i.e. the operation would cause a WAGED rebalance failure.
+ * replicas &mdash; i.e. the operation would cause a WAGED rebalance failure. Catching it before the ZK
+ * write turns a silent, cluster-wide {@code CAPACITY_DEFICIT} into an actionable {@code 400}.
  * <p>
- * <b>Which operations this covers, and why it needs no hard-coded list.</b> WAGED only ever places
- * replicas on instances where {@link InstanceConfig#isAssignable()} is true (the assignable pool is
- * exactly {@code InstanceConstants.ASSIGNABLE_INSTANCE_OPERATIONS = {ENABLE, DISABLE}}). An operation
- * can only force replicas to be re-placed &mdash; and therefore can only newly break placement
- * &mdash; when it takes the instance <em>out</em> of that pool: the target is currently assignable and
- * the proposed operation is not. Rather than enumerate operations, this rule derives the trigger from
- * {@code isAssignable()} directly, so it automatically covers the capacity-reducing transitions
- * ({@code ENABLE|DISABLE -> EVACUATE|UNKNOWN}) and automatically excludes the others:
- * <ul>
- *   <li><b>ENABLE</b> keeps/returns the instance to the pool &mdash; it adds capacity, never removes
- *       it.</li>
- *   <li><b>DISABLE</b> stays <em>in</em> the assignable pool: its replicas are forced OFFLINE in
- *       place rather than relocated, so placement feasibility is unchanged. (Disabling too many
- *       instances is an availability concern, enforced elsewhere, not a WAGED placement-feasibility
- *       failure.)</li>
- *   <li><b>SWAP_IN</b> is only reachable from an already non-assignable ({@code UNKNOWN}) state, so
- *       the target is not in the pool to begin with; its matching swap-out partner preserves capacity
- *       (a like-for-like trade).</li>
- *   <li>Any operation set on an <em>already</em> non-assignable instance removes no capacity.</li>
- * </ul>
+ * <b>Trigger.</b> WAGED only places replicas on instances where {@link InstanceConfig#isAssignable()}
+ * is true, so an operation can newly break placement only when it moves the target <em>out</em> of the
+ * pool (currently assignable, proposed not). The rule derives that from {@code isAssignable()} rather
+ * than a hard-coded operation list, so it covers the capacity-reducing transitions
+ * ({@code ENABLE|DISABLE -> EVACUATE|UNKNOWN}) and skips operations that keep or return the instance to
+ * the pool ({@code ENABLE}, {@code DISABLE}, {@code SWAP_IN}) or act on an already non-assignable one.
  * <p>
- * <b>How the check works.</b> The rule runs the read-only WAGED what-if twice via the injected
- * {@link WagedAssignmentProvider}: once on current cluster state (the <em>baseline</em>) and once with
- * the proposed operation applied to a copy of the target's {@link InstanceConfig} (the
- * <em>candidate</em>). It then flags only partitions whose placeable replica count drops from baseline
- * to candidate. Comparing against a baseline (rather than an absolute target) means a pre-existing
- * deficit is never blamed on this operation &mdash; the rule fails a request only for the shortfall the
- * operation itself introduces. WAGED excludes the mutated instance automatically because the candidate
- * config is no longer {@code isAssignable()}, so no manual pool surgery is needed.
+ * <b>Check.</b> The rule runs the read-only WAGED what-if (via the injected
+ * {@link WagedAssignmentProvider}) twice &mdash; once on current state (baseline) and once with the
+ * operation applied to a copy of the target's {@link InstanceConfig} (candidate) &mdash; and flags only
+ * partitions whose placeable replica count drops between them, so a pre-existing deficit is never
+ * blamed on this operation. Two sound {@code O(instances*keys)} pre-checks (replica-count pigeonhole
+ * &rarr; {@code NO_CANDIDATE_NODE}, and aggregate capacity &rarr; {@code CAPACITY_DEFICIT}, each
+ * computed with WAGED's own resolvers so the numbers match) short-circuit the common failures before
+ * that simulation and defer to it when their inputs are ambiguous.
  * <p>
- * <b>Why up front rather than at rebalance.</b> An {@code EVACUATE}/{@code UNKNOWN} that over-drains
- * the cluster is accepted into ZooKeeper today with no capacity preflight, and only surfaces later as
- * a WAGED {@code CAPACITY_DEFICIT} that can stall the cluster-wide rebalance. Catching it before the
- * write turns a silent, cluster-wide failure into an actionable {@code 400}.
- * <p>
- * <b>force is a legitimate override here.</b> Unlike adding an unplaceable resource, draining a node is
- * often operationally mandatory (failing hardware, decommission). The messages therefore point at
- * {@code force=true} as an accepted escape hatch when the operator knowingly accepts the resulting
- * under-replication &mdash; the guard rail's job is to make that a deliberate choice, not to forbid it.
- * <p>
- * <b>Opt-in.</b> Runs only when the cluster enables it via
- * {@link ClusterConfig#setInstanceOperationRebalanceGuardrailEnabled(boolean)}; disabled by default.
- * The disabled path returns feasible before any WAGED simulation or fail-closed ZK read, so a disabled
- * cluster is never exposed to the (relatively expensive) what-if or to read failures, and the flag
- * doubles as a single-config-change kill switch to back out a false positive.
- * <p>
- * <b>Cheap pre-checks short-circuit the common failures without a simulation.</b> Before running the
- * (relatively expensive) double WAGED what-if, two sound O(instances&times;keys) arithmetic checks run
- * against the post-operation assignable pool, each mirroring a WAGED <em>hard</em>-constraint failure
- * exactly:
- * <ul>
- *   <li><b>Replica-count pigeonhole.</b> {@code SamePartitionOnInstanceConstraint} forbids two replicas
- *       of a partition on one instance, so a resource with {@code R} replicas needs {@code R} distinct
- *       assignable instances. If fewer remain, WAGED throws {@code NO_CANDIDATE_NODE} &mdash; we block
- *       up-front.</li>
- *   <li><b>Aggregate capacity.</b> WAGED throws {@code CAPACITY_DEFICIT} when the total weight of all
- *       WAGED replicas exceeds the summed capacity of the assignable nodes for any capacity key. We
- *       recompute that same global necessary condition using WAGED's own resolvers
- *       ({@link WagedValidationUtil}/{@link WagedRebalanceUtil}) so the numbers are identical.</li>
- * </ul>
- * Both are <em>sound</em>: a block here is one the candidate simulation would also produce, just faster
- * and with a clearer message. When inputs are ambiguous (missing/malformed weights, non-enumerable
- * partitions) the pre-check yields to the full what-if rather than risk a false block, and both run only
- * when the target is currently live (an already-dead instance removes nothing from WAGED's pool).
- * <p>
- * <b>Scope and limitations.</b>
- * <ul>
- *   <li><b>Best-effort, not atomic admission control.</b> The verdict is computed from a cluster
- *       snapshot and the actual write happens afterwards, so two concurrent drains could each be
- *       certified against four-remaining-instances and both proceed. Treat this as a strong safety
- *       net that catches the common single-operation mistake, not as a serialized invariant.</li>
- *   <li><b>{@code ANY_LIVEINSTANCE} resources are exempt.</b> They keep one replica per live instance,
- *       so removing an instance never forces a replica to relocate; their by-design N&rarr;N-1
- *       reduction is not a deficit and would otherwise be a false rejection.</li>
- *   <li><b>Fail-closed on an uncomputable baseline.</b> If the baseline what-if itself cannot be
- *       computed (e.g. a transient metadata-store error, or a cluster already unable to rebalance),
- *       the request is blocked with a {@code force=true}-able message rather than silently allowed;
- *       this trades a possible false block (recoverable via force) for never certifying a write that
- *       could not be validated.</li>
- * </ul>
+ * <b>Behavior.</b> Opt-in via
+ * {@link ClusterConfig#setInstanceOperationRebalanceGuardrailEnabled(boolean)}, disabled by default;
+ * the disabled path returns before any simulation or ZK read, doubling as a kill switch. Because
+ * draining a node is often operationally mandatory (failing hardware, decommission), the verdict is
+ * overridable with {@code force=true}. It is best-effort admission control, not a serialized invariant:
+ * computed from a snapshot (concurrent drains are not mutually serialized), it exempts
+ * {@code ANY_LIVEINSTANCE} resources (their by-design N&rarr;N-1 reduction is not a deficit) and fails
+ * closed with a force-able message if the baseline what-if itself cannot be computed.
  */
 public class InstanceOperationRebalanceFeasibilityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "INSTANCE_OPERATION_CAUSES_WAGED_UNPLACEABLE";
@@ -403,11 +348,9 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
   }
 
   /**
-   * (a) Sound replica-count pre-check. Returns an infeasible result naming every WAGED resource that
-   * would need more distinct assignable instances than remain after the operation (each such resource
-   * makes WAGED throw {@code NO_CANDIDATE_NODE}); returns {@code null} when inconclusive so the caller
-   * proceeds to the full what-if. {@code ANY_LIVEINSTANCE} resources are already excluded upstream, so
-   * their replica count is never compared here.
+   * (a) Sound replica-count pre-check: returns an infeasible result naming every WAGED resource that
+   * needs more distinct assignable instances than remain after the operation (WAGED would throw
+   * {@code NO_CANDIDATE_NODE}), or {@code null} when inconclusive so the caller runs the full what-if.
    */
   private ValidationResult precheckReplicaCount(List<IdealState> wagedIdealStates,
       int remainingAssignableCount, InstanceConstants.InstanceOperation proposedOp, String instanceName,
@@ -433,13 +376,11 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
   }
 
   /**
-   * (b) Sound aggregate-capacity pre-check. Mirrors WAGED's global {@code CAPACITY_DEFICIT} condition
-   * (see {@code ConstraintBasedAlgorithm}): if the total weight of all WAGED replicas exceeds the
-   * summed capacity of the post-operation assignable nodes for any capacity key, WAGED cannot compute
-   * an assignment. Demand and capacity are resolved with WAGED's own utilities so the numbers are
-   * identical to the rebalancer's. Returns an infeasible result on a deficit, or {@code null} when the
-   * check is inconclusive (no capacity model, or missing/malformed/ non-enumerable weights) so the
-   * caller defers to the full what-if rather than risk a false block.
+   * (b) Sound aggregate-capacity pre-check: mirrors WAGED's global {@code CAPACITY_DEFICIT} condition,
+   * returning an infeasible result when the total weight of all WAGED replicas exceeds the summed
+   * post-operation assignable capacity for any key (resolved with WAGED's own utilities so the numbers
+   * match the rebalancer's), or {@code null} when inconclusive (no capacity model, or missing/malformed
+   * weights) so the caller defers to the full what-if.
    */
   private ValidationResult precheckAggregateCapacity(List<IdealState> wagedIdealStates,
       Map<String, ResourceConfig> resourceConfigByName,
@@ -542,10 +483,8 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
   }
 
   /**
-   * Number of replicas actually placed for a partition in a computed assignment: the count of
-   * instance entries whose state is a real placement (anything other than {@code DROPPED}). WAGED's
-   * target (preference-list) assignment does not emit {@code DROPPED}, but excluding it keeps the
-   * count robust if the source ever includes drop markers.
+   * Number of replicas actually placed for a partition: instance entries whose state is a real
+   * placement (anything other than {@code DROPPED}).
    */
   private static int countPlacedReplicas(Map<String, String> replicaMap) {
     if (replicaMap == null || replicaMap.isEmpty()) {
