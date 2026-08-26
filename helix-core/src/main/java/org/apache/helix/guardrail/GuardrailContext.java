@@ -21,6 +21,7 @@ package org.apache.helix.guardrail;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 
 /**
@@ -40,6 +41,7 @@ public class GuardrailContext {
   private final String instanceName;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
+  private final InstanceConfig proposedInstanceConfig;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -47,6 +49,7 @@ public class GuardrailContext {
     this.instanceName = builder.instanceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
+    this.proposedInstanceConfig = builder.proposedInstanceConfig;
   }
 
   public String getClusterName() {
@@ -83,6 +86,16 @@ public class GuardrailContext {
     return proposedIdealState;
   }
 
+  /**
+   * The instance config delta a mutation proposes to merge into the target instance, or {@code null}
+   * if the operation is not instance-config-scoped. This carries only the fields the caller is
+   * changing (e.g. a reduced capacity map); rules combine it with the existing config read through
+   * the accessor to reason about the post-merge state that would be written.
+   */
+  public InstanceConfig getProposedInstanceConfig() {
+    return proposedInstanceConfig;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -93,6 +106,7 @@ public class GuardrailContext {
     private String instanceName;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
+    private InstanceConfig proposedInstanceConfig;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -115,6 +129,11 @@ public class GuardrailContext {
 
     public Builder proposedIdealState(IdealState proposedIdealState) {
       this.proposedIdealState = proposedIdealState;
+      return this;
+    }
+
+    public Builder proposedInstanceConfig(InstanceConfig proposedInstanceConfig) {
+      this.proposedInstanceConfig = proposedInstanceConfig;
       return this;
     }
 
