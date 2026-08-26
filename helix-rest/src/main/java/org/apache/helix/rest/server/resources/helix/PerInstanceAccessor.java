@@ -76,6 +76,7 @@ import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintena
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.util.InstanceUtil;
@@ -468,6 +469,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @POST
   public Response updateInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String command,
@@ -644,6 +646,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName,
