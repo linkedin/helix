@@ -463,6 +463,70 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     Assert.assertTrue(result.isFeasible());
   }
 
+  @Test
+  public void testDeclaredPartitionSetDrivesDemandNotNumPartitions() throws IOException {
+    // In production WAGED's rebalance() writes a preference list per partition, so getPartitionSet() is
+    // populated and realPartitionNames returns that declared set -- not the {resource}_{i} synthesis
+    // driven by numPartitions. Here numPartitions is a stale 100 while only 3 partitions are actually
+    // declared (testResource_0/_1/_2 = 30/20/5 over DEFAULT 10), so real demand = 30 + 20 + 5 = 55.
+    // Summing over the synthesized 100 partitions instead would compute 55 + 97*10 = 1025.
+    Map<String, Map<String, Integer>> capacityMap = new HashMap<>();
+    capacityMap.put(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 10));
+    capacityMap.put(RESOURCE + "_0", ImmutableMap.of("FOO", 30));
+    capacityMap.put(RESOURCE + "_1", ImmutableMap.of("FOO", 20));
+    capacityMap.put(RESOURCE + "_2", ImmutableMap.of("FOO", 5));
+
+    ClusterConfig clusterConfig = clusterConfig("FOO");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 15)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 15))),
+        ImmutableList.of(wagedIdealStateWithPartitions(RESOURCE, 100, 1,
+            ImmutableList.of(RESOURCE + "_0", RESOURCE + "_1", RESOURCE + "_2"))),
+        ImmutableList.of(resourceConfigWithPartitionMap(RESOURCE, capacityMap)));
+
+    // Reduce instance0 200 -> 20: supply_after = 20 + 15 + 15 = 50, below the real demand 55.
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 20))));
+
+    Assert.assertFalse(result.isFeasible());
+    // The verdict must cite the declared-set demand 55, proving numPartitions (which would yield 1025)
+    // did not drive the calculation.
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("55"));
+    Assert.assertFalse(result.getViolations().get(0).getMessage().contains("1025"));
+  }
+
+  @Test
+  public void testDeclaredPartitionSetSmallerThanNumPartitionsAllowsSafeReduction()
+      throws IOException {
+    // Mirror of the above in the feasible direction: because demand is summed over the 3 declared
+    // partitions (55), a reduction to supply 90 is safe and must pass. Had numPartitions (100) driven
+    // the sum, demand would be 1025 and this safe reduction would be wrongly blocked -- so a pass here
+    // can only come from the declared-partition-set branch.
+    Map<String, Map<String, Integer>> capacityMap = new HashMap<>();
+    capacityMap.put(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 10));
+    capacityMap.put(RESOURCE + "_0", ImmutableMap.of("FOO", 30));
+    capacityMap.put(RESOURCE + "_1", ImmutableMap.of("FOO", 20));
+    capacityMap.put(RESOURCE + "_2", ImmutableMap.of("FOO", 5));
+
+    ClusterConfig clusterConfig = clusterConfig("FOO");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(
+            instanceConfig("instance0", ImmutableMap.of("FOO", 200)),
+            instanceConfig("instance1", ImmutableMap.of("FOO", 15)),
+            instanceConfig("instance2", ImmutableMap.of("FOO", 15))),
+        ImmutableList.of(wagedIdealStateWithPartitions(RESOURCE, 100, 1,
+            ImmutableList.of(RESOURCE + "_0", RESOURCE + "_1", RESOURCE + "_2"))),
+        ImmutableList.of(resourceConfigWithPartitionMap(RESOURCE, capacityMap)));
+
+    // Reduce instance0 200 -> 60: supply_after = 60 + 15 + 15 = 90, at or above the real demand 55.
+    ValidationResult result =
+        rule.validate(contextWith(dataAccessor, delta(ImmutableMap.of("FOO", 60))));
+
+    Assert.assertTrue(result.isFeasible());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       InstanceConfig proposedInstanceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -524,6 +588,19 @@ public class TestInstanceCapacityHeadroomGuardrailRule {
     idealState.setRebalancerClassName(WagedRebalancer.class.getName());
     idealState.setReplicas(String.valueOf(replicas));
     idealState.setNumPartitions(numPartitions);
+    return idealState;
+  }
+
+  private static IdealState wagedIdealStateWithPartitions(String resource, int numPartitions,
+      int replicas, List<String> declaredPartitions) {
+    IdealState idealState = wagedIdealState(resource, numPartitions, replicas);
+    // Populate list fields the way WAGED's rebalance() does in production, so getPartitionSet() returns
+    // the declared partitions (the branch realPartitionNames actually takes in prod) instead of the
+    // {resource}_{i} synthesis. The preference-list contents are irrelevant here -- only the partition
+    // names (the list-field keys) matter.
+    for (String partition : declaredPartitions) {
+      idealState.setPreferenceList(partition, ImmutableList.of("instance0"));
+    }
     return idealState;
   }
 
