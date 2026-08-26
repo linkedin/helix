@@ -50,6 +50,7 @@ import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -326,16 +327,21 @@ public class ResourceAccessor extends AbstractHelixResource {
           return structuralError.get();
         }
 
-        // Guard rail: block (or simulate) adding a resource whose partition weight exceeds the
-        // largest single instance's capacity in any dimension, which would make it permanently
-        // unplaceable. force=true overrides; dryRun=true only reports the verdict without writing.
+        // Guard rails: (1) instance capacity-key consistency -- reject if any assignable instance's
+        // capacity map omits a cluster-required capacity key (WAGED could not build a model, so the
+        // resource would be accepted but silently never place; the admin write path already validates
+        // the resource's own weights, but not the instances'); (2) partition-weight capacity -- reject
+        // if a partition weight exceeds the largest single instance's capacity in any dimension
+        // (making it permanently unplaceable). Both are opt-in per cluster. force=true overrides;
+        // dryRun=true only reports the verdict without writing.
         GuardrailContext context = GuardrailContext.newBuilder(clusterId)
             .dataAccessor(getDataAccssor(clusterId))
             .proposedResourceConfig(proposedResourceConfig)
             .proposedIdealState(proposedIdealState)
             .build();
         GuardrailPipeline pipeline =
-            new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
+            new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule(),
+                new PartitionWeightCapacityGuardrailRule());
         Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
         if (preflightResponse.isPresent()) {
           return preflightResponse.get();

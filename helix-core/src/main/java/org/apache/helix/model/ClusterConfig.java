@@ -136,6 +136,15 @@ public class ClusterConfig extends HelixProperty {
     // it is a deliberate per-cluster decision; it can be turned off again with a single ClusterConfig
     // change (no client change or helix-rest redeploy) to back out a false positive.
     PARTITION_WEIGHT_GUARDRAIL_ENABLED,
+    // Boolean. When true, the helix-rest capacity-key consistency guard rail pre-validates an
+    // addWagedResource request and rejects it before any ZooKeeper write if any assignable instance's
+    // capacity map does not declare every capacity key in INSTANCE_CAPACITY_KEYS -- a coverage gap
+    // that makes the WAGED model fail to build so the resource is accepted but never places. (The
+    // resource's own weights are already validated on the admin write path; the instances' are not.)
+    // Disabled by default so enabling it is a deliberate per-cluster decision; it can be turned off
+    // again with a single ClusterConfig change (no client change or helix-rest redeploy) to back out
+    // a false positive.
+    CAPACITY_KEY_CONSISTENCY_GUARDRAIL_ENABLED,
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
@@ -1221,6 +1230,33 @@ public class ClusterConfig extends HelixProperty {
   public void setPartitionWeightGuardrailEnabled(boolean enabled) {
     _record.setBooleanField(
         ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest capacity-key consistency guard rail is enabled for this cluster. When
+   * enabled, an addWagedResource request is pre-validated and rejected before any ZooKeeper write if
+   * any assignable instance's capacity map fails to declare every key in
+   * {@code INSTANCE_CAPACITY_KEYS} (a coverage gap that makes the WAGED model fail to build, so the
+   * resource is accepted but never placed). The resource's own weight map is already validated on the
+   * admin write path; the instances' capacity maps are not, which is the gap this guard rail closes.
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without
+   * changing any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isCapacityKeyConsistencyGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.CAPACITY_KEY_CONSISTENCY_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest capacity-key consistency guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setCapacityKeyConsistencyGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.CAPACITY_KEY_CONSISTENCY_GUARDRAIL_ENABLED.name(), enabled);
   }
 
   private Map<String, Integer> getDefaultCapacityMap(ClusterConfigProperty capacityPropertyType) {

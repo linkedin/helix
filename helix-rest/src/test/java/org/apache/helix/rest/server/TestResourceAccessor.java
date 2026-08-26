@@ -44,6 +44,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CustomizedView;
@@ -723,11 +724,130 @@ public class TestResourceAccessor extends AbstractTestClass {
   }
 
   /**
-   * force/dryRun are only meaningful for the addWagedResource command, which is the only one that
-   * runs a guard rail pipeline. On any other command they were silently ignored, so dryRun=true on a
-   * plain addResource still performed a real write. They must now be rejected with 400 and create
-   * nothing.
+   * Guard rail: adding a WAGED resource is rejected before it is written to ZooKeeper when some
+   * assignable instance omits a capacity dimension (a key in the cluster's INSTANCE_CAPACITY_KEYS),
+   * which would make WAGED unable to build a model for the resource so it is accepted but never
+   * places. This is the instance-side gap that neither the weight guard rail nor the admin API's
+   * resource-side validation ({@code addResourceWithWeight}) covers. Verifies opt-in default-off,
+   * enforcement (400 + verdict naming the instance), dry-run, force bypass (which works here because
+   * the admin write path does not re-check instance capacities), and the fully-covered happy path.
+   * The cluster/instance capacity configuration is saved and restored so this test does not perturb
+   * the other resource tests that share {@value #CLUSTER_NAME}.
    */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testAddWagedResourceCapacityKeyGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+    String starvedInstance = instances.get(0);
+
+    String disabledResource = "keyGuardrailDisabledWagedResource";
+    String blockedResource = "keyGuardrailBlockedWagedResource";
+    String forcedResource = "keyGuardrailForcedWagedResource";
+    String validResource = "keyGuardrailValidWagedResource";
+
+    // The resource weight always covers both dimensions; the gap under test is on the instance side.
+    Map<String, Map<String, Integer>> fullWeight = ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 10, "BAR", 5));
+
+    try {
+      // Declare two capacity dimensions and give every instance capacity in both dimensions, except
+      // starve one assignable instance of BAR to create the instance-side gap.
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instance.equals(starvedInstance)
+            ? ImmutableMap.of("FOO", 100) : ImmutableMap.of("FOO", 100, "BAR", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // 0) Opt-in: disabled by default, so the resource is created despite the instance-side gap
+      //    (the admin write path does not validate instance capacities). This is exactly the silent
+      //    failure the guard rail exists to prevent.
+      Response disabled = putWagedResource(disabledResource,
+          wagedResourceConfig(disabledResource, fullWeight), Collections.emptyMap());
+      Assert.assertEquals(disabled.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(disabledResource));
+
+      // Enable the guard rail for the remainder of the test (opt-in per cluster).
+      clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      clusterConfig.setCapacityKeyConsistencyGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+      // 1) Enforcement: blocked with 400 + a verdict naming the starved instance, nothing written.
+      Response blocked = putWagedResource(blockedResource,
+          wagedResourceConfig(blockedResource, fullWeight), Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(starvedInstance));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+
+      // 2) Dry-run: always 200 with the same infeasible verdict, and still nothing written.
+      Response dryRun = putWagedResource(blockedResource,
+          wagedResourceConfig(blockedResource, fullWeight), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+
+      // 3) force=true bypasses the guard rail: the resource is actually created despite the gap
+      //    (the admin write path does not re-check instance capacities).
+      Response forced = putWagedResource(forcedResource,
+          wagedResourceConfig(forcedResource, fullWeight), ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(forcedResource));
+
+      // 4) Close the gap (every instance now declares both keys) and the add passes the guard rail.
+      InstanceConfig restored = _configAccessor.getInstanceConfig(CLUSTER_NAME, starvedInstance);
+      restored.setInstanceCapacityMap(ImmutableMap.of("FOO", 100, "BAR", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, starvedInstance, restored);
+
+      Response valid = putWagedResource(validResource,
+          wagedResourceConfig(validResource, fullWeight), Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(validResource));
+    } finally {
+      // Drop any resources this test created (blockedResource was never created; ignore failures).
+      for (String resource : Arrays.asList(disabledResource, forcedResource, validResource,
+          blockedResource)) {
+        try {
+          _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resource);
+        } catch (Exception ignored) {
+        }
+      }
+      // Restore cluster + instance capacity configuration, and disable the opt-in guard rail again so
+      // it does not leak into other tests sharing this cluster.
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      restore.setCapacityKeyConsistencyGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
   @Test(dependsOnMethods = "testAddResourceWithWeight")
   public void testDryRunAndForceRejectedForNonWagedCommand() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
