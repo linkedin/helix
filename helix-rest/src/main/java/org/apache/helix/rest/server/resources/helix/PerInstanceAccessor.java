@@ -56,6 +56,7 @@ import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -78,6 +79,7 @@ import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintena
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.util.HelixUtil;
@@ -471,6 +473,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @POST
   public Response updateInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String command,
@@ -680,6 +683,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName,
@@ -733,7 +737,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Path("configs")
   public Response updateInstanceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -758,6 +763,24 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
         case update:
+          /*
+           * Guard rail: block (or simulate) a capacity reduction that would drop total cluster
+           * capacity below the demand already committed to WAGED resources, which would leave
+           * partitions unassigned. force=true overrides; dryRun=true only reports the verdict.
+           * Runs before the write so nothing touches ZooKeeper when the reduction is unsafe.
+           */
+          GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+              .dataAccessor(getDataAccssor(clusterId))
+              .instanceName(instanceName)
+              .proposedInstanceConfig(instanceConfig)
+              .build();
+          GuardrailPipeline guardrailPipeline =
+              new GuardrailPipeline(new InstanceCapacityHeadroomGuardrailRule());
+          Optional<Response> preflightResponse =
+              preflight(guardrailPipeline, guardrailContext, force, dryRun);
+          if (preflightResponse.isPresent()) {
+            return preflightResponse.get();
+          }
           /*
            * The new instanceConfig will be merged with existing one.
            * Even if the instance is disabled, non-valid instance topology config will cause rebalance

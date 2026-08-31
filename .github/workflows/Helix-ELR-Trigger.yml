@@ -2,9 +2,8 @@ name: Scheduled ELR Release
 
 on:
   schedule:
-    # Runs twice a week: Monday and Thursday at 06:00 UTC
-    - cron: '0 6 * * 1'
-    - cron: '0 6 * * 4'
+    # Runs daily at 06:00 UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

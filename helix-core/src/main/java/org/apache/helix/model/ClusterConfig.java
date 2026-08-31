@@ -144,6 +144,13 @@ public class ClusterConfig extends HelixProperty {
     // decision; it can be turned off again with a single ClusterConfig change (no client change or
     // helix-rest redeploy) to back out a false positive.
     INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceCapacityHeadroomGuardrailRule, which pre-validates an
+    // updateInstanceConfig that lowers an instance's capacity and rejects it when the cluster's total
+    // remaining capacity in some dimension would fall below the capacity already committed to WAGED
+    // resources (leaving partitions unplaceable). Disabled by default so enabling it is a deliberate
+    // per-cluster decision, and it can be turned off again with a single ClusterConfig change (no
+    // client change or helix-rest redeploy) to back out a false positive.
+    INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED,
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
@@ -1253,6 +1260,31 @@ public class ClusterConfig extends HelixProperty {
   public void setInstanceOperationRebalanceGuardrailEnabled(boolean enabled) {
     _record.setBooleanField(
         ClusterConfigProperty.INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-capacity headroom guard rail is enabled for this cluster. The
+   * rule pre-validates an updateInstanceConfig that reduces capacity and rejects reductions that would
+   * drop the cluster's total remaining capacity in some dimension below the demand already committed
+   * to WAGED resources.
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without changing
+   * any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceCapacityHeadroomGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-capacity headroom guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceCapacityHeadroomGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED.name(), enabled);
   }
 
   private Map<String, Integer> getDefaultCapacityMap(ClusterConfigProperty capacityPropertyType) {

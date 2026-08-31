@@ -46,6 +46,7 @@ import org.apache.helix.HelixManager;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
+import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.api.listeners.ClusterConfigChangeListener;
 import org.apache.helix.api.listeners.ControllerChangeListener;
@@ -148,6 +149,19 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   final AtomicReference<Map<String, LiveInstance>> _lastSeenInstances;
   final AtomicReference<Map<String, LiveInstance>> _lastSeenSessions;
+
+  // Pending per-instance listener registrations collected during INIT for parallel registration.
+  // Maps session -> instanceName for current-state/task-current-state listeners,
+  // and a set of instance names for message/customized-state-root listeners.
+  private volatile PendingInstanceListeners _pendingInstanceListeners;
+
+  // Feature gate (default OFF) for the deferred + parallel per-instance listener registration
+  // during leadership acquisition. Read once here so a whole leadership epoch is
+  // decided consistently. When off, checkLiveInstancesObservation registers inline exactly as
+  // before (legacy), and the controller drain in ZKHelixManager never runs (_pendingInstanceListeners
+  // stays null). Flip on per deployment via the system property to ramp on a canary.
+  private final boolean _parallelInstanceRegistrationEnabled =
+      Boolean.getBoolean(SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED);
 
   // map that stores the mapping between instance and the customized state types available on that
   //instance
@@ -1423,34 +1437,61 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         }
       }
 
-      for (String session : curSessions.keySet()) {
-        if (lastSessions == null || !lastSessions.containsKey(session)) {
-          String instanceName = curSessions.get(session).getInstanceName();
-          try {
-            // add current-state listeners for new sessions
-            manager.addCurrentStateChangeListener(this, instanceName, session);
-            manager.addTaskCurrentStateChangeListener(this, instanceName, session);
-            logger.info(manager.getInstanceName() + " added current-state listener for instance: "
-                + instanceName + ", session: " + session + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add current state listener for instance: " + instanceName
-                + " with session: " + session, e);
-          }
-        }
-      }
+      boolean isInit = changeContext.getType() == NotificationContext.Type.INIT;
 
-      for (String instance : curInstances.keySet()) {
-        if (lastInstances == null || !lastInstances.containsKey(instance)) {
-          try {
-            // add message listeners for new instances
-            manager.addMessageListener(this, instance);
-            logger.info(manager.getInstanceName() + " added message listener for " + instance
-                + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add message listener for instance: " + instance, e);
+      if (isInit && _parallelInstanceRegistrationEnabled) {
+        // Feature ON: during controller leadership acquisition, defer per-instance listener
+        // registration. These are registered in parallel by
+        // ZKHelixManager.registerDeferredInstanceListenersAsync(), triggered from
+        // DistributedLeaderElection.onControllerChange() for every leadership path (both new-session
+        // INIT and failover CALLBACK), after invoke() releases synchronized(_manager).
+        Map<String, String> sessionToInstance = new HashMap<>();
+        Set<String> newInstances = new HashSet<>();
+
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            sessionToInstance.put(session, curSessions.get(session).getInstanceName());
           }
         }
-      }
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            newInstances.add(instance);
+          }
+        }
+        _pendingInstanceListeners = new PendingInstanceListeners(sessionToInstance, newInstances);
+        logger.info("Deferred {} session listeners and {} instance listeners for parallel registration",
+            sessionToInstance.size(), newInstances.size());
+      } else {
+        // Legacy/inline path. Runs when the feature is OFF (any leadership INIT registers inline,
+        // exactly as before this change) OR for the incremental CALLBACK path (typically 0-1 new
+        // instances per event). On INIT with the flag off, lastSessions/lastInstances are null so
+        // every live instance is registered here inline via the unchanged addXxxListener path.
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            String instanceName = curSessions.get(session).getInstanceName();
+            try {
+              manager.addCurrentStateChangeListener(this, instanceName, session);
+              manager.addTaskCurrentStateChangeListener(this, instanceName, session);
+              logger.info(manager.getInstanceName() + " added current-state listener for instance: "
+                  + instanceName + ", session: " + session + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add current state listener for instance: " + instanceName
+                  + " with session: " + session, e);
+            }
+          }
+        }
+
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            try {
+              manager.addMessageListener(this, instance);
+              logger.info(manager.getInstanceName() + " added message listener for " + instance
+                  + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add message listener for instance: " + instance, e);
+            }
+          }
+        }
 
         for (String instance : curInstances.keySet()) {
           if (lastInstances == null || !lastInstances.containsKey(instance)) {
@@ -1463,6 +1504,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
                   "Fail to add root path listener for customized state change for instance: "
                       + instance, e);
             }
+          }
         }
       }
 
@@ -1664,6 +1706,77 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       if (_rebalancer != null) {
         _rebalancer.close();
         _rebalancer = null;
+      }
+    }
+  }
+
+  /**
+   * Per-instance listener registrations deferred during initial controller setup.
+   * Collected by {@link #checkLiveInstancesObservation} during a leadership acquisition, then
+   * registered in parallel by
+   * {@code ZKHelixManager.registerDeferredInstanceListenersAsync}, which
+   * {@code DistributedLeaderElection.onControllerChange} triggers for every leadership path.
+   */
+  public static class PendingInstanceListeners {
+    private final Map<String, String> _sessionToInstance;
+    private final Set<String> _newInstances;
+
+    public PendingInstanceListeners(Map<String, String> sessionToInstance, Set<String> newInstances) {
+      _sessionToInstance = sessionToInstance;
+      _newInstances = newInstances;
+    }
+
+    public Map<String, String> getSessionToInstance() {
+      return _sessionToInstance;
+    }
+
+    public Set<String> getNewInstances() {
+      return _newInstances;
+    }
+
+    public boolean isEmpty() {
+      return _sessionToInstance.isEmpty() && _newInstances.isEmpty();
+    }
+  }
+
+  public PendingInstanceListeners takePendingInstanceListeners() {
+    PendingInstanceListeners result = _pendingInstanceListeners;
+    _pendingInstanceListeners = null;
+    return result;
+  }
+
+  /**
+   * Drop a session from the last-seen set so its per-instance current-state and task-current-state
+   * listeners are re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred
+   * parallel registration for this session ultimately failed, so {@code _lastSeenSessions} reflects
+   * only sessions whose listeners actually registered (not ones that were merely attempted).
+   * Uses the same {@code synchronized(_lastSeenInstances)} monitor as
+   * {@link #checkLiveInstancesObservation} to stay consistent with the diffing logic.
+   */
+  public void forgetSessionForReregistration(String session) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> sessions = _lastSeenSessions.get();
+      if (sessions != null && sessions.containsKey(session)) {
+        Map<String, LiveInstance> updated = new HashMap<>(sessions);
+        updated.remove(session);
+        _lastSeenSessions.set(updated);
+      }
+    }
+  }
+
+  /**
+   * Drop an instance from the last-seen set so its message and customized-state-root listeners are
+   * re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred parallel
+   * registration for this instance ultimately failed, so {@code _lastSeenInstances} reflects only
+   * instances whose listeners actually registered.
+   */
+  public void forgetInstanceForReregistration(String instance) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> instances = _lastSeenInstances.get();
+      if (instances != null && instances.containsKey(instance)) {
+        Map<String, LiveInstance> updated = new HashMap<>(instances);
+        updated.remove(instance);
+        _lastSeenInstances.set(updated);
       }
     }
   }

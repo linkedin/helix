@@ -1,4 +1,4 @@
-package org.apache.helix.rest.server.authValidator;
+package org.apache.helix.rest.server.filters;
 
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -19,17 +19,20 @@ package org.apache.helix.rest.server.authValidator;
  * under the License.
  */
 
-import javax.ws.rs.container.ContainerRequestContext;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import javax.ws.rs.NameBinding;
 
 
-public class NoopAuthValidator implements AuthValidator {
-  public boolean validate(ContainerRequestContext request) {
-    return true;
-  }
-
-  @Override
-  public boolean validate(ContainerRequestContext request, String role) {
-    // No-op validator: authorizes every request, including role-restricted ones.
-    return true;
-  }
+/**
+ * Name-binding annotation that restricts an endpoint to callers holding the Helix admin role.
+ * Endpoints annotated with this are additionally guarded by {@link HelixAdminAuthFilter}, which
+ * only permits requests authorized for {@link HelixAdminAuthFilter#HELIX_ADMIN_ROLE}.
+ */
+@NameBinding
+@Target({ElementType.TYPE, ElementType.METHOD})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface HelixAdminAuth {
 }
