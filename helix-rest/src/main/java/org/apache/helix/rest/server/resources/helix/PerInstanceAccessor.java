@@ -20,10 +20,12 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
@@ -51,6 +53,10 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -71,6 +77,7 @@ import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintena
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.util.InstanceUtil;
@@ -463,6 +470,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @POST
   public Response updateInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String command,
@@ -639,9 +647,26 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+    // Guard rail: block (or simulate) dropping an instance that is still live -- its participant is
+    // connected, so its LIVEINSTANCES znode is present. force=true overrides this verdict, though
+    // the admin layer (ZKHelixAdmin.dropInstance) still rejects dropping a live instance;
+    // dryRun=true only reports the verdict without dropping.
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .instanceName(instanceName)
+        .build();
+    GuardrailPipeline pipeline = new GuardrailPipeline(new LiveInstanceGuardrailRule());
+    Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+    if (preflightResponse.isPresent()) {
+      return preflightResponse.get();
+    }
+
     HelixAdmin admin = getHelixAdmin();
     try {
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
@@ -676,7 +701,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Path("configs")
   public Response updateInstanceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -701,6 +727,24 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
         case update:
+          /*
+           * Guard rail: block (or simulate) a capacity reduction that would drop total cluster
+           * capacity below the demand already committed to WAGED resources, which would leave
+           * partitions unassigned. force=true overrides; dryRun=true only reports the verdict.
+           * Runs before the write so nothing touches ZooKeeper when the reduction is unsafe.
+           */
+          GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+              .dataAccessor(getDataAccssor(clusterId))
+              .instanceName(instanceName)
+              .proposedInstanceConfig(instanceConfig)
+              .build();
+          GuardrailPipeline guardrailPipeline =
+              new GuardrailPipeline(new InstanceCapacityHeadroomGuardrailRule());
+          Optional<Response> preflightResponse =
+              preflight(guardrailPipeline, guardrailContext, force, dryRun);
+          if (preflightResponse.isPresent()) {
+            return preflightResponse.get();
+          }
           /*
            * The new instanceConfig will be merged with existing one.
            * Even if the instance is disabled, non-valid instance topology config will cause rebalance
@@ -752,12 +796,22 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    // The liveInstances check above is a separate read, so the instance can drop in between and
+    // leave this null. Treat that as not live instead of throwing an NPE, which would surface as
+    // another HTTP 500.
+    if (liveInstance == null) {
+      return null;
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
 
-    List<String> resources =
-        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId));
+    // getChildNames() returns an immutable Collections.emptyList() when the znode is absent, so the
+    // result must be copied into a mutable list before addAll() below. Without the copy, an instance
+    // whose CURRENTSTATES/{sessionId} znode does not exist while TASKCURRENTSTATES/{sessionId} is
+    // non-empty throws UnsupportedOperationException, which surfaces as an HTTP 500.
+    List<String> resources = new ArrayList<>(
+        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId)));
     resources.addAll(accessor
         .getChildNames(accessor.keyBuilder().taskCurrentStates(instanceName, currentSessionId)));
     if (resources.size() > 0) {
@@ -780,6 +834,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    if (liveInstance == null) {
+      return notFound();
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();

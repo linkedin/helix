@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -37,18 +38,26 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
@@ -947,6 +956,201 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /*
+   * Guard rail coverage for the DELETE instance endpoint. Every participant in STOPPABLE_CLUSTER is
+   * started and connected, so its LIVEINSTANCES znode is present and the live-instance guard rail
+   * must block (or, for dryRun, report) the drop. None of these tests actually drop the instance, so
+   * they are non-destructive.
+   */
+  @Test
+  public void testDeleteInstanceGuardrailBlocks() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete).request()
+            .delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    // The instance must not have been dropped by a blocked request.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailDryRun() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // dryRun only simulates: it always returns 200 with the verdict and never drops the instance.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("dryRun", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailForceBypass() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // force=true bypasses the guard rail and lets the request reach the actual drop. The drop then
+    // fails specifically because the participant is still live -- asserting on that error (rather
+    // than merely "some 400") directly confirms the request got past the guard rail into
+    // dropInstance, instead of being blocked by the guard rail verdict.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("force", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    String body = response.readEntity(String.class);
+    Assert.assertFalse(body.contains(LiveInstanceGuardrailRule.RULE_ID),
+        "force=true should bypass the guard rail, not return its verdict: " + body);
+    Assert.assertTrue(body.contains("is still alive"),
+        "force=true should reach dropInstance, which fails on the live participant: " + body);
+
+    // The live participant was not dropped, so its config must still be present.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the updateInstanceConfig "update" endpoint's capacity-reduction path.
+   * Declares a single WAGED capacity dimension, gives all instances capacity 100 (supply 1000), and
+   * plants a WAGED resource committing demand 950 (10 partitions * 1 replica * weight 95), leaving
+   * only 50 units of headroom. It then verifies: (1) an over-cut reduction is blocked (400 + verdict,
+   * nothing written); (2) the same reduction under dryRun always returns 200 with the verdict and is
+   * still not written; (3) force=true bypasses the guard rail and the unsafe reduction is written;
+   * (4) a within-headroom reduction passes and is written. Cluster/instance capacity config and the
+   * demand resource are saved and torn down so the shared cluster is left unperturbed.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityHeadroomGuardrail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String targetInstance = CLUSTER_NAME + "localhost_12919";
+    String demandResource = "guardrailHeadroomDemandResource";
+
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances = admin.getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    try {
+      // supply = (# instances) * 100 in dimension FOO. With 10 instances that is 1000.
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList("FOO"));
+      // The guard rail is opt-in (disabled by default); enable it for this cluster so the endpoint
+      // actually enforces the capacity-reduction check below.
+      clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // Committed demand = 10 partitions * 1 replica * weight 95 = 950, leaving 50 of headroom.
+      admin.addResource(CLUSTER_NAME, demandResource, 10, "OnlineOffline", "FULL_AUTO");
+      IdealState idealState = admin.getResourceIdealState(CLUSTER_NAME, demandResource);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      idealState.setReplicas("1");
+      admin.setResourceIdealState(CLUSTER_NAME, demandResource, idealState);
+      ResourceConfig resourceConfig = new ResourceConfig(demandResource);
+      resourceConfig.setPartitionCapacityMap(
+          ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 95)));
+      _configAccessor.setResourceConfig(CLUSTER_NAME, demandResource, resourceConfig);
+
+      // 1. Enforcement: reducing to 30 drops supply to 930 < 950, so the freed load has no home.
+      Response blocked = postCapacityDelta(targetInstance, 30, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 2. Dry-run: always 200 with the same infeasible verdict, still nothing written.
+      Response dryRun = postCapacityDelta(targetInstance, 30, ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 3. force=true bypasses the guard rail: the unsafe reduction is actually written.
+      Response forced = postCapacityDelta(targetInstance, 30, ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 30);
+
+      // Restore the target to 100 before exercising the happy path.
+      InstanceConfig restoreTarget =
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance);
+      restoreTarget.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, targetInstance, restoreTarget);
+
+      // 4. A within-headroom reduction (100 -> 60 leaves supply 960 >= 950) passes and is written.
+      Response allowed = postCapacityDelta(targetInstance, 60, Collections.emptyMap());
+      Assert.assertEquals(allowed.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 60);
+    } finally {
+      try {
+        admin.dropResource(CLUSTER_NAME, demandResource);
+      } catch (Exception ignored) {
+        // best-effort teardown
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(
+          originalCapacityKeys == null ? new ArrayList<>() : originalCapacityKeys);
+      restore.setInstanceCapacityHeadroomGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * POST an InstanceConfig capacity delta ({@code {"FOO": fooCapacity}}) to the updateInstanceConfig
+   * "update" endpoint, threading through any guard-rail query flags (e.g. {@code dryRun},
+   * {@code force}), and return the raw {@link Response} so the caller can assert on status and body.
+   */
+  private Response postCapacityDelta(String instance, int fooCapacity, Map<String, Object> flags)
+      throws IOException {
+    InstanceConfig delta = new InstanceConfig(instance);
+    delta.setInstanceCapacityMap(ImmutableMap.of("FOO", fooCapacity));
+    Entity<String> entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/instances/" + instance + "/configs")
+        .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
+  }
+
   /**
    * Check that validateWeightForInstance() works by
    * 1. First call validate -> We should get "true" because nothing is set in ClusterConfig.
@@ -1410,6 +1614,58 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     // The below calls should successfully return
     body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources/{}")
         .isBodyReturnExpected(true).format(CLUSTER_NAME, INSTANCE_NAME, dbName).get(this);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * When the CURRENTSTATES/{sessionId} znode is absent, getChildNames() returns an immutable
+   * Collections.emptyList(), and the subsequent addAll() of a non-empty task current state list
+   * used to throw UnsupportedOperationException, which surfaced as an HTTP 500.
+   */
+  @Test(dependsOnMethods = "testGetResourcesOnInstance")
+  public void testGetResourcesOnInstanceWithOnlyTaskCurrentStates() throws JsonProcessingException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = "localhost_" + TestHelper.getTestMethodName();
+    addParticipant(CLUSTER_NAME, instanceName);
+
+    try {
+      HelixDataAccessor accessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
+      LiveInstance liveInstance =
+          accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+      Assert.assertNotNull(liveInstance);
+      String sessionId = liveInstance.getEphemeralOwner();
+
+      // Remove CURRENTSTATES/{sessionId} so that getChildNames() hits ZkNoNodeException and
+      // returns the immutable Collections.emptyList(). Note that a znode which merely exists
+      // with zero children yields a mutable list and would not reproduce this.
+      String currentStatesPath =
+          accessor.keyBuilder().currentStates(instanceName, sessionId).getPath();
+      _baseAccessor.remove(currentStatesPath, 0);
+      // Assert the znode is absent rather than merely childless: getChildNames() returns an
+      // immutable list only for an absent znode, so an existing-but-empty znode would not
+      // reproduce the failure even though it is also empty.
+      Assert.assertFalse(_baseAccessor.exists(currentStatesPath, 0));
+
+      // Give the instance a task current state so that addAll()'s argument is non-empty.
+      String taskResource = "TaskResource_" + TestHelper.getTestMethodName();
+      CurrentState taskCurrentState = new CurrentState(taskResource);
+      taskCurrentState.setSessionId(sessionId);
+      taskCurrentState.setStateModelDefRef("Task");
+      taskCurrentState.setState("0", "COMPLETED");
+      Assert.assertTrue(accessor.setProperty(
+          accessor.keyBuilder().taskCurrentState(instanceName, sessionId, taskResource),
+          taskCurrentState));
+
+      String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
+          .isBodyReturnExpected(true).format(CLUSTER_NAME, instanceName).get(this);
+      JsonNode node = OBJECT_MAPPER.readTree(body);
+      ArrayNode resources =
+          (ArrayNode) node.get(PerInstanceAccessor.PerInstanceProperties.resources.name());
+      Assert.assertEquals(resources.size(), 1);
+      Assert.assertEquals(resources.get(0).asText(), taskResource);
+    } finally {
+      dropParticipant(CLUSTER_NAME, instanceName);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

@@ -154,7 +154,9 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
   }
 
   public Integer getParticipantActiveTaskCount(String instance) {
-    return _participantActiveTaskCount.get(instance);
+    // Default to 0 for an instance not yet seeded by resetActiveTaskCount, so the throttling math in
+    // AbstractTaskDispatcher never unboxes a null.
+    return _participantActiveTaskCount.getOrDefault(instance, 0);
   }
 
   public void setParticipantActiveTaskCount(String instance, int taskCount) {
@@ -165,8 +167,9 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
    * Reset RUNNING/INIT tasks count in JobRebalancer
    */
   public void resetActiveTaskCount(CurrentStateOutput currentStateOutput) {
-    // init participant map
-    for (String liveInstance : getAssignableLiveInstances().keySet()) {
+    // Seed the active-task-count map from getEnabledLiveInstances() (the task-candidate set the
+    // dispatcher iterates), not getAssignableLiveInstances() which excludes live EVACUATE instances.
+    for (String liveInstance : getEnabledLiveInstances()) {
       _participantActiveTaskCount.put(liveInstance, 0);
     }
     // Active task == init and running tasks
@@ -269,12 +272,12 @@ public class WorkflowControllerDataProvider extends BaseControllerDataProvider {
   }
 
   /**
-   * Override to include EVACUATE-flagged live instances. The task framework co-locates tasks
-   * with existing replica states (e.g., MASTER) of the target resource. EVACUATE instances may
-   * still host such replicas until the (N+1) replacement replica completes bootstrap; excluding
-   * them here causes FixedTargetTaskAssignmentCalculator to leave those task partitions
-   * unassigned, which manifests as stuck/timed-out workflow jobs (e.g., backup, bulk operations)
-   * during long swap-out windows. See CICP-34004.
+   * Including live EVACUATE instances as task-assignment candidates is intentional policy for the task
+   * pipeline. The task framework co-locates tasks with existing replica states (e.g., MASTER) of the
+   * target resource. EVACUATE instances may still host such replicas until the (N+1) replacement replica
+   * completes bootstrap; excluding them here causes FixedTargetTaskAssignmentCalculator to leave those
+   * task partitions unassigned, which manifests as stuck/timed-out workflow jobs (e.g., backup, bulk
+   * operations) during long swap-out windows. See CICP-34004.
    *
    * Note: this override is intentionally scoped to the task pipeline. Replica-placement
    * pipelines (WAGED, DelayedAuto) continue to use the base class behavior which excludes

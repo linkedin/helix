@@ -20,11 +20,18 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.Optional;
+
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
 
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.server.ServerContext;
@@ -34,6 +41,8 @@ import org.apache.helix.tools.ClusterSetup;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -42,6 +51,8 @@ import org.apache.helix.zookeeper.impl.client.ZkClient;
  * metadata store.
  */
 public class AbstractHelixResource extends AbstractResource {
+
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractHelixResource.class);
 
   public RealmAwareZkClient getRealmAwareZkClient() {
     ServerContext serverContext = getServerContext();
@@ -94,5 +105,63 @@ public class AbstractHelixResource extends AbstractResource {
   private ServerContext getServerContext() {
     return (ServerContext) _application.getProperties()
         .get(ContextPropertyKeys.SERVER_CONTEXT.name());
+  }
+
+  /**
+   * Runs guard rail rules against a proposed mutation before it is applied, supporting three modes:
+   * <ul>
+   *   <li><b>enforce</b> (default): if the mutation is unsafe, returns a {@code 400} response
+   *       carrying the violations so the caller can abort before touching ZooKeeper;</li>
+   *   <li><b>dryRun</b> ({@code dryRun=true}): never proceeds with the write and always returns a
+   *       {@code 200} response with the verdict, so callers can "simulate" the operation;</li>
+   *   <li><b>force</b> ({@code force=true}): proceeds even when the mutation is unsafe, logging the
+   *       overridden violations. {@code dryRun} takes precedence over {@code force}.</li>
+   * </ul>
+   * Note: the verdict reflects only the guard rail rules evaluated here, not the full feasibility of
+   * the underlying mutation. A feasible dry-run does not guarantee the subsequent write will
+   * succeed, since the mutation may enforce additional preconditions of its own.
+   * <p>
+   * Note also that the verdict is computed from a snapshot of cluster state read at preflight time.
+   * Because the cluster is a live, eventually-consistent system &mdash; the controller keeps
+   * rebalancing and participants join and leave independently of this call &mdash; that state can
+   * change between this read and the subsequent write. This check is therefore a best-effort early
+   * abort, not a transactional gate: a {@code feasible} verdict does not lock the cluster, so a
+   * mutation judged safe here may still race with a concurrent state change. The mutation's own
+   * preconditions and the controller remain the authoritative safety net.
+   * <p>
+   * When this method returns {@link Optional#empty()} the caller should proceed with the mutation;
+   * when it returns a response, the caller should return that response as-is.
+   *
+   * @param pipeline the rules to evaluate for this endpoint
+   * @param context  the cluster state and mutation target
+   * @param force    proceed even if the mutation is judged unsafe
+   * @param dryRun   only simulate: return the verdict without ever performing the mutation
+   * @return a response to return immediately, or empty if the caller should proceed
+   */
+  protected Optional<Response> preflight(GuardrailPipeline pipeline, GuardrailContext context,
+      boolean force, boolean dryRun) {
+    ValidationResult result = pipeline.validate(context);
+    if (dryRun) {
+      return Optional.of(verdictResponse(result, Response.Status.OK));
+    }
+    if (result.isFeasible()) {
+      return Optional.empty();
+    }
+    if (force) {
+      LOG.warn("Guard rail violations for cluster {} overridden via force=true: {}",
+          context.getClusterName(), result.getViolations());
+      return Optional.empty();
+    }
+    return Optional.of(verdictResponse(result, Response.Status.BAD_REQUEST));
+  }
+
+  private Response verdictResponse(ValidationResult result, Response.Status status) {
+    try {
+      return Response.status(status).entity(toJson(result))
+          .type(MediaType.APPLICATION_JSON).build();
+    } catch (IOException e) {
+      LOG.error("Failed to serialize guard rail validation result", e);
+      return serverError();
+    }
   }
 }

@@ -18,6 +18,53 @@
   -->
 
 <mat-tab-group>
+  <mat-tab label="Task Summary">
+    <mat-spinner *ngIf="isLoading"></mat-spinner>
+    <div class="task-summary" *ngIf="!isLoading">
+      <ng-container *ngIf="taskSummary; else noSummary">
+        <div class="summary-counts">
+          <span class="chip total">Total: {{ taskSummary.total }}</span>
+          <span class="chip completed">Completed: {{ taskSummary.completed }}</span>
+          <span class="chip failed" [class.has-failures]="hasTaskFailures"
+            >Failed: {{ taskSummary.failed }}</span
+          >
+          <span class="chip timed-out" [class.has-timed-out]="hasTimedOut"
+            >Timed Out: {{ taskSummary.timedOut || 0 }}</span
+          >
+          <span class="chip in-progress" *ngIf="taskSummary.inProgress"
+            >In Progress: {{ taskSummary.inProgress }}</span
+          >
+          <span class="chip pending" *ngIf="taskSummary.pending"
+            >Pending: {{ taskSummary.pending }}</span
+          >
+          <span class="chip other" *ngIf="taskSummary.other">Other: {{ taskSummary.other }}</span>
+        </div>
+        <div class="failed-tasks" *ngIf="hasTaskFailures">
+          <strong>Failed task partitions:</strong>
+          {{ taskSummary.failedTasks?.join(', ') }}
+        </div>
+        <div class="timed-out-tasks" *ngIf="hasTimedOut">
+          <strong>Timed out task partitions:</strong>
+          {{ taskSummary.timedOutTasks?.join(', ') }}
+        </div>
+        <div class="in-progress-tasks" *ngIf="hasInProgress">
+          <strong>In progress task partitions:</strong>
+          {{ taskSummary.inProgressTasks?.join(', ') }}
+        </div>
+        <div class="pending-tasks" *ngIf="hasPending">
+          <strong>Pending task partitions:</strong>
+          {{ taskSummary.pendingTasks?.join(', ') }}
+        </div>
+        <ngx-json-viewer [json]="taskSummary"></ngx-json-viewer>
+      </ng-container>
+      <ng-template #noSummary>
+        <div class="no-summary">
+          No task status summary available yet. It is computed from the job's per-task states each
+          time this page is opened, and appears once the job has scheduled its tasks.
+        </div>
+      </ng-template>
+    </div>
+  </mat-tab>
   <mat-tab label="Job Config">
     <mat-spinner *ngIf="isLoading"></mat-spinner>
     <ngx-json-viewer [json]="job?.config"></ngx-json-viewer>

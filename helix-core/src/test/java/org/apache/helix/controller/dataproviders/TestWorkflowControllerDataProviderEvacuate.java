@@ -27,6 +27,7 @@ import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
@@ -122,6 +123,43 @@ public class TestWorkflowControllerDataProviderEvacuate {
     Assert.assertNull(provider.getAssignableInstanceConfigMap().get(evacuateLive),
         "AssignableInstanceConfigMap must NOT include EVACUATE - this is why the original throttle code path NPE'd");
     Assert.assertNotNull(provider.getAssignableInstanceConfigMap().get(enabledLive));
+  }
+
+  /**
+   * A live EVACUATE task candidate must have a non-null active-task count after resetActiveTaskCount,
+   * else AbstractTaskDispatcher's throttling math unboxes a null. Also checks the getter defaults to 0
+   * for an unseeded instance.
+   */
+  @Test
+  public void testActiveTaskCountSeededForEvacuateThrottlePath() {
+    String enabledLive = "host_enabled_live";
+    String evacuateLive = "host_evacuate_live";
+
+    Map<String, InstanceConfig> configMap = new HashMap<>();
+    configMap.put(enabledLive,
+        instanceWithOperation(enabledLive, InstanceConstants.InstanceOperation.ENABLE));
+    configMap.put(evacuateLive,
+        instanceWithOperation(evacuateLive, InstanceConstants.InstanceOperation.EVACUATE));
+
+    List<LiveInstance> liveInstances =
+        Arrays.asList(new LiveInstance(enabledLive), new LiveInstance(evacuateLive));
+
+    WorkflowControllerDataProvider provider = newProvider(configMap, liveInstances);
+
+    Assert.assertTrue(provider.getEnabledLiveInstances().contains(evacuateLive),
+        "EVACUATE+live instance must be a task candidate");
+
+    provider.resetActiveTaskCount(new CurrentStateOutput());
+
+    // Every task candidate must have a non-null active-task count (the dispatcher unboxes it).
+    Assert.assertNotNull(provider.getParticipantActiveTaskCount(evacuateLive),
+        "Active task count for the EVACUATE task candidate must not be null after resetActiveTaskCount");
+    Assert.assertNotNull(provider.getParticipantActiveTaskCount(enabledLive),
+        "Active task count for the ENABLE task candidate must not be null after resetActiveTaskCount");
+
+    Assert.assertEquals(provider.getParticipantActiveTaskCount("never_registered_instance"),
+        Integer.valueOf(0),
+        "getParticipantActiveTaskCount must default to 0 for an unseeded instance");
   }
 
   @Test

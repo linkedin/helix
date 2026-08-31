@@ -44,6 +44,7 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _successfulWorkflowCount;
   private SimpleDynamicMetric<Long> _failedWorkflowCount;
   private SimpleDynamicMetric<Long> _failedWorkflowGauge;
+  private SimpleDynamicMetric<Long> _stoppedWorkflowGauge;
   private SimpleDynamicMetric<Long> _existingWorkflowGauge;
   private SimpleDynamicMetric<Long> _queuedWorkflowGauge;
   private SimpleDynamicMetric<Long> _runningWorkflowGauge;
@@ -57,6 +58,7 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
     _successfulWorkflowCount = new SimpleDynamicMetric("SuccessfulWorkflowCount", 0L);
     _failedWorkflowCount = new SimpleDynamicMetric("FailedWorkflowCount", 0L);
     _failedWorkflowGauge = new SimpleDynamicMetric("FailedWorkflowGauge", 0L);
+    _stoppedWorkflowGauge = new SimpleDynamicMetric("StoppedWorkflowGauge", 0L);
     _existingWorkflowGauge = new SimpleDynamicMetric("ExistingWorkflowGauge", 0L);
     _queuedWorkflowGauge = new SimpleDynamicMetric("QueuedWorkflowGauge", 0L);
     _runningWorkflowGauge = new SimpleDynamicMetric("RunningWorkflowGauge", 0L);
@@ -98,6 +100,7 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
    */
   public void resetGauges() {
     _failedWorkflowGauge.updateValue(0L);
+    _stoppedWorkflowGauge.updateValue(0L);
     _existingWorkflowGauge.updateValue(0L);
     _runningWorkflowGauge.updateValue(0L);
     _queuedWorkflowGauge.updateValue(0L);
@@ -118,6 +121,8 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
       incrementSimpleDynamicMetric(_runningWorkflowGauge);
     } else if (current.equals(TaskState.FAILED)) {
       incrementSimpleDynamicMetric(_failedWorkflowGauge);
+    } else if (current.equals(TaskState.STOPPED)) {
+      incrementSimpleDynamicMetric(_stoppedWorkflowGauge);
     }
     incrementSimpleDynamicMetric(_existingWorkflowGauge);
   }
@@ -133,6 +138,10 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
 
   public long getFailedWorkflowGauge() {
     return _failedWorkflowGauge.getValue();
+  }
+
+  public long getStoppedWorkflowGauge() {
+    return _stoppedWorkflowGauge.getValue();
   }
 
   public long getExistingWorkflowGauge() {
@@ -153,6 +162,7 @@ public class WorkflowMonitor extends DynamicMBeanProvider {
     attributeList.add(_successfulWorkflowCount);
     attributeList.add(_failedWorkflowCount);
     attributeList.add(_failedWorkflowGauge);
+    attributeList.add(_stoppedWorkflowGauge);
     attributeList.add(_existingWorkflowGauge);
     attributeList.add(_queuedWorkflowGauge);
     attributeList.add(_runningWorkflowGauge);
