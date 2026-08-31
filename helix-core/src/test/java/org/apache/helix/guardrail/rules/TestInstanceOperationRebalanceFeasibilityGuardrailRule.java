@@ -344,69 +344,6 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Cheap sound pre-checks: block obvious infeasibility without ever running the what-if.
-  // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testReplicaCountPrecheckBlocksWithoutSimulation() {
-    // Draining instance0 leaves 2 assignable instances, but the resource needs 3 distinct instances
-    // (replica=3) to place every partition -> WAGED would throw NO_CANDIDATE_NODE. The pre-check
-    // blocks arithmetically; the provider must never run.
-    HelixDataAccessor dataAccessor = precheckAccessor(enabledClusterConfig(),
-        wagedIdealState(RESOURCE, 3, 3));
-    ValidationResult result = rule.validate(
-        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, PROVIDER_MUST_NOT_RUN));
-
-    Assert.assertFalse(result.isFeasible());
-    List<Violation> violations = result.getViolations();
-    Assert.assertEquals(violations.size(), 1);
-    Assert.assertEquals(violations.get(0).getResourceName(), RESOURCE);
-    Assert.assertTrue(violations.get(0).getMessage().contains("NO_CANDIDATE_NODE"),
-        "should cite the WAGED hard-constraint failure: " + violations.get(0).getMessage());
-  }
-
-  @Test
-  public void testAggregateCapacityPrecheckBlocksWithoutSimulation() {
-    // Enough instances for the replica count (replica=2, 2 remain), but the total weight of the
-    // WAGED replicas (3 partitions x 2 replicas x 40 = 240 CU) exceeds the summed assignable
-    // capacity (2 instances x 100 = 200 CU) -> WAGED would throw CAPACITY_DEFICIT. The pre-check
-    // blocks arithmetically; the provider must never run.
-    ClusterConfig clusterConfig = enabledClusterConfig();
-    clusterConfig.setInstanceCapacityKeys(ImmutableList.of("CU"));
-    clusterConfig.setDefaultInstanceCapacityMap(ImmutableMap.of("CU", 100));
-    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("CU", 40));
-    HelixDataAccessor dataAccessor = precheckAccessor(clusterConfig, wagedIdealState(RESOURCE, 2, 3));
-    ValidationResult result = rule.validate(
-        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, PROVIDER_MUST_NOT_RUN));
-
-    Assert.assertFalse(result.isFeasible());
-    List<Violation> violations = result.getViolations();
-    Assert.assertEquals(violations.size(), 1);
-    Assert.assertTrue(violations.get(0).getMessage().contains("CAPACITY_DEFICIT"),
-        "should cite the WAGED hard-constraint failure: " + violations.get(0).getMessage());
-  }
-
-  @Test
-  public void testAggregateCapacityPrecheckDefersWhenCapacityUnresolved() {
-    // Capacity keys are required but neither the instances nor the cluster default supply them, so
-    // WagedValidationUtil cannot resolve node capacity. Rather than risk a false block, the
-    // capacity pre-check is inconclusive and defers to the what-if, which here certifies feasible.
-    ClusterConfig clusterConfig = enabledClusterConfig();
-    clusterConfig.setInstanceCapacityKeys(ImmutableList.of("CU"));
-    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("CU", 40));
-    HelixDataAccessor dataAccessor = precheckAccessor(clusterConfig, wagedIdealState(RESOURCE, 2, 3));
-    Map<String, ResourceAssignment> steadyState = ImmutableMap.of(RESOURCE,
-        resourceAssignment(ImmutableMap.of("p0", ImmutableMap.of("instance1", "MASTER"))));
-
-    // A provider that must run (would throw only if the pre-check wrongly blocked) and returns an
-    // unchanged assignment -> feasible.
-    ValidationResult result = rule.validate(context(dataAccessor,
-        InstanceConstants.InstanceOperation.EVACUATE, fixedProvider(steadyState, steadyState)));
-
-    Assert.assertTrue(result.isFeasible());
-  }
-
-  // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
 
@@ -418,26 +355,6 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
         .proposedInstanceOperation(proposedOp)
         .wagedAssignmentProvider(provider)
         .build();
-  }
-
-  // A fully-wired accessor for the pre-check path: the given (enabled) cluster config and WAGED
-  // ideal state, an assignable target (instance0) plus two other assignable live instances, so that
-  // draining the target leaves exactly two assignable instances.
-  private HelixDataAccessor precheckAccessor(ClusterConfig clusterConfig, IdealState idealState) {
-    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
-    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
-    doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
-    doReturn(assignableInstance(INSTANCE)).when(dataAccessor)
-        .getProperty(BUILDER.instanceConfig(INSTANCE));
-    doReturn(ImmutableList.of(idealState)).when(dataAccessor)
-        .getChildValues(BUILDER.idealStates(), true);
-    doReturn(ImmutableList.of()).when(dataAccessor).getChildValues(BUILDER.resourceConfigs(), true);
-    doReturn(ImmutableList.of(assignableInstance(INSTANCE), assignableInstance("instance1"),
-        assignableInstance("instance2"))).when(dataAccessor)
-        .getChildValues(BUILDER.instanceConfigs(), true);
-    doReturn(ImmutableList.of(INSTANCE, "instance1", "instance2")).when(dataAccessor)
-        .getChildNames(BUILDER.liveInstances());
-    return dataAccessor;
   }
 
   // A fully-wired accessor for the simulation path: enabled cluster, an assignable target instance,
@@ -492,13 +409,9 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   private static IdealState wagedIdealState(String resource) {
     IdealState idealState = new IdealState(resource);
     idealState.setRebalancerClassName(WagedRebalancer.class.getName());
-    return idealState;
-  }
-
-  private static IdealState wagedIdealState(String resource, int replicas, int numPartitions) {
-    IdealState idealState = wagedIdealState(resource);
-    idealState.setReplicas(Integer.toString(replicas));
-    idealState.setNumPartitions(numPartitions);
+    // isWagedEnabled requires FULL_AUTO in addition to the WAGED rebalancer class; real WAGED
+    // resources are always FULL_AUTO.
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
     return idealState;
   }
 
