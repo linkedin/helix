@@ -318,7 +318,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
 
   @Test
   public void testViolationsCappedAtMax() {
-    // 150 partitions each lose a replica -> 100 enumerated violations + 1 trailing overflow summary.
+    // 150 partitions each lose a replica -> 10 enumerated violations + 1 trailing overflow summary.
     Map<String, Map<String, String>> baselineMap = new java.util.LinkedHashMap<>();
     Map<String, Map<String, String>> candidateMap = new java.util.LinkedHashMap<>();
     for (int i = 0; i < 150; i++) {
@@ -336,8 +336,8 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
 
     Assert.assertFalse(result.isFeasible());
     List<Violation> violations = result.getViolations();
-    Assert.assertEquals(violations.size(), 101);
-    Violation overflow = violations.get(100);
+    Assert.assertEquals(violations.size(), 11);
+    Violation overflow = violations.get(10);
     Assert.assertNull(overflow.getPartitionName());
     Assert.assertTrue(overflow.getMessage().contains("of 150"),
         "overflow summary should record the true total: " + overflow.getMessage());

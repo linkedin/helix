@@ -570,6 +570,14 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             if (setInstanceOperationPreflight.isPresent()) {
               return setInstanceOperationPreflight.get();
             }
+          } else {
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
+            // auditable (an operator can still see the override happened without a dryRun preflight).
+            LOG.info(
+                "Bypassing the instance-operation rebalance-feasibility guard rail for a force "
+                    + "setInstanceOperation {} on instance {} in cluster {} (reason: {}); force "
+                    + "overrides the verdict, so the WAGED what-if is skipped.",
+                instanceOperation, instanceName, clusterId, reason);
           }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
               new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,

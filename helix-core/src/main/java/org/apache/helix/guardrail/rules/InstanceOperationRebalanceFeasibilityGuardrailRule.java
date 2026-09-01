@@ -78,9 +78,10 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
   public static final String RULE_ID = "INSTANCE_OPERATION_CAUSES_WAGED_UNPLACEABLE";
 
   // Upper bound on the number of per-partition violations enumerated in a single verdict. Draining a
-  // large instance can under-replicate many partitions at once; beyond this cap the extras are
-  // summarized in one trailing entry so a pathological case cannot return a multi-megabyte body.
-  private static final int MAX_REPORTED_VIOLATIONS = 100;
+  // large instance can under-replicate many partitions at once; a short, readable preview keeps the
+  // message actionable while the trailing summary still reports the true total, so a pathological
+  // case cannot return a multi-megabyte body. Ten names are enough to characterize the failure.
+  private static final int MAX_REPORTED_VIOLATIONS = 10;
 
   @Override
   public String getId() {
