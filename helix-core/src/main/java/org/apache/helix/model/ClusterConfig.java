@@ -139,6 +139,14 @@ public class ClusterConfig extends HelixProperty {
     // it is a deliberate per-cluster decision; it can be turned off again with a single ClusterConfig
     // change (no client change or helix-rest redeploy) to back out a false positive.
     PARTITION_WEIGHT_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceOperationRebalanceFeasibilityGuardrailRule, which
+    // pre-validates a setInstanceOperation request: if moving the target instance out of the WAGED
+    // assignable pool (e.g. EVACUATE / UNKNOWN) would leave one or more partitions unable to place
+    // all their replicas on the remaining assignable instances, the operation is rejected before it
+    // is written to ZooKeeper. Disabled by default so enabling it is a deliberate per-cluster
+    // decision; it can be turned off again with a single ClusterConfig change (no client change or
+    // helix-rest redeploy) to back out a false positive.
+    INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED,
     // Opt-in toggle for the helix-rest InstanceCapacityHeadroomGuardrailRule, which pre-validates an
     // updateInstanceConfig that lowers an instance's capacity and rejects it when the cluster's total
     // remaining capacity in some dimension would fall below the capacity already committed to WAGED
@@ -1262,6 +1270,30 @@ public class ClusterConfig extends HelixProperty {
   public void setPartitionWeightGuardrailEnabled(boolean enabled) {
     _record.setBooleanField(
         ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-operation rebalance-feasibility guard rail is enabled for this
+   * cluster. When enabled, a {@code setInstanceOperation} that would drain the target out of the WAGED
+   * assignable pool is pre-validated with a read-only what-if and rejected before the ZooKeeper write
+   * if it would leave partitions unable to place all their replicas (rather than only surfacing later
+   * as a WAGED rebalance failure). Disabled by default: an opt-in, per-cluster decision that can be
+   * turned off again with a single ClusterConfig change to back out a false positive.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceOperationRebalanceGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-operation rebalance-feasibility guard rail for this
+   * cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceOperationRebalanceGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED.name(), enabled);
   }
 
   /**

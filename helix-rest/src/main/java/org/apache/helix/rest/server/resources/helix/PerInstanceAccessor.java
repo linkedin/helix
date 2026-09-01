@@ -55,7 +55,9 @@ import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -80,6 +82,7 @@ import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
+import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.eclipse.jetty.util.StringUtil;
@@ -481,6 +484,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
       String content) {
     Command cmd;
     try {
@@ -535,6 +539,46 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       .getTypeFactory().constructCollectionType(List.class, String.class)));
           break;
         case setInstanceOperation:
+          // Guard rail: when the cluster opts in, block (or simulate) a setInstanceOperation that
+          // would move this instance out of the WAGED assignable pool (e.g. EVACUATE / UNKNOWN) and
+          // leave one or more partitions unable to place all their replicas. The rule self-selects
+          // the capacity-reducing operations from isAssignable(); ENABLE/DISABLE/SWAP_IN are no-ops
+          // for it. force=true overrides the verdict (draining a failing node is often mandatory);
+          // dryRun=true reports the verdict without writing. The provider keeps the ZK-accessor
+          // plumbing for the read-only WAGED what-if here in the REST layer.
+          //
+          // Skip the (relatively expensive) double WAGED what-if entirely for a real force write:
+          // force overrides any verdict anyway, so an operator force-draining a failing node must
+          // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
+          // dryRun still computes the verdict (even together with force) so it can be previewed.
+          if (dryRun || !force) {
+            WagedAssignmentProvider wagedAssignmentProvider =
+                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                        liveInstances, idealStates, resourceConfigs);
+            GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(getDataAccssor(clusterId))
+                .instanceName(instanceName)
+                .proposedInstanceOperation(instanceOperation)
+                .wagedAssignmentProvider(wagedAssignmentProvider)
+                .build();
+            GuardrailPipeline setInstanceOperationPipeline =
+                new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+            Optional<Response> setInstanceOperationPreflight =
+                preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
+            if (setInstanceOperationPreflight.isPresent()) {
+              return setInstanceOperationPreflight.get();
+            }
+          } else {
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
+            // auditable (an operator can still see the override happened without a dryRun preflight).
+            LOG.info(
+                "Bypassing the instance-operation rebalance-feasibility guard rail for a force "
+                    + "setInstanceOperation {} on instance {} in cluster {} (reason: {}); force "
+                    + "overrides the verdict, so the WAGED what-if is skipped.",
+                instanceOperation, instanceName, clusterId, reason);
+          }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
               new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,
               new InstanceConfig.InstanceOperation.Builder().setOperation(instanceOperation)

@@ -20,6 +20,7 @@
 package org.apache.helix.guardrail;
 
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
@@ -41,6 +42,8 @@ public class GuardrailContext {
   private final String instanceName;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
+  private final InstanceConstants.InstanceOperation proposedInstanceOperation;
+  private final WagedAssignmentProvider wagedAssignmentProvider;
   private final InstanceConfig proposedInstanceConfig;
 
   private GuardrailContext(Builder builder) {
@@ -49,6 +52,8 @@ public class GuardrailContext {
     this.instanceName = builder.instanceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
+    this.proposedInstanceOperation = builder.proposedInstanceOperation;
+    this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
   }
 
@@ -87,6 +92,25 @@ public class GuardrailContext {
   }
 
   /**
+   * The instance operation a mutation proposes to set on {@link #getInstanceName()}, or {@code null}
+   * if the operation is not an instance-operation change. Rules read the to-be-written operation from
+   * here (rather than from ZK) since the change has not been applied yet at pre-validation time.
+   */
+  public InstanceConstants.InstanceOperation getProposedInstanceOperation() {
+    return proposedInstanceOperation;
+  }
+
+  /**
+   * A read-only seam for computing a WAGED what-if assignment, or {@code null} if the endpoint did
+   * not supply one. Rules that need to simulate a rebalance (rather than only read current state)
+   * call through this so that ZooKeeper-connection plumbing stays in the REST layer and the rule
+   * remains a pure, unit-testable function. See {@link WagedAssignmentProvider}.
+   */
+  public WagedAssignmentProvider getWagedAssignmentProvider() {
+    return wagedAssignmentProvider;
+  }
+
+  /**
    * The instance config delta a mutation proposes to merge into the target instance, or {@code null}
    * if the operation is not instance-config-scoped. This carries only the fields the caller is
    * changing (e.g. a reduced capacity map); rules combine it with the existing config read through
@@ -106,6 +130,8 @@ public class GuardrailContext {
     private String instanceName;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
+    private InstanceConstants.InstanceOperation proposedInstanceOperation;
+    private WagedAssignmentProvider wagedAssignmentProvider;
     private InstanceConfig proposedInstanceConfig;
 
     private Builder(String clusterName) {
@@ -129,6 +155,17 @@ public class GuardrailContext {
 
     public Builder proposedIdealState(IdealState proposedIdealState) {
       this.proposedIdealState = proposedIdealState;
+      return this;
+    }
+
+    public Builder proposedInstanceOperation(
+        InstanceConstants.InstanceOperation proposedInstanceOperation) {
+      this.proposedInstanceOperation = proposedInstanceOperation;
+      return this;
+    }
+
+    public Builder wagedAssignmentProvider(WagedAssignmentProvider wagedAssignmentProvider) {
+      this.wagedAssignmentProvider = wagedAssignmentProvider;
       return this;
     }
 
