@@ -68,6 +68,9 @@ public class ClusterConfig extends HelixProperty {
     PARTITION_RECOVERY_DURATION_THRESHOLD,
     RESOURCE_PRIORITY_FIELD,
     REBALANCE_TIMER_PERIOD,
+    // Time in ms after which a non-empty controller event queue that has not completed a pipeline
+    // run is treated as a wedged ("zombie leader") controller by ControllerPipelineStalledGauge.
+    CONTROLLER_PIPELINE_STALL_THRESHOLD_MS,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
 
     // The following concerns maintenance mode
@@ -252,6 +255,8 @@ public class ClusterConfig extends HelixProperty {
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
   private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
+  // Default for CONTROLLER_PIPELINE_STALL_THRESHOLD_MS when unset.
+  private final static long DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
   private final static long DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD = 300000L; // 5 minutes
 
   /**
@@ -846,6 +851,35 @@ public class ClusterConfig extends HelixProperty {
   public long getTopStateHandoffDurationThreshold() {
     return _record.getLongField(ClusterConfigProperty.TOP_STATE_HANDOFF_DURATION_THRESHOLD.name(),
         DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD);
+  }
+
+  /**
+  /**
+   * Set the wedged-controller stall threshold: a non-empty controller event queue that has not
+   * completed a pipeline run within this many ms is reported as stalled by
+   * ControllerPipelineStalledGauge.
+   * @param thresholdMs threshold in milliseconds; must be positive
+   * @throws IllegalArgumentException if {@code thresholdMs <= 0}. Rejecting non-positive values at
+   *         the write path keeps the persisted config from silently diverging from live behaviour
+   *         (the monitor ignores non-positive updates and keeps its previous/default threshold).
+   */
+  public void setControllerPipelineStallThresholdMs(long thresholdMs) {
+    if (thresholdMs <= 0) {
+      throw new IllegalArgumentException(
+          "CONTROLLER_PIPELINE_STALL_THRESHOLD_MS must be positive, got " + thresholdMs);
+    }
+    _record.setLongField(ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
+        thresholdMs);
+  }
+
+  /**
+   * @return the wedged-controller stall threshold in ms, defaulting to
+   *         {@value #DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS} when unset.
+   */
+  public long getControllerPipelineStallThresholdMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
+        DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS);
   }
 
   /**

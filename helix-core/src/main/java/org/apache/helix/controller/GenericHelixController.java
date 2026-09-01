@@ -735,6 +735,13 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       _eventThread = new ClusterEventProcessor(_resourceControlDataProvider, _eventQueue,
           "default-" + clusterName);
       initPipeline(_eventThread, _resourceControlDataProvider);
+      // Wire the pipeline liveness check so ControllerPipelineStalledGauge can report a dead DEFAULT
+      // processing thread (a leader that stopped processing entirely) immediately, read lazily at
+      // metric-scrape time even though the dead thread can no longer report anything itself.
+      _clusterStatusMonitor.setPipelineLivenessSupplier(() -> {
+        Thread eventThread = _eventThread;
+        return eventThread == null || eventThread.isAlive();
+      });
       logger.info("Initialized {} pipeline", Pipeline.Type.DEFAULT.name());
     } else {
       _eventQueue = null;
@@ -988,6 +995,15 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _clusterStatusMonitor
             .updateClusterEventDuration(ClusterEventMonitor.PhaseName.TotalProcessed.name(),
                 _lastPipelineEndTimestamp - startTime);
+        // Report DEFAULT-pipeline progress so ControllerPipelineStalledGauge can tell a wedged
+        // controller (queue not draining) apart from an idle or busy-but-progressing one.
+        _clusterStatusMonitor.setLastPipelineEndTimestamp(_lastPipelineEndTimestamp);
+        // Keep the stall threshold in sync with ClusterConfig so it can be tuned without a redeploy.
+        ClusterConfig stallThresholdConfig = dataProvider.getClusterConfig();
+        if (stallThresholdConfig != null) {
+          _clusterStatusMonitor.setPipelineStallThresholdMs(
+              stallThresholdConfig.getControllerPipelineStallThresholdMs());
+        }
         if (shouldCountTopologyEventAsProcessed(rebalanceFail, dataProvider)) {
           _clusterStatusMonitor.incrementTopologyChangeEventProcessed(event.getEventType());
         }
@@ -1356,6 +1372,21 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       return;
     }
     queue.put(event);
+    if (queue == _eventQueue) {
+      updateControllerEventQueueSizeGauge();
+    }
+  }
+
+  /**
+   * Publish the current DEFAULT cluster-event pipeline backlog to the per-cluster monitor. Invoked
+   * on both the enqueue side (ZK-callback / periodic-rebalance threads) and the dequeue side (the
+   * pipeline thread) so the gauge climbs when events pile up faster than they are drained, which
+   * surfaces a controller that still holds leadership but has stopped processing ("zombie leader").
+   */
+  private void updateControllerEventQueueSizeGauge() {
+    if (_isMonitoring && _clusterStatusMonitor != null && _eventQueue != null) {
+      _clusterStatusMonitor.setControllerEventQueueSizeGauge(_eventQueue.size());
+    }
   }
 
   @Override
@@ -1565,6 +1596,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             _resourceControlDataProvider.clearMonitoringRecords();
           }
           _clusterStatusMonitor.active();
+          // Seed the pipeline-progress baseline at monitoring-enable (leadership acquisition) so a
+          // controller that wedges before completing its very first pipeline run is still caught:
+          // with a 0 baseline the stalled gauge cannot fire. Cold-start slowness that briefly reads
+          // as stalled is covered by the EKG warm-up window and the configurable stall threshold.
+          _clusterStatusMonitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
         } else {
           logger.info("Disable clusterStatusMonitor for cluster " + _clusterName);
           // Reset will be done if (_isMonitoring = false) later, no matter if the state is changed or not.
@@ -1621,6 +1657,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       while (!isInterrupted()) {
         try {
           ClusterEvent newClusterEvent = _eventBlockingQueue.take();
+          if (_eventBlockingQueue == _eventQueue) {
+            updateControllerEventQueueSizeGauge();
+          }
           String threadName = String.format(
               "HelixController-pipeline-%s-(%s)", _processorName, newClusterEvent.getEventId());
           this.setName(threadName);

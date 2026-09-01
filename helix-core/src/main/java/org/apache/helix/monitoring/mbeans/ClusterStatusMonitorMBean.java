@@ -97,6 +97,34 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getContinuousTaskRebalanceFailureCount();
 
+  /**
+   * Backlog of the DEFAULT controller cluster-event pipeline (events enqueued but not yet
+   * processed). Stays near 0 on a healthy controller because the pipeline drains quickly and the
+   * queue dedups by event type; climbs when the controller holds leadership but has stopped
+   * processing events ("zombie leader").
+   * <p>
+   * Depth alone is ambiguous: under load a healthy controller also reads &gt; 0 (events queue
+   * behind the in-flight pipeline run), but it keeps draining them, so
+   * {@code ClusterEventStatus...TotalProcessed.EventCounter} advances. A wedged controller instead
+   * shows depth stuck &gt; 0 with that counter flat. The alert threshold and windowing belong in
+   * the alerting layer, not here.
+   * @return The current DEFAULT controller event queue size.
+   */
+  long getControllerEventQueueSizeGauge();
+
+  /**
+   * Reversible 0/1 wedged-controller ("zombie leader") gauge. 1 when the controller still holds
+   * queued DEFAULT events (and, since this MBean is registered only while leader, still holds
+   * leadership) but the pipeline is not processing them: either the DEFAULT pipeline thread is dead
+   * (caught immediately) or no pipeline run has completed within the configurable stall threshold
+   * (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS). 0 when idle (empty queue) or actively draining. Unlike
+   * the raw queue size this is producer-rate-independent and, because the threshold is set above the
+   * worst-case healthy run, does not false-positive on a long legitimate rebalance. Gate EKG/alerts
+   * on {@code == 1}.
+   * @return 1 if the controller pipeline appears wedged, otherwise 0.
+   */
+  long getControllerPipelineStalledGauge();
+
   // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
   // Each WAGED HelixRebalanceException increments exactly one of these. The pair
   // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended
