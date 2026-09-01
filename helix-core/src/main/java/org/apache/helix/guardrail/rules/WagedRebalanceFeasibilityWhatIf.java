@@ -23,8 +23,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.PropertyKey;
@@ -89,6 +91,37 @@ final class WagedRebalanceFeasibilityWhatIf {
   }
 
   /**
+   * The effective {@code INSTANCE_GROUP_TAG} of each of the given WAGED resources, read from the same
+   * merged (ResourceConfig-over-IdealState) view WAGED itself uses to resolve the pinning tag. WAGED
+   * merges the two via
+   * {@link ResourceConfig#mergeIdealStateWithResourceConfig(ResourceConfig, IdealState)} (see
+   * {@code AssignableReplica}), where a tag set on the {@link ResourceConfig} wins over one on the
+   * {@link IdealState}. Reading the tag off the IdealState alone would miss a resource pinned only
+   * through its ResourceConfig (e.g. a task/JobConfig resource), silently skipping exactly the
+   * resource a tag-removal guard rail must protect. Returned empty when no resource is pinned.
+   */
+  static Set<String> collectWagedInstanceGroupTags(ReadOnlyDataAccessor dataAccessor,
+      List<IdealState> wagedIdealStates) {
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    Map<String, ResourceConfig> resourceConfigByName = new HashMap<>();
+    for (ResourceConfig resourceConfig : dataAccessor.<ResourceConfig>getChildValues(
+        keyBuilder.resourceConfigs(), true)) {
+      if (resourceConfig != null) {
+        resourceConfigByName.put(resourceConfig.getResourceName(), resourceConfig);
+      }
+    }
+    Set<String> groupTags = new HashSet<>();
+    for (IdealState idealState : wagedIdealStates) {
+      String groupTag = ResourceConfig.mergeIdealStateWithResourceConfig(
+          resourceConfigByName.get(idealState.getResourceName()), idealState).getInstanceGroupTag();
+      if (groupTag != null) {
+        groupTags.add(groupTag);
+      }
+    }
+    return groupTags;
+  }
+
+  /**
    * Run the baseline-vs-candidate WAGED what-if and report partitions that lose placeable replicas.
    *
    * @param context the guard-rail context (supplies the {@link WagedAssignmentProvider}, the
@@ -101,11 +134,15 @@ final class WagedRebalanceFeasibilityWhatIf {
    *     {@link #collectWagedIdealStates(ReadOnlyDataAccessor)}
    * @param mutationDescription a human-readable noun phrase for the mutation used in messages, e.g.
    *     {@code "operation EVACUATE"} or {@code "removal of instance tag(s) [heavy]"}
+   * @param remedyHint a short, mutation-specific remedy fragment spliced into the operator-facing
+   *     violation messages, e.g. {@code "Free up assignable capacity"} or {@code "Add the removed tag
+   *     to another live instance, or lower the pinned resource's replica count"}
    * @param ruleId the reporting rule's id, used to tag every {@link Violation}
    */
   static ValidationResult evaluate(GuardrailContext context, ClusterConfig clusterConfig,
       String instanceName, InstanceConfig currentConfig, InstanceConfig candidateConfig,
-      List<IdealState> wagedIdealStates, String mutationDescription, String ruleId) {
+      List<IdealState> wagedIdealStates, String mutationDescription, String remedyHint,
+      String ruleId) {
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     WagedAssignmentProvider provider = context.getWagedAssignmentProvider();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
@@ -191,9 +228,9 @@ final class WagedRebalanceFeasibilityWhatIf {
           .message(String.format(
               "Applying %s to instance %s makes the WAGED rebalancer unable to compute an "
                   + "assignment for cluster %s (%s), which would stall the cluster-wide WAGED "
-                  + "rebalance. Free up assignable capacity first, or retry with force=true if this "
-                  + "is an intentional operational override.", mutationDescription, instanceName,
-              context.getClusterName(), e.getMessage()))
+                  + "rebalance. %s, or retry with force=true if this is an intentional operational "
+                  + "override.", mutationDescription, instanceName, context.getClusterName(),
+              e.getMessage(), remedyHint))
           .build());
     }
 
@@ -226,10 +263,10 @@ final class WagedRebalanceFeasibilityWhatIf {
               .message(String.format(
                   "%s on instance %s reduces the placeable replicas of partition %s from %d to %d: "
                       + "the WAGED rebalancer cannot re-place all of its replicas on the remaining "
-                      + "assignable instances. Add or free assignable capacity (or a compatible "
-                      + "fault domain), then retry; use force=true only if the resulting "
+                      + "assignable instances. %s, then retry; use force=true only if the resulting "
                       + "under-replication is an accepted operational tradeoff.", mutationDescription,
-                  instanceName, partition.getPartitionName(), baselineReplicas, candidateReplicas))
+                  instanceName, partition.getPartitionName(), baselineReplicas, candidateReplicas,
+                  remedyHint))
               .build());
         }
       }
@@ -243,8 +280,8 @@ final class WagedRebalanceFeasibilityWhatIf {
       violations.add(Violation.newBuilder(ruleId)
           .message(String.format(
               "Showing the first %d of %d partitions that would lose replicas from %s on instance "
-                  + "%s; %d were omitted to bound the response size. Fix the reported capacity "
-                  + "shortfall and resubmit.", reported, totalViolations, mutationDescription,
+                  + "%s; %d were omitted to bound the response size. Fix the reported shortfall and "
+                  + "resubmit.", reported, totalViolations, mutationDescription,
               instanceName, totalViolations - reported))
           .build());
     }

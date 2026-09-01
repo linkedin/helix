@@ -19,6 +19,8 @@
 
 package org.apache.helix.guardrail;
 
+import java.util.List;
+
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.IdealState;
@@ -45,6 +47,7 @@ public class GuardrailContext {
   private final InstanceConstants.InstanceOperation proposedInstanceOperation;
   private final WagedAssignmentProvider wagedAssignmentProvider;
   private final InstanceConfig proposedInstanceConfig;
+  private final List<String> proposedRemovedInstanceTags;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -55,6 +58,7 @@ public class GuardrailContext {
     this.proposedInstanceOperation = builder.proposedInstanceOperation;
     this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
+    this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
   }
 
   public String getClusterName() {
@@ -120,6 +124,17 @@ public class GuardrailContext {
     return proposedInstanceConfig;
   }
 
+  /**
+   * The instance tags a mutation proposes to remove from {@link #getInstanceName()}, or {@code null}
+   * if the operation is not a tag removal. Rules read the to-be-removed tags from here (rather than
+   * from ZK) since the change has not been applied yet at pre-validation time; a WAGED resource
+   * pinned to a removed tag (via {@code INSTANCE_GROUP_TAG}) can only place replicas on instances
+   * still carrying that tag.
+   */
+  public List<String> getProposedRemovedInstanceTags() {
+    return proposedRemovedInstanceTags;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -133,6 +148,7 @@ public class GuardrailContext {
     private InstanceConstants.InstanceOperation proposedInstanceOperation;
     private WagedAssignmentProvider wagedAssignmentProvider;
     private InstanceConfig proposedInstanceConfig;
+    private List<String> proposedRemovedInstanceTags;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -171,6 +187,11 @@ public class GuardrailContext {
 
     public Builder proposedInstanceConfig(InstanceConfig proposedInstanceConfig) {
       this.proposedInstanceConfig = proposedInstanceConfig;
+      return this;
+    }
+
+    public Builder proposedRemovedInstanceTags(List<String> proposedRemovedInstanceTags) {
+      this.proposedRemovedInstanceTags = proposedRemovedInstanceTags;
       return this;
     }
 
