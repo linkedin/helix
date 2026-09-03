@@ -65,7 +65,12 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
               .of(ClusterConfigProperty.TOPOLOGY.name(),
                   ClusterConfigProperty.FAULT_ZONE_TYPE.name(),
                   ClusterConfigProperty.TOPOLOGY_AWARE_ENABLED.name(),
-                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name()),
+                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
+                  // Flipping instance tag isolation changes how WAGED reacts to an unplaceable
+                  // group, so the change has to be visible to the change detector. Without it the
+                  // operator would turn the flag on and nothing would happen until some unrelated
+                  // config change happened to trigger the next global rebalance.
+                  ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name()),
           FieldType.LIST_FIELD, ImmutableSet
               .of(ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name()),
           FieldType.MAP_FIELD, ImmutableSet

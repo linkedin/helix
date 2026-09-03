@@ -59,7 +59,8 @@ import org.slf4j.LoggerFactory;
  * "hard constraints"
  */
 public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
-  private static final float DIV_GUARD = 0.01f;
+  // Package private so InstanceTagIsolation can build scoring capacities the same way.
+  static final float DIV_GUARD = 0.01f;
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithm.class);
   private final List<HardConstraint> _hardConstraints;
   private final Map<SoftConstraint, Float> _softConstraints;
@@ -130,8 +131,73 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     List<AssignableNode> nodes = new ArrayList<>(clusterModel.getAssignableNodes().values());
     Set<String> busyInstances =
         getBusyInstances(clusterModel.getContext().getBestPossibleAssignment().values());
+    List<AssignableReplica> allReplicas =
+        clusterModel.getAssignableReplicaMap().values().stream().flatMap(Collection::stream)
+            .collect(Collectors.toList());
+    // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
+    InstanceTagIsolation isolation =
+        new InstanceTagIsolation(clusterModel, allReplicas, nodes);
 
-    // create a always >0 capacity map to avoid divide by 0.
+    Map<String, Float> positiveEstimateClusterRemainCap =
+        computeScoringCapacities(clusterModel, isolation);
+
+    // Create a wrapper for each AssignableReplica.
+    List<AssignableReplicaWithScore> toBeAssignedReplicas =
+        allReplicas.stream().map(
+            replica -> new AssignableReplicaWithScore(replica, clusterModel, positiveEstimateClusterRemainCap)).sorted()
+            .collect(Collectors.toList());
+
+    for (AssignableReplicaWithScore replicaWithScore : toBeAssignedReplicas) {
+      AssignableReplica replica = replicaWithScore.getAssignableReplica();
+      if (isolation.shouldSkip(replica)) {
+        continue;
+      }
+      OptimalAssignment failureSink = isolation.failureSink(optimalAssignment);
+      Optional<AssignableNode> maybeBestNode =
+          getNodeWithHighestPoints(replica, nodes, clusterModel.getContext(), busyInstances,
+              failureSink, blockingTypes);
+      // stop immediately if any replica cannot find best assignable node
+      if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
+        String errorMessage = String.format(
+            "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
+                + "Failure summary: %s; Fail reasons: %s",
+            replica.getPartitionName(),
+            replica.getResourceName(),
+            clusterModel.getContext().getClusterName(),
+            failureSink.getFailureSummary(),
+            failureSink.getFailures());
+        HelixRebalanceException failure = new HelixRebalanceException(errorMessage,
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+        // ... unless isolation can absorb the failure into the replica's own instance tag group.
+        if (!isolation.tryIsolate(replica, failure)) {
+          throw failure;
+        }
+        continue;
+      }
+      AssignableNode bestNode = maybeBestNode.get();
+      // Assign the replica and update the cluster model.
+      clusterModel
+          .assign(replica.getResourceName(), replica.getPartitionName(), replica.getReplicaState(),
+              bestNode.getInstanceName());
+      isolation.recordPlacement(replica, bestNode);
+    }
+
+    isolation.finish(optimalAssignment);
+    optimalAssignment.updateAssignments(clusterModel);
+    return optimalAssignment;
+  }
+
+  /**
+   * The per-capacity-key denominators used to score how scarce each dimension is, always kept above
+   * zero to avoid a divide by zero.
+   *
+   * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
+   *         When instance tag isolation is on, a deficit that is really caused by individual
+   *         cliques is attributed to them instead, and only a genuine cluster wide shortfall throws.
+   */
+  private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
+      InstanceTagIsolation isolation) throws HelixRebalanceException {
     Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
     for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
         .getEstimateUtilizationMap().entrySet()) {
@@ -141,51 +207,26 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
         long remainingCapacity = clusterRemainingCap.getValue();
         long totalUsage = totalCapacity - remainingCapacity;
-        throw new HelixRebalanceException(String
+        HelixRebalanceException capacityDeficit = new HelixRebalanceException(String
             .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
                 clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
             HelixRebalanceException.Type.FAILED_TO_CALCULATE,
             HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+        // This cluster wide sum is tag blind, so one wildly oversubscribed clique can drag it
+        // negative while every other clique still fits comfortably on its own nodes.
+        Map<String, Float> residual =
+            isolation.absorbCapacityDeficit(capacityDeficit, DIV_GUARD);
+        if (residual == null) {
+          throw capacityDeficit;
+        }
+        return residual;
       }
       // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
       positiveEstimateClusterRemainCap.put(capacityKey,
            (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
           (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
     }
-
-    // Create a wrapper for each AssignableReplica.
-    List<AssignableReplicaWithScore> toBeAssignedReplicas =
-        clusterModel.getAssignableReplicaMap().values().stream().flatMap(Collection::stream).map(
-            replica -> new AssignableReplicaWithScore(replica, clusterModel, positiveEstimateClusterRemainCap)).sorted()
-            .collect(Collectors.toList());
-
-    for (AssignableReplicaWithScore replicaWithScore : toBeAssignedReplicas) {
-      AssignableReplica replica = replicaWithScore.getAssignableReplica();
-      Optional<AssignableNode> maybeBestNode =
-          getNodeWithHighestPoints(replica, nodes, clusterModel.getContext(), busyInstances,
-              optimalAssignment, blockingTypes);
-      // stop immediately if any replica cannot find best assignable node
-      if (!maybeBestNode.isPresent() || optimalAssignment.hasAnyFailure()) {
-        String errorMessage = String.format(
-            "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
-                + "Failure summary: %s; Fail reasons: %s",
-            replica.getPartitionName(),
-            replica.getResourceName(),
-            clusterModel.getContext().getClusterName(),
-            optimalAssignment.getFailureSummary(),
-            optimalAssignment.getFailures());
-        throw new HelixRebalanceException(errorMessage,
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
-            HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
-      }
-      AssignableNode bestNode = maybeBestNode.get();
-      // Assign the replica and update the cluster model.
-      clusterModel
-          .assign(replica.getResourceName(), replica.getPartitionName(), replica.getReplicaState(),
-              bestNode.getInstanceName());
-    }
-    optimalAssignment.updateAssignments(clusterModel);
-    return optimalAssignment;
+    return positiveEstimateClusterRemainCap;
   }
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,

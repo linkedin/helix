@@ -171,6 +171,50 @@ public class ClusterConfig extends HelixProperty {
     GLOBAL_REBALANCE_ASYNC_MODE,
 
     /**
+     * Enable instance-tag (a.k.a. "clique") isolation inside the WAGED rebalance algorithm.
+     *
+     * WAGED is a global rebalancer: it evaluates every replica of every WAGED managed resource in a
+     * single pass and aborts the whole pass as soon as one replica cannot be placed. In a cluster
+     * that is carved into disjoint cliques (each instance carries one instance tag, and each
+     * resource is pinned to exactly one tag through INSTANCE_GROUP_TAG), that means one unplaceable
+     * clique freezes the rebalance of every other clique, including the ones that are perfectly
+     * healthy.
+     *
+     * When this is enabled the algorithm still builds one global cluster model and still walks the
+     * one globally sorted replica list, so nothing about how a placement is chosen changes. The only
+     * difference is what happens when a replica cannot be placed: instead of aborting the whole
+     * cluster's rebalance, the algorithm releases everything it already placed for that replica's
+     * isolation group, skips the rest of that group, and carries on with the other groups. The
+     * isolation group is the resource's instance group tag, so every resource sharing a tag is
+     * carried over together: rolling back only the broken resource would free capacity that its
+     * healthy siblings would immediately consume, and the emitted result (recalculated siblings
+     * plus the carried over broken resource) could overcommit the clique's nodes. Skipped resources
+     * keep their previous assignment, so the assignment metadata store always holds a complete
+     * picture.
+     *
+     * A group is only isolated when no other group can be placed on its nodes, which is exactly the
+     * case this mode targets: every instance carries one clique tag, so every clique owns its nodes
+     * exclusively. When the domains overlap (an untagged resource, which can go anywhere, or an
+     * instance carrying two clique tags), carrying one group over could overcommit the nodes it
+     * shares, so the rebalance fails exactly as it does today. The mode is therefore never worse
+     * than the default one.
+     *
+     * Because the assignment pass, the cluster model and the cluster context are all unchanged, a
+     * rebalance in which nothing fails produces exactly the same assignment as when this is
+     * disabled. That parity holds for any topology, not only for cleanly partitioned ones.
+     *
+     * The cluster wide capacity check that runs before any placement is tag blind, so one wildly
+     * oversubscribed clique can drag it negative while every other clique still fits on its own
+     * nodes. When this is enabled that deficit is attributed to the cliques that cannot hold their
+     * own replicas on their own nodes, which are then carried over like any other failed group,
+     * and the check is re-evaluated on what is left. A genuine cluster wide shortfall still fails
+     * the whole rebalance.
+     *
+     * Default to be false, which keeps the all-or-nothing global behavior.
+     */
+    WAGED_INSTANCE_TAG_ISOLATION_ENABLED,
+
+    /**
      * Configure the abnormal partition states resolver classes for the corresponding state model.
      * <State Model Def Name, Full Path of the Resolver Class Name>
      */
@@ -257,6 +301,7 @@ public class ClusterConfig extends HelixProperty {
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
+  public final static boolean DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED = false;
   public final static boolean DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   private static final int GLOBAL_TARGET_TASK_THREAD_POOL_SIZE_NOT_SET = -1;
   private static final int OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET = -1;
@@ -1413,6 +1458,25 @@ public class ClusterConfig extends HelixProperty {
   public boolean isGlobalRebalanceAsyncModeEnabled() {
     return _record.getBooleanField(ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(),
         DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED);
+  }
+
+  /**
+   * Enable or disable instance-tag ("clique") isolation for the WAGED rebalance algorithm.
+   * See {@link ClusterConfigProperty#WAGED_INSTANCE_TAG_ISOLATION_ENABLED}.
+   * @param enabled true to isolate rebalance failures to the failing instance tag group.
+   */
+  public void setWagedInstanceTagIsolationEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
+        enabled);
+  }
+
+  /**
+   * @return true if WAGED should isolate rebalance failures per instance-group-tag. Default false.
+   */
+  public boolean isWagedInstanceTagIsolationEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
+            DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
   }
 
   /**

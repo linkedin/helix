@@ -208,7 +208,8 @@ class PartialRebalanceRunner implements AutoCloseable {
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
-    Map<String, ResourceAssignment> newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    Map<String, ResourceAssignment> newAssignment = WagedRebalanceUtil
+        .calculateAssignment(clusterModel, algorithm, currentBestPossibleAssignment);
 
     // Asynchronously report baseline divergence metric before persisting to metadata store,
     // just in case if persisting fails, we still have the metric.
