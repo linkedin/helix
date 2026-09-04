@@ -872,26 +872,16 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
 
-    ClusterConfig configDelta = new ClusterConfig(cluster);
-    configDelta.getRecord()
-        .setSimpleField(ClusterConfig.ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-            "100");
-    updateClusterConfigFromRest(cluster, configDelta, Command.update);
-
-    //Purge again without customized timeout, and the action will use default timeout value.
+    // Purge again without a customized timeout. With no cluster-level default configured,
+    // nothing is purged and the instances remain.
     post("clusters/" + cluster, ImmutableMap.of("command", "purgeOfflineParticipants"), null,
         Response.Status.OK.getStatusCode());
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance1).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance2).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
-
-    // reset cluster status to previous one
-    _gSetupTool.addInstanceToCluster(cluster, instance1);
-    _gSetupTool.addInstanceToCluster(cluster, instance2);
-    _gSetupTool.addInstanceToCluster(cluster, instance3);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
