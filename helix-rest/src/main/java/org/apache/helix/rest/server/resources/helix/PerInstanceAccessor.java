@@ -58,6 +58,7 @@ import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -607,16 +608,53 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             admin.addInstanceTag(clusterId, instanceName, tag);
           }
           break;
-        case removeInstanceTag:
+        case removeInstanceTag: {
           if (!validInstance(node, instanceName)) {
             return badRequest("Instance names are not match!");
           }
-          for (String tag : (List<String>) OBJECT_MAPPER.readValue(
+          List<String> tagsToRemove = (List<String>) OBJECT_MAPPER.readValue(
               node.get(PerInstanceProperties.instanceTags.name()).toString(),
-              OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class))) {
+              OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class));
+          // Guard rail (enforced by default; disable per-cluster via the ClusterConfig kill switch):
+          // block (or simulate) a tag removal that would move this instance out of the assignable pool
+          // for a WAGED resource pinned to that tag (INSTANCE_GROUP_TAG) and leave one or more
+          // partitions unable to place all their replicas.
+          // Same failure class as setInstanceOperation, so it reuses the same WAGED what-if. force
+          // overrides the verdict; dryRun reports it without writing. Skip the (expensive) what-if
+          // for a real force write, whose result would be discarded anyway.
+          if (dryRun || !force) {
+            WagedAssignmentProvider wagedAssignmentProvider =
+                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                        liveInstances, idealStates, resourceConfigs);
+            GuardrailContext removeTagContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(getDataAccssor(clusterId))
+                .instanceName(instanceName)
+                .proposedRemovedInstanceTags(tagsToRemove)
+                .wagedAssignmentProvider(wagedAssignmentProvider)
+                .build();
+            GuardrailPipeline removeTagPipeline =
+                new GuardrailPipeline(new InstanceTagRebalanceFeasibilityGuardrailRule());
+            Optional<Response> removeTagPreflight =
+                preflight(removeTagPipeline, removeTagContext, force, dryRun);
+            if (removeTagPreflight.isPresent()) {
+              return removeTagPreflight.get();
+            }
+          } else {
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
+            // auditable (an operator can still see the override happened without a dryRun preflight).
+            LOG.info(
+                "Bypassing the instance-tag rebalance-feasibility guard rail for a force "
+                    + "removeInstanceTag {} on instance {} in cluster {}; force overrides the "
+                    + "verdict, so the WAGED what-if is skipped.", tagsToRemove, instanceName,
+                clusterId);
+          }
+          for (String tag : tagsToRemove) {
             admin.removeInstanceTag(clusterId, instanceName, tag);
           }
           break;
+        }
         case enablePartitions:
           admin.enablePartition(true, clusterId, instanceName,
               node.get(PerInstanceProperties.resource.name()).textValue(),
