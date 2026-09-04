@@ -169,12 +169,6 @@ public class ClusterConfig extends HelixProperty {
     // Default to be true.
     GLOBAL_REBALANCE_ASYNC_MODE,
 
-    /**
-     * Configure the abnormal partition states resolver classes for the corresponding state model.
-     * <State Model Def Name, Full Path of the Resolver Class Name>
-     */
-    ABNORMAL_STATES_RESOLVER_MAP,
-
     // The target size of task thread pools for each participant. If participants specify their
     // individual pool sizes in their InstanceConfig's, this value will NOT be used; if participants
     // don't specify their individual pool sizes, this value will be used for all participants; if
@@ -1428,34 +1422,6 @@ public class ClusterConfig extends HelixProperty {
     return _record
         .getLongField(ClusterConfigProperty.OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE.name(),
             OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET);
-  }
-
-  /**
-   * Set the abnormal state resolver class map.
-   * @param resolverMap - the resolver map
-   *                    If null, the resolver map item will be removed from the config.
-   */
-  public void setAbnormalStateResolverMap(Map<String, String> resolverMap) {
-    if (resolverMap == null) {
-      _record.getMapFields().remove(ClusterConfigProperty.ABNORMAL_STATES_RESOLVER_MAP.name());
-    } else {
-      if (resolverMap.entrySet().stream().anyMatch(e -> {
-        String stateModelDefName = e.getKey();
-        String className = e.getValue();
-        return stateModelDefName == null || stateModelDefName.isEmpty() || className == null
-            || className.isEmpty();
-      })) {
-        throw new IllegalArgumentException(
-            "Invalid Abnormal State Resolver Map definition. StateModel definition name and the resolver class name cannot be null or empty.");
-      }
-      _record.setMapField(ClusterConfigProperty.ABNORMAL_STATES_RESOLVER_MAP.name(), resolverMap);
-    }
-  }
-
-  public Map<String, String> getAbnormalStateResolverMap() {
-    Map<String, String> resolverMap =
-        _record.getMapField(ClusterConfigProperty.ABNORMAL_STATES_RESOLVER_MAP.name());
-    return resolverMap == null ? Collections.emptyMap() : resolverMap;
   }
 
   /**
