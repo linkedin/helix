@@ -188,12 +188,6 @@ public class ClusterConfig extends HelixProperty {
     // The unit is milliseconds.
     OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE,
 
-    // The time out window for offline nodes to be purged; if an offline node has been
-    // offline for more than this specified time period, and users call purge participant API,
-    // then the node will be removed.
-    // The unit is milliseconds.
-    OFFLINE_DURATION_FOR_PURGE_MS,
-
     // The following 3 keywords are for metadata in batch disabled instance
     HELIX_ENABLED_DISABLE_TIMESTAMP,
     HELIX_DISABLED_REASON,
@@ -1434,27 +1428,6 @@ public class ClusterConfig extends HelixProperty {
     return _record
         .getLongField(ClusterConfigProperty.OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE.name(),
             OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE_NOT_SET);
-  }
-
-  /**
-   * Set the default duration for offline nodes to be purged. If an offline node has been
-   * offline for more than this specified time period, when users call purge participants API,
-   * the node will be dropped.
-   * @param offlineDuration offline duration in milliseconds.
-   */
-  public void setOfflineDurationForPurge(long offlineDuration) {
-    _record.setLongField(ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-        offlineDuration);
-  }
-
-  /**
-   * Get the default offline duration for offline nodes to be purged.
-   * @return offline duration in milliseconds
-   */
-  public long getOfflineDurationForPurge() {
-    return _record
-        .getLongField(ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-            OFFLINE_DURATION_FOR_PURGE_NOT_SET);
   }
 
   /**

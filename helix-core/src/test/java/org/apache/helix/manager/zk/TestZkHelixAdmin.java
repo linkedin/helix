@@ -1324,11 +1324,6 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
 
-    // set default offline duration for purge in cluster config
-    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
-    clusterConfig.setOfflineDurationForPurge(100000L);
-    dataAccessor.setProperty(keyBuilder.clusterConfig(), clusterConfig);
-
     String hostname = "host1";
     String port = "9999";
     String instanceName = hostname + "_" + port;
@@ -1349,7 +1344,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         .setSimpleField("LAST_OFFLINE_TIME", String.valueOf(System.currentTimeMillis() - 50000L));
     _baseAccessor.set(PropertyPathBuilder.instanceHistory(clusterName, instanceName), znRecord, 1);
 
-    // This purge will not remove the instance since the default offline duration is not met yet.
+    // No custom duration is supplied and no cluster default exists, so nothing is purged.
     tool.purgeOfflineInstances(clusterName, ClusterConfig.OFFLINE_DURATION_FOR_PURGE_NOT_SET);
     Assert.assertTrue(_gZkClient.exists(keyBuilder.instanceConfig(instanceName).getPath()),
         "Instance should still be there");

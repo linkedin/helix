@@ -3011,13 +3011,9 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   private Set<String> findTimeoutOfflineInstances(String clusterName, long offlineDuration) {
-    // in case there is no customized timeout value, use the one defined in cluster config
+    // No customized timeout value provided; nothing to purge by default.
     if (offlineDuration == ClusterConfig.OFFLINE_DURATION_FOR_PURGE_NOT_SET) {
-      offlineDuration =
-          _configAccessor.getClusterConfig(clusterName).getOfflineDurationForPurge();
-      if (offlineDuration == ClusterConfig.OFFLINE_DURATION_FOR_PURGE_NOT_SET) {
-        return Collections.emptySet();
-      }
+      return Collections.emptySet();
     }
 
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
