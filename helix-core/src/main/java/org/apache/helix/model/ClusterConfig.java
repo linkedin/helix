@@ -49,7 +49,6 @@ public class ClusterConfig extends HelixProperty {
    * ClusterConfig.
    */
   public enum ClusterConfigProperty {
-    HELIX_DISABLE_PIPELINE_TRIGGERS,
     PERSIST_BEST_POSSIBLE_ASSIGNMENT,
     PERSIST_INTERMEDIATE_ASSIGNMENT,
     TOPOLOGY, // cluster topology definition, for example, "/zone/rack/host/instance"
@@ -456,11 +455,6 @@ public class ClusterConfig extends HelixProperty {
       _record.setBooleanField(ClusterConfigProperty.PERSIST_INTERMEDIATE_ASSIGNMENT.toString(),
           enable);
     }
-  }
-
-  public Boolean isPipelineTriggersDisabled() {
-    return _record
-        .getBooleanField(ClusterConfigProperty.HELIX_DISABLE_PIPELINE_TRIGGERS.toString(), false);
   }
 
   /**

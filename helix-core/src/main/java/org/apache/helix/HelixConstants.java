@@ -71,7 +71,6 @@ public interface HelixConstants {
    */
   @Deprecated
   enum ClusterConfigType {
-    HELIX_DISABLE_PIPELINE_TRIGGERS,
     PERSIST_BEST_POSSIBLE_ASSIGNMENT
   }
 
