@@ -508,12 +508,13 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     // Current state output generation logic guarantees that current top state instance
     // must be a live instance
     String curTopStateSession = cache.getLiveInstances().get(curTopStateInstance).getEphemeralOwner();
-    long endTime =
-        cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName)
-            .getEndTime(partition.getPartitionName());
+    // getCurrentState() rebuilds the participant's entire current state map on every call, so
+    // resolve the entry for this resource once instead of once per field read.
+    CurrentState curTopStateCurrentState =
+        cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName);
+    long endTime = curTopStateCurrentState.getEndTime(partition.getPartitionName());
     long toTopStateuserLatency =
-        endTime - cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName)
-            .getStartTime(partition.getPartitionName());
+        endTime - curTopStateCurrentState.getStartTime(partition.getPartitionName());
 
     long startTime = TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED;
     long fromTopStateUserLatency = DEFAULT_HANDOFF_USER_LATENCY;
@@ -522,15 +523,13 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (!curTopStateInstance.equals(lastTopStateInstance) && cache.getLiveInstances().containsKey(lastTopStateInstance)) {
       String lastTopStateSession =
           cache.getLiveInstances().get(lastTopStateInstance).getEphemeralOwner();
+      CurrentState lastTopStateCurrentState =
+          cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName);
       // We need this null check as there are test cases creating incomplete current state
-      if (cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-          != null) {
-        startTime =
-            cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-                .getStartTime(partition.getPartitionName());
+      if (lastTopStateCurrentState != null) {
+        startTime = lastTopStateCurrentState.getStartTime(partition.getPartitionName());
         fromTopStateUserLatency =
-            cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-                .getEndTime(partition.getPartitionName()) - startTime;
+            lastTopStateCurrentState.getEndTime(partition.getPartitionName()) - startTime;
       }
     }
     if (startTime == TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED) {
