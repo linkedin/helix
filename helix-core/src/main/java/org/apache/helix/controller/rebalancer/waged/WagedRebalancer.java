@@ -591,7 +591,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       if (attempt > 1) {
         clusterData.restoreWagedInstanceCapacity(capacitySnapshot);
       }
-      int rejectionsBefore = clusterData.getCapacityRejectionCount();
+      long rejectionsBefore = clusterData.getCapacityRejectionEventCount();
 
       Map<String, IdealState> candidate;
       try {
@@ -614,7 +614,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       applyStateMapping(clusterData, resourceMap, currentStateOutput, candidate);
       newIdealStates = candidate;
 
-      int newRejections = clusterData.getCapacityRejectionCount() - rejectionsBefore;
+      // Count rejection *events*, not distinct rejected placements: a placement rejected again on
+      // a later attempt does not grow the deduplicated set, so a set-size delta of zero would be
+      // indistinguishable from "the capacity check accepted everything".
+      long newRejections = clusterData.getCapacityRejectionEventCount() - rejectionsBefore;
       if (newRejections == 0) {
         // The capacity check accepted everything the planner proposed.
         return newIdealStates;

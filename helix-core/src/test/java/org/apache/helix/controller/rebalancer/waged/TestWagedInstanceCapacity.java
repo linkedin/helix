@@ -146,6 +146,28 @@ public class TestWagedInstanceCapacity {
   }
 
   @Test
+  public void testRepeatedRejectionOfSamePlacementIsStillCountedAsAnEvent() {
+    _clusterData.setWagedCapacityProviders(_wagedInstanceCapacity,
+        new WagedResourceWeightsProvider(_clusterData));
+
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-0"));
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-1"));
+    Assert.assertFalse(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-2"));
+    Assert.assertEquals(_clusterData.getCapacityRejectionCount(), 1);
+    Assert.assertEquals(_clusterData.getCapacityRejectionEventCount(), 1L);
+
+    // Rejecting the same placement again must not grow the deduplicated set, but must still be
+    // observable as an event. A caller that watched only the deduplicated count would see no
+    // change and wrongly conclude the placement had been accepted.
+    Assert.assertFalse(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-2"));
+    Assert.assertEquals(_clusterData.getCapacityRejectionCount(), 1);
+    Assert.assertEquals(_clusterData.getCapacityRejectionEventCount(), 2L);
+
+    _clusterData.clearCapacityRejections();
+    Assert.assertEquals(_clusterData.getCapacityRejectionEventCount(), 0L);
+  }
+
+  @Test
   public void testRestoreCapacityUndoesChargesFromAPreviousAttempt() {
     _clusterData.setWagedCapacityProviders(_wagedInstanceCapacity,
         new WagedResourceWeightsProvider(_clusterData));

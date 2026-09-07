@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -129,6 +130,12 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // Scoped to a single rebalance pass: WagedRebalancer clears this at the start of every
   // computeNewIdealStates call. Concurrent because the capacity check runs from a parallel stream.
   private final Set<CapacityRejectionKey> _capacityRejections = ConcurrentHashMap.newKeySet();
+
+  // Total rejection events in the current pass, including repeats of a placement already recorded.
+  // The set above deduplicates, which makes it useless for answering "did the capacity check reject
+  // anything during this attempt?" -- a placement rejected again on a later attempt does not grow
+  // the set. That question needs an event count, not a set size.
+  private final AtomicLong _capacityRejectionEvents = new AtomicLong();
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -605,6 +612,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
    */
   public void recordCapacityRejection(String instance, String resourceName, String partition) {
     _capacityRejections.add(new CapacityRejectionKey(instance, resourceName, partition));
+    _capacityRejectionEvents.incrementAndGet();
   }
 
   /**
@@ -626,12 +634,23 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   }
 
   /**
+   * @return the number of capacity rejection events in the current pass, counting repeats of a
+   *         placement that was already rejected. Use this, not {@link #getCapacityRejectionCount()},
+   *         to detect whether an individual planning attempt was rejected: re-rejecting a known
+   *         placement leaves the deduplicated count unchanged.
+   */
+  public long getCapacityRejectionEventCount() {
+    return _capacityRejectionEvents.get();
+  }
+
+  /**
    * Clear all recorded capacity rejections. Called at the start of every rebalance pass: a
    * rejection reflects occupancy observed in one pass and must not leak into the next, otherwise
    * a transiently full instance would be excluded permanently.
    */
   public void clearCapacityRejections() {
     _capacityRejections.clear();
+    _capacityRejectionEvents.set(0);
   }
 
   /**
