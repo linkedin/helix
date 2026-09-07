@@ -237,7 +237,15 @@ public class ClusterModelProvider {
             || !WagedValidationUtil.isWagedEnabled(dataProvider.getIdealState(resourceName))) {
           continue;
         }
+        Resource resource = resourceMap.get(resourceName);
         for (String partitionName : entry.getValue().getPartitionStateMap().keySet()) {
+          // CurrentStateOutput, which is what the capacity check reads, drops partitions that are
+          // no longer part of the resource. Skip them here too, otherwise a stale current-state
+          // entry would be charged by the rebalancer but not by the capacity check -- reserving
+          // capacity nobody else believes is in use.
+          if (resource.getPartition(partitionName) == null) {
+            continue;
+          }
           String replicaKey = occupancyKey(resourceName, partitionName);
           if (alreadyCharged.contains(replicaKey) || pendingPlacement.contains(replicaKey)) {
             continue;
