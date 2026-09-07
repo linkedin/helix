@@ -39,9 +39,9 @@ import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
@@ -188,7 +188,7 @@ public class ClusterModelProvider {
    * replica belongs on the instance, so the rebalancer would never move or drop it, turning a
    * transient condition into a permanent placement. It must occupy space without being owned.
    */
-  private static void chargeUnallocatedCurrentStateOccupancy(Set<AssignableNode> assignableNodes,
+  private static void recordUnallocatedCurrentStateOccupancy(Set<AssignableNode> assignableNodes,
       Map<String, Set<AssignableReplica>> allocatedReplicas,
       Set<AssignableReplica> toBeAssignedReplicas, Map<String, Resource> resourceMap,
       ResourceControllerDataProvider dataProvider) {
@@ -261,9 +261,9 @@ public class ClusterModelProvider {
       }
 
       if (!unallocatedUsage.isEmpty()) {
-        logger.info("Charging {} for occupancy present on the instance but absent from its assignment: "
-            + "{}", node.getInstanceName(), unallocatedUsage);
-        node.reserveUnallocatedOccupancy(unallocatedUsage);
+        logger.info("Instance {} holds occupancy absent from its assignment: {}. Placement "
+            + "preference will account for it.", node.getInstanceName(), unallocatedUsage);
+        node.setUnallocatedOccupancy(unallocatedUsage);
       }
     }
   }
@@ -369,15 +369,11 @@ public class ClusterModelProvider {
     assignableNodes.parallelStream().forEach(node -> node.assignInitBatch(
         allocatedReplicas.getOrDefault(node.getLogicalId(), Collections.emptySet())));
 
-    // The ledger above only reflects replicas the rebalancer itself allocated. A replica that is
-    // physically present on an instance but absent from that allocation -- for example one wedged
-    // in a state the state model does not count -- still consumes real capacity. The rebalancer
-    // would treat that capacity as free while WagedInstanceCapacity, which charges every
-    // current-state replica, treats it as used. The two then disagree: the rebalancer proposes a
-    // placement the capacity check rejects, the placement is dropped, and because the inputs never
-    // change the same rejected placement is derived again on the next pass. Charge that occupancy
-    // here so both sides work from the same view of what an instance is holding.
-    chargeUnallocatedCurrentStateOccupancy(assignableNodes, allocatedReplicas, toBeAssignedReplicas,
+    // The ledger above only reflects replicas the rebalancer allocated. A replica physically on an
+    // instance but absent from that allocation still occupies real space, and the capacity check
+    // charges it, so the rebalancer would otherwise treat that instance as the emptiest available
+    // and keep proposing placements the capacity check rejects. Record it for preference scoring.
+    recordUnallocatedCurrentStateOccupancy(assignableNodes, allocatedReplicas, toBeAssignedReplicas,
         resourceMap, dataProvider);
 
     // Construct and initialize cluster context.

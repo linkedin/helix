@@ -63,6 +63,9 @@ public class AssignableNode implements Comparable<AssignableNode> {
   private Map<String, Map<String, AssignableReplica>> _currentAssignedReplicaMap;
   // A map of <capacity key, capacity value> that tracks the current available node capacity
   private Map<String, Integer> _remainingCapacity;
+  // Occupancy physically present on the node but absent from its assignment. Preference-scoring
+  // input only; never consulted by hard constraints, so it cannot make placement infeasible.
+  private Map<String, Integer> _unallocatedOccupancy = Collections.emptyMap();
   private Map<String, Integer> _remainingTopStateCapacity;
 
   /**
@@ -124,25 +127,6 @@ public class AssignableNode implements Comparable<AssignableNode> {
     // Update the global state after all single replications' calculation is done.
     updateRemainingCapacity(totalTopStatePartitionCapacity, _remainingTopStateCapacity, false);
     updateRemainingCapacity(totalPartitionCapacity, _remainingCapacity, false);
-  }
-
-  /**
-   * Reserve capacity for occupancy that physically exists on this node but is not part of this
-   * node's assignment.
-   * <p>
-   * Unlike {@link #assignInitBatch} and {@link #assign}, this deliberately does NOT record an
-   * assignment. Recording one would declare that the replica belongs on this node, and the
-   * rebalancer would then never move or drop it. The occupancy has to consume capacity without
-   * being owned, so the rebalancer stops treating the space as free while remaining free to
-   * resolve the underlying condition.
-   * <p>
-   * Only the overall capacity is charged, not the top-state capacity: this occupancy is by
-   * definition not part of a top-state assignment this node has been given.
-   *
-   * @param capacityUsage capacity consumed by the unassigned occupancy, keyed by capacity dimension
-   */
-  void reserveUnallocatedOccupancy(Map<String, Integer> capacityUsage) {
-    updateRemainingCapacity(capacityUsage, _remainingCapacity, false);
   }
 
   /**
@@ -329,6 +313,13 @@ public class AssignableNode implements Comparable<AssignableNode> {
 
   private float getProjectedHighestUtilization(Map<String, Integer> newUsage,
       Map<String, Integer> remainingCapacity, List<String> preferredScoringKeys) {
+    return getProjectedHighestUtilization(newUsage, remainingCapacity, preferredScoringKeys,
+        Collections.emptyMap());
+  }
+
+  private float getProjectedHighestUtilization(Map<String, Integer> newUsage,
+      Map<String, Integer> remainingCapacity, List<String> preferredScoringKeys,
+      Map<String, Integer> additionalUsage) {
     Set<String> capacityKeySet = _maxAllowedCapacity.keySet();
     if (preferredScoringKeys != null && preferredScoringKeys.size() != 0 && capacityKeySet.contains(preferredScoringKeys.get(0))) {
       capacityKeySet = preferredScoringKeys.stream().collect(Collectors.toSet());
@@ -337,10 +328,42 @@ public class AssignableNode implements Comparable<AssignableNode> {
     for (String capacityKey : capacityKeySet) {
       float capacityValue = _maxAllowedCapacity.get(capacityKey);
       float utilization = (capacityValue - remainingCapacity.get(capacityKey) + newUsage
-          .getOrDefault(capacityKey, 0)) / capacityValue;
+          .getOrDefault(capacityKey, 0) + additionalUsage.getOrDefault(capacityKey, 0))
+          / capacityValue;
       highestCapacityUtilization = Math.max(highestCapacityUtilization, utilization);
     }
     return highestCapacityUtilization;
+  }
+
+  /**
+   * Record occupancy that physically exists on this node but is absent from the assignment the
+   * rebalancer computed for it -- for example a replica wedged in a state whose drop transition
+   * never completes.
+   * <p>
+   * This deliberately does NOT touch {@link #_remainingCapacity}. Doing so would make the node look
+   * full to {@link org.apache.helix.controller.rebalancer.waged.constraints.NodeCapacityConstraint},
+   * and since a replica that fails every hard constraint aborts the whole rebalance with
+   * NO_CANDIDATE_NODE, one legitimately-full instance could stop the cluster from rebalancing at
+   * all. The occupancy is used only to score placement preference, so it can steer the rebalancer
+   * away from such an instance without ever making placement infeasible.
+   */
+  void setUnallocatedOccupancy(Map<String, Integer> unallocatedOccupancy) {
+    _unallocatedOccupancy = unallocatedOccupancy;
+  }
+
+  Map<String, Integer> getUnallocatedOccupancy() {
+    return _unallocatedOccupancy;
+  }
+
+  /**
+   * Same as {@link #getGeneralProjectedHighestUtilization(Map, List)} but additionally counts
+   * occupancy that physically exists on the node yet is absent from its assignment. Used for
+   * preference scoring only, never for feasibility.
+   */
+  public float getPhysicalProjectedHighestUtilization(Map<String, Integer> newUsage,
+      List<String> preferredScoringKeys) {
+    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys,
+        _unallocatedOccupancy);
   }
 
   public String getInstanceName() {
