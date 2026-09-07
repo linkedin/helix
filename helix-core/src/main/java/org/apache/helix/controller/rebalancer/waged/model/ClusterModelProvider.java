@@ -39,9 +39,9 @@ import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.CurrentState;
-import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
@@ -168,15 +168,14 @@ public class ClusterModelProvider {
   }
 
   /**
-   * Charge the rebalancer's capacity ledger for replicas that are physically present on an instance
-   * but were not part of the allocation computed above.
+   * Record, for placement scoring only, occupancy that is physically present on an instance but was
+   * not part of the allocation computed above.
    * <p>
    * These replicas are invisible to the rebalancer's own accounting yet are charged by
    * {@link org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity}, which charges every
-   * current-state replica of a WAGED resource regardless of its state. Leaving them uncharged lets
-   * the rebalancer believe an instance is free while the capacity check considers it full, so the
-   * rebalancer proposes a placement that is then rejected and dropped -- repeatedly, because the
-   * inputs never change.
+   * current-state replica of a WAGED resource regardless of its state. Left unrecorded, the
+   * rebalancer ranks such an instance among the emptiest in the cluster and proposes placements the
+   * capacity check then rejects -- repeatedly, because the inputs never change.
    * <p>
    * Occupancy is read from the data provider's current-state cache rather than from the assignment
    * passed into the cluster model. For a partial rebalance that assignment is the previously
@@ -184,9 +183,11 @@ public class ClusterModelProvider {
    * rebalancer cannot see. It is also read-only for the duration of the pass, so this is safe on
    * the asynchronous rebalance thread.
    * <p>
-   * The occupancy is charged WITHOUT recording an assignment. Recording one would declare that the
-   * replica belongs on the instance, so the rebalancer would never move or drop it, turning a
-   * transient condition into a permanent placement. It must occupy space without being owned.
+   * Nothing is deducted from the node's capacity ledger and no assignment is recorded. Deducting
+   * would let one wedged replica make placement infeasible and abort the entire rebalance with
+   * NO_CANDIDATE_NODE; recording an assignment would declare that the replica belongs on the
+   * instance, so it would never be moved or dropped. It must influence preference without being
+   * either owned or reserved.
    */
   private static void recordUnallocatedCurrentStateOccupancy(Set<AssignableNode> assignableNodes,
       Map<String, Set<AssignableReplica>> allocatedReplicas,
@@ -202,11 +203,10 @@ public class ClusterModelProvider {
     }
     Map<String, LiveInstance> liveInstances = dataProvider.getAssignableLiveInstances();
 
-    // Partitions the algorithm is about to place. Their current occupancy is the source side of a
-    // move the algorithm is actively deciding, and it charges the node it settles on. Charging them
-    // here as well would bill a relocating replica twice against the instance it already sits on,
-    // which can stop it from being placed back where it is -- the common no-op outcome -- and stall
-    // the move instead. Only occupancy outside the algorithm's view should be charged here.
+    // Partitions the algorithm is about to place. The score for such a replica already counts its
+    // own weight as the proposed new usage, so including it here as well would charge it twice
+    // against the instance it currently sits on and bias the algorithm against leaving it there.
+    // Only occupancy outside the algorithm's view belongs in this map.
     Set<String> pendingPlacement = toBeAssignedReplicas.stream()
         .map(replica -> occupancyKey(replica.getResourceName(), replica.getPartitionName()))
         .collect(Collectors.toSet());

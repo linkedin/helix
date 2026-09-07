@@ -266,13 +266,20 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * For example, if the current node usage is {CPU: 0.9, MEM: 0.4, DISK: 0.6}, preferredScoringKeys: [ CPU ]
    * Then this call shall return 0.9.
    *
+   * This also counts occupancy that is physically present on the node but absent from the
+   * assignment computed for it, so a node holding replicas the rebalancer cannot see does not
+   * report itself as the emptiest in the cluster and attract further placement. Only utilization
+   * scoring accounts for it; the hard capacity constraint does not, so it can steer placement away
+   * from such a node but can never make placement infeasible.
+   *
    * @param newUsage            the proposed new additional capacity usage.
    * @param preferredScoringKeys if provided, the capacity utilization will be calculated based on
    *                            the supplied keys only, else across all capacity categories.
    * @return The highest utilization number of the node among the specified capacity category.
    */
   public float getGeneralProjectedHighestUtilization(Map<String, Integer> newUsage, List<String> preferredScoringKeys) {
-    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys);
+    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys,
+        _unallocatedOccupancy);
   }
 
   /**
@@ -350,21 +357,6 @@ public class AssignableNode implements Comparable<AssignableNode> {
    */
   void setUnallocatedOccupancy(Map<String, Integer> unallocatedOccupancy) {
     _unallocatedOccupancy = unallocatedOccupancy;
-  }
-
-  Map<String, Integer> getUnallocatedOccupancy() {
-    return _unallocatedOccupancy;
-  }
-
-  /**
-   * Same as {@link #getGeneralProjectedHighestUtilization(Map, List)} but additionally counts
-   * occupancy that physically exists on the node yet is absent from its assignment. Used for
-   * preference scoring only, never for feasibility.
-   */
-  public float getPhysicalProjectedHighestUtilization(Map<String, Integer> newUsage,
-      List<String> preferredScoringKeys) {
-    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys,
-        _unallocatedOccupancy);
   }
 
   public String getInstanceName() {

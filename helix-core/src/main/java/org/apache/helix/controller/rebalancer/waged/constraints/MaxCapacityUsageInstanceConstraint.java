@@ -36,14 +36,8 @@ class MaxCapacityUsageInstanceConstraint extends UsageSoftConstraint {
   protected double getAssignmentScore(AssignableNode node, AssignableReplica replica,
       ClusterContext clusterContext) {
     float estimatedMaxUtilization = clusterContext.getEstimatedMaxUtilization();
-    // Counts occupancy that is physically on the node but absent from its assignment -- a replica
-    // wedged in a state whose drop never completes, say. Without it such a node reports itself as
-    // the emptiest in the cluster and is preferred, only for the capacity check to refuse the
-    // placement; the same rejected choice is then made again every pass. This is preference only:
-    // making it a hard rule would abort the whole rebalance with NO_CANDIDATE_NODE the moment one
-    // replica had nowhere to go. Identical to the previous behaviour when nothing is unaccounted.
-    float projectedHighestUtilization = node.getPhysicalProjectedHighestUtilization(
-        replica.getCapacity(), clusterContext.getPreferredScoringKeys());
+    float projectedHighestUtilization =
+        node.getGeneralProjectedHighestUtilization(replica.getCapacity(), clusterContext.getPreferredScoringKeys());
     return computeUtilizationScore(estimatedMaxUtilization, projectedHighestUtilization);
   }
 }

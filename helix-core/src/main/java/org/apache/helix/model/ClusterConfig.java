@@ -1131,20 +1131,21 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Whether the WAGED rebalancer counts occupancy that is physically present on an instance but
-   * absent from the assignment the rebalancer computed for it.
+   * Whether the WAGED rebalancer accounts for occupancy that is physically present on an instance
+   * but absent from the assignment the rebalancer computed for it.
    * <p>
    * The rebalancer normally derives an instance's used capacity only from the replicas it placed
    * there itself, while the capacity check that validates its output charges every replica reported
    * in the instance's current state. A replica that is present but unassigned -- for example one
    * left behind in a state the rebalancer does not account for -- is therefore free to the
-   * rebalancer and used to the capacity check. The rebalancer proposes a placement, the capacity
-   * check rejects it, and since neither side's input changed the same rejected placement is
-   * produced again on the next pass, so the partition is never placed anywhere else.
+   * rebalancer and used to the capacity check. The rebalancer consequently ranks the instance among
+   * the emptiest available and proposes a placement onto it, which the capacity check then rejects.
+   * Neither side's input has changed, so the next pass repeats the same rejected choice and the
+   * partition is never placed anywhere else.
    * <p>
-   * When enabled, that occupancy is charged to the instance before placement is computed, so both
-   * sides work from the same view of what an instance is holding. This makes the rebalancer more
-   * conservative about instances holding unassigned replicas. By default it is disabled if not set.
+   * When enabled, that occupancy is included when scoring how full an instance is, steering
+   * placement away from such instances. It affects preference only -- the hard capacity constraint
+   * is unchanged -- so it can never make a placement infeasible. Disabled if not set.
    * @return true if unallocated occupancy is counted, false otherwise
    */
   public boolean isWagedCountUnallocatedOccupancyEnabled() {
