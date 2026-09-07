@@ -81,7 +81,6 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, _clusterName, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, _clusterName, true);
     _dataAccessor = new ZKHelixDataAccessor(_clusterName, _baseAccessor);
     _configAccessor = new ConfigAccessor(_gZkClient);
 

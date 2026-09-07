@@ -66,13 +66,5 @@ public interface HelixConstants {
     ANY_LIVEINSTANCE
   }
 
-  /**
-   * Please use ClusterConfig instead
-   */
-  @Deprecated
-  enum ClusterConfigType {
-    PERSIST_BEST_POSSIBLE_ASSIGNMENT
-  }
-
   String DEFAULT_STATE_MODEL_FACTORY = "DEFAULT";
 }

@@ -91,7 +91,6 @@ public class TestPartitionMigrationBase extends ZkTestBase {
             .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
             .build();
 
-    enablePersistIntermediateAssignment(_gZkClient, CLUSTER_NAME, true);
 
     _manager = HelixManagerFactory
         .getZKHelixManager(CLUSTER_NAME, "admin", InstanceType.ADMINISTRATOR, ZK_ADDR);
