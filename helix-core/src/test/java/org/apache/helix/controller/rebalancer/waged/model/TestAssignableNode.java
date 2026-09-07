@@ -186,6 +186,55 @@ public class TestAssignableNode extends AbstractTestClusterModel {
     assignableNode.release(removingReplica);
   }
 
+  @Test
+  public void testReserveUnallocatedOccupancy() throws IOException {
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+
+    AssignableNode assignableNode = new AssignableNode(testCache.getClusterConfig(),
+        testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+    Map<String, Integer> capacityBefore = new HashMap<>(assignableNode.getRemainingCapacity());
+    Assert.assertTrue(assignableNode.getAssignedReplicas().isEmpty());
+
+    Map<String, Integer> occupancy = new HashMap<>();
+    occupancy.put("item1", 5);
+    occupancy.put("item2", 7);
+    assignableNode.reserveUnallocatedOccupancy(occupancy);
+
+    // The capacity is consumed, so the rebalancer sees the instance as holding it.
+    Assert.assertEquals(assignableNode.getRemainingCapacity().get("item1").intValue(),
+        capacityBefore.get("item1") - 5);
+    Assert.assertEquals(assignableNode.getRemainingCapacity().get("item2").intValue(),
+        capacityBefore.get("item2") - 7);
+    Assert.assertEquals(assignableNode.getRemainingCapacity().get("item3"),
+        capacityBefore.get("item3"));
+
+    // No assignment is recorded. Recording one would mean the replica belongs here, so it would
+    // never be moved or dropped and a transient condition would become a permanent placement.
+    Assert.assertTrue(assignableNode.getAssignedReplicas().isEmpty());
+    Assert.assertEquals(assignableNode.getAssignedReplicaCount(), 0);
+    Assert.assertTrue(assignableNode.getAssignedPartitionsMap().isEmpty());
+  }
+
+  @Test
+  public void testReserveUnallocatedOccupancyIsAdditiveToAssignment() throws IOException {
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    Set<AssignableReplica> assignmentSet = generateReplicas(testCache);
+
+    AssignableNode assignableNode = new AssignableNode(testCache.getClusterConfig(),
+        testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+    assignableNode.assignInitBatch(assignmentSet);
+    int assignedCount = assignableNode.getAssignedReplicaCount();
+    Map<String, Integer> capacityAfterAssign =
+        new HashMap<>(assignableNode.getRemainingCapacity());
+
+    assignableNode.reserveUnallocatedOccupancy(Collections.singletonMap("item1", 3));
+
+    Assert.assertEquals(assignableNode.getRemainingCapacity().get("item1").intValue(),
+        capacityAfterAssign.get("item1") - 3);
+    // The reservation must not disturb what the rebalancer actually assigned.
+    Assert.assertEquals(assignableNode.getAssignedReplicaCount(), assignedCount);
+  }
+
   @Test(expectedExceptions = HelixException.class, expectedExceptionsMessageRegExp = "Resource Resource1 already has a replica with state SLAVE from partition Partition1 on node testInstanceId")
   public void testAssignDuplicateReplica() throws IOException {
     ResourceControllerDataProvider testCache = setupClusterDataCache();

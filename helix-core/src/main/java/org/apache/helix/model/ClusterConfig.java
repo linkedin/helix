@@ -204,6 +204,7 @@ public class ClusterConfig extends HelixProperty {
 
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
+    WAGED_COUNT_UNALLOCATED_OCCUPANCY,
 
     // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
     // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
@@ -1127,6 +1128,38 @@ public class ClusterConfig extends HelixProperty {
    */
   public void setRelaxedDisabledPartitionConstraint(boolean enabled) {
     _record.setBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
+  }
+
+  /**
+   * Whether the WAGED rebalancer counts occupancy that is physically present on an instance but
+   * absent from the assignment the rebalancer computed for it.
+   * <p>
+   * The rebalancer normally derives an instance's used capacity only from the replicas it placed
+   * there itself, while the capacity check that validates its output charges every replica reported
+   * in the instance's current state. A replica that is present but unassigned -- for example one
+   * left behind in a state the rebalancer does not account for -- is therefore free to the
+   * rebalancer and used to the capacity check. The rebalancer proposes a placement, the capacity
+   * check rejects it, and since neither side's input changed the same rejected placement is
+   * produced again on the next pass, so the partition is never placed anywhere else.
+   * <p>
+   * When enabled, that occupancy is charged to the instance before placement is computed, so both
+   * sides work from the same view of what an instance is holding. This makes the rebalancer more
+   * conservative about instances holding unassigned replicas. By default it is disabled if not set.
+   * @return true if unallocated occupancy is counted, false otherwise
+   */
+  public boolean isWagedCountUnallocatedOccupancyEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.WAGED_COUNT_UNALLOCATED_OCCUPANCY.name(), false);
+  }
+
+  /**
+   * Enable/disable counting occupancy that is physically present on an instance but absent from the
+   * assignment the WAGED rebalancer computed for it.
+   * @param enabled true to count unallocated occupancy, false to ignore it (default)
+   */
+  public void setWagedCountUnallocatedOccupancyEnabled(boolean enabled) {
+    _record
+        .setBooleanField(ClusterConfigProperty.WAGED_COUNT_UNALLOCATED_OCCUPANCY.name(), enabled);
   }
 
   /**

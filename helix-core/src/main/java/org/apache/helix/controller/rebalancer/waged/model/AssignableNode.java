@@ -127,6 +127,25 @@ public class AssignableNode implements Comparable<AssignableNode> {
   }
 
   /**
+   * Reserve capacity for occupancy that physically exists on this node but is not part of this
+   * node's assignment.
+   * <p>
+   * Unlike {@link #assignInitBatch} and {@link #assign}, this deliberately does NOT record an
+   * assignment. Recording one would declare that the replica belongs on this node, and the
+   * rebalancer would then never move or drop it. The occupancy has to consume capacity without
+   * being owned, so the rebalancer stops treating the space as free while remaining free to
+   * resolve the underlying condition.
+   * <p>
+   * Only the overall capacity is charged, not the top-state capacity: this occupancy is by
+   * definition not part of a top-state assignment this node has been given.
+   *
+   * @param capacityUsage capacity consumed by the unassigned occupancy, keyed by capacity dimension
+   */
+  void reserveUnallocatedOccupancy(Map<String, Integer> capacityUsage) {
+    updateRemainingCapacity(capacityUsage, _remainingCapacity, false);
+  }
+
+  /**
    * Assign a replica to the node.
    * @param assignableReplica - the replica to be assigned
    */

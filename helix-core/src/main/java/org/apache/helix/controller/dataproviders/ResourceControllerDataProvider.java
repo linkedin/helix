@@ -576,6 +576,15 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   }
 
   /**
+   * @return the provider of per-partition capacity weights used by the WAGED capacity check, or
+   *         null if WAGED capacity is not in use. Exposed so the rebalancer's cluster model can
+   *         charge occupancy using the same weights the capacity check applies.
+   */
+  public WagedResourceWeightsProvider getWagedPartitionWeightProvider() {
+    return _wagedPartitionWeightProvider;
+  }
+
+  /**
    * Getter for cached waged instance capacity map.
    * @return
    */

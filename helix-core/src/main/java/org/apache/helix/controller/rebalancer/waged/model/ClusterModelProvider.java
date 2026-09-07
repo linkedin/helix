@@ -34,10 +34,14 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
@@ -164,6 +168,103 @@ public class ClusterModelProvider {
   }
 
   /**
+   * Charge the rebalancer's capacity ledger for replicas that are physically present on an instance
+   * but were not part of the allocation computed above.
+   * <p>
+   * These replicas are invisible to the rebalancer's own accounting yet are charged by
+   * {@link org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity}, which charges every
+   * current-state replica of a WAGED resource regardless of its state. Leaving them uncharged lets
+   * the rebalancer believe an instance is free while the capacity check considers it full, so the
+   * rebalancer proposes a placement that is then rejected and dropped -- repeatedly, because the
+   * inputs never change.
+   * <p>
+   * Occupancy is read from the data provider's current-state cache rather than from the assignment
+   * passed into the cluster model. For a partial rebalance that assignment is the previously
+   * persisted best-possible assignment, which by definition does not contain the replicas the
+   * rebalancer cannot see. It is also read-only for the duration of the pass, so this is safe on
+   * the asynchronous rebalance thread.
+   * <p>
+   * The occupancy is charged WITHOUT recording an assignment. Recording one would declare that the
+   * replica belongs on the instance, so the rebalancer would never move or drop it, turning a
+   * transient condition into a permanent placement. It must occupy space without being owned.
+   */
+  private static void chargeUnallocatedCurrentStateOccupancy(Set<AssignableNode> assignableNodes,
+      Map<String, Set<AssignableReplica>> allocatedReplicas,
+      Set<AssignableReplica> toBeAssignedReplicas, Map<String, Resource> resourceMap,
+      ResourceControllerDataProvider dataProvider) {
+    WagedResourceWeightsProvider weightProvider = dataProvider.getWagedPartitionWeightProvider();
+    if (weightProvider == null) {
+      return;
+    }
+    ClusterConfig clusterConfig = dataProvider.getClusterConfig();
+    if (clusterConfig == null || !clusterConfig.isWagedCountUnallocatedOccupancyEnabled()) {
+      return;
+    }
+    Map<String, LiveInstance> liveInstances = dataProvider.getAssignableLiveInstances();
+
+    // Partitions the algorithm is about to place. Their current occupancy is the source side of a
+    // move the algorithm is actively deciding, and it charges the node it settles on. Charging them
+    // here as well would bill a relocating replica twice against the instance it already sits on,
+    // which can stop it from being placed back where it is -- the common no-op outcome -- and stall
+    // the move instead. Only occupancy outside the algorithm's view should be charged here.
+    Set<String> pendingPlacement = toBeAssignedReplicas.stream()
+        .map(replica -> occupancyKey(replica.getResourceName(), replica.getPartitionName()))
+        .collect(Collectors.toSet());
+
+    for (AssignableNode node : assignableNodes) {
+      LiveInstance liveInstance = liveInstances.get(node.getInstanceName());
+      if (liveInstance == null) {
+        continue;
+      }
+      Map<String, CurrentState> currentStates =
+          dataProvider.getCurrentState(node.getInstanceName(), liveInstance.getEphemeralOwner());
+      if (currentStates == null || currentStates.isEmpty()) {
+        continue;
+      }
+
+      // Replicas assignInitBatch already charged on this node. A replica that is both allocated and
+      // physically present must be charged exactly once.
+      Set<String> alreadyCharged = allocatedReplicas
+          .getOrDefault(node.getLogicalId(), Collections.emptySet()).stream()
+          .map(replica -> occupancyKey(replica.getResourceName(), replica.getPartitionName()))
+          .collect(Collectors.toSet());
+
+      Map<String, Integer> unallocatedUsage = new HashMap<>();
+      for (Map.Entry<String, CurrentState> entry : currentStates.entrySet()) {
+        String resourceName = entry.getKey();
+        // Mirror the capacity check's scope: WAGED-managed resources only.
+        if (!resourceMap.containsKey(resourceName)
+            || !WagedValidationUtil.isWagedEnabled(dataProvider.getIdealState(resourceName))) {
+          continue;
+        }
+        for (String partitionName : entry.getValue().getPartitionStateMap().keySet()) {
+          String replicaKey = occupancyKey(resourceName, partitionName);
+          if (alreadyCharged.contains(replicaKey) || pendingPlacement.contains(replicaKey)) {
+            continue;
+          }
+          // Use the same weight source the capacity check uses, so the two cannot drift apart.
+          Map<String, Integer> partitionWeights =
+              weightProvider.getPartitionWeights(resourceName, partitionName);
+          if (partitionWeights == null || partitionWeights.isEmpty()) {
+            continue;
+          }
+          partitionWeights.forEach((key, value) -> unallocatedUsage.merge(key, value, Integer::sum));
+        }
+      }
+
+      if (!unallocatedUsage.isEmpty()) {
+        logger.info("Charging {} for occupancy present on the instance but absent from its assignment: "
+            + "{}", node.getInstanceName(), unallocatedUsage);
+        node.reserveUnallocatedOccupancy(unallocatedUsage);
+      }
+    }
+  }
+
+  private static String occupancyKey(String resourceName, String partitionName) {
+    return resourceName + "#" + partitionName;
+  }
+
+  /**
    * Generate a new Cluster Model object according to the current cluster status.
    * @param dataProvider           The controller's data cache.
    * @param resourceMap            The full list of the resources to be rebalanced. Note that any
@@ -259,6 +360,17 @@ public class ClusterModelProvider {
     // Update the allocated replicas to the assignable nodes.
     assignableNodes.parallelStream().forEach(node -> node.assignInitBatch(
         allocatedReplicas.getOrDefault(node.getLogicalId(), Collections.emptySet())));
+
+    // The ledger above only reflects replicas the rebalancer itself allocated. A replica that is
+    // physically present on an instance but absent from that allocation -- for example one wedged
+    // in a state the state model does not count -- still consumes real capacity. The rebalancer
+    // would treat that capacity as free while WagedInstanceCapacity, which charges every
+    // current-state replica, treats it as used. The two then disagree: the rebalancer proposes a
+    // placement the capacity check rejects, the placement is dropped, and because the inputs never
+    // change the same rejected placement is derived again on the next pass. Charge that occupancy
+    // here so both sides work from the same view of what an instance is holding.
+    chargeUnallocatedCurrentStateOccupancy(assignableNodes, allocatedReplicas, toBeAssignedReplicas,
+        resourceMap, dataProvider);
 
     // Construct and initialize cluster context.
     ClusterContext context = new ClusterContext(
