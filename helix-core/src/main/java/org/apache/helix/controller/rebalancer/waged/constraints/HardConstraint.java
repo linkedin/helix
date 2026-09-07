@@ -45,6 +45,7 @@ public abstract class HardConstraint {
     REPLICA_ACTIVATE,
     SAME_PARTITION_ON_INSTANCE,
     VALID_GROUP_TAG,
+    CAPACITY_REJECTED,
     UNKNOWN
   }
 

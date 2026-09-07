@@ -354,4 +354,20 @@ public class ClusterContext {
     // Fall back to cluster-level configuration
     return _dataProvider.getClusterConfig().isRelaxedDisabledPartitionConstraintEnabled();
   }
+
+  /**
+   * Check whether this placement was already rejected by the WAGED capacity check earlier in the
+   * current rebalance pass.
+   *
+   * @param instance the target instance name
+   * @param resourceName the resource name
+   * @param partitionName the partition name
+   * @return true if the placement was rejected and must not be proposed again in this pass
+   */
+  public boolean isCapacityRejected(String instance, String resourceName, String partitionName) {
+    if (_dataProvider == null) {
+      return false; // No data provider available, nothing has been rejected.
+    }
+    return _dataProvider.isCapacityRejected(instance, resourceName, partitionName);
+  }
 }

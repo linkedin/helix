@@ -81,13 +81,22 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     HardConstraintReplicaActivateFailureCounter,
     HardConstraintSamePartitionOnInstanceFailureCounter,
     HardConstraintValidGroupTagFailureCounter,
+    HardConstraintCapacityRejectedFailureCounter,
     HardConstraintUnknownFailureCounter,
 
     // Waged rebalance counters.
     GlobalBaselineCalcCounter,
     PartialRebalanceCounter,
     EmergencyRebalanceCounter,
-    RebalanceOverwriteCounter
+    RebalanceOverwriteCounter,
+
+    // Number of placements the WAGED capacity check rejected after the planner proposed them.
+    // A non-zero value means the planner's occupancy view disagrees with the capacity ledger.
+    CapacityRejectionCounter,
+
+    // Number of rebalance passes that still had capacity rejections after exhausting the bounded
+    // re-plan attempts, i.e. the pass could not be brought to an agreed assignment.
+    CapacityRejectionUnresolvedCounter
   }
 
   public WagedRebalancerMetricCollector(String clusterName) {
@@ -167,6 +176,8 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
         new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintSamePartitionOnInstanceFailureCounter.name());
     CountMetric hardConstraintValidGroupTagFailureCounter =
         new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintValidGroupTagFailureCounter.name());
+    CountMetric hardConstraintCapacityRejectedFailureCounter =
+        new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintCapacityRejectedFailureCounter.name());
     CountMetric hardConstraintUnknownFailureCounter =
         new RebalanceFailureCount(WagedRebalancerMetricNames.HardConstraintUnknownFailureCounter.name());
     CountMetric globalBaselineCalcCounter =
@@ -177,6 +188,10 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
         new RebalanceCounter(WagedRebalancerMetricNames.EmergencyRebalanceCounter.name());
     CountMetric rebalanceOverwriteCounter =
         new RebalanceCounter(WagedRebalancerMetricNames.RebalanceOverwriteCounter.name());
+    CountMetric capacityRejectionCounter =
+        new RebalanceCounter(WagedRebalancerMetricNames.CapacityRejectionCounter.name());
+    CountMetric capacityRejectionUnresolvedCounter =
+        new RebalanceCounter(WagedRebalancerMetricNames.CapacityRejectionUnresolvedCounter.name());
 
     // Add metrics to WagedRebalancerMetricCollector
     addMetric(globalBaselineCalcLatencyGauge);
@@ -201,10 +216,13 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     addMetric(hardConstraintReplicaActivateFailureCounter);
     addMetric(hardConstraintSamePartitionOnInstanceFailureCounter);
     addMetric(hardConstraintValidGroupTagFailureCounter);
+    addMetric(hardConstraintCapacityRejectedFailureCounter);
     addMetric(hardConstraintUnknownFailureCounter);
     addMetric(globalBaselineCalcCounter);
     addMetric(partialRebalanceCounter);
     addMetric(emergencyRebalanceCounter);
     addMetric(rebalanceOverwriteCounter);
+    addMetric(capacityRejectionCounter);
+    addMetric(capacityRejectionUnresolvedCounter);
   }
 }

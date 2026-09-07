@@ -68,6 +68,27 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
     }
   }
 
+  /**
+   * Copy constructor producing a deep copy of the capacity ledger.
+   * <p>
+   * {@link #checkAndReduceInstanceCapacity} mutates this ledger, so a caller that evaluates more
+   * than one candidate assignment within a single rebalance pass must restore the ledger to its
+   * pre-evaluation state between attempts. Otherwise the second attempt would be charged against
+   * capacity already consumed by the first.
+   */
+  public WagedInstanceCapacity(WagedInstanceCapacity other) {
+    _instanceCapacityMap = new HashMap<>();
+    other._instanceCapacityMap.forEach(
+        (instance, capacity) -> _instanceCapacityMap.put(instance, new HashMap<>(capacity)));
+
+    _allocatedPartitionsMap = new HashMap<>();
+    other._allocatedPartitionsMap.forEach((instance, allocationsByResource) -> {
+      Map<String, Set<String>> copy = new HashMap<>();
+      allocationsByResource.forEach((resource, partitions) -> copy.put(resource, new HashSet<>(partitions)));
+      _allocatedPartitionsMap.put(instance, copy);
+    });
+  }
+
   // Helper methods.
   // TODO: Currently, we don't allow double-accounting. But there may be
   // future scenarios, where we may want to allow.

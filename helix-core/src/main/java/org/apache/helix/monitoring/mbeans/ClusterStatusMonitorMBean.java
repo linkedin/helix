@@ -241,6 +241,13 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedHardConstraintValidGroupTagFailureCounter();
 
   /** @return Partitions that failed placement due to a hard constraint with no specific type tag. */
+  /**
+   * @return count of placements rejected because the WAGED capacity check had already rejected the
+   *         same placement earlier in the pass. A sustained non-zero value means the rebalancer's
+   *         occupancy view disagrees with the capacity ledger.
+   */
+  long getWagedHardConstraintCapacityRejectedFailureCounter();
+
   long getWagedHardConstraintUnknownFailureCounter();
 
   // ---- WAGED per-HardConstraint "currently blocking" gauges (reversible) ----
@@ -287,6 +294,9 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedHardConstraintValidGroupTagBlockingGauge();
 
   /** @return 1 if a hard constraint with no specific type tag is currently blocking placement; 0 otherwise. */
+  /** @return 1 if an earlier capacity rejection is currently blocking placement; 0 otherwise. */
+  long getWagedHardConstraintCapacityRejectedBlockingGauge();
+
   long getWagedHardConstraintUnknownBlockingGauge();
 
   /**

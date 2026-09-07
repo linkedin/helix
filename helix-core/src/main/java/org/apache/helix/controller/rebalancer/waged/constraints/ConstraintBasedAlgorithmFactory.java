@@ -94,7 +94,8 @@ public class ConstraintBasedAlgorithmFactory {
     List<HardConstraint> hardConstraints =
         ImmutableList.of(new FaultZoneAwareConstraint(), new NodeCapacityConstraint(),
             new ReplicaActivateConstraint(), new NodeMaxPartitionLimitConstraint(),
-            new ValidGroupTagConstraint(), new SamePartitionOnInstanceConstraint());
+            new ValidGroupTagConstraint(), new SamePartitionOnInstanceConstraint(),
+            new CapacityRejectionConstraint());
 
     int evennessPreference = preferences
         .getOrDefault(ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS,

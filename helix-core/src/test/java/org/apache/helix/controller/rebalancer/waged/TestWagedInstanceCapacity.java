@@ -100,7 +100,69 @@ public class TestWagedInstanceCapacity {
     Assert.assertTrue(instanceAvailableCapacity.get("CU").equals(90));
   }
 
-  // -- static helpers
+  @Test
+  public void testCapacitySnapshotIsAnIndependentDeepCopy() {
+    Map<String, Integer> partCapMap = ImmutableMap.of("CU", 10, "PARTCOUNT", 1, "DISK", 1);
+    WagedInstanceCapacity snapshot = new WagedInstanceCapacity(_wagedInstanceCapacity);
+
+    // Mutating the original must not disturb the snapshot ...
+    Assert.assertTrue(_wagedInstanceCapacity.checkAndReduceInstanceCapacity(
+        "instance-0", "resource-0", "partition-0", partCapMap));
+    Assert.assertEquals(_wagedInstanceCapacity.getInstanceAvailableCapacity("instance-0").get("CU"),
+        Integer.valueOf(90));
+    Assert.assertEquals(snapshot.getInstanceAvailableCapacity("instance-0").get("CU"),
+        Integer.valueOf(100));
+
+    // ... and the snapshot must not carry the original's allocation record either, otherwise a
+    // restored ledger would treat the partition as already charged and skip the capacity check.
+    Assert.assertTrue(snapshot.checkAndReduceInstanceCapacity(
+        "instance-0", "resource-0", "partition-0", partCapMap));
+    Assert.assertEquals(snapshot.getInstanceAvailableCapacity("instance-0").get("CU"),
+        Integer.valueOf(90));
+  }
+
+  @Test
+  public void testCapacityRejectionIsRecordedAndScopedToThePass() {
+    _clusterData.setWagedCapacityProviders(_wagedInstanceCapacity,
+        new WagedResourceWeightsProvider(_clusterData));
+
+    // Each partition costs 40 CU against an instance capacity of 100, so the third one cannot fit.
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-0"));
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-1"));
+    Assert.assertEquals(_clusterData.getCapacityRejectionCount(), 0);
+
+    Assert.assertFalse(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-2"));
+
+    // The rejection is recorded so the rebalancer can exclude this placement and re-plan.
+    Assert.assertEquals(_clusterData.getCapacityRejectionCount(), 1);
+    Assert.assertTrue(_clusterData.isCapacityRejected("instance-0", "resource-0", "partition-2"));
+    // Only the rejected placement is excluded, not the partition everywhere else.
+    Assert.assertFalse(_clusterData.isCapacityRejected("instance-1", "resource-0", "partition-2"));
+
+    // Rejections describe one pass only; they must not leak into the next one.
+    _clusterData.clearCapacityRejections();
+    Assert.assertEquals(_clusterData.getCapacityRejectionCount(), 0);
+    Assert.assertFalse(_clusterData.isCapacityRejected("instance-0", "resource-0", "partition-2"));
+  }
+
+  @Test
+  public void testRestoreCapacityUndoesChargesFromAPreviousAttempt() {
+    _clusterData.setWagedCapacityProviders(_wagedInstanceCapacity,
+        new WagedResourceWeightsProvider(_clusterData));
+    WagedInstanceCapacity snapshot = _clusterData.snapshotWagedInstanceCapacity();
+
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-0"));
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-1"));
+    Assert.assertFalse(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-2"));
+
+    // A retry has to start from the same ledger the first attempt saw, otherwise it would be
+    // charged against capacity the first attempt already consumed.
+    _clusterData.restoreWagedInstanceCapacity(snapshot);
+    Assert.assertEquals(
+        _clusterData.getWagedInstanceCapacity().getInstanceAvailableCapacity("instance-0").get("CU"),
+        Integer.valueOf(100));
+    Assert.assertTrue(_clusterData.checkAndReduceCapacity("instance-0", "resource-0", "partition-2"));
+  }
   private Map<String, InstanceConfig> generateInstanceCapacityConfigs() {
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
 

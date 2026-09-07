@@ -81,6 +81,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   // These failure types should be propagated to caller of computeNewIdealStates()
   private static final List<HelixRebalanceException.Type> FAILURE_TYPES_TO_PROPAGATE =
       ImmutableList.of(HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, HelixRebalanceException.Type.UNKNOWN_FAILURE);
+  // How many times the assignment may be recomputed within a single rebalance pass while feeding
+  // capacity rejections back to the rebalancer. Bounded because each retry costs a full
+  // recomputation; in practice one retry is enough to route around a rejected instance.
+  private static final int MAX_CAPACITY_FEEDBACK_ATTEMPTS = 3;
 
   private final HelixManager _manager;
   private final MappingCalculator<ResourceControllerDataProvider> _mappingCalculator;
@@ -92,6 +96,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   private final CountMetric _emergencyRebalanceCounter;
   private final LatencyMetric _emergencyRebalanceLatency;
   private final CountMetric _rebalanceOverwriteCounter;
+  private final CountMetric _capacityRejectionCounter;
+  private final CountMetric _capacityRejectionUnresolvedCounter;
   private final LatencyMetric _rebalanceOverwriteLatency;
   private final AssignmentManager _assignmentManager;
   private final PartialRebalanceRunner _partialRebalanceRunner;
@@ -199,6 +205,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     _rebalanceOverwriteLatency = _metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.RebalanceOverwriteLatencyGauge.name(),
         LatencyMetric.class);
+    _capacityRejectionCounter = _metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.CapacityRejectionCounter.name(),
+        CountMetric.class);
+    _capacityRejectionUnresolvedCounter = _metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.CapacityRejectionUnresolvedCounter.name(),
+        CountMetric.class);
     _writeLatency = _metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.StateWriteLatencyGauge.name(),
         LatencyMetric.class);
@@ -270,6 +282,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintSamePartitionOnInstanceFailureCounter;
       case VALID_GROUP_TAG:
         return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintValidGroupTagFailureCounter;
+      case CAPACITY_REJECTED:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintCapacityRejectedFailureCounter;
       case UNKNOWN:
       default:
         return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintUnknownFailureCounter;
@@ -487,10 +501,14 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
 
     Map<String, IdealState> newIdealStates;
     boolean usedFallback = false;
+    // Capacity rejections describe occupancy observed during this pass only. Clear them up front so
+    // an instance that was transiently full in an earlier pass is not excluded forever.
+    clusterData.clearCapacityRejections();
     try {
-      // Calculate the target assignment based on the current cluster status.
-      newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
-          _rebalanceAlgorithm);
+      // Calculate the target assignment based on the current cluster status, and reconcile it with
+      // the capacity check before returning it.
+      newIdealStates =
+          computeBestPossibleStatesWithCapacityFeedback(clusterData, resourceMap, currentStateOutput);
     } catch (HelixRebalanceException ex) {
       LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
           ex.getFailureCategory(), ex.isCustomerActionable(), ex);
@@ -532,6 +550,99 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       monitor.setWagedFallbackInUseGauge(usedFallback);
     }
 
+    if (usedFallback) {
+      // The fallback assignment has not been through the mapping calculator yet.
+      applyStateMapping(clusterData, resourceMap, currentStateOutput, newIdealStates);
+    }
+    LOG.info("Finish computing new ideal states for resources: {}",
+        resourceMap.keySet().toString());
+    return newIdealStates;
+  }
+
+  /**
+   * Compute the target assignment and reconcile it with the WAGED capacity check within a single
+   * rebalance pass.
+   * <p>
+   * The planner and the capacity check do not share an occupancy view. The planner only counts a
+   * replica when it is in a counted state <em>and</em> is where the target assignment expects it,
+   * while the capacity check counts everything physically present on the instance. An instance
+   * holding replicas the planner cannot see therefore looks empty to the planner and full to the
+   * capacity check. Because the rejection used to be discarded, the planner re-derived the same
+   * rejected placement on every subsequent pass and the partition was never placed anywhere.
+   * <p>
+   * Here the rejection is fed back instead: rejected placements are recorded on the data provider,
+   * {@code CapacityRejectionConstraint} makes them ineligible, and the assignment is recomputed.
+   * Each attempt strictly shrinks the candidate set, so the loop terminates.
+   * <p>
+   * This deliberately does not change how either side counts capacity. If the attempts are
+   * exhausted, or a retry fails, the result of the last completed attempt is returned -- which is
+   * the behaviour that existed before this feedback loop.
+   */
+  private Map<String, IdealState> computeBestPossibleStatesWithCapacityFeedback(
+      ResourceControllerDataProvider clusterData, Map<String, Resource> resourceMap,
+      final CurrentStateOutput currentStateOutput) throws HelixRebalanceException {
+    // The capacity check reduces the ledger as it accepts placements, so every attempt has to start
+    // from the same ledger state. Otherwise a retry would be charged against capacity already
+    // consumed by the previous attempt.
+    WagedInstanceCapacity capacitySnapshot = clusterData.snapshotWagedInstanceCapacity();
+    Map<String, IdealState> newIdealStates = null;
+
+    for (int attempt = 1; attempt <= MAX_CAPACITY_FEEDBACK_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        clusterData.restoreWagedInstanceCapacity(capacitySnapshot);
+      }
+      int rejectionsBefore = clusterData.getCapacityRejectionCount();
+
+      Map<String, IdealState> candidate;
+      try {
+        candidate = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
+            _rebalanceAlgorithm);
+      } catch (HelixRebalanceException ex) {
+        if (attempt == 1) {
+          // Nothing to do with the feedback loop -- propagate as before.
+          throw ex;
+        }
+        // Excluding rejected placements narrowed the candidate set too far. Keep the previous
+        // attempt rather than escalating to the cluster-wide last-known-good fallback.
+        LOG.warn("Retry {} of the capacity feedback loop failed; keeping the assignment from the "
+            + "previous attempt. category={}", attempt, ex.getFailureCategory(), ex);
+        // Re-apply so the capacity ledger matches the assignment actually being returned.
+        applyStateMapping(clusterData, resourceMap, currentStateOutput, newIdealStates);
+        return newIdealStates;
+      }
+
+      applyStateMapping(clusterData, resourceMap, currentStateOutput, candidate);
+      newIdealStates = candidate;
+
+      int newRejections = clusterData.getCapacityRejectionCount() - rejectionsBefore;
+      if (newRejections == 0) {
+        // The capacity check accepted everything the planner proposed.
+        return newIdealStates;
+      }
+      _capacityRejectionCounter.increment(newRejections);
+      LOG.warn("The capacity check rejected {} placement(s) proposed by the rebalancer on attempt "
+              + "{} of {}. Re-planning with those placements excluded.", newRejections, attempt,
+          MAX_CAPACITY_FEEDBACK_ATTEMPTS);
+    }
+
+    // Still not reconciled. The returned assignment is the last attempt's, i.e. rejected placements
+    // are dropped from the preference list exactly as they were before this loop existed. Surface
+    // it so a partition that cannot be placed is visible instead of silently starved.
+    _capacityRejectionUnresolvedCounter.increment(1L);
+    LOG.warn("The rebalancer and the capacity check did not agree after {} attempts; {} placement(s)"
+            + " remain rejected. Some partitions may be under-replicated until the underlying"
+            + " capacity or occupancy changes.", MAX_CAPACITY_FEEDBACK_ATTEMPTS,
+        clusterData.getCapacityRejectionCount());
+    return newIdealStates;
+  }
+
+  /**
+   * Adjust the target assignment against the current state and write the result into the ideal
+   * state map fields.
+   */
+  private void applyStateMapping(ResourceControllerDataProvider clusterData,
+      Map<String, Resource> resourceMap, final CurrentStateOutput currentStateOutput,
+      Map<String, IdealState> newIdealStates) {
     // Construct the new best possible states according to the current state and target assignment.
     // Note that the new ideal state might be an intermediate state between the current state and
     // the target assignment.
@@ -552,9 +663,6 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             newStateMap == null ? Collections.emptyMap() : newStateMap);
       }
     });
-    LOG.info("Finish computing new ideal states for resources: {}",
-        resourceMap.keySet().toString());
-    return newIdealStates;
   }
 
   // Coordinate global rebalance and partial rebalance according to the cluster changes.

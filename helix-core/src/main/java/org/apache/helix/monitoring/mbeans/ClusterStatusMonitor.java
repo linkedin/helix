@@ -1765,6 +1765,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   @Override
+  public long getWagedHardConstraintCapacityRejectedFailureCounter() {
+    return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.CAPACITY_REJECTED).get();
+  }
+
+  @Override
   public long getWagedHardConstraintUnknownFailureCounter() {
     return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.UNKNOWN).get();
   }
@@ -1797,6 +1802,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedHardConstraintValidGroupTagBlockingGauge() {
     return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.VALID_GROUP_TAG).get();
+  }
+
+  @Override
+  public long getWagedHardConstraintCapacityRejectedBlockingGauge() {
+    return _wagedHardConstraintBlockingGauges.get(HardConstraint.Type.CAPACITY_REJECTED).get();
   }
 
   @Override

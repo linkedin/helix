@@ -378,7 +378,10 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
           if (!cache.checkAndReduceCapacity(instance, idealState.getResourceName(),
               partition.getPartitionName())) {
             // if instanceToAdd instance has no capacity to hold the partition, we should
-            // remove it from combinedPreferenceList
+            // remove it from combinedPreferenceList.
+            // The rejection is recorded on the cache so the WAGED rebalancer can exclude this
+            // placement and re-plan within the same pass instead of proposing it again. See
+            // WagedRebalancer#computeBestPossibleStatesWithCapacityFeedback.
             LOG.info("Instance: {} has no capacity to hold resource: {}, partition: {}, removing "
                 + "it from combinedPreferenceList.", instance, idealState.getResourceName(),
                 partition.getPartitionName());

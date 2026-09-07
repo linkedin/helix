@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -118,6 +119,16 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // WAGED specific capacity / weight provider
   WagedInstanceCapacity _wagedInstanceCapacity;
   WagedResourceWeightsProvider _wagedPartitionWeightProvider;
+
+  // (instance, resource, partition) placements the WAGED capacity check rejected during the
+  // current rebalance pass. The planner cannot see occupancy that is physically present but not
+  // reflected in the target assignment, so it can repeatedly propose a placement the capacity
+  // check then rejects. Recording the rejection lets the planner be re-run with that placement
+  // excluded, instead of re-deriving the same rejected choice forever.
+  //
+  // Scoped to a single rebalance pass: WagedRebalancer clears this at the start of every
+  // computeNewIdealStates call. Concurrent because the capacity check runs from a parallel stream.
+  private final Set<CapacityRejectionKey> _capacityRejections = ConcurrentHashMap.newKeySet();
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -571,8 +582,12 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
       return true;
     }
 
-    return _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance, resourceName, partition,
-        partitionWeightMap);
+    boolean capacityAvailable = _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance,
+        resourceName, partition, partitionWeightMap);
+    if (!capacityAvailable) {
+      recordCapacityRejection(instance, resourceName, partition);
+    }
+    return capacityAvailable;
   }
 
   /**
@@ -581,6 +596,94 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
    */
   public WagedInstanceCapacity getWagedInstanceCapacity() {
     return _wagedInstanceCapacity;
+  }
+
+  /**
+   * Record a placement that the WAGED capacity check rejected during the current rebalance pass.
+   * Recorded rejections are consulted by CapacityRejectionConstraint so a re-run of the planner
+   * within the same pass will not propose the same rejected placement again.
+   */
+  public void recordCapacityRejection(String instance, String resourceName, String partition) {
+    _capacityRejections.add(new CapacityRejectionKey(instance, resourceName, partition));
+  }
+
+  /**
+   * @return true if this placement was rejected by the capacity check earlier in the current
+   *         rebalance pass.
+   */
+  public boolean isCapacityRejected(String instance, String resourceName, String partition) {
+    // Fast path: the overwhelmingly common case is an empty set, i.e. planner and capacity check
+    // agree. Avoid allocating a key per constraint evaluation in that case.
+    return !_capacityRejections.isEmpty()
+        && _capacityRejections.contains(new CapacityRejectionKey(instance, resourceName, partition));
+  }
+
+  /**
+   * @return the number of distinct placements rejected by the capacity check in the current pass.
+   */
+  public int getCapacityRejectionCount() {
+    return _capacityRejections.size();
+  }
+
+  /**
+   * Clear all recorded capacity rejections. Called at the start of every rebalance pass: a
+   * rejection reflects occupancy observed in one pass and must not leak into the next, otherwise
+   * a transiently full instance would be excluded permanently.
+   */
+  public void clearCapacityRejections() {
+    _capacityRejections.clear();
+  }
+
+  /**
+   * Take a deep copy of the WAGED capacity ledger so it can be restored between planner attempts
+   * within a single pass. Returns null when WAGED capacity is not in use.
+   */
+  public WagedInstanceCapacity snapshotWagedInstanceCapacity() {
+    return _wagedInstanceCapacity == null ? null : new WagedInstanceCapacity(_wagedInstanceCapacity);
+  }
+
+  /**
+   * Restore the WAGED capacity ledger from a snapshot taken by
+   * {@link #snapshotWagedInstanceCapacity()}. A fresh copy is installed so the snapshot itself
+   * stays clean and can be reused for a subsequent attempt.
+   */
+  public void restoreWagedInstanceCapacity(WagedInstanceCapacity snapshot) {
+    if (snapshot != null) {
+      _wagedInstanceCapacity = new WagedInstanceCapacity(snapshot);
+    }
+  }
+
+  /**
+   * Identity of a placement rejected by the WAGED capacity check.
+   */
+  private static final class CapacityRejectionKey {
+    private final String _instance;
+    private final String _resourceName;
+    private final String _partitionName;
+
+    CapacityRejectionKey(String instance, String resourceName, String partitionName) {
+      _instance = instance;
+      _resourceName = resourceName;
+      _partitionName = partitionName;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof CapacityRejectionKey)) {
+        return false;
+      }
+      CapacityRejectionKey that = (CapacityRejectionKey) o;
+      return Objects.equals(_instance, that._instance) && Objects.equals(_resourceName,
+          that._resourceName) && Objects.equals(_partitionName, that._partitionName);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(_instance, _resourceName, _partitionName);
+    }
   }
 
   private void buildSimpleCapacityMap(int globalMaxPartitionAllowedPerInstance) {
