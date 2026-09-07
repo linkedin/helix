@@ -706,9 +706,15 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // Generate a state mapping, state -> required numbers based on the live and enabled instances for this partition
     // preference list
     if (preferenceList != null) {
-      return stateModelDefinition.getStateCountMap((int) preferenceList.stream().filter(
-              i -> resourceControllerDataProvider.getEnabledLiveInstances().contains(i))
-          .count(), requiredNumReplica); // StateModelDefinition's counts
+      // Hoist the enabled-live-instance lookup out of the filter predicate. Each call to
+      // getEnabledLiveInstances() builds and returns a fresh HashSet, so evaluating it inside the
+      // lambda rebuilt that set once per preference list entry, per partition, on every pipeline
+      // run. The snapshot is immutable and fixed for the duration of a pipeline run, so hoisting
+      // is behaviour-preserving.
+      Set<String> enabledLiveInstances = resourceControllerDataProvider.getEnabledLiveInstances();
+      return stateModelDefinition.getStateCountMap(
+          (int) preferenceList.stream().filter(enabledLiveInstances::contains).count(),
+          requiredNumReplica); // StateModelDefinition's counts
     }
     return stateModelDefinition.getStateCountMap(
         resourceControllerDataProvider.getEnabledLiveInstances().size(),
