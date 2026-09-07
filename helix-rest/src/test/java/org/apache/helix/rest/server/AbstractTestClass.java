@@ -606,7 +606,6 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     clusterConfig.setFaultZoneType("helixZoneId");
     clusterConfig.setTopologyAwareEnabled(true);
     clusterConfig.setTopology("/helixZoneId/instance");
-    clusterConfig.setPersistIntermediateAssignment(true);
     _configAccessor.setClusterConfig(clusterName, clusterConfig);
     // Create instance configs
     List<InstanceConfig> instanceConfigs = new ArrayList<>();
@@ -665,7 +664,6 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     clusterConfig.setFaultZoneType("helixZoneId");
     clusterConfig.setTopologyAwareEnabled(true);
     clusterConfig.setTopology("/helixZoneId/instance");
-    clusterConfig.setPersistIntermediateAssignment(true);
     _configAccessor.setClusterConfig(clusterName, clusterConfig);
     // Create instance configs
     List<InstanceConfig> instanceConfigs = new ArrayList<>();
@@ -723,7 +721,6 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     _gSetupTool.addCluster(clusterName, true);
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
     clusterConfig.setFaultZoneType("helixZoneId");
-    clusterConfig.setPersistIntermediateAssignment(true);
     _configAccessor.setClusterConfig(clusterName, clusterConfig);
     // Create instance configs that do not include the domain field
     List<InstanceConfig> instanceConfigs = new ArrayList<>();

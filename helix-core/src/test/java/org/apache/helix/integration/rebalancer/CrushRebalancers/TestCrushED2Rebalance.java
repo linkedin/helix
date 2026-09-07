@@ -60,7 +60,6 @@ public class TestCrushED2Rebalance extends ZkTestBase {
     _clusterVerifier = new BestPossibleExternalViewVerifier.Builder(CLUSTER_NAME).setZkAddr(ZK_ADDR)
         .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     createParticipants();
     createResources();
   }

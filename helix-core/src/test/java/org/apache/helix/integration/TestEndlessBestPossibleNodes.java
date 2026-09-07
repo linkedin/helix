@@ -44,7 +44,6 @@ public class TestEndlessBestPossibleNodes extends ZkTestBase  {
     clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap("partcount", 1));
     clusterConfig.setDelayRebalaceEnabled(true);
     clusterConfig.setRebalanceDelayTime(57600000);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
   }
 

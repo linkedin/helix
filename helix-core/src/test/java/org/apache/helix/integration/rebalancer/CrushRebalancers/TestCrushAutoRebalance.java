@@ -100,7 +100,6 @@ public class TestCrushAutoRebalance extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true);
   }
 
@@ -185,7 +184,6 @@ public class TestCrushAutoRebalance extends ZkTestBase {
   })
   public void testLackEnoughLiveRacks() throws Exception {
     System.out.println("TestLackEnoughInstances");
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // shutdown participants within one zone
     String zone = _nodeToZoneMap.values().iterator().next();
@@ -225,7 +223,6 @@ public class TestCrushAutoRebalance extends ZkTestBase {
   })
   public void testLackEnoughRacks() throws Exception {
     System.out.println("TestLackEnoughInstances ");
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // shutdown participants within one zone
     String zone = _nodeToZoneMap.values().iterator().next();

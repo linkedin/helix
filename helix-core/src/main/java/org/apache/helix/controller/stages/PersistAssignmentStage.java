@@ -36,7 +36,6 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.MasterSlaveSMD;
 import org.apache.helix.model.Partition;
@@ -59,12 +58,6 @@ public class PersistAssignmentStage extends AbstractAsyncBaseStage {
   @Override
   public void execute(final ClusterEvent event) throws Exception {
     ResourceControllerDataProvider cache = event.getAttribute(AttributeName.ControllerDataProvider.name());
-    ClusterConfig clusterConfig = cache.getClusterConfig();
-
-    if (!clusterConfig.isPersistBestPossibleAssignment() && !clusterConfig
-        .isPersistIntermediateAssignment()) {
-      return;
-    }
 
     BestPossibleStateOutput bestPossibleAssignment =
         event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
@@ -77,7 +70,7 @@ public class PersistAssignmentStage extends AbstractAsyncBaseStage {
     for (String resourceId : bestPossibleAssignment.resourceSet()) {
       try {
         persistAssignment(resourceMap.get(resourceId), cache, event, bestPossibleAssignment,
-            clusterConfig, accessor, keyBuilder);
+            accessor, keyBuilder);
       } catch (HelixException ex) {
         LogUtil
             .logError(LOG, _eventId, "Failed to persist assignment for resource " + resourceId, ex);
@@ -87,8 +80,7 @@ public class PersistAssignmentStage extends AbstractAsyncBaseStage {
 
   private void persistAssignment(final Resource resource, final ResourceControllerDataProvider cache,
       final ClusterEvent event, final BestPossibleStateOutput bestPossibleAssignment,
-      final ClusterConfig clusterConfig, final HelixDataAccessor accessor,
-      final PropertyKey.Builder keyBuilder) {
+      final HelixDataAccessor accessor, final PropertyKey.Builder keyBuilder) {
     String resourceId = resource.getResourceName();
     if (resource != null) {
       final IdealState idealState = cache.getIdealState(resourceId);
@@ -117,11 +109,6 @@ public class PersistAssignmentStage extends AbstractAsyncBaseStage {
       }
 
       PartitionStateMap partitionStateMap = bestPossibleAssignment.getPartitionStateMap(resourceId);
-      if (clusterConfig.isPersistIntermediateAssignment()) {
-        IntermediateStateOutput intermediateAssignment =
-            event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
-        partitionStateMap = intermediateAssignment.getPartitionStateMap(resourceId);
-      }
 
       //TODO: temporary solution for Espresso/Dbus backcompatible, should remove this.
       Map<Partition, Map<String, String>> assignmentToPersist =

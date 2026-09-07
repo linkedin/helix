@@ -71,7 +71,6 @@ public class TestControllerLiveLock extends ZkUnitTestBase {
         1, // replicas
         "LeaderStandby", RebalanceMode.FULL_AUTO, true); // do rebalance
 
-    enablePersistBestPossibleAssignment(_gZkClient, clusterName, true);
 
 
     // start participants
