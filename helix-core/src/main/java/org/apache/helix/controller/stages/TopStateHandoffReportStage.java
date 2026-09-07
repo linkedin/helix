@@ -93,6 +93,10 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       long lastPipelineFinishTimestamp) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
+    // getCurrentState() rebuilds a participant's entire current state map on every call, and that
+    // map is invariant for the duration of a run, so resolve each participant at most once here
+    // instead of once per partition.
+    Map<String, Map<String, CurrentState>> currentStateMemo = new HashMap<>();
     Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
         cache.getInProgressHandoffMap();
     Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
@@ -139,7 +143,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         if (currentTopStateInstance != null) {
           reportTopStateExistence(cache, currentStateOutput, stateModelDef, resourceName, partition,
               lastTopStateInstance, currentTopStateInstance, clusterStatusMonitor,
-              durationThreshold, lastPipelineFinishTimestamp);
+              durationThreshold, lastPipelineFinishTimestamp, currentStateMemo);
           updateCachedTopStateLocation(cache, resourceName, partition, currentTopStateInstance);
 
           // Check for in-progress handoff: IdealState expects different instance than current
@@ -155,7 +159,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           }
         } else {
           reportTopStateMissing(cache, resourceName,
-              partition, stateModelDef.getTopState(), currentStateOutput);
+              partition, stateModelDef.getTopState(), currentStateOutput, currentStateMemo);
           reportTopStateHandoffFailIfNecessary(cache, resourceName, partition, durationThreshold,
               clusterStatusMonitor);
         }
@@ -462,7 +466,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       StateModelDefinition stateModelDef, String resourceName, Partition partition,
       String lastTopStateInstance, String currentTopStateInstance,
       ClusterStatusMonitor clusterStatusMonitor, long durationThreshold,
-      long lastPipelineFinishTimestamp) {
+      long lastPipelineFinishTimestamp, Map<String, Map<String, CurrentState>> currentStateMemo) {
 
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
@@ -474,18 +478,39 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       //        only if we were able to record it in the first place.
       reportTopStateComesBack(cache, currentStateOutput.getCurrentStateMap(resourceName, partition),
           resourceName, partition, clusterStatusMonitor, durationThreshold,
-          stateModelDef.getTopState());
+          stateModelDef.getTopState(), currentStateMemo);
     } else if (lastTopStateInstance != null) {
       // With no missing top state record, but top state instance changed,
       // we observed an entire top state handoff process
       reportSingleTopStateHandoff(cache, lastTopStateInstance, currentTopStateInstance,
-          resourceName, partition, clusterStatusMonitor, lastPipelineFinishTimestamp);
+          resourceName, partition, clusterStatusMonitor, lastPipelineFinishTimestamp,
+          currentStateMemo);
     } else {
       // else, there is not top state change, or top state first came up, do nothing
       LogUtil.logDebug(LOG, _eventId, String.format(
           "No top state hand off or first-seen top state for %s. CurNode: %s, LastNode: %s.",
           partition.getPartitionName(), currentTopStateInstance, lastTopStateInstance));
     }
+  }
+
+  /**
+   * Resolves a participant's current state map, reusing the result for the rest of the run.
+   * <p>
+   * {@code BaseControllerDataProvider#getCurrentState} is not an accessor: it streams, filters and
+   * collects the participant's entire current state map on every call. The result depends only on
+   * the participant and its session, both of which are fixed for the duration of a pipeline run,
+   * so memoising it collapses O(partitions) rebuilds into O(live instances).
+   *
+   * @param cache cluster data cache
+   * @param currentStateMemo per-run memo, keyed by instance name
+   * @param instanceName participant whose current states are needed
+   * @param session ephemeral owner of that participant, fixed for the run
+   */
+  private static Map<String, CurrentState> resolveCurrentStates(
+      ResourceControllerDataProvider cache, Map<String, Map<String, CurrentState>> currentStateMemo,
+      String instanceName, String session) {
+    return currentStateMemo
+        .computeIfAbsent(instanceName, instance -> cache.getCurrentState(instance, session));
   }
 
   /**
@@ -503,15 +528,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void reportSingleTopStateHandoff(ResourceControllerDataProvider cache, String lastTopStateInstance,
       String curTopStateInstance, String resourceName, Partition partition,
-      ClusterStatusMonitor clusterStatusMonitor, long lastPipelineFinishTimestamp) {
+      ClusterStatusMonitor clusterStatusMonitor, long lastPipelineFinishTimestamp,
+      Map<String, Map<String, CurrentState>> currentStateMemo) {
 
     // Current state output generation logic guarantees that current top state instance
     // must be a live instance
     String curTopStateSession = cache.getLiveInstances().get(curTopStateInstance).getEphemeralOwner();
-    // getCurrentState() rebuilds the participant's entire current state map on every call, so
-    // resolve the entry for this resource once instead of once per field read.
     CurrentState curTopStateCurrentState =
-        cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName);
+        resolveCurrentStates(cache, currentStateMemo, curTopStateInstance, curTopStateSession)
+            .get(resourceName);
     long endTime = curTopStateCurrentState.getEndTime(partition.getPartitionName());
     long toTopStateuserLatency =
         endTime - curTopStateCurrentState.getStartTime(partition.getPartitionName());
@@ -524,7 +549,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       String lastTopStateSession =
           cache.getLiveInstances().get(lastTopStateInstance).getEphemeralOwner();
       CurrentState lastTopStateCurrentState =
-          cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName);
+          resolveCurrentStates(cache, currentStateMemo, lastTopStateInstance, lastTopStateSession)
+              .get(resourceName);
       // We need this null check as there are test cases creating incomplete current state
       if (lastTopStateCurrentState != null) {
         startTime = lastTopStateCurrentState.getStartTime(partition.getPartitionName());
@@ -609,7 +635,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * @param currentStateOutput current state output
    */
   private void reportTopStateMissing(ResourceControllerDataProvider cache, String resourceName, Partition partition,
-      String topState, CurrentStateOutput currentStateOutput) {
+      String topState, CurrentStateOutput currentStateOutput,
+      Map<String, Map<String, CurrentState>> currentStateMemo) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap = cache.getMissingTopStateMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
     if (missingTopStateMap.containsKey(resourceName) && missingTopStateMap.get(resourceName)
@@ -631,8 +658,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (missingStateInstance != null) {
       Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
       if (liveInstances.containsKey(missingStateInstance)) {
-        CurrentState currentState = cache.getCurrentState(missingStateInstance,
-            liveInstances.get(missingStateInstance).getEphemeralOwner()).get(resourceName);
+        CurrentState currentState = resolveCurrentStates(cache, currentStateMemo,
+            missingStateInstance, liveInstances.get(missingStateInstance).getEphemeralOwner())
+            .get(resourceName);
 
         if (currentState != null
             && currentState.getPreviousState(partition.getPartitionName()) != null && currentState
@@ -715,7 +743,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void reportTopStateComesBack(ResourceControllerDataProvider cache, Map<String, String> stateMap, String resourceName,
       Partition partition, ClusterStatusMonitor clusterStatusMonitor, long threshold,
-      String topState) {
+      String topState, Map<String, Map<String, CurrentState>> currentStateMemo) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
     MissingTopStateRecord record =
@@ -731,9 +759,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       if (!liveInstances.containsKey(instanceName)) {
         continue;
       }
-      CurrentState currentState =
-          cache.getCurrentState(instanceName, liveInstances.get(instanceName).getEphemeralOwner())
-              .get(resourceName);
+      CurrentState currentState = resolveCurrentStates(cache, currentStateMemo, instanceName,
+          liveInstances.get(instanceName).getEphemeralOwner()).get(resourceName);
       if (currentState == null || currentState.getState(partition.getPartitionName()) == null) {
         // Current state may be transiently unavailable (e.g., transition in-flight), skip instance
         continue;
