@@ -34,8 +34,8 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
-import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.CurrentState;
@@ -192,8 +192,8 @@ public class ClusterModelProvider {
       Map<String, Set<AssignableReplica>> allocatedReplicas,
       Set<AssignableReplica> toBeAssignedReplicas, Map<String, Resource> resourceMap,
       ResourceControllerDataProvider dataProvider) {
-    WagedResourceWeightsProvider weightProvider = dataProvider.getWagedPartitionWeightProvider();
-    if (weightProvider == null) {
+    // Nothing to agree with unless the capacity check is actually running.
+    if (dataProvider.getWagedInstanceCapacity() == null) {
       return;
     }
     ClusterConfig clusterConfig = dataProvider.getClusterConfig();
@@ -238,6 +238,7 @@ public class ClusterModelProvider {
           continue;
         }
         Resource resource = resourceMap.get(resourceName);
+        ResourceConfig resourceConfig = dataProvider.getResourceConfig(resourceName);
         for (String partitionName : entry.getValue().getPartitionStateMap().keySet()) {
           // CurrentStateOutput, which is what the capacity check reads, drops partitions that are
           // no longer part of the resource. Skip them here too, otherwise a stale current-state
@@ -250,13 +251,14 @@ public class ClusterModelProvider {
           if (alreadyCharged.contains(replicaKey) || pendingPlacement.contains(replicaKey)) {
             continue;
           }
-          // Use the same weight source the capacity check uses, so the two cannot drift apart.
+          // The same weight computation the capacity check performs, so the two cannot drift apart.
           Map<String, Integer> partitionWeights =
-              weightProvider.getPartitionWeights(resourceName, partitionName);
+              WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
           if (partitionWeights == null || partitionWeights.isEmpty()) {
             continue;
           }
-          partitionWeights.forEach((key, value) -> unallocatedUsage.merge(key, value, Integer::sum));
+          partitionWeights
+              .forEach((key, value) -> unallocatedUsage.merge(key, value, Integer::sum));
         }
       }
 

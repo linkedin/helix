@@ -341,7 +341,8 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * never completes.
    * <p>
    * This deliberately does NOT touch {@link #_remainingCapacity}. Doing so would make the node look
-   * full to {@link org.apache.helix.controller.rebalancer.waged.constraints.NodeCapacityConstraint},
+   * full to
+   * {@link org.apache.helix.controller.rebalancer.waged.constraints.NodeCapacityConstraint},
    * and since a replica that fails every hard constraint aborts the whole rebalance with
    * NO_CANDIDATE_NODE, one legitimately-full instance could stop the cluster from rebalancing at
    * all. The occupancy is used only to score placement preference, so it can steer the rebalancer

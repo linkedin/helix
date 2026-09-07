@@ -42,8 +42,8 @@ class MaxCapacityUsageInstanceConstraint extends UsageSoftConstraint {
     // placement; the same rejected choice is then made again every pass. This is preference only:
     // making it a hard rule would abort the whole rebalance with NO_CANDIDATE_NODE the moment one
     // replica had nowhere to go. Identical to the previous behaviour when nothing is unaccounted.
-    float projectedHighestUtilization =
-        node.getPhysicalProjectedHighestUtilization(replica.getCapacity(), clusterContext.getPreferredScoringKeys());
+    float projectedHighestUtilization = node.getPhysicalProjectedHighestUtilization(
+        replica.getCapacity(), clusterContext.getPreferredScoringKeys());
     return computeUtilizationScore(estimatedMaxUtilization, projectedHighestUtilization);
   }
 }
