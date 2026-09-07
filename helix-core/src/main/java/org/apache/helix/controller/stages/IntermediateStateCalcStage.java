@@ -393,6 +393,12 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
     partitions.sort(new PartitionPriorityComparator(bestPossiblePartitionStateMap.getStateMap(),
         currentStateOutput.getCurrentStateMap(resourceName), stateModelDef.getTopState()));
+
+    // getEnabledLiveInstances() builds and returns a fresh HashSet on every call. Resolve it once
+    // for the whole resource: the snapshot is fixed for the duration of a pipeline run, so
+    // hoisting it out of the per-partition loop is behaviour-preserving.
+    Set<String> enabledLiveInstances = cache.getEnabledLiveInstances();
+
     for (Partition partition : partitions) {
       if (resourceMessageMap.get(partition) == null || resourceMessageMap.get(partition)
           .isEmpty()) {
@@ -403,7 +409,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
           currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet().stream()
               .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
       List<String> preferenceList = preferenceLists.get(partition.getPartitionName());
-      Map<String, Integer> requiredState = getRequiredStates(resourceName, cache, preferenceList);
+      Map<String, Integer> requiredState =
+          getRequiredStates(resourceName, cache, preferenceList, enabledLiveInstances);
       if (preferenceList != null && !preferenceList.isEmpty()) {
         // Sort messages based on the priority (priority is defined in the state model definition
         messagesToThrottle.sort(new MessagePriorityComparator(preferenceList, stateModelDef.getStatePriorityMap()));
@@ -507,13 +514,18 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     String resourceName = resource.getResourceName();
     boolean recoveryRebalanceForTopStateDownwardTransition =
         cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
+
+    // Resolved once for the whole resource — see the note in computeIntermediatePartitionState().
+    Set<String> enabledLiveInstances = cache.getEnabledLiveInstances();
+
     // check and charge pending transitions
     for (Partition partition : resource.getPartitions()) {
       // To clarify that custom mode does not apply recovery/load rebalance since user can define different number of
       // replicas for different partitions. Actually, the custom will stopped from resource level checks if this resource
       // is not FULL_AUTO, we will return best possible state and do nothing.
       Map<String, Integer> requiredStates =
-          getRequiredStates(resourceName, cache, preferenceLists.get(partition.getPartitionName()));
+          getRequiredStates(resourceName, cache, preferenceLists.get(partition.getPartitionName()),
+              enabledLiveInstances);
       // Maps instance to its current state
       Map<String, String> currentStateMap =
           currentStateOutput.getCurrentStateMap(resourceName, partition);
@@ -692,7 +704,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   }
 
   private Map<String, Integer> getRequiredStates(String resourceName,
-      ResourceControllerDataProvider resourceControllerDataProvider, List<String> preferenceList) {
+      ResourceControllerDataProvider resourceControllerDataProvider, List<String> preferenceList,
+      Set<String> enabledLiveInstances) {
 
     // Prepare required inputs: 1) Priority State List 2) required number of replica
     IdealState idealState = resourceControllerDataProvider.getIdealState(resourceName);
@@ -702,13 +715,6 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
         idealState.getMinActiveReplicas() == -1 ?
             idealState.getReplicaCount(preferenceList == null ? 0 : preferenceList.size())
             : idealState.getMinActiveReplicas();
-
-    // Each call to getEnabledLiveInstances() builds and returns a fresh HashSet. Resolve it once
-    // here: both branches below need it unconditionally, and evaluating it inside the filter
-    // predicate rebuilt the set once per preference list entry, per partition, on every pipeline
-    // run. The snapshot is fixed for the duration of a pipeline run, so hoisting is
-    // behaviour-preserving.
-    Set<String> enabledLiveInstances = resourceControllerDataProvider.getEnabledLiveInstances();
 
     // Generate a state mapping, state -> required numbers based on the live and enabled instances for this partition
     // preference list
