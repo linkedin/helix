@@ -25,12 +25,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.testng.Assert;
@@ -173,6 +175,78 @@ public class TestUnallocatedOccupancyScoping extends AbstractTestClusterModel {
 
     Assert.assertEquals(totalUnallocatedOccupancy(partial), 0,
         "with the flag off nothing may be collected");
+  }
+
+  /**
+   * The constraint carries a weight of 100000, which dwarfs PartitionMovementConstraint's maximum
+   * effective influence of 2000. If a replica already sitting on a penalised instance were scored
+   * against that instance, movement stickiness could not hold it there and enabling the feature
+   * would evict healthy replicas off any instance holding unaccounted occupancy.
+   * <p>
+   * It cannot, and the reason is structural rather than a matter of weights: replicas that already
+   * match the ideal assignment are separated into allocatedReplicas, pre-assigned via
+   * assignInitBatch, and the ClusterModel is constructed with only toBeAssignedReplicas. Soft
+   * constraints score the latter. An existing placement is therefore never a candidate for any soft
+   * constraint to have an opinion about. This test pins that separation on an instance that is
+   * simultaneously holding unaccounted occupancy.
+   */
+  @Test
+  public void testExistingPlacementsAreNotScoredAndSoCannotBeEvicted() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+
+    // Partition1 is already placed on the instance and the ideal assignment agrees, so it is an
+    // existing placement. Partition2 is wanted by the ideal assignment but is not there yet, so it
+    // is a live placement decision. Both are handled in the same pass, which is what makes the
+    // exclusion below meaningful rather than an artifact of there being nothing to place at all.
+    String resource = _resourceNames.get(0);
+    String existing = _partitionNames.get(0);
+    String pending = _partitionNames.get(1);
+
+    ResourceAssignment ideal = new ResourceAssignment(resource);
+    ideal.addReplicaMap(new Partition(existing),
+        Collections.singletonMap(_testInstanceId, "MASTER"));
+    ideal.addReplicaMap(new Partition(pending),
+        Collections.singletonMap(_testInstanceId, "MASTER"));
+    Map<String, ResourceAssignment> idealAssignment = new HashMap<>();
+    idealAssignment.put(resource, ideal);
+
+    ResourceAssignment current = new ResourceAssignment(resource);
+    current.addReplicaMap(new Partition(existing),
+        Collections.singletonMap(_testInstanceId, "MASTER"));
+    Map<String, ResourceAssignment> currentAssignment = new HashMap<>();
+    currentAssignment.put(resource, current);
+
+    ClusterModel model = ClusterModelProvider.generateClusterModelForPartialRebalance(cache,
+        resourceMap(), new HashSet<>(Collections.singletonList(_testInstanceId)), idealAssignment,
+        currentAssignment);
+
+    AssignableNode node = model.getAssignableNodes().get(_testInstanceId);
+    Assert.assertNotNull(node);
+
+    Assert.assertTrue(totalUnallocatedOccupancy(model) > 0,
+        "the instance must be carrying unaccounted occupancy, otherwise the constraint would be "
+            + "inert here and this test would prove nothing about what happens when it is active");
+
+    Set<String> scored = model.getAssignableReplicaMap().values().stream()
+        .flatMap(Set::stream)
+        .map(r -> r.getResourceName() + "|" + r.getPartitionName())
+        .collect(Collectors.toSet());
+
+    // Without this guard the exclusion below would pass trivially against an empty set.
+    Assert.assertTrue(scored.contains(resource + "|" + pending),
+        "the pending placement must actually be up for scoring, otherwise the exclusion of the "
+            + "existing placement proves nothing; scored was " + scored);
+
+    Assert.assertFalse(scored.contains(resource + "|" + existing),
+        "an existing placement matching the ideal assignment must never be offered to the soft "
+            + "constraints, no matter how heavily its instance is penalised; scored was " + scored);
+
+    Set<String> held = node.getAssignedReplicas().stream()
+        .map(r -> r.getResourceName() + "|" + r.getPartitionName())
+        .collect(Collectors.toSet());
+    Assert.assertTrue(held.contains(resource + "|" + existing),
+        "the existing placement must instead be pre-assigned to the node before any constraint "
+            + "runs; the node held " + held);
   }
 
   /**
