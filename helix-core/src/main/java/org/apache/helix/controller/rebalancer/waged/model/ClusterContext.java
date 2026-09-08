@@ -30,11 +30,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
-import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.model.ResourceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,8 +74,6 @@ public class ClusterContext {
   private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
   private final String _clusterName;
-  // Reference to the data provider for accessing resource configurations
-  private final ResourceControllerDataProvider _dataProvider;
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -85,18 +81,12 @@ public class ClusterContext {
    */
   ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
                  Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment) {
-    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, null, null);
+    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, null);
   }
 
   ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
                  Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment,
                  ClusterConfig clusterConfig) {
-    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, clusterConfig, null);
-  }
-
-  ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
-                 Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment,
-                 ClusterConfig clusterConfig, ResourceControllerDataProvider dataProvider) {
     int instanceCount = nodeSet.size();
     int totalReplicas = 0;
     int totalTopStateReplicas = 0;
@@ -105,7 +95,6 @@ public class ClusterContext {
     Map<String, Long> totalCapacity = new HashMap<>();
     _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
-    _dataProvider = dataProvider;
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
         .collect(Collectors.groupingBy(AssignableReplica::getResourceName))
@@ -330,28 +319,4 @@ public class ClusterContext {
     return Collections.unmodifiableMap(estimateUtilization);
   }
 
-  /**
-   * Helper method to determine if relaxed disabled partition constraint is enabled.
-   * Checks resource-level configuration first, then falls back to cluster-level configuration.
-   *
-   * @param resourceName the name of the resource
-   * @return true if relaxed disabled partition constraint is enabled for the resource
-   */
-  public boolean isRelaxedDisabledPartitionConstraintEnabled(String resourceName) {
-    if (_dataProvider == null) {
-      return false; // Default to false if no data provider available
-    }
-
-    // Check resource-level configuration first
-    ResourceConfig resourceConfig = _dataProvider.getResourceConfig(resourceName);
-    if (resourceConfig != null) {
-      Boolean resourceLevel = resourceConfig.isRelaxedDisabledPartitionConstraintEnabled();
-      if (resourceLevel != null) {
-        return resourceLevel; // Resource-level override takes precedence
-      }
-    }
-
-    // Fall back to cluster-level configuration
-    return _dataProvider.getClusterConfig().isRelaxedDisabledPartitionConstraintEnabled();
-  }
 }

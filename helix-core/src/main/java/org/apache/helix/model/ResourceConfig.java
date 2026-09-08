@@ -61,7 +61,6 @@ public class ResourceConfig extends HelixProperty {
     EXTERNAL_VIEW_DISABLED,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
-    RELAXED_DISABLED_PARTITION_CONSTRAINT, // Resource-level override for relaxed disabled partition constraint
     ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
 
@@ -384,34 +383,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public Boolean isExternalViewDisabled() {
     return _record.getBooleanField(ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(), false);
-  }
-
-  /**
-   * Whether the relaxed disabled partition constraint is enabled for this resource.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE 
-   * instead of being immediately reassigned for this specific resource.
-   * This setting overrides the cluster-level configuration for this resource.
-   * @return true if enabled, false if disabled, null if not set (uses cluster default)
-   */
-  public Boolean isRelaxedDisabledPartitionConstraintEnabled() {
-    String value = _record.getSimpleField(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name());
-    return value != null ? Boolean.valueOf(value) : null;
-  }
-
-  /**
-   * Enable/disable relaxed disabled partition constraint for this resource.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE 
-   * instead of being immediately reassigned for this specific resource.
-   * This setting overrides the cluster-level configuration for this resource.
-   * @param enabled true to enable relaxed constraint, false for strict constraint, 
-   *                null to use cluster default
-   */
-  public void setRelaxedDisabledPartitionConstraint(Boolean enabled) {
-    if (enabled == null) {
-      _record.getSimpleFields().remove(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name());
-    } else {
-      _record.setBooleanField(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
-    }
   }
 
   /**
