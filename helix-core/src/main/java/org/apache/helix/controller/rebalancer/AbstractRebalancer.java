@@ -559,6 +559,9 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
     protected final List<String> _preferenceList;
     protected final ResourceControllerDataProvider _cache;
     protected final Map<String, Integer> _mzReplicaCountMap;
+    // Per-instance fault zone, resolved once so that InstanceConfig.getDomainAsMap() is not
+    // re-parsed for every comparison (compare() runs O(n log n) times per partition sort).
+    private final Map<String, String> _instanceFaultZoneMap;
 
     public PreferenceListNodeComparator(Map<String, String> currentStateMap,
         StateModelDefinition stateModelDef, List<String> preferenceList) {
@@ -566,6 +569,7 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
       _stateModelDef = stateModelDef;
       _preferenceList = preferenceList;
       _cache = null;
+      _instanceFaultZoneMap = Collections.emptyMap();
       _mzReplicaCountMap = null;
     }
 
@@ -575,6 +579,7 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
       _stateModelDef = stateModelDef;
       _preferenceList = preferenceList;
       _cache = cache;
+      _instanceFaultZoneMap = buildInstanceFaultZoneMap();
       _mzReplicaCountMap = populateMzReplicaCountMap();
     }
 
@@ -598,11 +603,8 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
 
       // Order by MZ representation (overrepresented should be dropped first)
       if (_mzReplicaCountMap != null && !_mzReplicaCountMap.isEmpty()) {
-        String faultZoneType = _cache.getClusterConfig().getFaultZoneType();
-        String mz1 = _cache.getInstanceConfigMap().get(ins1) != null ?
-            _cache.getInstanceConfigMap().get(ins1).getDomainAsMap().get(faultZoneType) : null;
-        String mz2 = _cache.getInstanceConfigMap().get(ins2) != null ?
-            _cache.getInstanceConfigMap().get(ins2).getDomainAsMap().get(faultZoneType) : null;
+        String mz1 = _instanceFaultZoneMap.get(ins1);
+        String mz2 = _instanceFaultZoneMap.get(ins2);
 
         int mz1Count = _mzReplicaCountMap.getOrDefault(mz1, 0);
         int mz2Count = _mzReplicaCountMap.getOrDefault(mz2, 0);
@@ -625,16 +627,39 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
       return p1.compareTo(p2);
     }
 
+    // Resolve each instance's fault zone exactly once (parsing InstanceConfig.getDomainAsMap()),
+    // covering every instance that populateMzReplicaCountMap() or compare() may look up. The
+    // instances that can be compared are a subset of the current-state instances and the
+    // preference list, so those are the only entries we need to resolve.
+    private Map<String, String> buildInstanceFaultZoneMap() {
+      if (_cache == null || _cache.getInstanceConfigMap() == null ||
+          _cache.getClusterConfig() == null || !_cache.getClusterConfig().isTopologyAwareEnabled()) {
+        return Collections.emptyMap();
+      }
+      String faultZoneType = _cache.getClusterConfig().getFaultZoneType();
+
+      Set<String> instances = new HashSet<>(_currentStateMap.keySet());
+      instances.addAll(_preferenceList);
+
+      Map<String, String> instanceFaultZoneMap = new HashMap<>();
+      for (String instance : instances) {
+        if (_cache.getInstanceConfigMap().get(instance) != null) {
+          instanceFaultZoneMap.put(instance,
+              _cache.getInstanceConfigMap().get(instance).getDomainAsMap().get(faultZoneType));
+        }
+      }
+      return instanceFaultZoneMap;
+    }
+
     private Map<String, Integer> populateMzReplicaCountMap() {
       if (_cache == null || _cache.getInstanceConfigMap() == null ||
           _cache.getClusterConfig() == null || !_cache.getClusterConfig().isTopologyAwareEnabled() ) {
         return Collections.emptyMap();
       }
-      String faultZoneType = _cache.getClusterConfig().getFaultZoneType();
 
       Map<String, Integer> mzReplicaCountMap = new HashMap<>();
       for (String instance : _currentStateMap.keySet()) {
-        String mz = _cache.getInstanceConfigMap().get(instance).getDomainAsMap().get(faultZoneType);
+        String mz = _instanceFaultZoneMap.get(instance);
         if (mzReplicaCountMap.containsKey(mz)) {
           mzReplicaCountMap.put(mz, mzReplicaCountMap.get(mz) + 1);
         } else {
