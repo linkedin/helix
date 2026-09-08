@@ -47,6 +47,23 @@ public class TestConstraintWeightDominance {
     return (Map<SoftConstraint, Float>) field.get(algorithm);
   }
 
+  @SuppressWarnings("unchecked")
+  private Map<SoftConstraint, Float> weightsWithForcedBaselineConverge() throws Exception {
+    RebalanceAlgorithm algorithm = ConstraintBasedAlgorithmFactory.getInstance(
+        ImmutableMap.of(ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS, 1,
+            ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT, 1,
+            ClusterConfig.GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 1));
+    Field field = algorithm.getClass().getDeclaredField("_softConstraints");
+    field.setAccessible(true);
+    return (Map<SoftConstraint, Float>) field.get(algorithm);
+  }
+
+  private float baselineInfluenceWeight(Map<SoftConstraint, Float> weights) {
+    return weights.entrySet().stream()
+        .filter(e -> e.getKey() instanceof BaselineInfluenceConstraint).map(Map.Entry::getValue)
+        .findFirst().orElseThrow(() -> new AssertionError("constraint not registered"));
+  }
+
   private float physicalCapacityWeight(Map<SoftConstraint, Float> weights) {
     return weights.entrySet().stream()
         .filter(e -> e.getKey() instanceof PhysicalCapacitySoftConstraint).map(Map.Entry::getValue)
@@ -57,6 +74,43 @@ public class TestConstraintWeightDominance {
     return (float) weights.entrySet().stream()
         .filter(e -> !(e.getKey() instanceof PhysicalCapacitySoftConstraint))
         .mapToDouble(Map.Entry::getValue).sum();
+  }
+
+  /**
+   * FORCE_BASELINE_CONVERGE raises BaselineInfluenceConstraint to the same 100000 used here, and
+   * the two then argue about the same placement with equal authority. The baseline is exactly the
+   * ledger that cannot see wedged replicas, because occupancy is collected for PARTIAL scope only,
+   * so under this preference the blind plan can outvote the physical reality.
+   * <p>
+   * Worked through with the scores the two constraints actually return: a saturated instance the
+   * baseline wants scores 1.0 for baseline influence and at most 0.5 for physical room, while a
+   * healthy instance the baseline does not want scores 0.0 and 1.0. That is 150000 against 100000
+   * at the extreme, and the saturated instance wins.
+   * <p>
+   * This documents a real limitation rather than asserting desired behaviour. The preference
+   * defaults to 0, so the fix is unaffected unless a cluster opts in.
+   */
+  @Test
+  public void testForcedBaselineConvergeCanOutvotePhysicalCapacity() throws Exception {
+    Map<SoftConstraint, Float> weights = weightsWithForcedBaselineConverge();
+
+    float physical = physicalCapacityWeight(weights);
+    float baseline = baselineInfluenceWeight(weights);
+
+    Assert.assertEquals(baseline, physical, 0.001f,
+        "the two constraints are expected to carry equal weight under this preference; if this "
+            + "changes the limitation described below may no longer hold");
+
+    // Best case for the saturated instance: baseline matches exactly (1.0), physical room is at
+    // its highest penalised value (just under 0.5).
+    double saturatedInBaseline = baseline * 1.0d + physical * 0.5d;
+    // Healthy instance the baseline does not mention: no baseline credit, full physical score.
+    double healthyNotInBaseline = baseline * 0.0d + physical * 1.0d;
+
+    Assert.assertTrue(saturatedInBaseline > healthyNotInBaseline,
+        "documents the limitation: with FORCE_BASELINE_CONVERGE a saturated instance named by the "
+            + "baseline can outscore a healthy one. saturated=" + saturatedInBaseline
+            + " healthy=" + healthyNotInBaseline);
   }
 
   /**
