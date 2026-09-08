@@ -190,9 +190,16 @@ public class ClusterModelProvider {
    * either owned or reserved.
    */
   private static void recordUnallocatedCurrentStateOccupancy(Set<AssignableNode> assignableNodes,
-      Map<String, Set<AssignableReplica>> allocatedReplicas,
-      Set<AssignableReplica> toBeAssignedReplicas, Map<String, Resource> resourceMap,
-      ResourceControllerDataProvider dataProvider) {
+      Map<String, Set<AssignableReplica>> allocatedReplicas, Map<String, Resource> resourceMap,
+      ResourceControllerDataProvider dataProvider, ClusterModel.RebalanceScopeType scopeType) {
+    // Only the partial scope. The baseline is a from-scratch ideal placement that deliberately
+    // ignores where replicas currently sit; there nothing is pre-allocated, so every instance
+    // would report its entire load as unaccounted and the whole cluster would look full. It is
+    // also the best-possible assignment, computed in the partial scope, that the capacity check
+    // prunes -- so that is the ledger this needs to agree with.
+    if (scopeType != ClusterModel.RebalanceScopeType.PARTIAL) {
+      return;
+    }
     // Nothing to agree with unless the capacity check is actually running.
     if (dataProvider.getWagedInstanceCapacity() == null) {
       return;
@@ -202,14 +209,6 @@ public class ClusterModelProvider {
       return;
     }
     Map<String, LiveInstance> liveInstances = dataProvider.getAssignableLiveInstances();
-
-    // Partitions the algorithm is about to place. The score for such a replica already counts its
-    // own weight as the proposed new usage, so including it here as well would charge it twice
-    // against the instance it currently sits on and bias the algorithm against leaving it there.
-    // Only occupancy outside the algorithm's view belongs in this map.
-    Set<String> pendingPlacement = toBeAssignedReplicas.stream()
-        .map(replica -> occupancyKey(replica.getResourceName(), replica.getPartitionName()))
-        .collect(Collectors.toSet());
 
     for (AssignableNode node : assignableNodes) {
       LiveInstance liveInstance = liveInstances.get(node.getInstanceName());
@@ -226,10 +225,11 @@ public class ClusterModelProvider {
       // physically present must be charged exactly once.
       Set<String> alreadyCharged = allocatedReplicas
           .getOrDefault(node.getLogicalId(), Collections.emptySet()).stream()
-          .map(replica -> occupancyKey(replica.getResourceName(), replica.getPartitionName()))
+          .map(r -> AssignableNode.occupancyKey(r.getResourceName(), r.getPartitionName()))
           .collect(Collectors.toSet());
 
       Map<String, Integer> unallocatedUsage = new HashMap<>();
+      Set<String> unallocatedKeys = new HashSet<>();
       for (Map.Entry<String, CurrentState> entry : currentStates.entrySet()) {
         String resourceName = entry.getKey();
         // Mirror the capacity check's scope: WAGED-managed resources only.
@@ -247,8 +247,8 @@ public class ClusterModelProvider {
           if (resource.getPartition(partitionName) == null) {
             continue;
           }
-          String replicaKey = occupancyKey(resourceName, partitionName);
-          if (alreadyCharged.contains(replicaKey) || pendingPlacement.contains(replicaKey)) {
+          String replicaKey = AssignableNode.occupancyKey(resourceName, partitionName);
+          if (alreadyCharged.contains(replicaKey)) {
             continue;
           }
           // The same weight computation the capacity check performs, so the two cannot drift apart.
@@ -257,6 +257,7 @@ public class ClusterModelProvider {
           if (partitionWeights == null || partitionWeights.isEmpty()) {
             continue;
           }
+          unallocatedKeys.add(replicaKey);
           partitionWeights
               .forEach((key, value) -> unallocatedUsage.merge(key, value, Integer::sum));
         }
@@ -265,13 +266,9 @@ public class ClusterModelProvider {
       if (!unallocatedUsage.isEmpty()) {
         logger.info("Instance {} holds occupancy absent from its assignment: {}. Placement "
             + "preference will account for it.", node.getInstanceName(), unallocatedUsage);
-        node.setUnallocatedOccupancy(unallocatedUsage);
+        node.setUnallocatedOccupancy(unallocatedUsage, unallocatedKeys);
       }
     }
-  }
-
-  private static String occupancyKey(String resourceName, String partitionName) {
-    return resourceName + "#" + partitionName;
   }
 
   /**
@@ -375,8 +372,8 @@ public class ClusterModelProvider {
     // instance but absent from that allocation still occupies real space, and the capacity check
     // charges it, so the rebalancer would otherwise treat that instance as the emptiest available
     // and keep proposing placements the capacity check rejects. Record it for preference scoring.
-    recordUnallocatedCurrentStateOccupancy(assignableNodes, allocatedReplicas, toBeAssignedReplicas,
-        resourceMap, dataProvider);
+    recordUnallocatedCurrentStateOccupancy(assignableNodes, allocatedReplicas, resourceMap,
+        dataProvider, scopeType);
 
     // Construct and initialize cluster context.
     ClusterContext context = new ClusterContext(

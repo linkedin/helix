@@ -239,9 +239,27 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     LOG.debug("Disabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
     removeFullLoggingForCluster();
 
+    // Occupancy that is physically present but absent from the rebalancer's assignment -- for
+    // example a replica wedged in a state whose drop transition never completes -- leaves an
+    // instance looking emptier than it is, so it keeps winning placements that the capacity check
+    // downstream then prunes. Narrow the candidates to nodes that still have room once that
+    // occupancy is counted.
+    //
+    // This is a candidate filter rather than a hard constraint or a scoring signal on purpose.
+    // A hard constraint that rejects every node aborts the entire rebalance with
+    // NO_CANDIDATE_NODE, so the roomier set is used only when it is non-empty; otherwise the
+    // original candidates stand and behaviour is unchanged. Scoring cannot express this either:
+    // the utilization score saturates once a node is meaningfully above the cluster average, so
+    // a full node and a half-empty one both normalize to ~0 and the signal disappears.
+    List<AssignableNode> nodesWithPhysicalRoom = candidateNodes.stream()
+        .filter(candidateNode -> candidateNode.hasPhysicalRoomFor(replica))
+        .collect(Collectors.toList());
+    List<AssignableNode> nodesToScore =
+        nodesWithPhysicalRoom.isEmpty() ? candidateNodes : nodesWithPhysicalRoom;
+
     // Execute second parallelStream within custom ForkJoinPool context
     return executeInPool(
-        () -> candidateNodes.parallelStream()
+        () -> nodesToScore.parallelStream()
             .map(node -> new HashMap.SimpleEntry<>(node,
                 getAssignmentNormalizedScore(node, replica, clusterContext)))
             .max((nodeEntry1, nodeEntry2) -> {

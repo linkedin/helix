@@ -65,7 +65,12 @@ public class AssignableNode implements Comparable<AssignableNode> {
   private Map<String, Integer> _remainingCapacity;
   // Occupancy physically present on the node but absent from its assignment. Preference-scoring
   // input only; never consulted by hard constraints, so it cannot make placement infeasible.
+  // Invariant: this holds exactly the physical occupancy that _remainingCapacity does NOT yet
+  // reflect, so assign()/release() move weight across the boundary to keep it charged once.
   private Map<String, Integer> _unallocatedOccupancy = Collections.emptyMap();
+  // Keys (resource|partition) that were physically present but unaccounted at model build time.
+  // Immutable; _unallocatedOccupancy is the mutable running total for these keys.
+  private Set<String> _unallocatedOccupancyKeys = Collections.emptySet();
   private Map<String, Integer> _remainingTopStateCapacity;
 
   /**
@@ -139,6 +144,9 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (assignableReplica.isReplicaTopState()) {
       updateRemainingCapacity(assignableReplica.getCapacity(), _remainingTopStateCapacity, false);
     }
+    // Now reflected in _remainingCapacity, so it must leave the unallocated total or it would be
+    // charged twice.
+    moveOutOfUnallocatedOccupancy(assignableReplica, true);
   }
 
   /**
@@ -171,6 +179,37 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (removedReplica.isReplicaTopState()) {
       updateRemainingCapacity(removedReplica.getCapacity(), _remainingTopStateCapacity, true);
     }
+    // Rollback of an assignment: the replica is physically still here, so its weight goes back to
+    // the unallocated total that _remainingCapacity no longer reflects.
+    moveOutOfUnallocatedOccupancy(removedReplica, false);
+  }
+
+  /**
+   * Keep the unallocated-occupancy total in step with _remainingCapacity for a replica that is
+   * physically present on this node but was not part of the assignment the model was built with.
+   * Such a replica must be charged exactly once: while unassigned it is counted in
+   * _unallocatedOccupancy, and once assigned it is counted in _remainingCapacity instead.
+   * @param replica the replica being assigned or released
+   * @param assigned true when the replica was just assigned, false when an assignment was reverted
+   */
+  private void moveOutOfUnallocatedOccupancy(AssignableReplica replica, boolean assigned) {
+    if (!_unallocatedOccupancyKeys
+        .contains(occupancyKey(replica.getResourceName(), replica.getPartitionName()))) {
+      return;
+    }
+    for (Map.Entry<String, Integer> capacity : replica.getCapacity().entrySet()) {
+      _unallocatedOccupancy.merge(capacity.getKey(),
+          assigned ? -capacity.getValue() : capacity.getValue(), Integer::sum);
+    }
+  }
+
+  /**
+   * The key identifying a replica within the unallocated-occupancy bookkeeping. Deliberately
+   * (resource, partition) rather than (resource, partition, state) so it matches the granularity
+   * the capacity check itself dedupes on.
+   */
+  static String occupancyKey(String resourceName, String partitionName) {
+    return resourceName + "|" + partitionName;
   }
 
   /**
@@ -266,20 +305,45 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * For example, if the current node usage is {CPU: 0.9, MEM: 0.4, DISK: 0.6}, preferredScoringKeys: [ CPU ]
    * Then this call shall return 0.9.
    *
-   * This also counts occupancy that is physically present on the node but absent from the
-   * assignment computed for it, so a node holding replicas the rebalancer cannot see does not
-   * report itself as the emptiest in the cluster and attract further placement. Only utilization
-   * scoring accounts for it; the hard capacity constraint does not, so it can steer placement away
-   * from such a node but can never make placement infeasible.
-   *
    * @param newUsage            the proposed new additional capacity usage.
    * @param preferredScoringKeys if provided, the capacity utilization will be calculated based on
    *                            the supplied keys only, else across all capacity categories.
    * @return The highest utilization number of the node among the specified capacity category.
    */
-  public float getGeneralProjectedHighestUtilization(Map<String, Integer> newUsage, List<String> preferredScoringKeys) {
-    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys,
-        _unallocatedOccupancy);
+  public float getGeneralProjectedHighestUtilization(Map<String, Integer> newUsage,
+      List<String> preferredScoringKeys) {
+    return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys);
+  }
+
+  /**
+   * Whether the node has room for the replica once occupancy that is physically present but absent
+   * from the rebalancer's assignment is taken into account.
+   * <p>
+   * This is deliberately NOT wired into
+   * {@link org.apache.helix.controller.rebalancer.waged.constraints.NodeCapacityConstraint}. A hard
+   * constraint that rejects every node aborts the whole rebalance with NO_CANDIDATE_NODE, so this
+   * is used only to narrow the candidate set when a roomier alternative exists.
+   * @param replica the replica being placed
+   * @return true if the replica fits in the capacity left after unaccounted occupancy
+   */
+  public boolean hasPhysicalRoomFor(AssignableReplica replica) {
+    // With no unaccounted occupancy there is nothing to add beyond what the configured hard
+    // constraints have already evaluated, so this must not filter anything on its own.
+    if (_unallocatedOccupancy.isEmpty()) {
+      return true;
+    }
+    for (Map.Entry<String, Integer> required : replica.getCapacity().entrySet()) {
+      Integer remaining = _remainingCapacity.get(required.getKey());
+      if (remaining == null) {
+        continue;
+      }
+      int physicallyRemaining =
+          remaining - _unallocatedOccupancy.getOrDefault(required.getKey(), 0);
+      if (physicallyRemaining < required.getValue()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -320,13 +384,6 @@ public class AssignableNode implements Comparable<AssignableNode> {
 
   private float getProjectedHighestUtilization(Map<String, Integer> newUsage,
       Map<String, Integer> remainingCapacity, List<String> preferredScoringKeys) {
-    return getProjectedHighestUtilization(newUsage, remainingCapacity, preferredScoringKeys,
-        Collections.emptyMap());
-  }
-
-  private float getProjectedHighestUtilization(Map<String, Integer> newUsage,
-      Map<String, Integer> remainingCapacity, List<String> preferredScoringKeys,
-      Map<String, Integer> additionalUsage) {
     Set<String> capacityKeySet = _maxAllowedCapacity.keySet();
     if (preferredScoringKeys != null && preferredScoringKeys.size() != 0 && capacityKeySet.contains(preferredScoringKeys.get(0))) {
       capacityKeySet = preferredScoringKeys.stream().collect(Collectors.toSet());
@@ -335,8 +392,7 @@ public class AssignableNode implements Comparable<AssignableNode> {
     for (String capacityKey : capacityKeySet) {
       float capacityValue = _maxAllowedCapacity.get(capacityKey);
       float utilization = (capacityValue - remainingCapacity.get(capacityKey) + newUsage
-          .getOrDefault(capacityKey, 0) + additionalUsage.getOrDefault(capacityKey, 0))
-          / capacityValue;
+          .getOrDefault(capacityKey, 0)) / capacityValue;
       highestCapacityUtilization = Math.max(highestCapacityUtilization, utilization);
     }
     return highestCapacityUtilization;
@@ -354,9 +410,15 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * NO_CANDIDATE_NODE, one legitimately-full instance could stop the cluster from rebalancing at
    * all. The occupancy is used only to score placement preference, so it can steer the rebalancer
    * away from such an instance without ever making placement infeasible.
+   * @param unallocatedOccupancy running total of unaccounted weight, by capacity key. Must be
+   *                             mutable: assign()/release() adjust it as replicas move into and
+   *                             out of the assignment.
+   * @param unallocatedOccupancyKeys the (resource, partition) keys making up that total
    */
-  void setUnallocatedOccupancy(Map<String, Integer> unallocatedOccupancy) {
+  void setUnallocatedOccupancy(Map<String, Integer> unallocatedOccupancy,
+      Set<String> unallocatedOccupancyKeys) {
     _unallocatedOccupancy = unallocatedOccupancy;
+    _unallocatedOccupancyKeys = unallocatedOccupancyKeys;
   }
 
   public String getInstanceName() {
