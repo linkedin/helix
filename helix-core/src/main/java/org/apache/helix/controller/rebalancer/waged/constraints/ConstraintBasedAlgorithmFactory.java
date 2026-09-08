@@ -74,8 +74,16 @@ public class ConstraintBasedAlgorithmFactory {
       put(ResourcePartitionAntiAffinityConstraint.class.getSimpleName(), 1f);
       put(TopStateMaxCapacityUsageInstanceConstraint.class.getSimpleName(), 3f);
       put(MaxCapacityUsageInstanceConstraint.class.getSimpleName(), 6f);
+      put(PhysicalCapacitySoftConstraint.class.getSimpleName(), PHYSICAL_CAPACITY_WEIGHT);
     }
   };
+  // Placing a replica on an instance that is already physically full is pathological rather than
+  // merely suboptimal, so this outweighs the evenness and movement constraints instead of trading
+  // against them. The rebalance preferences scale those up to 1000, taking their maximum combined
+  // weight to 13500; this number, multiplied by the 0.5 score gap that a full instance is
+  // guaranteed to concede, must stay clear of that. It is overridable through the soft constraint
+  // weight properties so that the behaviour can be ramped rather than switched.
+  private static final float PHYSICAL_CAPACITY_WEIGHT = 100000f;
   // The weight for BaselineInfluenceConstraint used when we are forcing a baseline converge. This
   // number, multiplied by the max score returned by BaselineInfluenceConstraint, must be greater
   // than the total maximum sum of all other constraints, in order to overpower other constraints.
@@ -112,7 +120,7 @@ public class ConstraintBasedAlgorithmFactory {
         .of(new PartitionMovementConstraint(), new BaselineInfluenceConstraint(),
             new InstancePartitionsCountConstraint(), new ResourcePartitionAntiAffinityConstraint(),
             new TopStateMaxCapacityUsageInstanceConstraint(),
-            new MaxCapacityUsageInstanceConstraint());
+            new MaxCapacityUsageInstanceConstraint(), new PhysicalCapacitySoftConstraint());
     Map<SoftConstraint, Float> softConstraintsWithWeight = Maps.toMap(softConstraints, key -> {
       if (key instanceof BaselineInfluenceConstraint && forceBaselineConverge) {
         return FORCE_BASELINE_CONVERGE_WEIGHT;

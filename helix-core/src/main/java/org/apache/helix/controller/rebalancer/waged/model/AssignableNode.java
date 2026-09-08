@@ -326,12 +326,25 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * @param replica the replica being placed
    * @return true if the replica fits in the capacity left after unaccounted occupancy
    */
-  public boolean hasPhysicalRoomFor(AssignableReplica replica) {
-    // With no unaccounted occupancy there is nothing to add beyond what the configured hard
-    // constraints have already evaluated, so this must not filter anything on its own.
+  /**
+   * Score how much physical room this node has for the replica, where physical means the
+   * occupancy the rebalancer allocated plus the occupancy that is present on the instance but
+   * absent from its allocation.
+   * <p>
+   * Returns 1 when the replica fits, and degrades continuously towards 0 as the instance gets
+   * further overcommitted, so that a caller choosing among instances that are all full still
+   * prefers the least overcommitted one. The scale is deliberately linear rather than the
+   * saturating sigmoid used by the utilization constraints.
+   * @param replica the replica being considered
+   * @return a score in [0, 1], higher meaning more physical room
+   */
+  public double getPhysicalRoomScore(AssignableReplica replica) {
+    // Without unaccounted occupancy this carries no information beyond what the hard constraints
+    // have already evaluated, so it must score every candidate identically and change nothing.
     if (_unallocatedOccupancy.isEmpty()) {
-      return true;
+      return 1d;
     }
+    double lowestRatio = 1d;
     for (Map.Entry<String, Integer> required : replica.getCapacity().entrySet()) {
       Integer remaining = _remainingCapacity.get(required.getKey());
       if (remaining == null) {
@@ -339,11 +352,13 @@ public class AssignableNode implements Comparable<AssignableNode> {
       }
       int physicallyRemaining =
           remaining - _unallocatedOccupancy.getOrDefault(required.getKey(), 0);
-      if (physicallyRemaining < required.getValue()) {
-        return false;
-      }
+      // A zero-weight requirement cannot be short of room; guard the division rather than skew it.
+      int needed = Math.max(required.getValue(), 1);
+      lowestRatio = Math.min(lowestRatio, (double) physicallyRemaining / needed);
     }
-    return true;
+    // Map [-1, 1] onto [0, 1]: a replica that fits scores 1, an instance short by exactly the
+    // replica's own weight scores 0.5, and anything more overcommitted trends towards 0.
+    return Math.max(0d, Math.min(1d, (lowestRatio + 1d) / 2d));
   }
 
   /**
