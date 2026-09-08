@@ -37,7 +37,6 @@ public class RebalanceConfig {
    */
   public enum RebalanceConfigProperty {
     REBALANCE_DELAY,
-    DELAY_REBALANCE_DISABLED,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
     REBALANCE_TIMER_PERIOD,
@@ -65,7 +64,6 @@ public class RebalanceConfig {
   private RebalanceMode _rebalanceMode;
   private String _rebalancerClassName;
   private String _rebalanceStrategy;
-  private Boolean _delayRebalanceDisabled;
   private long _rebalanceTimerPeriod = -1;  /* in milliseconds */
 
   private static final Logger _logger = LoggerFactory.getLogger(RebalanceConfig.class.getName());
@@ -83,8 +81,6 @@ public class RebalanceConfig {
     _rebalancerClassName =
         znRecord.getSimpleField(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name());
     _rebalanceStrategy = znRecord.getSimpleField(RebalanceConfigProperty.REBALANCE_STRATEGY.name());
-    _delayRebalanceDisabled =
-        znRecord.getBooleanField(RebalanceConfigProperty.DELAY_REBALANCE_DISABLED.name(), false);
     _rebalanceTimerPeriod =
         znRecord.getLongField(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(), -1);
   }
@@ -151,22 +147,6 @@ public class RebalanceConfig {
   }
 
   /**
-   * Whether the delay rebalance is disabled. By default, it is false.
-   * @return
-   */
-  public Boolean isDelayRebalanceDisabled() {
-    return _delayRebalanceDisabled;
-  }
-
-  /**
-   * If disabled is true, the delayed rebalance time will be ignored.
-   * @param delayRebalanceDisabled
-   */
-  public void setDelayRebalanceDisabled(Boolean delayRebalanceDisabled) {
-    this._delayRebalanceDisabled = delayRebalanceDisabled;
-  }
-
-  /**
    * Get the frequency with which to rebalance
    * @return the rebalancing timer period
    */
@@ -202,10 +182,6 @@ public class RebalanceConfig {
     }
     if (_rebalanceStrategy != null) {
       simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_STRATEGY.name(), _rebalanceStrategy);
-    }
-    if (_delayRebalanceDisabled != null) {
-      simpleFieldMap.put(RebalanceConfigProperty.DELAY_REBALANCE_DISABLED.name(),
-          String.valueOf(_delayRebalanceDisabled));
     }
     if (_rebalanceTimerPeriod > 0) {
       simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(),
