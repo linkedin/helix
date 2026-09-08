@@ -57,11 +57,26 @@ public class TestPhysicalCapacityScore extends AbstractTestClusterModel {
     return m;
   }
 
+  /**
+   * A replica that is NOT itself part of the node's unaccounted occupancy, which is what every
+   * penalty test here means by "the node is occupied". Deliberately a different partition from
+   * OCCUPANCY_KEY: a replica already sitting on the node costs nothing more to place there, so its
+   * own footprint is excluded from the shortfall and it would never be penalised.
+   */
   private AssignableReplica replica(Map<String, Integer> capacity) {
+    return replica(capacity, "PartitionUnderTest");
+  }
+
+  /** A replica that IS part of the node's unaccounted occupancy, keyed to match OCCUPANCY_KEY. */
+  private AssignableReplica replicaAlreadyOnNode(Map<String, Integer> capacity) {
+    return replica(capacity, "Partition1");
+  }
+
+  private AssignableReplica replica(Map<String, Integer> capacity, String partitionName) {
     AssignableReplica r = mock(AssignableReplica.class);
     when(r.getCapacity()).thenReturn(capacity);
     when(r.getResourceName()).thenReturn("Resource1");
-    when(r.getPartitionName()).thenReturn("Partition1");
+    when(r.getPartitionName()).thenReturn(partitionName);
     return r;
   }
 
@@ -267,5 +282,59 @@ public class TestPhysicalCapacityScore extends AbstractTestClusterModel {
     Assert.assertEquals(
         nodeWithOccupancy(cache, map("item1", 20)).getPhysicalRoomScore(replica(map("itemX", 5))),
         1d, "A requirement the node has no capacity type for is the hard constraints' business");
+  }
+
+  /**
+   * A replica already physically on the node costs nothing more to place there, so it must not be
+   * charged for its own footprint. Without this the node a replica currently sits on is penalised
+   * by that replica's own weight every time the ideal assignment wants to move it -- the ordinary
+   * case for partial rebalance -- and the constraint then argues for the physically worse option,
+   * since the replica goes on occupying this node until its drop completes.
+   */
+  @Test
+  public void testAReplicaIsNotPenalisedByItsOwnFootprint() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    Map<String, Integer> need = map("item1", 18);
+
+    double alreadyHere =
+        nodeWithOccupancy(cache, need).getPhysicalRoomScore(replicaAlreadyOnNode(need));
+    double someoneElse = nodeWithOccupancy(cache, need).getPhysicalRoomScore(replica(need));
+
+    Assert.assertEquals(alreadyHere, 1d,
+        "placing a replica where it already sits consumes no new space, so the node has room");
+    Assert.assertTrue(someoneElse < 1d,
+        "identical occupancy belonging to a different partition must still be penalised, "
+            + "otherwise this test would pass for the wrong reason. scored " + someoneElse);
+  }
+
+  /**
+   * Only the replica's own share is excused. Occupancy from anything else still counts, so a node
+   * that is genuinely overloaded does not get a free pass merely because the replica under
+   * consideration happens to be one of the things sitting on it.
+   */
+  @Test
+  public void testOnlyTheReplicaOwnShareIsExcused() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    Map<String, Integer> need = map("item1", 18);
+    // 18 belonging to the replica under test, plus 10 belonging to something else.
+    Map<String, Integer> occupancy = map("item1", 28);
+    Set<String> keys = new HashSet<>(java.util.Arrays.asList(OCCUPANCY_KEY, "Resource1|Another"));
+
+    AssignableNode mixed = new AssignableNode(cache.getClusterConfig(),
+        cache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+    mixed.setUnallocatedOccupancy(new HashMap<>(occupancy), keys);
+    double excused = mixed.getPhysicalRoomScore(replicaAlreadyOnNode(need));
+
+    AssignableNode same = new AssignableNode(cache.getClusterConfig(),
+        cache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+    same.setUnallocatedOccupancy(new HashMap<>(occupancy), keys);
+    double notExcused = same.getPhysicalRoomScore(replica(need));
+
+    Assert.assertTrue(excused < 1d,
+        "the 10 units belonging to something else must still be held against the node, scored "
+            + excused);
+    Assert.assertTrue(excused > notExcused,
+        "excusing the replica's own 18 units must leave it better off than a replica that has to "
+            + "account for all 28. excused=" + excused + " notExcused=" + notExcused);
   }
 }

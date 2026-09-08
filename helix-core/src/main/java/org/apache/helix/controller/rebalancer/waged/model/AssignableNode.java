@@ -337,6 +337,16 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (_unallocatedOccupancy.isEmpty()) {
       return 1d;
     }
+    // A replica that is already physically on this node costs nothing more to place here, so its
+    // own footprint must not be held against it. Without this the node a replica currently sits on
+    // is penalised by that replica's own weight whenever the ideal assignment wants to move it,
+    // which is the normal case for partial rebalance. That biases against staying put, and the
+    // alternative it steers towards is strictly worse physically: the replica keeps occupying this
+    // node until its drop completes, so placing it elsewhere raises total occupancy rather than
+    // lowering it. Occupancy from anything else still counts, so a genuinely overloaded node does
+    // not get a free pass.
+    boolean alreadyPresent = _unallocatedOccupancyKeys
+        .contains(occupancyKey(replica.getResourceName(), replica.getPartitionName()));
     double worstShortfall = 0d;
     for (Map.Entry<String, Integer> required : replica.getCapacity().entrySet()) {
       // A replica needing none of a capacity type can never be short of it, whatever else is
@@ -349,8 +359,13 @@ public class AssignableNode implements Comparable<AssignableNode> {
       if (remaining == null) {
         continue;
       }
-      int physicallyRemaining =
-          remaining - _unallocatedOccupancy.getOrDefault(required.getKey(), 0);
+      int occupancy = _unallocatedOccupancy.getOrDefault(required.getKey(), 0);
+      if (alreadyPresent) {
+        // Clamped because the two quantities are computed from the same partition weight and so
+        // should agree, but a node must never read as having more room than it physically has.
+        occupancy = Math.max(0, occupancy - required.getValue());
+      }
+      int physicallyRemaining = remaining - occupancy;
       int shortfall = required.getValue() - physicallyRemaining;
       if (shortfall <= 0) {
         continue;
