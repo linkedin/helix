@@ -316,27 +316,20 @@ public class AssignableNode implements Comparable<AssignableNode> {
   }
 
   /**
-   * Whether the node has room for the replica once occupancy that is physically present but absent
-   * from the rebalancer's assignment is taken into account.
-   * <p>
-   * This is deliberately NOT wired into
-   * {@link org.apache.helix.controller.rebalancer.waged.constraints.NodeCapacityConstraint}. A hard
-   * constraint that rejects every node aborts the whole rebalance with NO_CANDIDATE_NODE, so this
-   * is used only to narrow the candidate set when a roomier alternative exists.
-   * @param replica the replica being placed
-   * @return true if the replica fits in the capacity left after unaccounted occupancy
-   */
-  /**
    * Score how much physical room this node has for the replica, where physical means the
    * occupancy the rebalancer allocated plus the occupancy that is present on the instance but
    * absent from its allocation.
    * <p>
-   * Returns 1 when the replica fits, and degrades continuously towards 0 as the instance gets
-   * further overcommitted, so that a caller choosing among instances that are all full still
-   * prefers the least overcommitted one. The scale is deliberately linear rather than the
-   * saturating sigmoid used by the utilization constraints.
+   * Returns 1 when the replica fits. When it does not, the score is at most one half, so that an
+   * instance with physical room always outranks one without by a margin no other constraint in the
+   * model can close, whatever the cluster's capacity numbers happen to be. Within the instances
+   * that do not fit, the score still decreases strictly with the shortfall, so the least
+   * overcommitted one is preferred. That second property is why the scale is a reciprocal rather
+   * than something clamped: a scale with a floor stops ranking once every candidate is past it,
+   * which is exactly the saturation that makes the utilization constraints' sigmoid unable to
+   * express this signal.
    * @param replica the replica being considered
-   * @return a score in [0, 1], higher meaning more physical room
+   * @return a score in (0, 1], higher meaning more physical room
    */
   public double getPhysicalRoomScore(AssignableReplica replica) {
     // Without unaccounted occupancy this carries no information beyond what the hard constraints
@@ -344,21 +337,33 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (_unallocatedOccupancy.isEmpty()) {
       return 1d;
     }
-    double lowestRatio = 1d;
+    double worstShortfall = 0d;
     for (Map.Entry<String, Integer> required : replica.getCapacity().entrySet()) {
+      // A replica needing none of a capacity type can never be short of it, whatever else is
+      // occupying the node. Scoring such a dimension would penalise a node for a reason that does
+      // not apply to this replica.
+      if (required.getValue() <= 0) {
+        continue;
+      }
       Integer remaining = _remainingCapacity.get(required.getKey());
       if (remaining == null) {
         continue;
       }
       int physicallyRemaining =
           remaining - _unallocatedOccupancy.getOrDefault(required.getKey(), 0);
-      // A zero-weight requirement cannot be short of room; guard the division rather than skew it.
-      int needed = Math.max(required.getValue(), 1);
-      lowestRatio = Math.min(lowestRatio, (double) physicallyRemaining / needed);
+      int shortfall = required.getValue() - physicallyRemaining;
+      if (shortfall <= 0) {
+        continue;
+      }
+      // Relative to the node's own capacity, so that being short by a given amount counts for
+      // more on a small instance than on a large one.
+      int capacity = Math.max(_maxAllowedCapacity.getOrDefault(required.getKey(), 0), 1);
+      worstShortfall = Math.max(worstShortfall, (double) shortfall / capacity);
     }
-    // Map [-1, 1] onto [0, 1]: a replica that fits scores 1, an instance short by exactly the
-    // replica's own weight scores 0.5, and anything more overcommitted trends towards 0.
-    return Math.max(0d, Math.min(1d, (lowestRatio + 1d) / 2d));
+    if (worstShortfall == 0d) {
+      return 1d;
+    }
+    return 0.5d / (1d + worstShortfall);
   }
 
   /**
