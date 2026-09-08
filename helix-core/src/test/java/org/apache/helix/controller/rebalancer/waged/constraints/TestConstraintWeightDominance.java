@@ -35,7 +35,7 @@ import com.google.common.collect.ImmutableMap;
  * configured with.
  */
 public class TestConstraintWeightDominance {
-  private static final float PHYSICAL_CAPACITY_WEIGHT = 100000f;
+  private static final float PHYSICAL_CAPACITY_WEIGHT = 1000000f;
 
   @SuppressWarnings("unchecked")
   private Map<SoftConstraint, Float> weightsFor(int evenness, int lessMovement) throws Exception {
@@ -77,40 +77,39 @@ public class TestConstraintWeightDominance {
   }
 
   /**
-   * FORCE_BASELINE_CONVERGE raises BaselineInfluenceConstraint to the same 100000 used here, and
-   * the two then argue about the same placement with equal authority. The baseline is exactly the
-   * ledger that cannot see wedged replicas, because occupancy is collected for PARTIAL scope only,
-   * so under this preference the blind plan can outvote the physical reality.
+   * FORCE_BASELINE_CONVERGE raises BaselineInfluenceConstraint to FORCE_BASELINE_CONVERGE_WEIGHT,
+   * and the baseline is exactly the ledger that cannot see wedged replicas, because occupancy is
+   * collected for PARTIAL scope only. A saturated instance the baseline names collects the full
+   * baseline weight while a healthy instance the baseline omits collects none of it, so the blind
+   * plan gets to argue directly against physical reality.
    * <p>
-   * Worked through with the scores the two constraints actually return: a saturated instance the
-   * baseline wants scores 1.0 for baseline influence and at most 0.5 for physical room, while a
-   * healthy instance the baseline does not want scores 0.0 and 1.0. That is 150000 against 100000
-   * at the extreme, and the saturated instance wins.
-   * <p>
-   * This documents a real limitation rather than asserting desired behaviour. The preference
-   * defaults to 0, so the fix is unaffected unless a cluster opts in.
+   * At equal weights the baseline won and this fix silently did nothing on any cluster opting into
+   * forced convergence, with the feature flag still reading enabled. The physical weight now has to
+   * clear FORCE_BASELINE_CONVERGE_WEIGHT plus the 13500 ceiling of the remaining constraints, twice
+   * over because a penalised instance still keeps half the weight.
    */
   @Test
-  public void testForcedBaselineConvergeCanOutvotePhysicalCapacity() throws Exception {
+  public void testForcedBaselineConvergeCannotOutvotePhysicalCapacity() throws Exception {
     Map<SoftConstraint, Float> weights = weightsWithForcedBaselineConverge();
 
     float physical = physicalCapacityWeight(weights);
     float baseline = baselineInfluenceWeight(weights);
 
-    Assert.assertEquals(baseline, physical, 0.001f,
-        "the two constraints are expected to carry equal weight under this preference; if this "
-            + "changes the limitation described below may no longer hold");
+    Assert.assertTrue(physical > baseline,
+        "the physical constraint must outweigh a forced baseline converge, otherwise the baseline "
+            + "decides. physical=" + physical + " baseline=" + baseline);
 
-    // Best case for the saturated instance: baseline matches exactly (1.0), physical room is at
-    // its highest penalised value (just under 0.5).
-    double saturatedInBaseline = baseline * 1.0d + physical * 0.5d;
-    // Healthy instance the baseline does not mention: no baseline credit, full physical score.
-    double healthyNotInBaseline = baseline * 0.0d + physical * 1.0d;
+    // Best case for the saturated instance: the baseline matches it exactly (1.0), its physical
+    // room is at the highest value a penalised instance can hold (just under 0.5), and every other
+    // constraint also favours it. Worst case for the healthy instance: no baseline credit and no
+    // support from any other constraint.
+    double saturatedInBaseline = baseline * 1.0d + physical * 0.5d + everythingElse(weights);
+    double healthyNotInBaseline = physical * 1.0d;
 
-    Assert.assertTrue(saturatedInBaseline > healthyNotInBaseline,
-        "documents the limitation: with FORCE_BASELINE_CONVERGE a saturated instance named by the "
-            + "baseline can outscore a healthy one. saturated=" + saturatedInBaseline
-            + " healthy=" + healthyNotInBaseline);
+    Assert.assertTrue(healthyNotInBaseline > saturatedInBaseline,
+        "a healthy instance must still win even when the baseline, and everything else, favours "
+            + "the saturated one. healthy=" + healthyNotInBaseline
+            + " saturated=" + saturatedInBaseline);
   }
 
   /**

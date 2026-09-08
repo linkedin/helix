@@ -78,14 +78,28 @@ public class ConstraintBasedAlgorithmFactory {
     }
   };
   // Placing a replica on an instance that is already physically full is pathological rather than
-  // merely suboptimal, so this outweighs the evenness and movement constraints instead of trading
-  // against them. The six other constraints default to weights summing to 13.5, which the
-  // rebalance preferences scale by at most MAX_REBALANCE_PREFERENCE, so their combined influence
-  // cannot exceed 13500; half of the weight below -- the smallest gap a full instance is
-  // guaranteed to concede -- stays clear of that. Unlike those constraints this one is deliberately
-  // not scaled by a preference, see getInstance. It is overridable through the soft constraint
-  // weight properties so that the behaviour can be ramped rather than switched.
-  private static final float PHYSICAL_CAPACITY_WEIGHT = 100000f;
+  // merely suboptimal, so this outweighs the other constraints instead of trading against them.
+  //
+  // The opposition it has to clear is the sum of two things. The six other constraints default to
+  // weights summing to 13.5, which the rebalance preferences scale by at most
+  // MAX_REBALANCE_PREFERENCE, so they contribute at most 13500. On top of that,
+  // FORCE_BASELINE_CONVERGE raises BaselineInfluenceConstraint to
+  // FORCE_BASELINE_CONVERGE_WEIGHT, and the baseline is computed without any knowledge of
+  // unaccounted occupancy because that is collected for PARTIAL scope only. A saturated instance
+  // named by the baseline therefore collects the full baseline weight while a healthy instance the
+  // baseline omits collects none of it.
+  //
+  // getPhysicalRoomScore returns at most 0.5 once an instance is short, so the smallest gap a full
+  // instance is guaranteed to concede is half the weight below. That has to exceed
+  // FORCE_BASELINE_CONVERGE_WEIGHT + 13500, which puts the minimum at 227000; the value below
+  // leaves real margin rather than sitting on the boundary. At 100000 the two constraints tied and
+  // the baseline won, silently disabling this fix on any cluster that opts into forced convergence
+  // while the feature flag still read enabled.
+  //
+  // Unlike the preference-scaled constraints this one is deliberately not scaled, see getInstance.
+  // It is overridable through the soft constraint weight properties so that the behaviour can be
+  // ramped rather than switched.
+  private static final float PHYSICAL_CAPACITY_WEIGHT = 1000000f;
   // The weight for BaselineInfluenceConstraint used when we are forcing a baseline converge. This
   // number, multiplied by the max score returned by BaselineInfluenceConstraint, must be greater
   // than the total maximum sum of all other constraints, in order to overpower other constraints.
