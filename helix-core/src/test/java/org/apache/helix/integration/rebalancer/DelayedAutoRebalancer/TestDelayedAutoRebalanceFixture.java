@@ -19,6 +19,8 @@ package org.apache.helix.integration.rebalancer.DelayedAutoRebalancer;
  * under the License.
  */
 
+import java.util.Arrays;
+
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
@@ -26,9 +28,12 @@ import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 public class TestDelayedAutoRebalanceFixture {
   @DataProvider
@@ -55,14 +60,14 @@ public class TestDelayedAutoRebalanceFixture {
 
   @Test
   public void testCleanupAfterSkippedSetup() throws Exception {
-    Fixture fixture = new Fixture();
+    TestDelayedAutoRebalance fixture = newFixture();
     fixture.afterClass();
-    Assert.assertTrue(fixture._clusterDeleted);
+    verifyClusterDeletion(fixture);
   }
 
   @Test
   public void testCleanupAfterPartialSetup() throws Exception {
-    Fixture fixture = new Fixture();
+    TestDelayedAutoRebalance fixture = newFixture();
     MockParticipantManager participant = mock(MockParticipantManager.class);
     ZkHelixClusterVerifier verifier = mock(ZkHelixClusterVerifier.class);
     fixture._participants.add(participant);
@@ -72,7 +77,7 @@ public class TestDelayedAutoRebalanceFixture {
 
     verify(verifier).close();
     verify(participant).syncStop();
-    Assert.assertTrue(fixture._clusterDeleted);
+    verifyClusterDeletion(fixture);
   }
 
   private InstanceConfig instanceConfig(boolean enabled, long timestamp) {
@@ -82,13 +87,18 @@ public class TestDelayedAutoRebalanceFixture {
     return config;
   }
 
-  private static class Fixture extends TestDelayedAutoRebalance {
-    private boolean _clusterDeleted;
+  private TestDelayedAutoRebalance newFixture() throws Exception {
+    // Concrete subclasses inherit @Test methods and are discovered by the package-based CI suite.
+    TestDelayedAutoRebalance fixture =
+        mock(TestDelayedAutoRebalance.class, withSettings().useConstructor());
+    doCallRealMethod().when(fixture).afterClass();
+    return fixture;
+  }
 
-    @Override
-    protected void deleteCluster(String clusterName) {
-      Assert.assertEquals(clusterName, CLUSTER_NAME);
-      _clusterDeleted = true;
-    }
+  private void verifyClusterDeletion(TestDelayedAutoRebalance fixture) {
+    Assert.assertTrue(mockingDetails(fixture).getInvocations().stream().anyMatch(invocation ->
+        invocation.getMethod().getName().equals("deleteCluster")
+            && Arrays.equals(invocation.getArguments(), new Object[] {fixture.CLUSTER_NAME})),
+        "Cleanup must delete the fixture's cluster");
   }
 }
