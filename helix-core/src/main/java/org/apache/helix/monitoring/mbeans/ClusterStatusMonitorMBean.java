@@ -174,6 +174,31 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedFallbackInUseGauge();
 
   /**
+   * @return Cumulative count of placements the WAGED capacity check refused. Unlike a rebalance
+   *         failure this is silent: the rebalancer still returns an assignment and the partition
+   *         is simply short of replicas, with nothing in the resulting state naming the cause. A
+   *         steadily climbing count means placements are being computed and then discarded.
+   */
+  long getWagedCapacityDeniedPlacementCounter();
+
+  /**
+   * @return Placements the WAGED capacity check refused during the most recent pipeline pass, or 0
+   *         if that pass was clean. Sustained non-zero, rather than an occasional spike during
+   *         normal movement, is what indicates the rebalancer and the capacity check disagree about
+   *         where there is room.
+   */
+  long getWagedCapacityDeniedPlacementsLastPassGauge();
+
+  /**
+   * @return Distinct instances that refused at least one placement during the most recent pipeline
+   *         pass. Read together with
+   *         {@link #getWagedCapacityDeniedPlacementsLastPassGauge()}: many refusals concentrated on
+   *         one instance is an instance nothing can be placed on, which is a different problem from
+   *         refusals spread across a cluster that is simply full.
+   */
+  long getWagedCapacityDeniedInstancesLastPassGauge();
+
+  /**
    * Reversible rollup of {@link #getWagedCustomerActionableFailureCounter()}: 1 while WAGED's most
    * recent SERVING (partial) computation failed for a customer-controlled reason (capacity /
    * candidate-node / resource or cluster config), 0 once a later partial computation succeeds.
@@ -222,7 +247,7 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   // operators distinguish fault-zone failures from tag failures from capacity failures within the
   // broader "no candidate node" bucket.
 
-  /** @return Partitions that failed placement because the fault-zone constraint rejected every node. */
+    /** @return Partitions that failed placement because the fault-zone constraint rejected every node. */
   long getWagedHardConstraintFaultZoneFailureCounter();
 
   /** @return Partitions that failed placement because per-node capacity constraints rejected every node. */
@@ -233,7 +258,6 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /** @return Partitions that failed placement because every candidate instance was inactive. */
   long getWagedHardConstraintReplicaActivateFailureCounter();
-
   /** @return Partitions that failed placement because the same-partition-on-instance rule rejected every node. */
   long getWagedHardConstraintSamePartitionOnInstanceFailureCounter();
 

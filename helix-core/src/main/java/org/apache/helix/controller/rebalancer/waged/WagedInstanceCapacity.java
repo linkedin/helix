@@ -45,6 +45,40 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
   // Available Capacity per Instance
   private final Map<String, Map<String, Integer>> _instanceCapacityMap;
   private final Map<String, Map<String, Set<String>>> _allocatedPartitionsMap;
+  // Placements the capacity check refused during this pipeline pass, keyed by instance. A refusal
+  // is silent from the outside: the instance is dropped from the preference list and the partition
+  // simply does not appear where the rebalancer intended, with nothing in the resulting state
+  // explaining why. Recorded here so the controller can report it. This object is rebuilt on every
+  // pass, so the tally is naturally scoped to one pass.
+  private final Map<String, Set<String>> _deniedPlacements = new HashMap<>();
+
+  /**
+   * Record that the capacity check refused to place a partition on an instance.
+   * @param instance the instance that could not take the replica
+   * @param resourceName the resource the replica belongs to
+   * @param partitionName the partition that could not be placed
+   */
+  public synchronized void recordPlacementDenied(String instance, String resourceName,
+      String partitionName) {
+    _deniedPlacements.computeIfAbsent(instance, k -> new HashSet<>())
+        .add(resourceName + "|" + partitionName);
+  }
+
+  /**
+   * Placements refused during this pass, keyed by instance, valued by "resource|partition".
+   */
+  public synchronized Map<String, Set<String>> getDeniedPlacements() {
+    Map<String, Set<String>> copy = new HashMap<>();
+    _deniedPlacements.forEach((instance, denied) -> copy.put(instance, new HashSet<>(denied)));
+    return copy;
+  }
+
+  /**
+   * Total number of distinct instance/partition placements refused during this pass.
+   */
+  public synchronized int getDeniedPlacementCount() {
+    return _deniedPlacements.values().stream().mapToInt(Set::size).sum();
+  }
 
   public WagedInstanceCapacity(ResourceControllerDataProvider clusterData) {
     _instanceCapacityMap = new HashMap<>();

@@ -134,6 +134,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // "how often" tally.
   private volatile boolean _wagedCustomerActionableFailure = false;
   private volatile boolean _wagedInternalFailure = false;
+  // Placements the WAGED capacity check refused. Unlike a rebalance failure this is silent: the
+  // rebalancer still returns an assignment, and the partition is simply short of replicas with
+  // nothing naming the cause. The monotonic counter answers "is this happening at all"; the
+  // reversible gauges answer "is it happening right now, and is it concentrated on one instance",
+  // which is the shape that indicates an instance nothing can be placed on.
+  private final AtomicLong _wagedCapacityDeniedPlacementCount = new AtomicLong(0L);
+  private volatile int _wagedCapacityDeniedPlacementsLastPass = 0;
+  private volatile int _wagedCapacityDeniedInstancesLastPass = 0;
   // Reversible gauge: 1 while WAGED's most recent Baseline (global) computation failed, reset to 0
   // when a Baseline computation next succeeds. Owned exclusively by the GLOBAL_BASELINE phase. This
   // is the latent signal -- serving may be fine (partial succeeds off the last-good baseline) while
@@ -1444,6 +1452,21 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Report the placements the WAGED capacity check refused during one pipeline pass. Called on
+   * every pass, including passes with no refusals, so the reversible gauges fall back to zero on
+   * recovery rather than latching.
+   * @param deniedPlacements total instance/partition placements refused this pass
+   * @param deniedInstances number of distinct instances that refused at least one placement
+   */
+  public void reportWagedCapacityDeniedPlacements(int deniedPlacements, int deniedInstances) {
+    if (deniedPlacements > 0) {
+      _wagedCapacityDeniedPlacementCount.addAndGet(deniedPlacements);
+    }
+    _wagedCapacityDeniedPlacementsLastPass = deniedPlacements;
+    _wagedCapacityDeniedInstancesLastPass = deniedInstances;
+  }
+
+  /**
    * Increment the monotonic WAGED failure counters (per-category plus the customer-actionable /
    * internal rollup counter) for a classified failure. This is the scope-agnostic "how often" tally
    * -- every failing computation counts, whether baseline, partial, or emergency. It does NOT touch
@@ -1733,10 +1756,24 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   @Override
+  public long getWagedCapacityDeniedPlacementCounter() {
+    return _wagedCapacityDeniedPlacementCount.get();
+  }
+
+  @Override
+  public long getWagedCapacityDeniedPlacementsLastPassGauge() {
+    return _wagedCapacityDeniedPlacementsLastPass;
+  }
+
+  @Override
+  public long getWagedCapacityDeniedInstancesLastPassGauge() {
+    return _wagedCapacityDeniedInstancesLastPass;
+  }
+
+  @Override
   public long getWagedHardConstraintFaultZoneFailureCounter() {
     return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.FAULT_ZONE).get();
   }
-
   @Override
   public long getWagedHardConstraintNodeCapacityFailureCounter() {
     return _wagedHardConstraintFailureCounters.get(HardConstraint.Type.NODE_CAPACITY).get();

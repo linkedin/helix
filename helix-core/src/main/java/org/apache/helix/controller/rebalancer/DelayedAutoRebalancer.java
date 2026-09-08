@@ -383,6 +383,12 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
                 + "it from combinedPreferenceList.", instance, idealState.getResourceName(),
                 partition.getPartitionName());
             combinedPreferenceList.remove(instance);
+            // Nothing downstream records that this happened, so a partition can end up short of
+            // replicas with no signal naming the cause. Tally it for the controller to report.
+            if (cache.getWagedInstanceCapacity() != null) {
+              cache.getWagedInstanceCapacity().recordPlacementDenied(instance,
+                  idealState.getResourceName(), partition.getPartitionName());
+            }
           }
         }
       }

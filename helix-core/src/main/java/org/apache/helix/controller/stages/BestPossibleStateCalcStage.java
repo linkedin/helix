@@ -103,6 +103,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
 
     event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
 
+    reportCapacityDeniedPlacements(cache, clusterStatusMonitor);
+
     final Map<String, InstanceConfig> allInstanceConfigMap = cache.getInstanceConfigMap();
     final Map<String, StateModelDefinition> stateModelDefMap = cache.getStateModelDefMap();
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
@@ -244,8 +246,50 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     }
   }
 
-  private void reportResourceState(ClusterStatusMonitor clusterStatusMonitor,
-      BestPossibleStateOutput bestPossibleStateOutput, String resourceName, IdealState is,
+  /**
+   * Publish the placements the WAGED capacity check refused during this pass. The refusal happens
+   * deep in the rebalancer, where an instance is dropped from a partition's preference list; from
+   * the outside all that is visible is a partition with fewer replicas than it should have and no
+   * indication of why. Reported unconditionally so the last-pass gauges return to zero once a pass
+   * is clean, rather than latching on the first bad pass.
+   */
+  private void reportCapacityDeniedPlacements(ResourceControllerDataProvider cache,
+      ClusterStatusMonitor clusterStatusMonitor) {
+    if (clusterStatusMonitor == null || cache.getWagedInstanceCapacity() == null) {
+      return;
+    }
+    try {
+      Map<String, Set<String>> denied = cache.getWagedInstanceCapacity().getDeniedPlacements();
+      int total = denied.values().stream().mapToInt(Set::size).sum();
+      clusterStatusMonitor.reportWagedCapacityDeniedPlacements(total, denied.size());
+      if (total > 0) {
+        // One aggregated line per pass. The per-occurrence logging at the refusal site is at INFO
+        // and is easily lost in volume, and it names one partition at a time, so it does not show
+        // that the refusals are concentrated on a single instance.
+        LogUtil.logWarn(logger, _eventId, String.format(
+            "WAGED capacity check refused %d placement(s) across %d instance(s) this pass. "
+                + "Affected partitions will be short of replicas. Per instance: %s", total,
+            denied.size(), summarizeDeniedPlacements(denied)));
+      }
+    } catch (Exception e) {
+      LogUtil.logError(logger, _eventId, "Failed to report WAGED capacity denied placements", e);
+    }
+  }
+
+  /**
+   * Instance-by-instance refusal counts, worst first, with a couple of example partitions so the
+   * line is actionable without needing to correlate against the per-occurrence logs.
+   */
+  private static String summarizeDeniedPlacements(Map<String, Set<String>> denied) {
+    return denied.entrySet().stream()
+        .sorted((a, b) -> Integer.compare(b.getValue().size(), a.getValue().size())).limit(10)
+        .map(e -> String.format("%s=%d%s", e.getKey(), e.getValue().size(),
+            e.getValue().stream().sorted().limit(3)
+                .collect(Collectors.joining(",", " (e.g. ", ")"))))
+        .collect(Collectors.joining("; "));
+  }
+
+  private void reportResourceState(ClusterStatusMonitor clusterStatusMonitor,      BestPossibleStateOutput bestPossibleStateOutput, String resourceName, IdealState is,
       ExternalView ev, StateModelDefinition stateModelDef) {
     // Create a temporary local IdealState object for monitoring. This is to avoid modifying
     // the IdealState cache.
