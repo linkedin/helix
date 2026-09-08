@@ -123,10 +123,39 @@ public class TestUnallocatedOccupancyScoping extends AbstractTestClusterModel {
   }
 
   /**
-   * The flag has to gate the collection itself, not merely the scoring, otherwise a cluster with
-   * the feature disabled would still pay for the current-state walk on every pass.
+   * The emergency and delayed-overwrite scopes are excluded too, and it is worth recording why
+   * that does not leave a gap. Emergency rebalance is a narrow correction for a permanently downed
+   * node, computed from an assignment in which everything is already allocated -- so there is
+   * little unaccounted occupancy for it to find. More importantly WagedRebalancer.emergencyRebalance
+   * ends by calling PartialRebalanceRunner.partialRebalance unconditionally, and that runs in the
+   * partial scope where this collection does apply. The occupancy is therefore accounted for on the
+   * very next step rather than skipped.
    */
   @Test
+  public void testNothingIsCollectedInEmergencyOrDelayedOverwriteScopes() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    Map<String, ResourceAssignment> emptyAssignment = new HashMap<>();
+    for (String resourceName : _resourceNames) {
+      emptyAssignment.put(resourceName, new ResourceAssignment(resourceName));
+    }
+    Set<String> instances = new HashSet<>(Collections.singletonList(_testInstanceId));
+
+    ClusterModel emergency = ClusterModelProvider.generateClusterModelForEmergencyRebalance(cache,
+        resourceMap(), instances, emptyAssignment);
+    Assert.assertEquals(totalUnallocatedOccupancy(emergency), 0,
+        "emergency rebalance must not collect; the partial pass that follows it does");
+
+    ClusterModel delayedOverwrites =
+        ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(cache, resourceMap(),
+            instances, emptyAssignment);
+    Assert.assertEquals(totalUnallocatedOccupancy(delayedOverwrites), 0,
+        "delayed rebalance overwrites must not collect");
+  }
+
+  /**
+   * The flag has to gate the collection itself, not merely the scoring, otherwise a cluster with
+   * the feature disabled would still pay for the current-state walk on every pass.
+   */  @Test
   public void testNothingIsCollectedWhenTheFlagIsOff() throws IOException {
     ResourceControllerDataProvider cache = setupClusterDataCache();
     ClusterConfig config = cache.getClusterConfig();

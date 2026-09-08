@@ -210,6 +210,20 @@ public class ClusterModelProvider {
     }
     Map<String, LiveInstance> liveInstances = dataProvider.getAssignableLiveInstances();
 
+    // Resolve per-resource metadata once. The loop below runs for every instance in the cluster and
+    // these two lookups return the same thing every time, so doing them inside it costs one pair of
+    // lookups per (instance, resource) on a large cluster instead of one pair per resource.
+    Map<String, ResourceConfig> wagedResourceConfigs = new HashMap<>();
+    for (String resourceName : resourceMap.keySet()) {
+      if (WagedValidationUtil.isWagedEnabled(dataProvider.getIdealState(resourceName))) {
+        wagedResourceConfigs.put(resourceName, dataProvider.getResourceConfig(resourceName));
+      }
+    }
+    // A partition's weight depends only on (resource, partition), never on which instance holds it,
+    // so it is computed at most once here rather than once per replica. WagedInstanceCapacity, the
+    // ledger this has to agree with, hoists the same computation out of its own instance loop.
+    Map<String, Map<String, Integer>> partitionWeightCache = new HashMap<>();
+
     for (AssignableNode node : assignableNodes) {
       LiveInstance liveInstance = liveInstances.get(node.getInstanceName());
       if (liveInstance == null) {
@@ -233,12 +247,11 @@ public class ClusterModelProvider {
       for (Map.Entry<String, CurrentState> entry : currentStates.entrySet()) {
         String resourceName = entry.getKey();
         // Mirror the capacity check's scope: WAGED-managed resources only.
-        if (!resourceMap.containsKey(resourceName)
-            || !WagedValidationUtil.isWagedEnabled(dataProvider.getIdealState(resourceName))) {
+        if (!wagedResourceConfigs.containsKey(resourceName)) {
           continue;
         }
         Resource resource = resourceMap.get(resourceName);
-        ResourceConfig resourceConfig = dataProvider.getResourceConfig(resourceName);
+        ResourceConfig resourceConfig = wagedResourceConfigs.get(resourceName);
         for (String partitionName : entry.getValue().getPartitionStateMap().keySet()) {
           // CurrentStateOutput, which is what the capacity check reads, drops partitions that are
           // no longer part of the resource. Skip them here too, otherwise a stale current-state
@@ -252,8 +265,9 @@ public class ClusterModelProvider {
             continue;
           }
           // The same weight computation the capacity check performs, so the two cannot drift apart.
-          Map<String, Integer> partitionWeights =
-              WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
+          Map<String, Integer> partitionWeights = partitionWeightCache.computeIfAbsent(replicaKey,
+              k -> WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig,
+                  clusterConfig));
           if (partitionWeights == null || partitionWeights.isEmpty()) {
             continue;
           }
