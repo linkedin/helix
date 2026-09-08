@@ -39,7 +39,6 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
   /**
    * The following fields are considered as non-topology related.
    * REBALANCE_DELAY,
-   * DELAY_REBALANCE_DISABLED,
    * REBALANCE_TIMER_PERIOD,
    * GROUP_ROUTING_ENABLED,
    * EXTERNAL_VIEW_DISABLED,

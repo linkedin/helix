@@ -55,8 +55,6 @@ public class ClusterConfig extends HelixProperty {
     FAULT_ZONE_TYPE, // the type in which isolation should be applied on when Helix places the
     // replicas from same partition.
     TOPOLOGY_AWARE_ENABLED, // whether topology aware rebalance is enabled.
-    @Deprecated
-    DELAY_REBALANCE_DISABLED, // disabled the delayed rebalaning in case node goes offline.
     DELAY_REBALANCE_ENABLED, // whether the delayed rebalaning is enabled.
     DELAY_REBALANCE_TIME, // delayed time in ms that the delay time Helix should hold until
     // rebalancing.
@@ -529,14 +527,7 @@ public class ClusterConfig extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalaceEnabled() {
-    boolean disabled =
-        _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_DISABLED.name(), false);
-    boolean enabled =
-        _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
-    if (disabled) {
-      return false;
-    }
-    return enabled;
+    return _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**
