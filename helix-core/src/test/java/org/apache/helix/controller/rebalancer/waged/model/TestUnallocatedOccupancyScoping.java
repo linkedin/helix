@@ -201,7 +201,8 @@ public class TestUnallocatedOccupancyScoping extends AbstractTestClusterModel {
   /**
    * The flag has to gate the collection itself, not merely the scoring, otherwise a cluster with
    * the feature disabled would still pay for the current-state walk on every pass.
-   */  @Test
+   */
+  @Test
   public void testNothingIsCollectedWhenTheFlagIsOff() throws IOException {
     ResourceControllerDataProvider cache = setupClusterDataCache();
     ClusterConfig config = cache.getClusterConfig();
