@@ -43,10 +43,11 @@ import static org.mockito.Mockito.when;
  */
 public class TestPhysicalCapacityScore extends AbstractTestClusterModel {
   private static final String OCCUPANCY_KEY = "Resource1|Partition1";
-  // The maximum a fully-weighted soft constraint model can move a score by, so that "dominates"
-  // below is a claim about this model rather than a vague one.
-  private static final double MAX_COMPETING_INFLUENCE = 13500d;
-  private static final double PHYSICAL_CAPACITY_WEIGHT = 100000f;
+  // The most the rest of the model can move a score by, so that "dominates" below is a claim about
+  // this model rather than a vague one. The six preference-scaled constraints contribute at most
+  // 13500, and FORCE_BASELINE_CONVERGE can raise BaselineInfluenceConstraint by a further 100000.
+  private static final double MAX_COMPETING_INFLUENCE = 113500d;
+  private static final double PHYSICAL_CAPACITY_WEIGHT = 1000000f;
 
   private static Map<String, Integer> map(Object... kv) {
     Map<String, Integer> m = new HashMap<>();
