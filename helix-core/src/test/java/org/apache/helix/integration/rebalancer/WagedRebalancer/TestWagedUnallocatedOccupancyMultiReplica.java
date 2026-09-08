@@ -1,0 +1,428 @@
+package org.apache.helix.integration.rebalancer.WagedRebalancer;
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.NotificationContext;
+import org.apache.helix.TestHelper;
+import org.apache.helix.common.ZkTestBase;
+import org.apache.helix.controller.rebalancer.waged.AssignmentMetadataStore;
+import org.apache.helix.integration.manager.ClusterControllerManager;
+import org.apache.helix.integration.manager.MockParticipantManager;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZkBucketDataAccessor;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.Message;
+import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.participant.StateMachineEngine;
+import org.apache.helix.participant.statemachine.StateModel;
+import org.apache.helix.participant.statemachine.StateModelFactory;
+import org.apache.helix.participant.statemachine.StateModelInfo;
+import org.apache.helix.participant.statemachine.Transition;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
+import org.testng.annotations.Test;
+
+/**
+ * The chi_5 reproduction places single-replica partitions, so every placement decision was
+ * independent. Production resources are replicated, and WAGED places a partition's replicas one at
+ * a time, committing each into the cluster model before scoring the next. That makes occupancy a
+ * moving target within a single partition: replica two is scored against a node whose remaining
+ * capacity already reflects replica one, while the unaccounted occupancy stays fixed.
+ *
+ * <p>This exercises that path with a MasterSlave victim at replication factor 3, so three replicas
+ * must be placed sequentially across a candidate set containing two physically saturated instances.
+ * All three have to land on instances that can actually run them.
+ */
+public class TestWagedUnallocatedOccupancyMultiReplica extends ZkTestBase {
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestWagedUnallocatedOccupancyMultiReplica.class);
+
+  private static final String STATE_MODEL = "IndexerStateModel";
+  private static final String CAPACITY_KEY = "SLOT";
+  private static final int INSTANCE_CAPACITY = 2; // incident-exact
+  private static final int PARTITION_WEIGHT = 1;  // incident-exact
+
+  private static final String POISON_TAG = "POISON"; // stuck resource's tag
+  private static final String CHI_TAG = "CHI";        // victim resource's tag
+
+  private static final String STUCK_RESOURCE = "stuck"; // admintest25 analog
+  private static final String CHI_RESOURCE = "chi";     // chi analog
+
+  private static final int START_PORT = 13200;
+
+  // Blocks INDEX_DOWNLOADED->CAUGHT_UP (catch-up) and INDEX_DOWNLOADED->OFFLINE (drop) so replicas
+  // wedge in INDEX_DOWNLOADED and cannot vacate. Released only at teardown.
+  private static final CountDownLatch BLOCK = new CountDownLatch(1);
+
+  private final String CLASS_NAME = getShortClassName();
+  private final String CLUSTER_NAME = CLUSTER_PREFIX + "_" + CLASS_NAME;
+
+  private final List<MockParticipantManager> _participants = new ArrayList<>();
+  private final List<String> _poisonNodes = new ArrayList<>(); // P0, P1
+  private final List<String> _sinkNodes = new ArrayList<>();   // absorb `stuck` after re-tagging
+  private final List<String> _spareNodes = new ArrayList<>();  // chi-eligible, kept clean
+  private ClusterControllerManager _controller;
+  private AssignmentMetadataStore _assignmentMetadataStore;
+  private HelixDataAccessor _dataAccessor;
+
+  @BeforeClass
+  public void beforeClass() throws Exception {
+    System.out.println("START " + CLASS_NAME + " at " + new Date(System.currentTimeMillis()));
+
+    _gSetupTool.addCluster(CLUSTER_NAME, true);
+    _gSetupTool.addStateModelDef(CLUSTER_NAME, STATE_MODEL, buildIndexerStateModelDef());
+
+    // 2 poisoned + 4 spare instances. Poisoned nodes start with POISON_TAG so `stuck` lands there.
+    for (int i = 0; i < 2; i++) {
+      String node = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
+      _gSetupTool.addInstanceToCluster(CLUSTER_NAME, node);
+      _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, node, POISON_TAG);
+      _poisonNodes.add(node);
+    }
+    // Dedicated sinks for `stuck` to migrate onto. Without these the victim's own spares absorb
+    // `stuck`, wedge on it too, and the cluster genuinely runs out of distinct healthy instances --
+    // at which point the test measures capacity exhaustion rather than the constraint.
+    for (int i = 2; i < 4; i++) {
+      String node = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
+      _gSetupTool.addInstanceToCluster(CLUSTER_NAME, node);
+      _sinkNodes.add(node);
+    }
+    for (int i = 4; i < 8; i++) {
+      String node = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
+      _gSetupTool.addInstanceToCluster(CLUSTER_NAME, node);
+      _spareNodes.add(node);
+    }
+
+    // WAGED capacity: every instance holds 2 slots; every partition weighs 1 (incident-exact).
+    _dataAccessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
+    ClusterConfig clusterConfig = _dataAccessor.getProperty(_dataAccessor.keyBuilder().clusterConfig());
+    clusterConfig.setInstanceCapacityKeys(Collections.singletonList(CAPACITY_KEY));
+    clusterConfig.setDefaultInstanceCapacityMap(ImmutableMap.of(CAPACITY_KEY, INSTANCE_CAPACITY));
+    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of(CAPACITY_KEY, PARTITION_WEIGHT));
+    clusterConfig.setWagedCountUnallocatedOccupancyEnabled(true);
+    _dataAccessor.setProperty(_dataAccessor.keyBuilder().clusterConfig(), clusterConfig);
+
+    // Participants with the custom IndexerStateModel factory (blocking transitions).
+    for (String node : allNodes()) {
+      MockParticipantManager participant =
+          new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, node);
+      StateMachineEngine engine = participant.getStateMachineEngine();
+      engine.registerStateModelFactory(STATE_MODEL, new IndexerModelFactory());
+      participant.syncStart();
+      _participants.add(participant);
+    }
+
+    _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, CONTROLLER_PREFIX + "_0");
+    _controller.syncStart();
+
+    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
+    _assignmentMetadataStore =
+        new AssignmentMetadataStore(new ZkBucketDataAccessor(ZK_ADDR), CLUSTER_NAME) {
+          public Map<String, ResourceAssignment> getBaseline() {
+            super.reset();
+            return super.getBaseline();
+          }
+
+          public synchronized Map<String, ResourceAssignment> getBestPossibleAssignment() {
+            super.reset();
+            return super.getBestPossibleAssignment();
+          }
+        };
+  }
+
+  /**
+   * An instance can physically hold replicas the rebalancer's own accounting does not know about --
+   * here, replicas wedged in a state whose drop transition never completes. The capacity check
+   * charges those replicas and so refuses to place anything else there, but the rebalancer does not
+   * and so keeps choosing that instance, and its choice keeps being discarded. The victim partition
+   * then stays unplaced even though other eligible instances have free capacity.
+   * <p>
+   * With WAGED_COUNT_UNALLOCATED_OCCUPANCY enabled the rebalancer charges that occupancy too, sees
+   * the instance as full, and places the partition somewhere it can actually run.
+   */
+  @Test
+  public void testEveryReplicaOfAMultiReplicaPartitionAvoidsSaturatedInstances() throws Exception {
+    // ---------- Phase 1: saturate P0/P1 with wedged replicas (as in the chi_5 reproduction) -----
+    createWagedResource(STUCK_RESOURCE, 4 /*partitions*/, 1 /*replica*/, POISON_TAG);
+
+    Assert.assertTrue(TestHelper.verify(() -> {
+      Map<String, String> ev = flatExternalView(STUCK_RESOURCE);
+      long wedgedOnPoison = ev.entrySet().stream()
+          .filter(e -> "INDEX_DOWNLOADED".equals(e.getValue()))
+          .filter(e -> _poisonNodes.contains(instanceOf(e.getKey())))
+          .count();
+      return ev.size() == 4 && wedgedOnPoison == 4;
+    }, 30_000), "Phase 1 setup: `stuck` must wedge 4 replicas in INDEX_DOWNLOADED on the poisoned "
+        + "nodes. Actual ExternalView=" + flatExternalView(STUCK_RESOURCE));
+
+    // ---------- Phase 2: a 3-replica victim whose candidate set includes both full instances ----
+    for (String p : _poisonNodes) {
+      _gSetupTool.getClusterManagementTool().removeInstanceTag(CLUSTER_NAME, p, POISON_TAG);
+      _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, p, CHI_TAG);
+    }
+    for (String sink : _sinkNodes) {
+      _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, sink, POISON_TAG);
+    }
+    for (String s : _spareNodes) {
+      _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, s, CHI_TAG);
+    }
+
+    // One partition, three replicas. The four spares hold 2 slots each, so there is room for all
+    // three on distinct healthy instances; only a rebalancer blind to the wedged occupants would
+    // spend replicas on the two saturated nodes.
+    // The four chi-eligible spares stay clean, so three distinct healthy instances always exist.
+    // Any replica landing on a saturated poison node is therefore a choice, not a necessity.
+    createWagedResource(CHI_RESOURCE, 1 /*partition*/, 3 /*replicas*/, CHI_TAG, "MasterSlave");
+
+    // Poll for the fully converged state, not merely for three active replicas. All three reach
+    // SLAVE before one is promoted, so a weaker condition is satisfied mid-transition and the
+    // assertions below then read a state the cluster was still moving through.
+    boolean fullyReplicated = TestHelper.verify(() -> {
+      Map<String, String> view = flatExternalView(CHI_RESOURCE);
+      return view.values().stream()
+          .filter(TestWagedUnallocatedOccupancyMultiReplica::isMasterSlaveActive).count() == 3
+          && view.values().stream().filter("MASTER"::equals).count() == 1;
+    }, 60_000);
+
+    Map<String, String> ev = flatExternalView(CHI_RESOURCE);
+    Map<String, String> bestPossible = flatBestPossible(CHI_RESOURCE);
+
+    Assert.assertTrue(fullyReplicated,
+        "all three replicas must become active with exactly one MASTER; a replica placed on a "
+            + "saturated instance is pruned by the capacity check and never appears. ExternalView=" + ev
+            + " best-possible=" + bestPossible);
+
+    // Each replica on its own instance, none of them saturated.
+    Set<String> hosts = ev.keySet().stream().map(TestWagedUnallocatedOccupancyMultiReplica::instanceOf)
+        .collect(Collectors.toSet());
+    Assert.assertEquals(hosts.size(), 3,
+        "the three replicas must occupy three distinct instances. ExternalView=" + ev);
+    Assert.assertTrue(Collections.disjoint(hosts, _poisonNodes),
+        "no replica may be placed on a physically saturated instance. hosts=" + hosts
+            + " saturated=" + _poisonNodes + " ExternalView=" + ev);
+
+    // A MasterSlave partition needs exactly one top state; losing it would mean the partition is
+    // replicated but unusable.
+    long masters = ev.values().stream().filter("MASTER"::equals).count();
+    Assert.assertEquals(masters, 1L,
+        "the partition must have exactly one MASTER. ExternalView=" + ev);
+  }
+
+  private static boolean isMasterSlaveActive(String state) {
+    return "MASTER".equals(state) || "SLAVE".equals(state);
+  }
+
+  private static boolean isActive(String state) {
+    return "CAUGHT_UP".equals(state) || "INDEX_DOWNLOADED".equals(state) || "ASSIGNED".equals(state);
+  }
+
+  @AfterClass
+  public void afterClass() throws Exception {
+    BLOCK.countDown(); // release any wedged transition threads so participants can stop
+    if (_controller != null) {
+      _controller.syncStop();
+    }
+    for (MockParticipantManager p : _participants) {
+      p.syncStop();
+    }
+    deleteCluster(CLUSTER_NAME);
+    System.out.println("END " + CLASS_NAME + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  // ------------------------------------------------------------------ helpers
+
+  private List<String> allNodes() {
+    List<String> all = new ArrayList<>(_poisonNodes);
+    all.addAll(_sinkNodes);
+    all.addAll(_spareNodes);
+    return all;
+  }
+
+  private void createWagedResource(String resource, int partitions, int replica, String tag) {
+    createWagedResource(resource, partitions, replica, tag, STATE_MODEL);
+  }
+
+  private void createWagedResource(String resource, int partitions, int replica, String tag,
+      String stateModel) {
+    createResourceWithWagedRebalance(CLUSTER_NAME, resource, stateModel, partitions, replica,
+        replica);
+    IdealState is = _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resource);
+    is.setInstanceGroupTag(tag);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(CLUSTER_NAME, resource, is);
+    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, resource, replica);
+  }
+
+  /** partition:instance -> state, from the live ExternalView. */
+  private Map<String, String> flatExternalView(String resource) {
+    ExternalView ev = _dataAccessor.getProperty(_dataAccessor.keyBuilder().externalView(resource));
+    Map<String, String> flat = new HashMap<>();
+    if (ev == null) {
+      return flat;
+    }
+    for (String partition : ev.getPartitionSet()) {
+      for (Map.Entry<String, String> e : ev.getStateMap(partition).entrySet()) {
+        flat.put(partition + ":" + e.getKey(), e.getValue());
+      }
+    }
+    return flat;
+  }
+
+  /** partition:instance -> state, from the persisted best-possible assignment (planner output). */
+  private Map<String, String> flatBestPossible(String resource) {
+    Map<String, ResourceAssignment> best = _assignmentMetadataStore.getBestPossibleAssignment();
+    Map<String, String> flat = new HashMap<>();
+    ResourceAssignment ra = best.get(resource);
+    if (ra == null) {
+      return flat;
+    }
+    ra.getMappedPartitions().forEach(p ->
+        ra.getReplicaMap(p).forEach((inst, state) -> flat.put(p.getPartitionName() + ":" + inst, state)));
+    return flat;
+  }
+
+  private static String instanceOf(String partitionColonInstance) {
+    return partitionColonInstance.substring(partitionColonInstance.indexOf(':') + 1);
+  }
+
+  // ------------------------------------------------------------------ SEAS IndexerStateModel
+
+  private static StateModelDefinition buildIndexerStateModelDef() {
+    ZNRecord record = new ZNRecord(STATE_MODEL);
+    record.setSimpleField("INITIAL_STATE", "OFFLINE");
+
+    record.setMapField("CAUGHT_UP.meta", meta("R"));
+    record.setMapField("INDEX_DOWNLOADED.meta", meta("-1"));
+    record.setMapField("ASSIGNED.meta", meta("-1"));
+    record.setMapField("OFFLINE.meta", meta("-1"));
+    record.setMapField("DROPPED.meta", meta("-1"));
+    record.setMapField("ERROR.meta", meta("-1"));
+
+    record.setMapField("CAUGHT_UP.next", mapOf("CAUGHT_UP", "CAUGHT_UP", "DROPPED", "OFFLINE",
+        "INDEX_DOWNLOADED", "OFFLINE", "ASSIGNED", "OFFLINE", "OFFLINE", "OFFLINE"));
+    record.setMapField("INDEX_DOWNLOADED.next", mapOf("CAUGHT_UP", "CAUGHT_UP", "DROPPED", "OFFLINE",
+        "INDEX_DOWNLOADED", "INDEX_DOWNLOADED", "ASSIGNED", "OFFLINE", "OFFLINE", "OFFLINE"));
+    record.setMapField("ASSIGNED.next", mapOf("CAUGHT_UP", "INDEX_DOWNLOADED", "DROPPED", "OFFLINE",
+        "INDEX_DOWNLOADED", "INDEX_DOWNLOADED", "ASSIGNED", "ASSIGNED", "OFFLINE", "OFFLINE"));
+    record.setMapField("OFFLINE.next", mapOf("DROPPED", "DROPPED", "CAUGHT_UP", "ASSIGNED",
+        "INDEX_DOWNLOADED", "ASSIGNED", "ASSIGNED", "ASSIGNED", "OFFLINE", "OFFLINE"));
+    record.setMapField("DROPPED.next", mapOf("DROPPED", "DROPPED"));
+    record.setMapField("ERROR.next", mapOf("DROPPED", "DROPPED", "ERROR", "ERROR", "OFFLINE",
+        "OFFLINE"));
+
+    record.setListField("STATE_PRIORITY_LIST",
+        Arrays.asList("CAUGHT_UP", "INDEX_DOWNLOADED", "ASSIGNED", "OFFLINE", "DROPPED", "ERROR"));
+    record.setListField("STATE_TRANSITION_PRIORITYLIST",
+        Arrays.asList("INDEX_DOWNLOADED-CAUGHT_UP", "CAUGHT_UP-OFFLINE", "ASSIGNED-INDEX_DOWNLOADED",
+            "INDEX_DOWNLOADED-OFFLINE", "OFFLINE-ASSIGNED", "ASSIGNED-OFFLINE", "OFFLINE-DROPPED"));
+
+    return new StateModelDefinition(record);
+  }
+
+  private static Map<String, String> meta(String count) {
+    return ImmutableMap.of("count", count);
+  }
+
+  private static Map<String, String> mapOf(String... kv) {
+    Map<String, String> m = new HashMap<>();
+    for (int i = 0; i < kv.length; i += 2) {
+      m.put(kv[i], kv[i + 1]);
+    }
+    return m;
+  }
+
+  public static class IndexerModelFactory extends StateModelFactory<IndexerStateModel> {
+    @Override
+    public IndexerStateModel createNewStateModel(String resourceName, String partitionKey) {
+      return new IndexerStateModel();
+    }
+  }
+
+  @StateModelInfo(initialState = "OFFLINE", states = {
+      "CAUGHT_UP", "INDEX_DOWNLOADED", "ASSIGNED", "OFFLINE", "DROPPED", "ERROR"
+  })
+  public static class IndexerStateModel extends StateModel {
+    @Transition(to = "ASSIGNED", from = "OFFLINE")
+    public void onBecomeAssignedFromOffline(Message m, NotificationContext c) {
+      LOG.info("{} OFFLINE->ASSIGNED", m.getPartitionName());
+    }
+
+    @Transition(to = "INDEX_DOWNLOADED", from = "ASSIGNED")
+    public void onBecomeIndexDownloadedFromAssigned(Message m, NotificationContext c) {
+      LOG.info("{} ASSIGNED->INDEX_DOWNLOADED", m.getPartitionName());
+    }
+
+    // The wedge: catch-up to the counted top state never completes (SEAS build 1.0.1716.15).
+    @Transition(to = "CAUGHT_UP", from = "INDEX_DOWNLOADED")
+    public void onBecomeCaughtUpFromIndexDownloaded(Message m, NotificationContext c)
+        throws InterruptedException {
+      LOG.info("{} INDEX_DOWNLOADED->CAUGHT_UP BLOCKING (wedged)", m.getPartitionName());
+      BLOCK.await(5, TimeUnit.MINUTES);
+    }
+
+    // The drop is also blocked so the poison persists on the node.
+    @Transition(to = "OFFLINE", from = "INDEX_DOWNLOADED")
+    public void onBecomeOfflineFromIndexDownloaded(Message m, NotificationContext c)
+        throws InterruptedException {
+      LOG.info("{} INDEX_DOWNLOADED->OFFLINE BLOCKING (cannot vacate)", m.getPartitionName());
+      BLOCK.await(5, TimeUnit.MINUTES);
+    }
+
+    @Transition(to = "OFFLINE", from = "CAUGHT_UP")
+    public void onBecomeOfflineFromCaughtUp(Message m, NotificationContext c) {
+      LOG.info("{} CAUGHT_UP->OFFLINE", m.getPartitionName());
+    }
+
+    @Transition(to = "OFFLINE", from = "ASSIGNED")
+    public void onBecomeOfflineFromAssigned(Message m, NotificationContext c) {
+      LOG.info("{} ASSIGNED->OFFLINE", m.getPartitionName());
+    }
+
+    @Transition(to = "DROPPED", from = "OFFLINE")
+    public void onBecomeDroppedFromOffline(Message m, NotificationContext c) {
+      LOG.info("{} OFFLINE->DROPPED", m.getPartitionName());
+    }
+
+    @Transition(to = "OFFLINE", from = "ERROR")
+    public void onBecomeOfflineFromError(Message m, NotificationContext c) {
+      LOG.info("{} ERROR->OFFLINE", m.getPartitionName());
+    }
+  }
+}
