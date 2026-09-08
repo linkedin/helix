@@ -29,6 +29,7 @@ import java.util.stream.Collectors;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
+import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -152,6 +153,49 @@ public class TestUnallocatedOccupancyScoping extends AbstractTestClusterModel {
             instances, emptyAssignment);
     Assert.assertEquals(totalUnallocatedOccupancy(delayedOverwrites), 0,
         "delayed rebalance overwrites must not collect");
+  }
+
+  /**
+   * Excluding the delayed-overwrite scope is only safe because that scope's result is discarded.
+   * It is blind to unaccounted occupancy, so it can propose a placement on an instance that is
+   * physically full; what stops that from becoming permanent is that the proposal never reaches
+   * the best-possible ledger the next partial pass reads.
+   * <p>
+   * That relies on one thing. WagedRebalancer persists the assignment before the overwrite runs,
+   * and mergeAssignments then mutates the assignment object in place -- so the only reason the
+   * persisted copy is not corrupted is that AssignmentManager.getBestPossibleAssignment and
+   * AssignmentMetadataStore.persistBestPossibleAssignment each rebuild through
+   * new ResourceAssignment(record), which deep copies. If that ever became a shallow wrap the
+   * overwrite would silently start writing capacity-blind placements into the durable ledger,
+   * where the next partial pass would read them back as already allocated and leave them alone.
+   * The comment on that code says the result is temporary; this asserts it.
+   */
+  @Test
+  public void testDelayedOverwriteResultCannotLeakIntoThePersistedAssignment() {
+    Partition partition = new Partition("Resource_0");
+
+    ResourceAssignment persisted = new ResourceAssignment("Resource");
+    persisted.addReplicaMap(partition, Collections.singletonMap("healthyInstance", "MASTER"));
+
+    // Obtained exactly the way the rebalancer obtains it, through the record-rebuilding copy.
+    Map<String, ResourceAssignment> handedToOverwrite = Collections.singletonMap("Resource",
+        new ResourceAssignment(persisted.getRecord()));
+
+    // The overwrite decides a physically full instance should also host the partition.
+    ResourceAssignment overwrite = new ResourceAssignment("Resource");
+    overwrite.addReplicaMap(partition, Collections.singletonMap("saturatedInstance", "SLAVE"));
+
+    DelayedRebalanceUtil.mergeAssignments(Collections.singletonMap("Resource", overwrite),
+        handedToOverwrite);
+
+    Assert.assertTrue(
+        handedToOverwrite.get("Resource").getReplicaMap(partition).containsKey("saturatedInstance"),
+        "guard: the merge must actually have applied, otherwise this test proves nothing");
+
+    Assert.assertEquals(persisted.getReplicaMap(partition),
+        Collections.singletonMap("healthyInstance", "MASTER"),
+        "the delayed overwrite must not reach the persisted assignment, or a capacity-blind "
+            + "placement would be read back as already allocated and never corrected");
   }
 
   /**
