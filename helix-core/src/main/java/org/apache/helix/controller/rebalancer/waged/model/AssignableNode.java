@@ -441,6 +441,15 @@ public class AssignableNode implements Comparable<AssignableNode> {
     _unallocatedOccupancyKeys = unallocatedOccupancyKeys;
   }
 
+  /**
+   * @return the unaccounted physical weight this node currently carries, by capacity key. Empty
+   *         unless the feature is enabled and the node holds replicas the assignment does not
+   *         cover. Exposed for tests that assert where collection happens.
+   */
+  Map<String, Integer> getUnallocatedOccupancy() {
+    return Collections.unmodifiableMap(_unallocatedOccupancy);
+  }
+
   public String getInstanceName() {
     return _instanceName;
   }

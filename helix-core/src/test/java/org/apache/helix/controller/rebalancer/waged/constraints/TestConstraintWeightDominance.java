@@ -86,6 +86,35 @@ public class TestConstraintWeightDominance {
   }
 
   /**
+   * The PR offers a weight ramp as the rollout story: an operator lowers the weight through the
+   * soft constraint weight properties instead of switching the behaviour on at full strength. That
+   * override writes into MODEL, so the weight has to be read from MODEL at getInstance time rather
+   * than captured from the constant, otherwise the ramp silently does nothing.
+   */
+  @Test
+  public void testWeightIsRampableThroughTheModelOverride() throws Exception {
+    Field modelField = ConstraintBasedAlgorithmFactory.class.getDeclaredField("MODEL");
+    modelField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<String, Float> model = (Map<String, Float>) modelField.get(null);
+    String key = PhysicalCapacitySoftConstraint.class.getSimpleName();
+    Float original = model.get(key);
+    Assert.assertNotNull(original, "the constraint must be addressable by its simple name, which is "
+        + "the key an operator writes in the properties file");
+    try {
+      for (float ramped : new float[] {0f, 1f, 250f, 20000f}) {
+        model.put(key, ramped);
+        Assert.assertEquals(physicalCapacityWeight(weightsFor(1, 1)), ramped,
+            "a weight override of " + ramped + " must reach the constraint");
+      }
+    } finally {
+      model.put(key, original);
+    }
+    Assert.assertEquals(physicalCapacityWeight(weightsFor(1, 1)), original,
+        "restoring the model must restore the default weight");
+  }
+
+  /**
    * The 13500 quoted in the factory: the six pre-existing constraints at their default weights,
    * scaled by the maximum preference. If a future weight change invalidates that number the
    * dominance argument needs revisiting, so pin it here.
