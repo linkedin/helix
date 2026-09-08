@@ -79,9 +79,11 @@ public class ConstraintBasedAlgorithmFactory {
   };
   // Placing a replica on an instance that is already physically full is pathological rather than
   // merely suboptimal, so this outweighs the evenness and movement constraints instead of trading
-  // against them. The rebalance preferences scale those up to 1000, taking their maximum combined
-  // weight to 13500; this number, multiplied by the 0.5 score gap that a full instance is
-  // guaranteed to concede, must stay clear of that. It is overridable through the soft constraint
+  // against them. The six other constraints default to weights summing to 13.5, which the
+  // rebalance preferences scale by at most MAX_REBALANCE_PREFERENCE, so their combined influence
+  // cannot exceed 13500; half of the weight below -- the smallest gap a full instance is
+  // guaranteed to concede -- stays clear of that. Unlike those constraints this one is deliberately
+  // not scaled by a preference, see getInstance. It is overridable through the soft constraint
   // weight properties so that the behaviour can be ramped rather than switched.
   private static final float PHYSICAL_CAPACITY_WEIGHT = 100000f;
   // The weight for BaselineInfluenceConstraint used when we are forcing a baseline converge. This
@@ -124,6 +126,13 @@ public class ConstraintBasedAlgorithmFactory {
     Map<SoftConstraint, Float> softConstraintsWithWeight = Maps.toMap(softConstraints, key -> {
       if (key instanceof BaselineInfluenceConstraint && forceBaselineConverge) {
         return FORCE_BASELINE_CONVERGE_WEIGHT;
+      }
+      // Not scaled by any rebalance preference. This constraint expresses that an instance cannot
+      // physically hold the replica, which is a correctness concern rather than a balance
+      // preference, and EVENNESS is allowed to be zero -- scaling by it would let a cluster tuned
+      // for stability silently switch the constraint off while its flag still reads enabled.
+      if (key instanceof PhysicalCapacitySoftConstraint) {
+        return MODEL.get(key.getClass().getSimpleName());
       }
 
       float weight = MODEL.get(key.getClass().getSimpleName());
