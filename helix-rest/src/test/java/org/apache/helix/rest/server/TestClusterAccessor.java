@@ -171,7 +171,8 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     Set<String> clusters = OBJECT_MAPPER.readValue(clustersStr,
         OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
-    Assert.assertTrue(isSame(clusters, _clusters));
+    Assert.assertTrue(clusters.equals(_clusters),
+        "Expected clusters " + _clusters + " but found " + clusters);
 
     validateAuditLogSize(1);
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
@@ -335,6 +336,11 @@ public class TestClusterAccessor extends AbstractTestClass {
         Response.Status.OK.getStatusCode());
 
     Assert.assertTrue(isMaintenanceModeEnabled(VG_CLUSTER));
+    post("clusters/" + VG_CLUSTER,
+        ImmutableMap.of("command", "disableMaintenanceMode"),
+        Entity.entity("virtual group", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode());
+    Assert.assertFalse(isMaintenanceModeEnabled(VG_CLUSTER));
   }
 
   @Test(dataProvider = "prepareVirtualTopologyTests", dependsOnMethods = "testVirtualTopologyGroupMaintenanceMode")
@@ -375,7 +381,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
   @DataProvider
   public Object[][] prepareVirtualTopologyTests() {
-    setupClusterForVirtualTopology(VG_CLUSTER);
     String test1 = "{\"virtualTopologyGroupNumber\":\"7\",\"virtualTopologyGroupName\":\"vgTest\"}";
     String test2 = "{\"virtualTopologyGroupNumber\":\"9\",\"virtualTopologyGroupName\":\"vgTest\"}";
     // Split 5 zones into 2 virtual groups, expect 0-2-4 in virtual group 0, 1-3 in virtual group 1
@@ -455,6 +460,15 @@ public class TestClusterAccessor extends AbstractTestClass {
     // Write a test to verify the logics of virtual topology imbalance detection
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String clusterName = "TestImbalanceDetectionCluster";
+    try {
+      verifyImbalanceAlgorithmThrottling(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyImbalanceAlgorithmThrottling(String clusterName) {
     setupClusterForVirtualTopology(clusterName);
     // Verify that the imbalance detection algorithm is working as expected
     HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
@@ -513,13 +527,21 @@ public class TestClusterAccessor extends AbstractTestClass {
       Assert.assertTrue(virtualZoneMap.get(virtualZoneOfZone1).size() > 2,
           "Zone 1 should have more than 2 instances now and it shouldn't be recomputed due to throttling");
     }
-    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test
   public void testAddVirtualTopologyGroupSurfacesValidationReason() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String clusterName = "VgErrorReasonCluster";
+    try {
+      verifyVirtualTopologyGroupValidationReason(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyVirtualTopologyGroupValidationReason(String clusterName) {
     setupClusterForVirtualTopology(clusterName);
 
     // The cluster has 5 fault zones; requesting 6 ZONE_BASED virtual groups must fail the
@@ -539,7 +561,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertTrue(
         body.contains("Number of virtual groups cannot be greater than the number of zones"),
         "Expected the validation reason in the response body but got: " + body);
-    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   @Test(dependsOnMethods = "testGetClusterTopologyAndFaultZoneMap")
@@ -1736,11 +1757,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     validateAuditLog(auditLog, HTTPMethods.POST.name(),
         "clusters/" + cluster + "/configs?command=" + command.name(),
         Response.Status.OK.getStatusCode(), null);
-  }
-
-  private boolean isSame(Set<String> result, Set<String> expected) {
-    return result.size() == expected.size() && result.containsAll(expected) && expected.containsAll(
-        result);
   }
 
   private void validateAuditLogSize(int expected) {

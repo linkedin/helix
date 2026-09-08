@@ -34,9 +34,9 @@ import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.messaging.handling.MessageHandler.ErrorCode;
+import org.apache.helix.mock.participant.BlockingTransition;
 import org.apache.helix.mock.participant.MockMSStateModel;
 import org.apache.helix.mock.participant.MockTransition;
-import org.apache.helix.mock.participant.SleepTransition;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Message;
@@ -88,8 +88,8 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
   })
   public static class TimeOutStateModel extends MockMSStateModel {
     boolean _sleep = false;
-    StateTransitionError _error;
-    int _errorCallcount = 0;
+    volatile StateTransitionError _error;
+    volatile int _errorCallcount = 0;
 
     public TimeOutStateModel(MockTransition transition, boolean sleep) {
       super(transition);
@@ -115,11 +115,6 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
 
   public static class SleepStateModelFactory extends StateModelFactory<TimeOutStateModel> {
     Set<String> partitionsToSleep = new HashSet<String>();
-    int _sleepTime;
-
-    public SleepStateModelFactory(int sleepTime) {
-      _sleepTime = sleepTime;
-    }
 
     public void setPartitions(Collection<String> partitions) {
       partitionsToSleep.addAll(partitions);
@@ -131,7 +126,7 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
 
     @Override
     public TimeOutStateModel createNewStateModel(String resource, String stateUnitKey) {
-      return new TimeOutStateModel(new SleepTransition(_sleepTime),
+      return new TimeOutStateModel(new BlockingTransition("SLAVE", "MASTER"),
           partitionsToSleep.contains(stateUnitKey));
     }
   }
@@ -143,7 +138,7 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
         _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, TEST_DB);
     for (int i = 0; i < NODE_NR; i++) {
       String instanceName = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
-      SleepStateModelFactory factory = new SleepStateModelFactory(1000);
+      SleepStateModelFactory factory = new SleepStateModelFactory();
       factories.put(instanceName, factory);
       for (String p : idealState.getPartitionSet()) {
         if (idealState.getPreferenceList(p).get(0).equals(instanceName)) {
@@ -166,22 +161,26 @@ public class TestStateTransitionTimeout extends ZkStandAloneCMTestBase {
     Assert.assertTrue(result);
     HelixDataAccessor accessor = _participants[0].getHelixDataAccessor();
 
-    TestHelper.verify(() -> verify(accessor, idealState, factories), 5000);
-    Assert.assertTrue(verify(accessor, idealState, factories));
+    Assert.assertTrue(TestHelper.verify(() -> verify(accessor, idealState, factories),
+        TestHelper.WAIT_DURATION), "Expected one timeout and ERROR state for every ideal master");
   }
 
   private boolean verify(HelixDataAccessor accessor, IdealState idealState,
       Map<String, SleepStateModelFactory> factoryMap) {
     Builder kb = accessor.keyBuilder();
     ExternalView ev = accessor.getProperty(kb.externalView(TEST_DB));
+    if (ev == null) {
+      return false;
+    }
     for (String p : idealState.getPartitionSet()) {
       String idealMaster = idealState.getPreferenceList(p).get(0);
-      if (!ev.getStateMap(p).get(idealMaster).equals("ERROR")) {
+      if (ev.getStateMap(p) == null || !"ERROR".equals(ev.getStateMap(p).get(idealMaster))) {
         return false;
       }
 
       TimeOutStateModel model = factoryMap.get(idealMaster).getStateModel(TEST_DB, p);
-      if (model._errorCallcount != 1 || model._error.getCode() != ErrorCode.TIMEOUT) {
+      if (model == null || model._errorCallcount != 1 || model._error == null
+          || model._error.getCode() != ErrorCode.TIMEOUT) {
         return false;
       }
     }

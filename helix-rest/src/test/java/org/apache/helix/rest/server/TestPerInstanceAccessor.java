@@ -841,6 +841,15 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   public void setInstanceOperationRebalanceFeasibilityGuardrail() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String cluster = "TestClusterInstanceOpGuardrail";
+    try {
+      verifyInstanceOperationRebalanceFeasibilityGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyInstanceOperationRebalanceFeasibilityGuardrail(String cluster) throws Exception {
     String capacityKey = "CU";
     int numInstances = 3;
     int numPartitions = 3;
@@ -876,10 +885,11 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
     _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
 
-    BestPossibleExternalViewVerifier verifier =
-        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build();
-    Assert.assertTrue(verifier.verifyByPolling(),
-        "cluster should converge before enabling the guard rail");
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before enabling the guard rail");
+    }
 
     // Enable the opt-in guard rail.
     clusterConfig = _configAccessor.getClusterConfig(cluster);
@@ -929,7 +939,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
             .getOperation(), InstanceConstants.InstanceOperation.EVACUATE,
         "with the guard rail disabled, EVACUATE should be written");
 
-    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   /**

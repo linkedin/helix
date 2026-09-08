@@ -7,17 +7,26 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.apache.helix.ConfigAccessor;
+import org.apache.helix.NotificationContext;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.controller.rebalancer.strategy.CrushEd2RebalanceStrategy;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
+import org.apache.helix.mock.participant.DummyProcess.DummyLeaderStandbyStateModel;
+import org.apache.helix.mock.participant.DummyProcess.DummyLeaderStandbyStateModelFactory;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.Message;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
+import org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
@@ -44,6 +53,34 @@ public class TestCrushED2Rebalance extends ZkTestBase {
   Set<String> _allDBs = new HashSet<>();
   int _REPLICA = 3;
   ConfigAccessor _configAccessor;
+  private final AtomicBoolean _pauseNextDrop = new AtomicBoolean();
+  private final CountDownLatch _dropStarted = new CountDownLatch(1);
+  private final CountDownLatch _releaseDrop = new CountDownLatch(1);
+
+  private class DelayedDropParticipant extends MockParticipantManager {
+    DelayedDropParticipant(String instanceName) {
+      super(ZK_ADDR, CLUSTER_NAME, instanceName);
+      _lsModelFactory = new DummyLeaderStandbyStateModelFactory(_transDelay) {
+        @Override
+        public DummyLeaderStandbyStateModel createNewStateModel(String resource, String partition) {
+          DelayedDropStateModel model = new DelayedDropStateModel();
+          model.setDelay(_transDelay);
+          return model;
+        }
+      };
+    }
+  }
+
+  public class DelayedDropStateModel extends DummyLeaderStandbyStateModel {
+    @Override
+    public void onBecomeDroppedFromOffline(Message message, NotificationContext context) {
+      if (_pauseNextDrop.compareAndSet(true, false)) {
+        _dropStarted.countDown();
+        Uninterruptibles.awaitUninterruptibly(_releaseDrop);
+      }
+      super.onBecomeDroppedFromOffline(message, context);
+    }
+  }
 
   @BeforeClass
   public void beforeClass() throws Exception {
@@ -57,7 +94,8 @@ public class TestCrushED2Rebalance extends ZkTestBase {
     // start controller
     String controllerName = CONTROLLER_PREFIX + "_0";
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
-    _clusterVerifier = new BestPossibleExternalViewVerifier.Builder(CLUSTER_NAME).setZkAddr(ZK_ADDR)
+    // Balance counts every ExternalView entry, including replicas awaiting deletion.
+    _clusterVerifier = new StrictMatchExternalViewVerifier.Builder(CLUSTER_NAME).setZkAddr(ZK_ADDR)
         .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
 
     enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
@@ -105,7 +143,7 @@ public class TestCrushED2Rebalance extends ZkTestBase {
       instanceConfig.setDomain(domain);
       _configAccessor.setInstanceConfig(CLUSTER_NAME, participantName, instanceConfig);
 
-      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, participantName);
+      MockParticipantManager participant = new DelayedDropParticipant(participantName);
       participant.syncStart();
       _participants.add(participant);
     }
@@ -113,6 +151,7 @@ public class TestCrushED2Rebalance extends ZkTestBase {
 
   @AfterClass
   public void afterClass() throws Exception {
+    _releaseDrop.countDown();
     for (String db : _allDBs) {
       _gSetupTool.dropResourceFromCluster(CLUSTER_NAME, db);
     }
@@ -127,6 +166,7 @@ public class TestCrushED2Rebalance extends ZkTestBase {
     if (_controller != null && _controller.isConnected()) {
       _controller.syncStop();
     }
+    _clusterVerifier.close();
     deleteCluster(CLUSTER_NAME);
     System.out.println("END " + CLASS_NAME + " at " + new Date(System.currentTimeMillis()));
   }
@@ -137,7 +177,7 @@ public class TestCrushED2Rebalance extends ZkTestBase {
    even topology.
    */
   @Test
-  public void TestCrushED2RebalanceAssignments(){
+  public void TestCrushED2RebalanceAssignments() throws Exception {
     updateSkewedZoneToInstanceMap();
     updateInstanceConfigs();
     _controller.syncStart();
@@ -148,10 +188,25 @@ public class TestCrushED2Rebalance extends ZkTestBase {
         .manuallyEnableMaintenanceMode(CLUSTER_NAME, true, null, null);
     updateEvenZoneToInstanceMap();
     updateInstanceConfigs();
-    // Exit the cluster in maintenance mode.
-    _gSetupTool.getClusterManagementTool()
-        .manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null, null);
-    Assert.assertTrue(_clusterVerifier.verifyByPolling());
+    _pauseNextDrop.set(true);
+    try {
+      _gSetupTool.getClusterManagementTool()
+          .manuallyEnableMaintenanceMode(CLUSTER_NAME, false, null, null);
+      Assert.assertTrue(_dropStarted.await(TestHelper.WAIT_DURATION, TimeUnit.MILLISECONDS),
+          "Topology change did not retire a replica");
+      // Best-possible convergence ignores OFFLINE replicas awaiting deletion.
+      try (BestPossibleExternalViewVerifier activeReplicaVerifier =
+          new BestPossibleExternalViewVerifier.Builder(CLUSTER_NAME).setZkAddr(ZK_ADDR).build()) {
+        Assert.assertTrue(activeReplicaVerifier.verifyByPolling(),
+            "Active replicas did not converge while a retired replica was held OFFLINE");
+      }
+      Assert.assertFalse(_clusterVerifier.verifyByPolling(1, 1),
+          "Balance verification must wait for retired OFFLINE replicas to be removed");
+    } finally {
+      _releaseDrop.countDown();
+    }
+    Assert.assertTrue(_clusterVerifier.verifyByPolling(),
+        "ExternalView did not converge to the final assignment after replica cleanup");
     validateAssignment(0.1);
   }
 
@@ -204,7 +259,10 @@ public class TestCrushED2Rebalance extends ZkTestBase {
       Map<Integer, List<Double>> avgPartitionsByZoneType = CrushED2TestUtils.getAvgPartitionsPerZoneType(preferenceList, _instanceToZoneTypeMap);
       avgPartitionsByZoneType.forEach((zoneType, stats) -> {
         Double skew = stats.get(1);
-        Assert.assertTrue(skew >= (1.0 - threshold) && skew <= (1.0 + threshold));
+        Assert.assertTrue(skew >= (1.0 - threshold) && skew <= (1.0 + threshold),
+            "Resource " + resource + ", zone size " + zoneType + ": skew " + skew
+                + ", expected [" + (1.0 - threshold) + ", " + (1.0 + threshold)
+                + "], average partitions " + stats.get(0) + ", ideal average " + stats.get(2));
       });
     }
   }
