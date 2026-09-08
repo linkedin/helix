@@ -166,6 +166,51 @@ public class TestPhysicalCapacityScore extends AbstractTestClusterModel {
   }
 
   /**
+   * The previous test exhausts a single dimension, so Math.max never had to choose between two
+   * competing shortfalls -- returning the first, the last, or the smaller would all have passed it.
+   * With both dimensions short by different relative amounts the choice becomes observable, and the
+   * larger relative shortfall has to win. Taking the smaller would let an instance that is badly
+   * short of one capacity type hide behind being only slightly short of another.
+   */
+  @Test
+  public void testLargerOfTwoCompetingShortfallsGoverns() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    // Both dimensions fully occupied: item1 capacity 20, item2 capacity 40.
+    AssignableNode n = nodeWithOccupancy(cache, map("item1", 20, "item2", 40));
+
+    // item1 short by 2 of 20 = 0.10 relative; item2 short by 8 of 40 = 0.20 relative.
+    double actual = n.getPhysicalRoomScore(replica(map("item1", 2, "item2", 8)));
+
+    double expectedFromWorse = 0.5d / (1d + 0.20d);
+    double ifItTookTheSmaller = 0.5d / (1d + 0.10d);
+
+    Assert.assertEquals(actual, expectedFromWorse, 1e-9,
+        "the larger relative shortfall (item2, 0.20) must govern the score");
+    Assert.assertTrue(Math.abs(actual - ifItTookTheSmaller) > 1e-6,
+        "the two candidate outcomes must be distinguishable, otherwise this test cannot tell which "
+            + "shortfall was used; actual=" + actual + " smaller-would-give=" + ifItTookTheSmaller);
+  }
+
+  /**
+   * The relative scaling means a shortfall must be judged against the dimension's own capacity, not
+   * in absolute units. A larger absolute shortfall on a roomy dimension is less serious than a
+   * smaller one on a tight dimension, and scoring the absolute value would invert that.
+   */
+  @Test
+  public void testShortfallIsRelativeToEachDimensionNotAbsolute() throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    AssignableNode n = nodeWithOccupancy(cache, map("item1", 20, "item2", 40));
+
+    // item1: 4 of 20 = 0.20 relative. item2: 6 of 40 = 0.15 relative.
+    // item2 is the larger absolute shortfall, item1 the larger relative one.
+    double actual = n.getPhysicalRoomScore(replica(map("item1", 4, "item2", 6)));
+
+    Assert.assertEquals(actual, 0.5d / (1d + 0.20d), 1e-9,
+        "item1 must govern on relative shortfall (0.20) even though item2 is short by more in "
+            + "absolute units (6 > 4)");
+  }
+
+  /**
    * Occupancy is a running total that assign and release both adjust, so a replica moving into and
    * back out of an assignment has to leave it exactly where it started. Drift here would corrupt
    * every later score on the node.
