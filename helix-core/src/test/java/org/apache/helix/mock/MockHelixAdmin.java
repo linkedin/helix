@@ -540,11 +540,6 @@ public class MockHelixAdmin implements HelixAdmin {
 
   }
 
-  @Override
-  public Map<String, String> getBatchDisabledInstances(String clusterName) {
-    return null;
-  }
-
   @Override public List<String> getInstancesByDomain(String clusterName, String domain) {
     return null;
   }
