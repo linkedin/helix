@@ -110,7 +110,6 @@ public abstract class AbstractTestClusterModel {
     // 2. Set up the basic cluster configuration.
     ClusterConfig testClusterConfig = new ClusterConfig("testClusterConfigId");
     testClusterConfig.setMaxPartitionsPerInstance(5);
-    testClusterConfig.setDisabledInstances(Collections.emptyMap());
     testClusterConfig.setInstanceCapacityKeys(new ArrayList<>(_capacityDataMap.keySet()));
     testClusterConfig.setDefaultPartitionWeightMap(
         _capacityDataMap.keySet().stream().collect(Collectors.toMap(key -> key, key -> 0)));

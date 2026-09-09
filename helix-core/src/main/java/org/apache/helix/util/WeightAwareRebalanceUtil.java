@@ -20,7 +20,6 @@ package org.apache.helix.util;
  */
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,8 +80,6 @@ public class WeightAwareRebalanceUtil {
       instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
       _instanceConfigMap.put(instanceConfig.getInstanceName(), instanceConfig);
     }
-    // ensure no instance is disabled
-    clusterConfig.setDisabledInstances(Collections.<String, String>emptyMap());
     _clusterConfig = clusterConfig;
 
     _dataCache = new ResourceControllerDataProvider();

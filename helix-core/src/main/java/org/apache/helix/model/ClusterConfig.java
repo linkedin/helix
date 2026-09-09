@@ -107,11 +107,8 @@ public class ClusterConfig extends HelixProperty {
     // partitons that need recovery or in
     // error exceeds this limitation
     @Deprecated // TODO: Remove in Helix 2.0
-    DISABLED_INSTANCES,
-    @Deprecated // TODO: Remove in Helix 2.0
     DISABLED_INSTANCES_WITH_INFO,
-    // disabled instances and disabled instances with info are for storing batch disabled instances.
-    // disabled instances will write into both 2 fields for backward compatibility.
+    // disabled instances with info is for storing batch disabled instances (cloud event handling).
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -1038,32 +1035,11 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the disabled instance list
-   * @param disabledInstances
-   */
-  public void setDisabledInstances(Map<String, String> disabledInstances) {
-    _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES.name(), disabledInstances);
-  }
-
-  /**
    * Set the disabled instance list with concatenated Info
    */
   public void setDisabledInstancesWithInfo(Map<String, String> disabledInstancesWithInfo) {
     _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name(),
         disabledInstancesWithInfo);
-  }
-
-  /**
-   * Get current disabled instance map of <instance, disabledTimeStamp>
-   * @deprecated We will no longer be using the clusterConfig to disable instances
-   * please use the InstanceConfig to disable instances
-   * @return a non-null map of disabled instances in cluster config
-   */
-  @Deprecated
-  public Map<String, String> getDisabledInstances() {
-    Map<String, String> disabledInstances =
-        _record.getMapField(ClusterConfigProperty.DISABLED_INSTANCES.name());
-    return disabledInstances == null ? Collections.emptyMap() : disabledInstances;
   }
 
   /**
@@ -1491,8 +1467,7 @@ public class ClusterConfig extends HelixProperty {
   }
 
   public String getInstanceHelixDisabledType(String instanceName) {
-    if (!getDisabledInstancesWithInfo().containsKey(instanceName) &&
-        !getDisabledInstances().containsKey(instanceName)) {
+    if (!getDisabledInstancesWithInfo().containsKey(instanceName)) {
       return InstanceConstants.INSTANCE_NOT_DISABLED;
     }
     return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
@@ -1520,7 +1495,7 @@ public class ClusterConfig extends HelixProperty {
           .parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
           .get(ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString());
     }
-    return getDisabledInstances().get(instanceName);
+    return null;
   }
 
   /**

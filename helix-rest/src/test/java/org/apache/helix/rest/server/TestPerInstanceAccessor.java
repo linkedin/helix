@@ -623,11 +623,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
 
-    // We should see no instance disable related field in to clusterConfig
-    ClusterConfig cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
-
     // disable instance with no reason input
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
@@ -639,11 +634,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-
-    // Disable instance should see no field write to clusterConfig
-    cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
 
     // AddTags
     List<String> tagList = ImmutableList.of("tag3", "tag1", "tag2");

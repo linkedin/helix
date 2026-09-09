@@ -65,8 +65,6 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -282,54 +280,12 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     if (_propertyDataChangedMap.get(HelixConstants.ChangeType.CLUSTER_CONFIG).getAndSet(false)) {
       _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
       refreshedType.add(HelixConstants.ChangeType.CLUSTER_CONFIG);
-      // TODO: This is a temp function to clean up incompatible batched disabled instances format.
-      // Remove in later version.
-      if (_clusterConfig!=null && needCleanUpBatchedDisabledInstance(_clusterConfig.getRecord())
-          && cleanBatchDisableMapField(accessor)) {
-        LogUtil.logInfo(logger, getClusterEventId(), String
-            .format("Clean ClusterConfig mapField for cluster %s, pipeline %s", _clusterName,
-                getPipelineName()));
-      }
       refreshAbnormalStateResolverMap(_clusterConfig);
     } else {
       LogUtil.logDebug(logger, getClusterEventId(), String
           .format("No ClusterConfig change for cluster %s, pipeline %s", _clusterName,
               getPipelineName()));
     }
-  }
-
-  // TODO: This function is used to clean up batched disabled instances for
-  // "DISABLED_INSTANCES" introduced in 1.0.3.0. This temp change should be reverted after 1.0.5.0 \
-  // or later version.
-  private boolean cleanBatchDisableMapField(final HelixDataAccessor accessor) {
-    boolean successful =
-        accessor.updateProperty(accessor.keyBuilder().clusterConfig(), new DataUpdater<ZNRecord>() {
-          @Override
-          public ZNRecord update(ZNRecord currentData) {
-            if (currentData == null) {
-              throw new HelixException(
-                  "Cluster: " + _clusterConfig.getClusterName() + ": cluster config is null");
-            }
-            ZNRecord newRecord = new ZNRecord(currentData);
-            String batchDisabledInstanceMapFieldKey =
-                ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name();
-            if (needCleanUpBatchedDisabledInstance(currentData)) {
-              newRecord.getMapFields().remove(batchDisabledInstanceMapFieldKey);
-            }
-            return newRecord;
-          }
-        }, null);
-    if (!successful) {
-      LogUtil.logError(logger, getClusterEventId(), String
-          .format("Failed to clean ClusterConfig change for cluster %s, pipeline %s", _clusterName,
-              getPipelineName()));
-    }
-    return successful;
-  }
-
-  private boolean needCleanUpBatchedDisabledInstance(ZNRecord record) {
-    return record!=null && record.getMapFields()!=null && record.getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name());
   }
 
   private void refreshIdealState(final HelixDataAccessor accessor,
