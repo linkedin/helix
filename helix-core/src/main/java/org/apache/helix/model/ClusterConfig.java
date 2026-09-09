@@ -148,6 +148,13 @@ public class ClusterConfig extends HelixProperty {
     // per-cluster decision, and it can be turned off again with a single ClusterConfig change (no
     // client change or helix-rest redeploy) to back out a false positive.
     INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceTagRebalanceFeasibilityGuardrailRule, which pre-validates
+    // a removeInstanceTag request: removing a tag that a WAGED resource is pinned to (via
+    // INSTANCE_GROUP_TAG) shrinks that resource's assignable pool, so if it would leave partitions
+    // unable to place all their replicas the removal is rejected before the ZooKeeper write. Disabled by
+    // default so enabling it is a deliberate per-cluster decision; it can be turned off again with a
+    // single ClusterConfig change (no client change or helix-rest redeploy) to back out a false positive.
+    INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED,
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
@@ -1274,6 +1281,32 @@ public class ClusterConfig extends HelixProperty {
   public void setInstanceCapacityHeadroomGuardrailEnabled(boolean enabled) {
     _record.setBooleanField(
         ClusterConfigProperty.INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-tag rebalance-feasibility guard rail is enabled for this cluster.
+   * When enabled, a {@code removeInstanceTag} that would shrink the assignable pool of a WAGED resource
+   * pinned to that tag (via {@code INSTANCE_GROUP_TAG}) is pre-validated with a read-only what-if and
+   * rejected before the ZooKeeper write if it would leave partitions unable to place all their replicas
+   * (rather than only surfacing later as a WAGED rebalance failure).
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without changing
+   * any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceTagRebalanceGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-tag rebalance-feasibility guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceTagRebalanceGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED.name(), enabled);
   }
 
   private Map<String, Integer> getDefaultCapacityMap(ClusterConfigProperty capacityPropertyType) {
