@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -79,6 +80,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private final String _clusterName;
   private final String _participantName;
   private final ObjectName _initObjectName;
+  private final LongSupplier _currentTimeMillis;
 
   private List<String> _tags;
 
@@ -121,8 +123,14 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * @param objectName the MBean object name
    */
   public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
+    this(clusterName, participantName, objectName, System::currentTimeMillis);
+  }
+
+  InstanceMonitor(String clusterName, String participantName, ObjectName objectName,
+      LongSupplier currentTimeMillis) {
     _clusterName = clusterName;
     _participantName = participantName;
+    _currentTimeMillis = currentTimeMillis;
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
@@ -422,7 +430,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     // Handle backward compatibility: if timestamp is -1 (unknown), use current time
     // This happens when InstanceOperation is not set and we're using legacy HELIX_ENABLED field
     // We capture current time ONCE to ensure consistency across calculations
-    long currentTime = System.currentTimeMillis();
+    long currentTime = _currentTimeMillis.getAsLong();
     if (operationStartTime == -1L) {
       operationStartTime = currentTime;
     }

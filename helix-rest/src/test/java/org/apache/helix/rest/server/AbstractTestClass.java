@@ -357,6 +357,24 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     return instances;
   }
 
+  protected void deleteTestCluster(String cluster) {
+    _clusterControllerManagers.removeIf(controller -> {
+      if (cluster.equals(controller.getClusterName())) {
+        controller.syncStop();
+        return true;
+      }
+      return false;
+    });
+    _mockParticipantManagers.removeIf(participant -> {
+      if (cluster.equals(participant.getClusterName())) {
+        participant.syncStop();
+        return true;
+      }
+      return false;
+    });
+    _gSetupTool.deleteCluster(cluster);
+  }
+
   protected void addParticipant(String cluster, String instanceName) {
     // Create instance
     _gSetupTool.addInstanceToCluster(cluster, instanceName);

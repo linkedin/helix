@@ -238,7 +238,9 @@ public class TestConsecutiveZkSessionExpiry extends ZkUnitTestBase {
     Assert.assertNotNull(leader);
     Assert.assertEquals(leader.getId(), "localhost_12919");
 
-    // check localhost_12918 has 2 handlers: message and data-accessor
+    // Leadership changes before the old controller finishes removing its handlers.
+    Assert.assertTrue(TestHelper.verify(() -> distributedControllers[0].getHandlers().size() == 1,
+        20000), "Old controller did not finish callback-handler cleanup");
     LOG.debug("handlers: " + TestHelper.printHandlers(distributedControllers[0]));
     List<CallbackHandler> handlers = distributedControllers[0].getHandlers();
     Assert

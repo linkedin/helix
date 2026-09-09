@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -83,12 +84,13 @@ public class TestInstanceMonitor {
   }
 
   @Test
-  public void testInstanceOperationDurationMetrics() throws JMException, InterruptedException {
+  public void testInstanceOperationDurationMetrics() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
     String testDomain = "testDomain:key=value";
+    AtomicLong currentTime = new AtomicLong(1000L);
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), currentTime::get);
 
     // Initially, all duration metrics should be 0 (instance starts in ENABLE state)
     Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L);
@@ -98,19 +100,16 @@ public class TestInstanceMonitor {
     Assert.assertEquals(monitor.getInstanceOperationDurationUnknown(), 0L);
 
     // Test EVACUATE operation
-    long evacuateStartTime = System.currentTimeMillis();
+    long evacuateStartTime = currentTime.get();
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE, evacuateStartTime);
 
-    // Wait 100ms to let duration accumulate
-    Thread.sleep(100);
+    currentTime.addAndGet(100L);
 
     // Update again to calculate current duration
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE, evacuateStartTime);
 
-    // EVACUATE duration should be > 0 and roughly >= 100ms
     long evacuateDuration = monitor.getInstanceOperationDurationEvacuate();
-    Assert.assertTrue(evacuateDuration >= 100L,
-        "EVACUATE duration should be >= 100ms, but was " + evacuateDuration);
+    Assert.assertEquals(evacuateDuration, 100L);
 
     // The previous operation (ENABLE) should be reset to 0 immediately
     Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L,
@@ -121,19 +120,17 @@ public class TestInstanceMonitor {
     Assert.assertEquals(monitor.getInstanceOperationDurationSwapIn(), 0L);
     Assert.assertEquals(monitor.getInstanceOperationDurationUnknown(), 0L);
 
-    // Wait another 100ms
-    Thread.sleep(100);
+    currentTime.addAndGet(100L);
 
     // Update again - duration should have increased
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE, evacuateStartTime);
     long evacuateDuration2 = monitor.getInstanceOperationDurationEvacuate();
     Assert.assertTrue(evacuateDuration2 > evacuateDuration,
         "EVACUATE duration should increase over time");
-    Assert.assertTrue(evacuateDuration2 >= 200L,
-        "EVACUATE duration should be >= 200ms, but was " + evacuateDuration2);
+    Assert.assertEquals(evacuateDuration2, 200L);
 
     // Change to DISABLE operation
-    long disableStartTime = System.currentTimeMillis();
+    long disableStartTime = currentTime.get();
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.DISABLE, disableStartTime);
 
     // All gauges except DISABLE should be reset to 0
@@ -144,25 +141,22 @@ public class TestInstanceMonitor {
     Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L,
         "ENABLE duration should be reset to 0");
 
-    // Wait and verify DISABLE duration increases
-    Thread.sleep(100);
+    currentTime.addAndGet(100L);
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.DISABLE, disableStartTime);
     long disableDuration = monitor.getInstanceOperationDurationDisable();
-    Assert.assertTrue(disableDuration >= 100L,
-        "DISABLE duration should be >= 100ms, but was " + disableDuration);
+    Assert.assertEquals(disableDuration, 100L);
     // EVACUATE should remain reset at 0
     Assert.assertEquals(monitor.getInstanceOperationDurationEvacuate(), 0L,
         "EVACUATE should remain at 0");
 
     // Test SWAP_IN operation
-    long swapInStartTime = System.currentTimeMillis();
+    long swapInStartTime = currentTime.get();
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN, swapInStartTime);
-    Thread.sleep(50);
+    currentTime.addAndGet(50L);
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN, swapInStartTime);
 
     long swapInDuration = monitor.getInstanceOperationDurationSwapIn();
-    Assert.assertTrue(swapInDuration >= 50L,
-        "SWAP_IN duration should be >= 50ms, but was " + swapInDuration);
+    Assert.assertEquals(swapInDuration, 50L);
     // All others (DISABLE, EVACUATE, ENABLE) should be reset to 0
     Assert.assertEquals(monitor.getInstanceOperationDurationDisable(), 0L,
         "DISABLE should be reset to 0");
@@ -172,14 +166,13 @@ public class TestInstanceMonitor {
         "ENABLE should be reset to 0");
 
     // Test UNKNOWN operation
-    long unknownStartTime = System.currentTimeMillis();
+    long unknownStartTime = currentTime.get();
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN, unknownStartTime);
-    Thread.sleep(50);
+    currentTime.addAndGet(50L);
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN, unknownStartTime);
 
     long unknownDuration = monitor.getInstanceOperationDurationUnknown();
-    Assert.assertTrue(unknownDuration >= 50L,
-        "UNKNOWN duration should be >= 50ms, but was " + unknownDuration);
+    Assert.assertEquals(unknownDuration, 50L);
     // All others (SWAP_IN, DISABLE, EVACUATE, ENABLE) should be reset to 0
     Assert.assertEquals(monitor.getInstanceOperationDurationSwapIn(), 0L,
         "SWAP_IN should be reset to 0");
@@ -191,9 +184,9 @@ public class TestInstanceMonitor {
         "ENABLE should be reset to 0");
 
     // Test going back to ENABLE - all others reset to 0
-    long enableStartTime = System.currentTimeMillis();
+    long enableStartTime = currentTime.get();
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.ENABLE, enableStartTime);
-    Thread.sleep(50);
+    currentTime.addAndGet(50L);
     monitor.updateInstanceOperation(InstanceConstants.InstanceOperation.ENABLE, enableStartTime);
 
     // All gauges except ENABLE should be reset to 0
@@ -208,23 +201,21 @@ public class TestInstanceMonitor {
 
     // ENABLE duration should be > 0
     long enableDuration = monitor.getInstanceOperationDurationEnable();
-    Assert.assertTrue(enableDuration >= 50L,
-        "ENABLE duration should be >= 50ms, but was " + enableDuration);
+    Assert.assertEquals(enableDuration, 50L);
 
     // Test null operation defaults to ENABLE
     monitor.updateInstanceOperation(null, enableStartTime);
-    Thread.sleep(50);
+    currentTime.addAndGet(50L);
     monitor.updateInstanceOperation(null, enableStartTime);
     long enableDuration2 = monitor.getInstanceOperationDurationEnable();
-    Assert.assertTrue(enableDuration2 > enableDuration,
-        "ENABLE duration should continue increasing");
+    Assert.assertEquals(enableDuration2, 100L);
 
     monitor.unregister();
   }
 
   @Test
   public void testInstanceOperationDurationWithInstanceConfigAPI()
-      throws JMException, InterruptedException {
+      throws JMException {
     String testCluster = "testCluster";
     String testInstance = "localhost_12345";
     String testDomain = "testDomain:key=value";
@@ -233,8 +224,9 @@ public class TestInstanceMonitor {
     InstanceConfig instanceConfig = new InstanceConfig(testInstance);
 
     // Create InstanceMonitor
+    AtomicLong currentTime = new AtomicLong();
     InstanceMonitor monitor =
-        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain));
+        new InstanceMonitor(testCluster, testInstance, new ObjectName(testDomain), currentTime::get);
 
     // Verify initial state - instance starts in ENABLE
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
@@ -261,13 +253,13 @@ public class TestInstanceMonitor {
     long operationTimestamp = instanceConfig.getInstanceOperation().getTimestamp();
     Assert.assertTrue(operationTimestamp > 0,
         "Operation timestamp should be set");
+    currentTime.set(operationTimestamp);
 
     // Update monitor with the new operation (simulating what ClusterStatusMonitor does)
     monitor.updateInstanceOperation(instanceConfig.getInstanceOperation().getOperation(),
         instanceConfig.getInstanceOperation().getTimestamp());
 
-    // Wait for duration to accumulate
-    Thread.sleep(150);
+    currentTime.addAndGet(150L);
 
     // Update monitor again to get current duration
     monitor.updateInstanceOperation(instanceConfig.getInstanceOperation().getOperation(),
@@ -275,8 +267,7 @@ public class TestInstanceMonitor {
 
     // Verify EVACUATE duration is tracking
     long evacuateDuration = monitor.getInstanceOperationDurationEvacuate();
-    Assert.assertTrue(evacuateDuration >= 150L,
-        "EVACUATE duration should be >= 150ms, but was " + evacuateDuration);
+    Assert.assertEquals(evacuateDuration, 150L);
     // ENABLE should be reset to 0 when switching to EVACUATE
     Assert.assertEquals(monitor.getInstanceOperationDurationEnable(), 0L,
         "ENABLE should be reset to 0 when switching to EVACUATE");
@@ -285,7 +276,8 @@ public class TestInstanceMonitor {
     // Creating a fresh instance to avoid backwards compatibility issues
     InstanceConfig instanceConfig2 = new InstanceConfig(testInstance + "_2");
     InstanceMonitor monitor2 =
-        new InstanceMonitor(testCluster, testInstance + "_2", new ObjectName(testDomain + "2"));
+        new InstanceMonitor(testCluster, testInstance + "_2", new ObjectName(testDomain + "2"),
+            currentTime::get);
 
     InstanceConfig.InstanceOperation disableOp =
         new InstanceConfig.InstanceOperation.Builder()
@@ -301,18 +293,18 @@ public class TestInstanceMonitor {
         InstanceConstants.InstanceOperation.DISABLE);
     Assert.assertEquals(instanceConfig2.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.ADMIN);
+    currentTime.set(instanceConfig2.getInstanceOperation().getTimestamp());
 
     // Update monitor
     monitor2.updateInstanceOperation(instanceConfig2.getInstanceOperation().getOperation(),
         instanceConfig2.getInstanceOperation().getTimestamp());
 
-    Thread.sleep(100);
+    currentTime.addAndGet(100L);
     monitor2.updateInstanceOperation(instanceConfig2.getInstanceOperation().getOperation(),
         instanceConfig2.getInstanceOperation().getTimestamp());
 
     long disableDuration = monitor2.getInstanceOperationDurationDisable();
-    Assert.assertTrue(disableDuration >= 100L,
-        "DISABLE duration should be >= 100ms, but was " + disableDuration);
+    Assert.assertEquals(disableDuration, 100L);
     Assert.assertEquals(monitor2.getInstanceOperationDurationEvacuate(), 0L,
         "EVACUATE should be 0 for this instance");
 
