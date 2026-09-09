@@ -116,8 +116,10 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig cloudConfig = builder.build();
   }
 
-  @Test(expectedExceptions = HelixException.class)
-  public void testUnverifiedCloudConfigBuilderWithoutProcessor() {
+  @Test
+  public void testCloudConfigBuilderWithoutProcessorName() {
+    // CUSTOMIZED no longer requires a processor name; the engine supplies the default LinkedIn
+    // processor. Building such a config succeeds as long as CloudInfoSources is present.
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
@@ -126,6 +128,21 @@ public class TestCloudConfig extends ZkUnitTestBase {
     builder.setCloudInfoSources(testList);
     builder.addCloudInfoSource("TestURL");
     CloudConfig cloudConfig = builder.build();
+    Assert.assertTrue(cloudConfig.isCloudEnabled());
+    Assert.assertEquals(cloudConfig.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+    // The processor name is not stored in the config; the engine defaults it at consumption time.
+    Assert.assertNull(cloudConfig.getCloudInfoProcessorName());
+  }
+
+  @Test
+  public void testCloudConfigBuilderDefaultsProvider() {
+    // When cloud is enabled and no provider is specified, the builder defaults to CUSTOMIZED.
+    CloudConfig.Builder builder = new CloudConfig.Builder();
+    builder.setCloudEnabled(true);
+    builder.addCloudInfoSource("TestURL");
+    CloudConfig cloudConfig = builder.build();
+    Assert.assertTrue(cloudConfig.isCloudEnabled());
+    Assert.assertEquals(cloudConfig.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
   }
 
   @Test(dependsOnMethods = "testCloudConfig")

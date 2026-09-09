@@ -24,6 +24,7 @@ import java.util.Collections;
 import org.apache.helix.HelixCloudProperty;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.model.CloudConfig;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -87,10 +88,48 @@ public class TestHelixCloudProperty {
     Assert.assertEquals(customCloudProperty.getCloudInfoSources(),
         Collections.singletonList("https://custom-cloud.com"));
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorPackage(),
-        "org.apache.helix.cloud.customized");
+        "com.linkedin.helix.cloudinfo");
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorName(),
         "CustomCloudInstanceInfoProcessor");
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorFullyQualifiedClassName(),
-        "org.apache.helix.cloud.customized.CustomCloudInstanceInfoProcessor");
+        "com.linkedin.helix.cloudinfo.CustomCloudInstanceInfoProcessor");
+  }
+
+  @Test
+  public void testHelixCloudPropertyCustomizedDefaultsProcessor() {
+    // A CUSTOMIZED cloud config that omits the processor package and name falls back to the
+    // LinkedIn cloud-info processor supplied by the engine.
+    CloudConfig customCloudConfig =
+        new CloudConfig.Builder().setCloudEnabled(true).setCloudProvider(CloudProvider.CUSTOMIZED)
+            .setCloudInfoSources(Collections.singletonList("https://custom-cloud.com")).build();
+
+    HelixCloudProperty customCloudProperty = new HelixCloudProperty(customCloudConfig);
+
+    Assert.assertTrue(customCloudProperty.getCloudEnabled());
+    Assert.assertEquals(customCloudProperty.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+    Assert.assertEquals(customCloudProperty.getCloudInfoProcessorPackage(),
+        "com.linkedin.helix.cloudinfo");
+    Assert.assertEquals(customCloudProperty.getCloudInfoProcessorName(),
+        "LinkedInCloudInstanceInformationProcessor");
+    Assert.assertEquals(customCloudProperty.getCloudInfoProcessorFullyQualifiedClassName(),
+        "com.linkedin.helix.cloudinfo.LinkedInCloudInstanceInformationProcessor");
+  }
+
+  @Test
+  public void testHelixCloudPropertyDefaultsProviderWhenAbsent() {
+    // A cloud-enabled config read from ZK with no provider (e.g. omitted by the provisioner)
+    // defaults to the CUSTOMIZED provider with the LinkedIn processor defaults.
+    ZNRecord record = new ZNRecord("CloudConfig");
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("https://custom-cloud.com"));
+    CloudConfig cloudConfig = new CloudConfig(record);
+
+    HelixCloudProperty cloudProperty = new HelixCloudProperty(cloudConfig);
+
+    Assert.assertTrue(cloudProperty.getCloudEnabled());
+    Assert.assertEquals(cloudProperty.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+    Assert.assertEquals(cloudProperty.getCloudInfoProcessorFullyQualifiedClassName(),
+        "com.linkedin.helix.cloudinfo.LinkedInCloudInstanceInformationProcessor");
   }
 }
