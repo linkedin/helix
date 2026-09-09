@@ -22,7 +22,6 @@ package org.apache.helix.cloud.event.helix;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
@@ -39,9 +38,9 @@ public class DefaultCloudEventCallbackImpl {
   private final String _emmReason = "Cloud event EMM in DefaultCloudEventCallback by %s at %s";
 
   /**
-   * Disable the instance and track the cloud event in map field disabledInstancesWithInfo in
-   * cluster config. Will not re-disable the instance if the instance is already disabled for
-   * other reason. (So we will not overwrite the disabled reason and enable this instance when
+   * Disable the instance for a cloud event, recording the disabled type as CLOUD_EVENT at the
+   * instance level. Will not re-disable the instance if the instance is already disabled for
+   * another reason. (So we will not overwrite the disabled reason and enable this instance when
    * on-unpause)
    * @param manager The helix manager associated with the listener
    * @param eventInfo Detailed information about the event
@@ -55,13 +54,10 @@ public class DefaultCloudEventCallbackImpl {
           .enableInstance(manager.getClusterName(), manager.getInstanceName(), false,
               InstanceConstants.InstanceDisabledType.CLOUD_EVENT, message);
     }
-    HelixEventHandlingUtil.updateCloudEventOperationInClusterConfig(manager.getClusterName(),
-        manager.getInstanceName(), manager.getHelixDataAccessor().getBaseDataAccessor(), false,
-        message);
   }
 
   /**
-   * Remove tracked cloud event in cluster config and enable the instance
+   * Enable the instance if it was disabled because of a cloud event.
    * We only enable instance that is disabled because of cloud event.
    * @param manager The helix manager associated with the listener
    * @param eventInfo Detailed information about the event
@@ -71,9 +67,6 @@ public class DefaultCloudEventCallbackImpl {
     String instanceName = manager.getInstanceName();
     HelixDataAccessor accessor = manager.getHelixDataAccessor();
     String message = String.format(_instanceReason, System.currentTimeMillis());
-    HelixEventHandlingUtil
-        .updateCloudEventOperationInClusterConfig(manager.getClusterName(), instanceName,
-            manager.getHelixDataAccessor().getBaseDataAccessor(), true, message);
     if (HelixEventHandlingUtil.isInstanceDisabledForCloudEvent(instanceName, accessor)) {
       manager.getClusterManagmentTool().enableInstance(manager.getClusterName(), instanceName, true,
           InstanceConstants.InstanceDisabledType.CLOUD_EVENT, message);
@@ -98,15 +91,13 @@ public class DefaultCloudEventCallbackImpl {
   }
 
   /**
-   * Will exit MM when when cluster config tracks no ongoing cloud event being handling
+   * Will exit MM when no instance is disabled due to an ongoing cloud event
    * TODO: we should also check the maintenance reason and only exit when EMM is caused by cloud event
    * @param manager The helix manager associated with the listener
    * @param eventInfo Detailed information about the event
    */
   public void exitMaintenanceMode(HelixManager manager, Object eventInfo) {
-    ClusterConfig clusterConfig = manager.getHelixDataAccessor()
-        .getProperty(manager.getHelixDataAccessor().keyBuilder().clusterConfig());
-    if (HelixEventHandlingUtil.checkNoInstanceUnderCloudEvent(clusterConfig)) {
+    if (HelixEventHandlingUtil.checkNoInstanceUnderCloudEvent(manager.getHelixDataAccessor())) {
       LOG.info("DefaultCloudEventCallbackImpl exitMaintenanceMode by {}",
           manager.getInstanceName());
       manager.getClusterManagmentTool()
@@ -115,8 +106,7 @@ public class DefaultCloudEventCallbackImpl {
               null);
     } else {
       LOG.info(
-          "DefaultCloudEventCallbackImpl will not exitMaintenanceMode as there are {} instances under cloud event",
-          clusterConfig.getDisabledInstancesWithInfo().keySet().size());
+          "DefaultCloudEventCallbackImpl will not exitMaintenanceMode as there are instances under cloud event");
     }
   }
 }

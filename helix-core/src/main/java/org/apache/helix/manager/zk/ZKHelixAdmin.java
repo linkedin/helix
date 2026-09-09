@@ -37,7 +37,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -99,7 +98,6 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.RebalanceUtil;
@@ -2677,77 +2675,6 @@ public class ZKHelixAdmin implements HelixAdmin {
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
-  }
-
-  // TODO: Add history ZNode for all batched enabling/disabling histories with metadata.
-  @Deprecated
-  private void enableBatchInstances(final String clusterName, final List<String> instances,
-      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
-      InstanceConstants.InstanceDisabledType disabledType, String reason) {
-
-    // TODO: batch enable/disable is breaking backward compatibility on instance enable with older library
-    // re-enable once batch enable/disable is ready
-    if (true) {
-      throw new HelixException("enableBatchInstances is not supported.");
-    }
-    String path = PropertyPathBuilder.clusterConfig(clusterName);
-
-    if (!baseAccessor.exists(path, 0)) {
-      throw new HelixException("Cluster " + clusterName + ": cluster config does not exist");
-    }
-
-    baseAccessor.update(path, new DataUpdater<ZNRecord>() {
-      @Override
-      public ZNRecord update(ZNRecord currentData) {
-        if (currentData == null) {
-          throw new HelixException("Cluster: " + clusterName + ": cluster config is null");
-        }
-
-        ClusterConfig clusterConfig = new ClusterConfig(currentData);
-        Map<String, String> disabledInstances = new TreeMap<>(clusterConfig.getDisabledInstances());
-        Map<String, String> disabledInstancesWithInfo = new TreeMap<>(clusterConfig.getDisabledInstancesWithInfo());
-        if (enabled) {
-          disabledInstances.keySet().removeAll(instances);
-          disabledInstancesWithInfo.keySet().removeAll(instances);
-        } else {
-          for (String disabledInstance : instances) {
-            // We allow user to override disabledType and reason for an already disabled instance.
-            // TODO: we are updating both DISABLED_INSTANCES and DISABLED_INSTANCES_W_INFO for
-            // backward compatible. Deprecate DISABLED_INSTANCES in the future.
-            // TODO: update the history ZNode
-            String timeStamp = String.valueOf(System.currentTimeMillis());
-            disabledInstances.put(disabledInstance, timeStamp);
-            disabledInstancesWithInfo
-                .put(disabledInstance, assembleInstanceBatchedDisabledInfo(disabledType, reason, timeStamp));
-          }
-        }
-        clusterConfig.setDisabledInstances(disabledInstances);
-        clusterConfig.setDisabledInstancesWithInfo(disabledInstancesWithInfo);
-
-        return clusterConfig.getRecord();
-      }
-    }, AccessOption.PERSISTENT);
-  }
-
-  public static String assembleInstanceBatchedDisabledInfo(
-      InstanceConstants.InstanceDisabledType disabledType, String reason, String timeStamp) {
-    Map<String, String> disableInfo = new TreeMap<>();
-    disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString(),
-        timeStamp);
-    if (disabledType != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-          disabledType.toString());
-    }
-    if (reason != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_REASON.toString(), reason);
-    }
-    return ConfigStringUtil.concatenateMapping(disableInfo);
-  }
-
-  @Override
-  public Map<String, String> getBatchDisabledInstances(String clusterName) {
-    ConfigAccessor accessor = new ConfigAccessor(_zkClient);
-    return accessor.getClusterConfig(clusterName).getDisabledInstances();
   }
 
   @Override
