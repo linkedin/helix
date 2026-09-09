@@ -19,28 +19,16 @@ package org.apache.helix.cloud.event.helix;
  * under the License.
  */
 
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.List;
 
-import org.apache.helix.AccessOption;
-import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
-import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.manager.zk.ZKHelixAdmin;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.InstanceValidationUtil;
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.zookeeper.zkclient.DataUpdater;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 
 class HelixEventHandlingUtil {
-  private static Logger LOG = LoggerFactory.getLogger(HelixEventHandlingUtil.class);
 
   /**
    * check if instance is disabled by cloud event.
@@ -66,60 +54,19 @@ class HelixEventHandlingUtil {
   }
 
   /**
-   * Update map field disabledInstancesWithInfo in clusterConfig with cloudEvent instance info
-   */
-  static void updateCloudEventOperationInClusterConfig(String clusterName, String instanceName,
-      BaseDataAccessor baseAccessor, boolean enable, String message) {
-    String path = PropertyPathBuilder.clusterConfig(clusterName);
-
-    if (!baseAccessor.exists(path, 0)) {
-      throw new HelixException("Cluster " + clusterName + ": cluster config does not exist");
-    }
-
-    if (!baseAccessor.update(path, new DataUpdater<ZNRecord>() {
-      @Override
-      public ZNRecord update(ZNRecord currentData) {
-        if (currentData == null) {
-          throw new HelixException("Cluster: " + clusterName + ": cluster config is null");
-        }
-
-        ClusterConfig clusterConfig = new ClusterConfig(currentData);
-        Map<String, String> disabledInstancesWithInfo =
-            new TreeMap<>(clusterConfig.getDisabledInstancesWithInfo());
-        if (enable) {
-          disabledInstancesWithInfo.keySet().remove(instanceName);
-        } else {
-          // disabledInstancesWithInfo is only used for cloud event handling.
-          String timeStamp = String.valueOf(System.currentTimeMillis());
-          disabledInstancesWithInfo.put(instanceName, ZKHelixAdmin
-              .assembleInstanceBatchedDisabledInfo(
-                  InstanceConstants.InstanceDisabledType.CLOUD_EVENT, message, timeStamp));
-        }
-        clusterConfig.setDisabledInstancesWithInfo(disabledInstancesWithInfo);
-
-        return clusterConfig.getRecord();
-      }
-    }, AccessOption.PERSISTENT)) {
-      LOG.error("Failed to update cluster config {} for {} instance {}. {}", clusterName,
-          enable ? "enable" : "disable", instanceName, message);
-    }
-  }
-
-  /**
-   * Return true if no instance is under cloud event handling
-   * @param clusterConfig
+   * Return true if no instance is disabled due to a cloud event. Scans instance configs directly
+   * (the authoritative source) instead of a denormalized cluster-config aggregate.
+   * @param dataAccessor
    * @return
    */
-  static boolean checkNoInstanceUnderCloudEvent(ClusterConfig clusterConfig) {
-    Map<String, String> clusterConfigTrackedEvent = clusterConfig.getDisabledInstancesWithInfo();
-    if (clusterConfigTrackedEvent == null || clusterConfigTrackedEvent.isEmpty()) {
+  static boolean checkNoInstanceUnderCloudEvent(HelixDataAccessor dataAccessor) {
+    List<String> instances =
+        dataAccessor.getChildNames(dataAccessor.keyBuilder().instanceConfigs());
+    if (instances == null || instances.isEmpty()) {
       return true;
     }
-
-    for (Map.Entry<String, String> entry : clusterConfigTrackedEvent.entrySet()) {
-      if (ConfigStringUtil.parseConcatenatedConfig(entry.getValue())
-          .get(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString())
-          .equals(InstanceConstants.InstanceDisabledType.CLOUD_EVENT.name())) {
+    for (String instance : instances) {
+      if (isInstanceDisabledForCloudEvent(instance, dataAccessor)) {
         return false;
       }
     }

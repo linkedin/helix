@@ -37,7 +37,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -99,7 +98,6 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.RebalanceUtil;
@@ -2677,21 +2675,6 @@ public class ZKHelixAdmin implements HelixAdmin {
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
-  }
-
-  public static String assembleInstanceBatchedDisabledInfo(
-      InstanceConstants.InstanceDisabledType disabledType, String reason, String timeStamp) {
-    Map<String, String> disableInfo = new TreeMap<>();
-    disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString(),
-        timeStamp);
-    if (disabledType != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-          disabledType.toString());
-    }
-    if (reason != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_REASON.toString(), reason);
-    }
-    return ConfigStringUtil.concatenateMapping(disableInfo);
   }
 
   @Override

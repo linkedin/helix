@@ -35,8 +35,6 @@ import org.apache.helix.api.config.HelixConfigProperty;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
 import org.apache.helix.api.config.ViewClusterSourceConfig;
-import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
@@ -106,9 +104,6 @@ public class ClusterConfig extends HelixProperty {
     // state transition if the number of
     // partitons that need recovery or in
     // error exceeds this limitation
-    @Deprecated // TODO: Remove in Helix 2.0
-    DISABLED_INSTANCES_WITH_INFO,
-    // disabled instances with info is for storing batch disabled instances (cloud event handling).
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -182,12 +177,6 @@ public class ClusterConfig extends HelixProperty {
     // the maintenance mode's duration even when it comes online.
     // The unit is milliseconds.
     OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE,
-
-    // The following 3 keywords are for metadata in batch disabled instance
-    HELIX_ENABLED_DISABLE_TIMESTAMP,
-    HELIX_DISABLED_REASON,
-    // disabled type should be a enum of org.apache.helix.constants.InstanceConstants.InstanceDisabledType
-    HELIX_DISABLED_TYPE,
 
     // The last time when the on-demand rebalance is triggered.
     LAST_ON_DEMAND_REBALANCE_TIMESTAMP,
@@ -1035,27 +1024,6 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the disabled instance list with concatenated Info
-   */
-  public void setDisabledInstancesWithInfo(Map<String, String> disabledInstancesWithInfo) {
-    _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name(),
-        disabledInstancesWithInfo);
-  }
-
-  /**
-   * Get current disabled instance map of
-   * <instance, disabledReason = "res, disabledType = typ, disabledTimeStamp = time">
-   * @deprecated Please use InstanceConfig for enabling and disabling instances
-   * @return a non-null map of disabled instances in cluster config
-   */
-  @Deprecated
-  public Map<String, String> getDisabledInstancesWithInfo() {
-    Map<String, String> disabledInstances =
-        _record.getMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name());
-    return disabledInstances == null ? Collections.emptyMap() : disabledInstances;
-  }
-
-  /**
    * Whether the P2P state transition message is enabled for all resources in this cluster. By
    * default it is disabled if not set.
    * @return
@@ -1459,43 +1427,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public String getClusterName() {
     return _record.getId();
-  }
-
-  public String getPlainInstanceHelixDisabledType(String instanceName) {
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .get(ClusterConfigProperty.HELIX_DISABLED_TYPE.toString());
-  }
-
-  public String getInstanceHelixDisabledType(String instanceName) {
-    if (!getDisabledInstancesWithInfo().containsKey(instanceName)) {
-      return InstanceConstants.INSTANCE_NOT_DISABLED;
-    }
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .getOrDefault(ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-            InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
-  }
-
-  /**
-   * @return a String representing reason.
-   * null if instance is not disabled in batch mode or do not have disabled reason
-   */
-  public String getInstanceHelixDisabledReason(String instanceName) {
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .get(ClusterConfigProperty.HELIX_DISABLED_REASON.toString());
-  }
-
-  /**
-   * @param instanceName
-   * @return a String representation of unix time
-   * null if the instance is not disabled in batch mode.
-   */
-  public String getInstanceHelixDisabledTimeStamp(String instanceName) {
-    if (getDisabledInstancesWithInfo().containsKey(instanceName)) {
-      return ConfigStringUtil
-          .parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-          .get(ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString());
-    }
-    return null;
   }
 
   /**
