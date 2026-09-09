@@ -32,7 +32,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
@@ -414,9 +413,16 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
     // Record the assigned instances to avoid double calculating or conflict assignment.
     Set<String> assignedInstances = new HashSet<>();
 
-    Set<String> liveAndEnabled =
-        liveInstances.stream().filter(instance -> !disabledInstancesForPartition.contains(instance))
-            .collect(Collectors.toSet());
+    // liveAndEnabled is only read (retainAll/size), never mutated, so when no instance is disabled
+    // for this partition (the common case) reuse liveInstances directly instead of rebuilding a
+    // HashSet of every live instance for every partition.
+    Set<String> liveAndEnabled;
+    if (disabledInstancesForPartition.isEmpty()) {
+      liveAndEnabled = liveInstances;
+    } else {
+      liveAndEnabled = new HashSet<>(liveInstances);
+      liveAndEnabled.removeAll(disabledInstancesForPartition);
+    }
 
     Queue<String> preferredActiveInstanceQueue = new LinkedList<>(preferenceList);
     preferredActiveInstanceQueue.retainAll(liveAndEnabled);
