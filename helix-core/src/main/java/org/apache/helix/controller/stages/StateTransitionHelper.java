@@ -21,7 +21,9 @@ package org.apache.helix.controller.stages;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
@@ -55,6 +57,23 @@ public class StateTransitionHelper {
     Map<String, Integer> priority = def.getStatePriorityMap();
     return priority.containsKey(from) && priority.containsKey(to)
         && priority.get(from) < priority.get(to);
+  }
+
+  /**
+   * Identify an already-selected ERROR drop authorized by opt-in graceful evacuation. ERROR may
+   * lack a downward priority in the state model, so this drop needs an exception to downward-only
+   * filtering. Normal throttle quotas still apply; replacement readiness is checked by the rebalancer.
+   *
+   * @param configEnabled whether ERROR drops during evacuation are enabled
+   * @param message the selected state-transition message
+   * @param evacuatingInstances instances currently in EVACUATE operation
+   * @return true if the message is an opt-in evacuation ERROR drop
+   */
+  public static boolean isEvacuateErrorPartitionDrop(boolean configEnabled, Message message,
+      Set<String> evacuatingInstances) {
+    return configEnabled && HelixDefinedState.ERROR.name().equals(message.getFromState())
+        && HelixDefinedState.DROPPED.name().equals(message.getToState())
+        && evacuatingInstances.contains(message.getTgtName());
   }
 
   /**
