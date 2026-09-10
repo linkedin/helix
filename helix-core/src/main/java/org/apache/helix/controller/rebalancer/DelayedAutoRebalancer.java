@@ -272,7 +272,7 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       Map<String, String> bestStateForPartition =
           // We use cache.getLiveInstances().keySet() to make sure we gracefully handle n -> n + 1 replicas if possible
           // when the one of the current nodes holding the replica is no longer considered assignable. (ex: EVACUATE)
-          computeBestPossibleStateForPartition(cache.getLiveInstances().keySet(),
+          computeBestPossibleStateForPartitionInternal(cache.getLiveInstances().keySet(),
               stateModelDef, preferenceList,
               currentStateOutput, disabledInstancesForPartition, idealState, clusterConfig,
               partition, cache.getAbnormalStateResolver(stateModelDefName), cache,
@@ -308,12 +308,12 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       CurrentStateOutput currentStateOutput, Set<String> disabledInstancesForPartition,
       IdealState idealState, ClusterConfig clusterConfig, Partition partition,
       MonitoredAbnormalResolver monitoredResolver, ResourceControllerDataProvider cache) {
-    return computeBestPossibleStateForPartition(liveInstances, stateModelDef, preferenceList,
+    return computeBestPossibleStateForPartitionInternal(liveInstances, stateModelDef, preferenceList,
         currentStateOutput, disabledInstancesForPartition, idealState, clusterConfig, partition,
         monitoredResolver, cache, getNumExtraReplicas(clusterConfig));
   }
 
-  private Map<String, String> computeBestPossibleStateForPartition(Set<String> liveInstances,
+  private Map<String, String> computeBestPossibleStateForPartitionInternal(Set<String> liveInstances,
       StateModelDefinition stateModelDef, List<String> preferenceList,
       CurrentStateOutput currentStateOutput, Set<String> disabledInstancesForPartition,
       IdealState idealState, ClusterConfig clusterConfig, Partition partition,
