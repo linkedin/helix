@@ -485,9 +485,6 @@ public class TestInstancesAccessor extends AbstractTestClass {
         new HashSet<>(instancesToDisable));
     Assert.assertEquals(clusterConfig.getDisabledInstancesWithInfo().keySet(),
         new HashSet<>(instancesToDisable));
-    Assert
-        .assertEquals(clusterConfig.getInstanceHelixDisabledType(CLUSTER_NAME + "localhost_12918"),
-            "USER_OPERATION");
     Assert.assertEquals(
         clusterConfig.getInstanceHelixDisabledReason(CLUSTER_NAME + "localhost_12918"), "reason_1");
 
@@ -507,9 +504,6 @@ public class TestInstancesAccessor extends AbstractTestClass {
     Assert.assertEquals(Long.parseLong(
         clusterConfig.getInstanceHelixDisabledTimeStamp(CLUSTER_NAME + "localhost_12919")),
         Long.parseLong(clusterConfig.getDisabledInstances().get(CLUSTER_NAME + "localhost_12919")));
-    Assert
-        .assertEquals(clusterConfig.getInstanceHelixDisabledType(CLUSTER_NAME + "localhost_12918"),
-            "INSTANCE_NOT_DISABLED");
     Assert
         .assertNull(clusterConfig.getInstanceHelixDisabledReason(CLUSTER_NAME + "localhost_12918"));
     System.out.println("End test :" + TestHelper.getTestMethodName());

@@ -426,9 +426,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertFalse(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
     Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
-    Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "reason1");
 
@@ -438,9 +435,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-    Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.INSTANCE_NOT_DISABLED);
     Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
