@@ -53,7 +53,7 @@ public class TestDefaultCloudEventCallbackImpl extends ZkStandAloneCMTestBase {
         .isEnabled(_manager.getHelixDataAccessor(), _instanceManager.getInstanceName()));
     Assert.assertEquals(_manager.getConfigAccessor()
         .getInstanceConfig(CLUSTER_NAME, _instanceManager.getInstanceName()).getInstanceOperation()
-        .getSource(), InstanceConstants.InstanceOperationSource.USER);
+        .getSource(), InstanceConstants.InstanceOperationSource.AUTOMATION);
 
     _admin.enableInstance(CLUSTER_NAME, _instanceManager.getInstanceName(), false);
     _impl.disableInstance(_instanceManager, null);
@@ -61,11 +61,10 @@ public class TestDefaultCloudEventCallbackImpl extends ZkStandAloneCMTestBase {
         .isEnabled(_manager.getHelixDataAccessor(), _instanceManager.getInstanceName()));
     Assert.assertEquals(_manager.getConfigAccessor()
             .getInstanceConfig(CLUSTER_NAME, _instanceManager.getInstanceName())
-        .getInstanceOperation().getSource(), InstanceConstants.InstanceOperationSource.USER);
+        .getInstanceOperation().getSource(), InstanceConstants.InstanceOperationSource.AUTOMATION);
 
     _admin.enableInstance(CLUSTER_NAME, _instanceManager.getInstanceName(), true);
-    _admin.enableInstance(CLUSTER_NAME, _instanceManager.getInstanceName(), false,
-        InstanceConstants.InstanceDisabledType.CLOUD_EVENT, null);
+    _impl.disableInstance(_instanceManager, null);
   }
 
   @Test (dependsOnMethods = "testDisableInstance")

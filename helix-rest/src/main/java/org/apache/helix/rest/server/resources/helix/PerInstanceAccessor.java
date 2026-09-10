@@ -481,7 +481,6 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @QueryParam("instanceOperation") InstanceConstants.InstanceOperation instanceOperation,
       @QueryParam("instanceOperationSource") InstanceConstants.InstanceOperationSource instanceOperationSource,
       @QueryParam("reason") String reason,
-      @Deprecated @QueryParam("instanceDisabledType") String disabledType,
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
@@ -506,15 +505,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           admin.enableInstance(clusterId, instanceName, true);
           break;
         case disable:
-          InstanceConstants.InstanceDisabledType disabledTypeEnum = null;
-          if (disabledType != null) {
-            try {
-              disabledTypeEnum = InstanceConstants.InstanceDisabledType.valueOf(disabledType);
-            } catch (IllegalArgumentException ex) {
-              return badRequest("Invalid instanceDisabledType!");
-            }
-          }
-          admin.enableInstance(clusterId, instanceName, false, disabledTypeEnum, disabledReason);
+          admin.setInstanceOperation(clusterId, instanceName,
+              InstanceConstants.InstanceOperation.DISABLE, disabledReason);
           break;
 
         case reset:

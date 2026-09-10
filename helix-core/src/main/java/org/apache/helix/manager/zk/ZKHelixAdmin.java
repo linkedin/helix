@@ -389,20 +389,10 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
       final boolean enabled) {
-    enableInstance(clusterName, instanceName, enabled, null, null);
-  }
-
-  @Deprecated
-  @Override
-  public void enableInstance(final String clusterName, final String instanceName,
-      final boolean enabled, InstanceConstants.InstanceDisabledType disabledType, String reason) {
     logger.info("{} instance {} in cluster {}.", enabled ? "Enable" : "Disable", instanceName,
         clusterName);
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
-
-    // Eventually we will have all instances' enable/disable information in clusterConfig. Now we
-    // update both instanceConfig and clusterConfig in transition period.
-    enableSingleInstance(clusterName, instanceName, enabled, baseAccessor, disabledType, reason);
+    enableSingleInstance(clusterName, instanceName, enabled, baseAccessor);
   }
 
   @Deprecated
@@ -2622,8 +2612,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Deprecated
   private void enableSingleInstance(final String clusterName, final String instanceName,
-      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
-      InstanceConstants.InstanceDisabledType disabledType, String reason) {
+      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor) {
     String path = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
 
     if (!baseAccessor.exists(path, 0)) {
@@ -2642,29 +2631,18 @@ public class ZKHelixAdmin implements HelixAdmin {
         InstanceConfig config = new InstanceConfig(currentData);
         config.setInstanceEnabled(enabled);
         if (!enabled) {
-          // new disabled type and reason will overwrite existing ones.
+          // reset any existing disabled reason when toggling enablement.
           config.resetInstanceDisabledTypeAndReason();
-          if (reason != null) {
-            config.setInstanceDisabledReason(reason);
-          }
-          if (disabledType != null) {
-            config.setInstanceDisabledType(disabledType);
-          }
         }
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
   }
 
-  public static String assembleInstanceBatchedDisabledInfo(
-      InstanceConstants.InstanceDisabledType disabledType, String reason, String timeStamp) {
+  public static String assembleInstanceBatchedDisabledInfo(String reason, String timeStamp) {
     Map<String, String> disableInfo = new TreeMap<>();
     disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString(),
         timeStamp);
-    if (disabledType != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-          disabledType.toString());
-    }
     if (reason != null) {
       disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_REASON.toString(), reason);
     }
