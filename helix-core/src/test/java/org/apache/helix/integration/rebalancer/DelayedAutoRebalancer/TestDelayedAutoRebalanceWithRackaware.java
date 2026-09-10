@@ -26,6 +26,7 @@ import org.apache.helix.controller.rebalancer.strategy.CrushRebalanceStrategy;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -43,7 +44,11 @@ public class TestDelayedAutoRebalanceWithRackaware extends TestDelayedAutoRebala
       String storageNodeName = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
       _gSetupTool.addInstanceToCluster(CLUSTER_NAME, storageNodeName);
       String zone = "zone-" + i % 3;
-      _gSetupTool.getClusterManagementTool().setInstanceZoneId(CLUSTER_NAME, storageNodeName, zone);
+      InstanceConfig instanceConfig =
+          _gSetupTool.getClusterManagementTool().getInstanceConfig(CLUSTER_NAME, storageNodeName);
+      instanceConfig.setDomain("zone=" + zone + ",instance=" + storageNodeName);
+      _gSetupTool.getClusterManagementTool().setInstanceConfig(CLUSTER_NAME, storageNodeName,
+          instanceConfig);
 
       // start dummy participants
       MockParticipantManager participant =
@@ -52,7 +57,7 @@ public class TestDelayedAutoRebalanceWithRackaware extends TestDelayedAutoRebala
       _participants.add(participant);
     }
 
-    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true);
+    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true, "/zone/instance", "zone");
     enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // start controller

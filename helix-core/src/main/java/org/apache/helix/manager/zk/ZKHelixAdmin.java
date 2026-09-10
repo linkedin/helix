@@ -2595,26 +2595,6 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   @Override
-  public void setInstanceZoneId(String clusterName, String instanceName, String zoneId) {
-    logger.info("Set instance zoneId {} for instance {} in cluster {}.", zoneId, instanceName,
-        clusterName);
-    if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
-      throw new HelixException("cluster " + clusterName + " is not setup yet");
-    }
-
-    if (!ZKUtil.isInstanceSetup(_zkClient, clusterName, instanceName, InstanceType.PARTICIPANT)) {
-      throw new HelixException(
-          "cluster " + clusterName + " instance " + instanceName + " is not setup yet");
-    }
-    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
-    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
-
-    InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
-    config.setZoneId(zoneId);
-    accessor.setProperty(keyBuilder.instanceConfig(instanceName), config);
-  }
-
-  @Override
   public void enableBatchMessageMode(String clusterName, boolean enabled) {
     logger
         .info("{} batch message mode for cluster {}.", enabled ? "Enable" : "Disable", clusterName);
