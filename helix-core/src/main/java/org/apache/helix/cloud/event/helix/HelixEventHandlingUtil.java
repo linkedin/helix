@@ -31,7 +31,6 @@ import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
@@ -46,8 +45,8 @@ class HelixEventHandlingUtil {
    * check if instance is disabled by cloud event.
    * @param instanceName
    * @param dataAccessor
-   * @return return true only when instance is Helix disabled and the disabled reason in
-   * instanceConfig is cloudEvent
+   * @return return true only when instance is Helix disabled and the disable was triggered by
+   * automation (cloud event)
    * @deprecated No need to check this if using InstanceOperation and specifying the trigger as CLOUD
    *            when enabling.
    */
@@ -60,9 +59,9 @@ class HelixEventHandlingUtil {
       throw new HelixException("Instance: " + instanceName
           + ", instance config does not exist");
     }
-    return !InstanceValidationUtil.isEnabled(dataAccessor, instanceName) && instanceConfig
-        .getInstanceDisabledType()
-        .equals(InstanceConstants.InstanceDisabledType.CLOUD_EVENT.name());
+    return !InstanceValidationUtil.isEnabled(dataAccessor, instanceName)
+        && instanceConfig.getInstanceOperation().getSource()
+        == InstanceConstants.InstanceOperationSource.AUTOMATION;
   }
 
   /**
@@ -91,9 +90,8 @@ class HelixEventHandlingUtil {
         } else {
           // disabledInstancesWithInfo is only used for cloud event handling.
           String timeStamp = String.valueOf(System.currentTimeMillis());
-          disabledInstancesWithInfo.put(instanceName, ZKHelixAdmin
-              .assembleInstanceBatchedDisabledInfo(
-                  InstanceConstants.InstanceDisabledType.CLOUD_EVENT, message, timeStamp));
+          disabledInstancesWithInfo.put(instanceName,
+              ZKHelixAdmin.assembleInstanceBatchedDisabledInfo(message, timeStamp));
         }
         clusterConfig.setDisabledInstancesWithInfo(disabledInstancesWithInfo);
 
@@ -111,18 +109,9 @@ class HelixEventHandlingUtil {
    * @return
    */
   static boolean checkNoInstanceUnderCloudEvent(ClusterConfig clusterConfig) {
+    // disabledInstancesWithInfo is only populated for cloud event handling, so any tracked
+    // instance means there is an ongoing cloud event.
     Map<String, String> clusterConfigTrackedEvent = clusterConfig.getDisabledInstancesWithInfo();
-    if (clusterConfigTrackedEvent == null || clusterConfigTrackedEvent.isEmpty()) {
-      return true;
-    }
-
-    for (Map.Entry<String, String> entry : clusterConfigTrackedEvent.entrySet()) {
-      if (ConfigStringUtil.parseConcatenatedConfig(entry.getValue())
-          .get(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString())
-          .equals(InstanceConstants.InstanceDisabledType.CLOUD_EVENT.name())) {
-        return false;
-      }
-    }
-    return true;
+    return clusterConfigTrackedEvent == null || clusterConfigTrackedEvent.isEmpty();
   }
 }

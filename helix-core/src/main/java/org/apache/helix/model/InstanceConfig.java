@@ -63,7 +63,6 @@ public class InstanceConfig extends HelixProperty {
     @Deprecated HELIX_ENABLED,
     HELIX_ENABLED_TIMESTAMP,
     @Deprecated HELIX_DISABLED_REASON,
-    @Deprecated HELIX_DISABLED_TYPE,
     HELIX_DISABLED_PARTITION,
     TAG_LIST,
     INSTANCE_WEIGHT,
@@ -85,8 +84,7 @@ public class InstanceConfig extends HelixProperty {
       OPERATION,
       REASON,
       SOURCE,
-      TIMESTAMP,
-      LEGACY_DISABLED_TYPE
+      TIMESTAMP
     }
 
     private InstanceOperation(@Nullable Map<String, String> properties) {
@@ -139,23 +137,6 @@ public class InstanceConfig extends HelixProperty {
         return this;
       }
 
-      /**
-       * Set the HELIX_DISABLED_TYPE which is a legacy field that must be stored, so we can write it
-       * back when we write back to the legacy fields.
-       *
-       * @param disabledType InstanceDisabledType
-       * @return Builder
-       */
-      private Builder setLegacyDisabledType(InstanceConstants.InstanceDisabledType disabledType) {
-        if (disabledType == null) {
-          logger.error("LEGACY_DISABLED_TYPE cannot be set to null. Skipped setting the field.");
-          return this;
-        }
-        _properties.put(InstanceOperationProperties.LEGACY_DISABLED_TYPE.name(),
-            disabledType.name());
-        return this;
-      }
-
       public InstanceOperation build() throws IllegalArgumentException {
         if (!_properties.containsKey(InstanceOperationProperties.OPERATION.name())) {
           throw new IllegalArgumentException(
@@ -199,12 +180,6 @@ public class InstanceConfig extends HelixProperty {
       return InstanceConstants.InstanceOperationSource.valueOf(
           _properties.getOrDefault(InstanceOperationProperties.SOURCE.name(),
               InstanceConstants.InstanceOperationSource.USER.name()));
-    }
-
-    private InstanceConstants.InstanceDisabledType getLegacyDisabledType() {
-      return InstanceConstants.InstanceDisabledType.valueOf(
-          _properties.getOrDefault(InstanceOperationProperties.LEGACY_DISABLED_TYPE.name(),
-              InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name()));
     }
 
     /**
@@ -455,12 +430,11 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Removes HELIX_DISABLED_REASON and HELIX_DISABLED_TYPE entry from simple field.
+   * Removes the HELIX_DISABLED_REASON entry from simple field.
    */
   @Deprecated
   public void resetInstanceDisabledTypeAndReason() {
     _record.getSimpleFields().remove(InstanceConfigProperty.HELIX_DISABLED_REASON.name());
-    _record.getSimpleFields().remove(InstanceConfigProperty.HELIX_DISABLED_TYPE.name());
   }
 
   /**
@@ -476,22 +450,6 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Set the instance disabled type when instance is disabled.
-   * It will be a no-op when instance is enabled.
-   * @deprecated This method is deprecated. Please use setInstanceOperation along with
-   * InstanceOperation.Builder().setSource
-   *(...)
-   */
-  @Deprecated
-  public void setInstanceDisabledType(InstanceConstants.InstanceDisabledType disabledType) {
-    if (getInstanceOperation().getOperation().equals(InstanceConstants.InstanceOperation.DISABLE)
-        && disabledType != InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE) {
-      _record.setSimpleField(InstanceConfigProperty.HELIX_DISABLED_TYPE.name(),
-          disabledType.name());
-    }
-  }
-
-  /**
    * Get the instance disabled reason when instance is disabled.
    * @return Return instance disabled reason. Default is am empty string.
    * @deprecated This method is deprecated. Please use getInstanceOperation().getReason() instead.
@@ -499,23 +457,6 @@ public class InstanceConfig extends HelixProperty {
   @Deprecated
   public String getInstanceDisabledReason() {
     return _record.getStringField(InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "");
-  }
-
-  /**
-   *
-   * @return Return instance disabled type (org.apache.helix.constants.InstanceConstants.InstanceDisabledType)
-   *         Default is am empty string.
-   * @deprecated This method is deprecated. Please use getInstanceOperation().getSource
-   *() instead.
-   */
-  @Deprecated
-  public String getInstanceDisabledType() {
-    if (_record.getBooleanField(InstanceConfigProperty.HELIX_ENABLED.name(),
-        HELIX_ENABLED_DEFAULT_VALUE)) {
-      return InstanceConstants.INSTANCE_NOT_DISABLED;
-    }
-    return _record.getStringField(InstanceConfigProperty.HELIX_DISABLED_TYPE.name(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name());
   }
 
   private List<InstanceOperation> getInstanceOperations() {
@@ -592,7 +533,6 @@ public class InstanceConfig extends HelixProperty {
 
       resetInstanceDisabledTypeAndReason();
       setInstanceDisabledReason(operation.getReason());
-      setInstanceDisabledType(operation.getLegacyDisabledType());
     } else if (operation.getOperation() == InstanceConstants.InstanceOperation.ENABLE) {
       // Ensure HELIX_ENABLED reflects the latest disable operation if applicable.
       InstanceOperation latestDisableInstanceOperation = getInstanceOperations().stream()
@@ -605,7 +545,6 @@ public class InstanceConfig extends HelixProperty {
         // being true takes precedence over an existing latest disable operation existing.
         if (latestDisableInstanceOperation != null) {
           setInstanceDisabledReason(latestDisableInstanceOperation.getReason());
-          setInstanceDisabledType(latestDisableInstanceOperation.getLegacyDisabledType());
         } else {
           setInstanceEnabledHelper(true, operation.getTimestamp());
         }
@@ -614,8 +553,8 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Set the instance operation for this instance. This method also sets the HELIX_ENABLED,
-   * HELIX_DISABLED_REASON, and HELIX_DISABLED_TYPE fields for backwards compatibility.
+   * Set the instance operation for this instance. This method also sets the HELIX_ENABLED
+   * and HELIX_DISABLED_REASON fields for backwards compatibility.
    *
    * @param operation the instance operation
    */
@@ -712,14 +651,6 @@ public class InstanceConfig extends HelixProperty {
       InstanceOperation.Builder instanceOperationBuilder =
           new InstanceOperation.Builder().setOperation(InstanceConstants.InstanceOperation.DISABLE)
               .setReason(getInstanceDisabledReason());
-
-      try {
-        instanceOperationBuilder.setLegacyDisabledType(
-            InstanceConstants.InstanceDisabledType.valueOf(getInstanceDisabledType()));
-      } catch (IllegalArgumentException e) {
-        _logger.error("Invalid instance disabled type for instance: " + _record.getId()
-            + ". Defaulting to DEFAULT_INSTANCE_DISABLE_TYPE.");
-      }
 
       return instanceOperationBuilder.build();
     }
