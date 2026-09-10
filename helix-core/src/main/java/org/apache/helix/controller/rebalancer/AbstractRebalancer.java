@@ -413,12 +413,13 @@ public abstract class AbstractRebalancer<T extends BaseControllerDataProvider> i
     // Record the assigned instances to avoid double calculating or conflict assignment.
     Set<String> assignedInstances = new HashSet<>();
 
-    // liveAndEnabled is only read (retainAll/size), never mutated, so when no instance is disabled
-    // for this partition (the common case) reuse liveInstances directly instead of rebuilding a
-    // HashSet of every live instance for every partition.
+    // liveAndEnabled is only read (retainAll/size), never mutated. When no instance is disabled for
+    // this partition (the common case), avoid rebuilding a HashSet of every live instance by reusing
+    // liveInstances directly, wrapped as unmodifiable so the shared cache set cannot be mutated
+    // through this alias.
     Set<String> liveAndEnabled;
     if (disabledInstancesForPartition.isEmpty()) {
-      liveAndEnabled = liveInstances;
+      liveAndEnabled = Collections.unmodifiableSet(liveInstances);
     } else {
       liveAndEnabled = new HashSet<>(liveInstances);
       liveAndEnabled.removeAll(disabledInstancesForPartition);
