@@ -19,8 +19,10 @@ package org.apache.helix.controller.rebalancer;
  * under the License.
  */
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -36,6 +38,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolver;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -53,6 +56,156 @@ import org.slf4j.LoggerFactory;
  */
 public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceControllerDataProvider> {
   private static final Logger LOG = LoggerFactory.getLogger(DelayedAutoRebalancer.class);
+
+  /**
+   * Instances eligible to host a replica of this resource, best first.
+   * Eligibility mirrors the constraints WAGED itself applies: the instance must be enabled (which
+   * excludes instance operations such as EVACUATE and SWAP), live, carry the resource's instance
+   * group tag if one is configured, and have a known capacity; it must not already hold this
+   * partition, must not be pending a drop of it, must not be disabled for it, and must be below
+   * both the cluster-wide and per-resource partition limits, using the same "negative means
+   * unlimited" convention as NodeMaxPartitionLimitConstraint.
+   * Ordering is a pure function of names (see rendezvousWeight), never of occupancy, so the same
+   * instance is chosen on every round until the eligible set itself changes.
+   */
+  @VisibleForTesting
+  static List<String> recoveryCandidates(IdealState idealState,
+      ResourceConfig mergedResourceConfig, String partitionName, List<String> current,
+      Set<String> instancesToDrop, Set<String> disabledInstancesForPartition,
+      ClusterConfig clusterConfig, ResourceControllerDataProvider cache) {
+    // Tag and partition limit come from the merged resource config, not the IdealState: an
+    // explicitly configured ResourceConfig value wins the merge, and that is the value the WAGED
+    // constraints are evaluated against.
+    String tag = mergedResourceConfig.getInstanceGroupTag();
+    int resourceMaxPartitions = mergedResourceConfig.getMaxPartitionsPerInstance();
+    Set<String> eligible = new HashSet<>(
+        tag == null ? cache.getEnabledLiveInstances() : cache.getEnabledLiveInstancesWithTag(tag));
+    eligible.removeAll(current);
+    // An instance whose replica is already being dropped is removed from currentInstances but is
+    // still overwritten with DROPPED after the states are assigned, so a replica restored onto it
+    // would be discarded and its capacity charged for nothing.
+    eligible.removeAll(instancesToDrop);
+    // A disabled instance only ever receives the initial state, so it cannot restore an active
+    // replica.
+    eligible.removeAll(disabledInstancesForPartition);
+
+    WagedInstanceCapacity capacityProvider = cache.getWagedInstanceCapacity();
+    String resourceName = idealState.getResourceName();
+    int clusterMaxPartitions =
+        clusterConfig == null ? -1 : clusterConfig.getMaxPartitionsPerInstance();
+
+    // Snapshot occupancy once, under the monitor checkAndReduceInstanceCapacity holds, so the
+    // filters below see a consistent view.
+    Map<String, Integer> totalPartitionsByInstance = new HashMap<>();
+    Map<String, Integer> resourcePartitionsByInstance = new HashMap<>();
+    Set<String> knownCapacityInstances = new HashSet<>();
+    if (capacityProvider != null) {
+      synchronized (capacityProvider) {
+        Map<String, Map<String, Set<String>>> allocated =
+            capacityProvider.getAllocatedPartitionsMap();
+        for (String instance : eligible) {
+          Map<String, Set<String>> byResource =
+              allocated.getOrDefault(instance, Collections.emptyMap());
+          int total = 0;
+          for (Set<String> partitions : byResource.values()) {
+            total += partitions.size();
+          }
+          totalPartitionsByInstance.put(instance, total);
+          resourcePartitionsByInstance.put(instance,
+              byResource.getOrDefault(resourceName, Collections.emptySet()).size());
+          Map<String, Integer> available = capacityProvider.getInstanceAvailableCapacity(instance);
+          if (available != null && !available.isEmpty()) {
+            knownCapacityInstances.add(instance);
+          }
+        }
+      }
+    }
+
+    List<String> candidates = new ArrayList<>();
+    for (String instance : eligible) {
+      // Defensive: checkAndReduceInstanceCapacity iterates the instance's own capacity keys, so an
+      // instance with none would be admitted without limit and could not be refused.
+      if (!knownCapacityInstances.contains(instance)) {
+        continue;
+      }
+      if (clusterMaxPartitions >= 0
+          && totalPartitionsByInstance.getOrDefault(instance, 0) >= clusterMaxPartitions) {
+        continue;
+      }
+      if (resourceMaxPartitions >= 0
+          && resourcePartitionsByInstance.getOrDefault(instance, 0) >= resourceMaxPartitions) {
+        continue;
+      }
+      candidates.add(instance);
+    }
+
+    // Occupancy is a filter above, never an ordering key. It is mutated as other partitions are
+    // charged and rounds run on several threads, so ordering by "emptiest instance" chose a
+    // different winner from one round to the next and re-targeted the replica instead of
+    // restoring it. Hashing against the partition name also keeps partitions that starve in the
+    // same round from all selecting one instance.
+    candidates.sort(Comparator
+        .comparingInt((String instance) -> rendezvousWeight(resourceName, partitionName, instance))
+        .reversed().thenComparing(Comparator.naturalOrder()));
+    return candidates;
+  }
+
+  /**
+   * Stable weight of one instance for one partition. String.hashCode is specified by the language,
+   * so every controller derives the same ordering; the mixing step only spreads the result.
+   */
+  private static int rendezvousWeight(String resourceName, String partitionName, String instance) {
+    int hash = (resourceName + '/' + partitionName + '/' + instance).hashCode();
+    hash ^= hash >>> 16;
+    hash *= 0x7feb352d;
+    hash ^= hash >>> 15;
+    return hash;
+  }
+
+  /**
+   * Restores ONE replica for a partition that capacity pruning left with no placement at all --
+   * not minActiveReplica replicas. That is enough to bring the partition back into service, and
+   * because the partition has no other placement at this point the replica cannot collide with a
+   * sibling in its fault zone. The planner places the rest once capacity allows. Every candidate is
+   * admitted only through the same capacity check that did the pruning, so capacity is never over
+   * committed.
+   */
+  private static void recoverMinActiveReplica(IdealState idealState, Partition partition,
+      List<String> combinedPreferenceList, List<String> currentInstances,
+      Set<String> instancesToDrop, Set<String> disabledInstancesForPartition, int liveInstanceCount,
+      ClusterConfig clusterConfig, ResourceControllerDataProvider cache) {
+    String resourceName = idealState.getResourceName();
+    String partitionName = partition.getPartitionName();
+    int replicaCount = idealState.getReplicaCount(liveInstanceCount);
+    ResourceConfig mergedResourceConfig = ResourceConfig.mergeIdealStateWithResourceConfig(
+        cache.getResourceConfig(resourceName), idealState);
+    // MIN_ACTIVE_REPLICAS may be configured above REPLICAS; clamp so recovery can never place more
+    // replicas than the resource is configured for.
+    int minActiveReplica = Math.min(
+        DelayedRebalanceUtil.getMinActiveReplica(mergedResourceConfig, idealState, replicaCount),
+        replicaCount);
+    if (minActiveReplica <= 0) {
+      return;
+    }
+    List<String> candidates = recoveryCandidates(idealState, mergedResourceConfig, partitionName,
+        currentInstances, instancesToDrop, disabledInstancesForPartition, clusterConfig, cache);
+    for (String candidate : candidates) {
+      if (cache.checkAndReduceCapacity(candidate, resourceName, partitionName)) {
+        combinedPreferenceList.add(candidate);
+        LOG.warn("Resource: {}, partition: {} had no placement left because every planned instance "
+                + "lacked capacity. Restored one replica onto instance: {} which has capacity. The "
+                + "partition stays below its minActiveReplica of {} until the planner can place "
+                + "the rest.", resourceName, partitionName, candidate, minActiveReplica);
+        return;
+      }
+    }
+    // Reporting the count separates "nothing had room" from "nothing was eligible at all", which
+    // point at different causes: a full cluster versus a tag, an instance operation or a disabled
+    // partition.
+    LOG.error("Resource: {}, partition: {} has no placement against minActiveReplica {}. Every "
+            + "planned instance lacked capacity, and none of the {} eligible instance(s) could be "
+            + "charged either.", resourceName, partitionName, minActiveReplica, candidates.size());
+  }
 
   @Override
   public IdealState computeNewIdealState(String resourceName,
@@ -373,6 +526,7 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
     boolean isWaged = WagedValidationUtil.isWagedEnabled(idealState) && cache != null;
     if (isWaged && !isPreferenceListEmpty && !instanceToAdd.isEmpty()) {
       // check instanceToAdd instance appears in combinedPreferenceList
+      boolean prunedForCapacity = false;
       for (String instance : instanceToAdd) {
         if (combinedPreferenceList.contains(instance)) {
           if (!cache.checkAndReduceCapacity(instance, idealState.getResourceName(),
@@ -383,8 +537,17 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
                 + "it from combinedPreferenceList.", instance, idealState.getResourceName(),
                 partition.getPartitionName());
             combinedPreferenceList.remove(instance);
+            prunedForCapacity = true;
           }
         }
+      }
+      // Capacity pruning selects among candidates; it must not be the sole reason a partition ends
+      // up with no placement at all. Pruning that merely narrows a list is normal and left alone.
+      if (prunedForCapacity && combinedPreferenceList.isEmpty() && clusterConfig != null
+          && clusterConfig.isMinActiveReplicaCapacityRecoveryEnabled()) {
+        recoverMinActiveReplica(idealState, partition, combinedPreferenceList, currentInstances,
+            instancesToDrop, disabledInstancesForPartition, liveInstances.size(), clusterConfig,
+            cache);
       }
     }
 

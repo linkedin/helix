@@ -58,6 +58,9 @@ public class ClusterConfig extends HelixProperty {
     DELAY_REBALANCE_ENABLED, // whether the delayed rebalaning is enabled.
     DELAY_REBALANCE_TIME, // delayed time in ms that the delay time Helix should hold until
     // rebalancing.
+    // Whether a partition left with no placement at all by the WAGED capacity check may be
+    // recovered onto another instance that has spare capacity. Disabled by default.
+    MIN_ACTIVE_REPLICA_CAPACITY_RECOVERY_ENABLED,
     STATE_TRANSITION_THROTTLE_CONFIGS,
     STATE_TRANSITION_CANCELLATION_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
@@ -532,6 +535,23 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isDelayRebalaceEnabled() {
     return _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
+  }
+
+  /**
+   * Whether a partition that the WAGED capacity check left with no placement at all may be
+   * recovered onto an instance that genuinely has spare capacity. Exactly one replica is restored,
+   * not minActiveReplica of them, which is enough to bring the partition back into service. The
+   * recovery never over-commits: every candidate is subject to the normal capacity check. Disabled
+   * by default.
+   */
+  public boolean isMinActiveReplicaCapacityRecoveryEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.MIN_ACTIVE_REPLICA_CAPACITY_RECOVERY_ENABLED.name(), false);
+  }
+
+  public void setMinActiveReplicaCapacityRecoveryEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.MIN_ACTIVE_REPLICA_CAPACITY_RECOVERY_ENABLED.name(), enabled);
   }
 
   /**
