@@ -20,8 +20,11 @@ package org.apache.helix.controller.rebalancer.util;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
@@ -44,12 +47,62 @@ public class WagedRebalanceUtil {
    */
   public static Map<String, ResourceAssignment> calculateAssignment(ClusterModel clusterModel,
       RebalanceAlgorithm algorithm) throws HelixRebalanceException {
+    return calculateAssignment(clusterModel, algorithm, null);
+  }
+
+  /**
+   * Same as {@link #calculateAssignment(ClusterModel, RebalanceAlgorithm)}, but carries the previous
+   * assignment forward for any resource that the algorithm skipped.
+   *
+   * The algorithm only skips resources when instance-tag ("clique") isolation is enabled and one
+   * instance-group-tag could not be fully placed. Copying the previous assignment for those
+   * resources keeps the returned map complete, so every downstream consumer (the metadata store
+   * blobs, the baseline divergence metric, the ideal state conversion) behaves exactly as it does in
+   * the default global mode, where a failure aborts the whole calculation instead.
+   *
+   * @param previousAssignment the assignment this phase started from, in instance-name view. Pass
+   *                           null when a skipped resource should simply be absent from the result,
+   *                           which is the right behavior for the delayed rebalance overwrite phase
+   *                           because an absent resource there means "no overwrite applied".
+   * @return the new optimal assignment for the resources.
+   */
+  public static Map<String, ResourceAssignment> calculateAssignment(ClusterModel clusterModel,
+      RebalanceAlgorithm algorithm, Map<String, ResourceAssignment> previousAssignment)
+      throws HelixRebalanceException {
     long startTime = System.currentTimeMillis();
     LOG.info("Start calculating for an assignment with algorithm {}",
         algorithm.getClass().getSimpleName());
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
     Map<String, ResourceAssignment> newAssignment =
         optimalAssignment.getOptimalResourceAssignment();
+    Set<String> skippedResources = optimalAssignment.getSkippedResources();
+    if (!skippedResources.isEmpty()) {
+      // A skipped resource may still have a partial entry in the result: in the partial, emergency
+      // and delayed overwrite phases the nodes are pre-loaded with the replicas that were already
+      // allocated, and updateAssignments emits whatever sits on the nodes. Replace that partial
+      // entry with the complete previous assignment, or drop it, so no resource is ever emitted
+      // half assigned.
+      newAssignment = new HashMap<>(newAssignment);
+      List<String> carriedOver = new ArrayList<>();
+      List<String> dropped = new ArrayList<>();
+      for (String resource : skippedResources) {
+        ResourceAssignment previous =
+            previousAssignment == null ? null : previousAssignment.get(resource);
+        if (previous == null) {
+          newAssignment.remove(resource);
+          dropped.add(resource);
+        } else {
+          // Deep copy so the result never aliases the caller's previous assignment objects.
+          newAssignment.put(resource, new ResourceAssignment(previous.getRecord()));
+          carriedOver.add(resource);
+        }
+      }
+      LOG.warn(
+          "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
+              + "Carried the previous assignment forward for {}. Left out of this phase's result: "
+              + "{}.", skippedResources.size(), clusterModel.getRebalanceScopeType(),
+          clusterModel.getContext().getClusterName(), carriedOver, dropped);
+    }
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
     return newAssignment;

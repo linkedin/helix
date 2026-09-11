@@ -21,8 +21,10 @@ package org.apache.helix.controller.rebalancer.waged.model;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
@@ -39,6 +41,10 @@ public class OptimalAssignment {
   private Map<String, ResourceAssignment> _optimalAssignment = Collections.emptyMap();
   private Map<AssignableReplica, Map<AssignableNode, List<String>>> _failedAssignments =
       new HashMap<>();
+  // Resources that were skipped because their instance-group-tag could not be fully placed while
+  // instance-tag isolation is enabled. These resources are absent from _optimalAssignment and the
+  // caller is expected to carry their previous assignment forward. Empty in the default global mode.
+  private Set<String> _skippedResources = Collections.emptySet();
 
   /**
    * Update the OptimalAssignment instance with the existing assignment recorded in the input cluster model.
@@ -85,6 +91,27 @@ public class OptimalAssignment {
 
   public boolean hasAnyFailure() {
     return !_failedAssignments.isEmpty();
+  }
+
+  /**
+   * Record the resources that were skipped because their instance-group-tag could not be fully
+   * placed. Only used when instance-tag isolation is enabled.
+   */
+  public void setSkippedResources(Set<String> skippedResources) {
+    // Defensive copy: the caller owns a mutable set, and an unmodifiable view over it would still
+    // change underneath this object if that set were ever touched again.
+    _skippedResources = skippedResources == null || skippedResources.isEmpty()
+        ? Collections.emptySet()
+        : Collections.unmodifiableSet(new HashSet<>(skippedResources));
+  }
+
+  /**
+   * @return The resources that were skipped by instance-tag isolation. These resources have no entry
+   *         in {@link #getOptimalResourceAssignment()} and their previous assignment must be carried
+   *         forward by the caller. Never null; empty in the default global mode.
+   */
+  public Set<String> getSkippedResources() {
+    return _skippedResources;
   }
 
   public String getFailures() {
