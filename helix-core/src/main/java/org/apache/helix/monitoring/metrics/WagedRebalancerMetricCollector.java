@@ -46,6 +46,15 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     EmergencyRebalanceLatencyGauge,
     RebalanceOverwriteLatencyGauge,
 
+    // Sub-phase breakdown of the Global Baseline and Partial rebalance latencies above. Each of the
+    // two phases is timed separately so a slow rebalance can be attributed to either building the
+    // cluster model (constructing assignable nodes/replicas and pinning existing placement) or
+    // solving it (running the constraint-based assignment algorithm).
+    GlobalBaselineCalcBuildLatencyGauge,
+    GlobalBaselineCalcSolveLatencyGauge,
+    PartialRebalanceBuildLatencyGauge,
+    PartialRebalanceSolveLatencyGauge,
+
     // The following latency metrics are related to AssignmentMetadataStore
     StateReadLatencyGauge,
     StateWriteLatencyGauge,
@@ -87,7 +96,13 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     GlobalBaselineCalcCounter,
     PartialRebalanceCounter,
     EmergencyRebalanceCounter,
-    RebalanceOverwriteCounter
+    RebalanceOverwriteCounter,
+
+    // Count of replica placements in the new best possible assignment that changed relative to the
+    // previous best possible assignment, i.e. the churn (state-transition blast radius) that the
+    // partial rebalance introduces (the best possible assignment is what actually drives state
+    // transitions in the cluster).
+    PartialRebalanceReplicaMovementCounter
   }
 
   public WagedRebalancerMetricCollector(String clusterName) {
@@ -128,6 +143,20 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
             getResetIntervalInMs());
     LatencyMetric rebalanceOverwriteLatencyGauge =
         new RebalanceLatencyGauge(WagedRebalancerMetricNames.RebalanceOverwriteLatencyGauge.name(),
+            getResetIntervalInMs());
+    LatencyMetric globalBaselineCalcBuildLatencyGauge =
+        new RebalanceLatencyGauge(
+            WagedRebalancerMetricNames.GlobalBaselineCalcBuildLatencyGauge.name(),
+            getResetIntervalInMs());
+    LatencyMetric globalBaselineCalcSolveLatencyGauge =
+        new RebalanceLatencyGauge(
+            WagedRebalancerMetricNames.GlobalBaselineCalcSolveLatencyGauge.name(),
+            getResetIntervalInMs());
+    LatencyMetric partialRebalanceBuildLatencyGauge =
+        new RebalanceLatencyGauge(WagedRebalancerMetricNames.PartialRebalanceBuildLatencyGauge.name(),
+            getResetIntervalInMs());
+    LatencyMetric partialRebalanceSolveLatencyGauge =
+        new RebalanceLatencyGauge(WagedRebalancerMetricNames.PartialRebalanceSolveLatencyGauge.name(),
             getResetIntervalInMs());
     LatencyMetric stateReadLatencyGauge =
         new RebalanceLatencyGauge(WagedRebalancerMetricNames.StateReadLatencyGauge.name(),
@@ -177,12 +206,19 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
         new RebalanceCounter(WagedRebalancerMetricNames.EmergencyRebalanceCounter.name());
     CountMetric rebalanceOverwriteCounter =
         new RebalanceCounter(WagedRebalancerMetricNames.RebalanceOverwriteCounter.name());
+    CountMetric partialRebalanceReplicaMovementCounter =
+        new RebalanceCounter(
+            WagedRebalancerMetricNames.PartialRebalanceReplicaMovementCounter.name());
 
     // Add metrics to WagedRebalancerMetricCollector
     addMetric(globalBaselineCalcLatencyGauge);
     addMetric(partialRebalanceLatencyGauge);
     addMetric(emergencyRebalanceLatencyGauge);
     addMetric(rebalanceOverwriteLatencyGauge);
+    addMetric(globalBaselineCalcBuildLatencyGauge);
+    addMetric(globalBaselineCalcSolveLatencyGauge);
+    addMetric(partialRebalanceBuildLatencyGauge);
+    addMetric(partialRebalanceSolveLatencyGauge);
     addMetric(stateReadLatencyGauge);
     addMetric(stateWriteLatencyGauge);
     addMetric(baselineDivergenceGauge);
@@ -206,5 +242,6 @@ public class WagedRebalancerMetricCollector extends MetricCollector {
     addMetric(partialRebalanceCounter);
     addMetric(emergencyRebalanceCounter);
     addMetric(rebalanceOverwriteCounter);
+    addMetric(partialRebalanceReplicaMovementCounter);
   }
 }
