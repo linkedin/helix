@@ -408,19 +408,50 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       }
     }
 
-    // TODO: This may not be necessary, all of the instances bestPossibleStateMap should be set to ERROR
-    //    if necessary in the call to computeBestPossibleMap.
-    // Adding ERROR replica mapping to best possible
-    // ERROR assignment should be mutual excluded from DROPPED assignment because
-    // once there is an ERROR replica in the mapping, bestPossibleStateMap.size() > numReplicas prevents
-    // code entering the DROPPING stage.
+    boolean replacementsReadyForErrorDrop = cache != null
+        && clusterConfig.isEvacuateErrorPartitionDropEnabled()
+        && areReplacementsReadyForErrorDrop(preferenceList, currentStateMap, bestPossibleStateMap,
+            pendingStates, cache.getEnabledLiveInstances(), disabledInstancesForPartition,
+            stateModelDef, idealState);
+
+    // Preserve ERROR unless an opted-in evacuation has fully replaced the replica and already
+    // selected it for dropping. In particular, readyToDrop alone can accept a partial target list.
     for (String instance : combinedPreferenceList) {
-      if (currentStateMap.containsKey(instance) && currentStateMap.get(instance)
-          .equals(HelixDefinedState.ERROR.name())) {
-        bestPossibleStateMap.put(instance, HelixDefinedState.ERROR.name());
+      if (HelixDefinedState.ERROR.name().equals(currentStateMap.get(instance))) {
+        boolean canDropErrorReplica = replacementsReadyForErrorDrop
+            && cache.getEvacuatingInstances().contains(instance)
+            && !preferenceList.contains(instance)
+            && HelixDefinedState.DROPPED.name().equals(bestPossibleStateMap.get(instance));
+        if (!canDropErrorReplica) {
+          bestPossibleStateMap.put(instance, HelixDefinedState.ERROR.name());
+        }
       }
     }
     return bestPossibleStateMap;
+  }
+
+  private boolean areReplacementsReadyForErrorDrop(List<String> preferenceList,
+      Map<String, String> currentStateMap, Map<String, String> bestPossibleStateMap,
+      Map<String, String> pendingStates, Set<String> enabledLiveInstances,
+      Set<String> disabledInstancesForPartition, StateModelDefinition stateModelDef,
+      IdealState idealState) {
+    int requiredReplicas = idealState.getReplicaCount(preferenceList.size());
+    if (requiredReplicas <= 0 || new HashSet<>(preferenceList).size() < requiredReplicas) {
+      return false;
+    }
+
+    for (String target : preferenceList) {
+      String targetState = bestPossibleStateMap.get(target);
+      if (!enabledLiveInstances.contains(target) || disabledInstancesForPartition.contains(target)
+          || pendingStates.containsKey(target) || targetState == null
+          || targetState.equals(stateModelDef.getInitialState())
+          || targetState.equals(HelixDefinedState.ERROR.name())
+          || targetState.equals(HelixDefinedState.DROPPED.name())
+          || !targetState.equals(currentStateMap.get(target))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private boolean readyToDrop(Map<String, String> currentStateMap,
