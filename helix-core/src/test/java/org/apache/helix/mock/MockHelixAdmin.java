@@ -527,10 +527,6 @@ public class MockHelixAdmin implements HelixAdmin {
 
   }
 
-  @Override public void setInstanceZoneId(String clusterName, String instanceName, String zoneId) {
-
-  }
-
   @Override public void enableBatchMessageMode(String clusterName, boolean enabled) {
 
   }

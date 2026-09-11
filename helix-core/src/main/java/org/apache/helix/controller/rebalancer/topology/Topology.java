@@ -238,18 +238,13 @@ public class Topology {
     LinkedHashMap<String, String> instanceTopologyMap = new LinkedHashMap<>();
     if (clusterTopologyConfig.isTopologyAwareEnabled()) {
       if (clusterTopologyConfig.getTopologyKeyDefaultValue().isEmpty()) {
-        // Return a ordered map using default cluster topology definition, i,e. /root/zone/instance
-        String zone = instanceConfig.getZoneId();
-        if (zone == null) {
-          throw new IllegalArgumentException(String
-              .format("ZONE_ID for instance %s is not set, fail the topology-aware placement!",
-                  instanceName));
-        }
-        instanceTopologyMap.put(Types.ZONE.name(), zone);
-        if (faultZoneForEarlyQuit != null) {
-          return instanceTopologyMap;
-        }
-        instanceTopologyMap.put(Types.INSTANCE.name(), instanceName);
+        // Topology-aware placement requires an explicit cluster TOPOLOGY definition together with
+        // each instance's DOMAIN. The legacy default "/root/zone/instance" mode backed by the
+        // per-instance ZONE_ID field has been removed.
+        throw new IllegalArgumentException(String.format(
+            "Cluster %s has topology-aware rebalance enabled but no TOPOLOGY defined. The legacy "
+                + "per-instance ZONE_ID topology mode has been removed; configure "
+                + "ClusterConfig.TOPOLOGY and each instance's DOMAIN.", clusterName));
       } else {
         /*
          * Return a ordered map representing the instance path. The topology order is defined in

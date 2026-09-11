@@ -59,7 +59,6 @@ public class InstanceConfig extends HelixProperty {
   public enum InstanceConfigProperty {
     HELIX_HOST,
     HELIX_PORT,
-    HELIX_ZONE_ID,
     @Deprecated HELIX_ENABLED,
     HELIX_ENABLED_TIMESTAMP,
     @Deprecated HELIX_DISABLED_REASON,
@@ -247,7 +246,7 @@ public class InstanceConfig extends HelixProperty {
   // instance and must not transfer onto a swap-in target via overwriteInstanceConfig.
   private static final ImmutableSet<InstanceConfigProperty> NON_OVERWRITABLE_PROPERTIES =
       ImmutableSet.of(InstanceConfigProperty.HELIX_HOST, InstanceConfigProperty.HELIX_PORT,
-          InstanceConfigProperty.HELIX_ZONE_ID, InstanceConfigProperty.DOMAIN,
+          InstanceConfigProperty.DOMAIN,
           InstanceConfigProperty.INSTANCE_INFO_MAP,
           InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS);
 
@@ -305,20 +304,6 @@ public class InstanceConfig extends HelixProperty {
    */
   public void setPort(String port) {
     _record.setSimpleField(InstanceConfigProperty.HELIX_PORT.name(), port);
-  }
-
-  /**
-   * Set the zone identifier for this instance.
-   * This is deprecated, please use domain to set hierarchy tag for an instance.
-   * @return
-   */
-  @Deprecated
-  public String getZoneId() {
-    return _record.getSimpleField(InstanceConfigProperty.HELIX_ZONE_ID.name());
-  }
-
-  public void setZoneId(String zoneId) {
-    _record.setSimpleField(InstanceConfigProperty.HELIX_ZONE_ID.name(), zoneId);
   }
 
   /**
@@ -1269,7 +1254,7 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Validate if the topology related settings (Domain or ZoneId) in the given instanceConfig
+   * Validate if the topology related settings (Domain) in the given instanceConfig
    * are valid and align with current clusterConfig.
    * This function should be called when instance added to cluster or caller updates instanceConfig.
    *
