@@ -61,8 +61,30 @@ public class AssignmentMetadataStore {
 
   protected AssignmentMetadataStore(BucketDataAccessor bucketDataAccessor, String clusterName) {
     _dataAccessor = bucketDataAccessor;
-    _baselinePath = String.format(BASELINE_TEMPLATE, clusterName, ASSIGNMENT_METADATA_KEY);
-    _bestPossiblePath = String.format(BEST_POSSIBLE_TEMPLATE, clusterName, ASSIGNMENT_METADATA_KEY);
+    _baselinePath = getBaselinePath(clusterName);
+    _bestPossiblePath = getBestPossiblePath(clusterName);
+  }
+
+  /**
+   * Returns the metadata store path holding the persisted WAGED baseline assignment.
+   * Exposed so that read-only consumers, such as the REST layer, can locate the assignment without
+   * duplicating the path layout.
+   * @param clusterName the cluster whose baseline assignment is being located
+   * @return the bucketized root path of the baseline assignment
+   */
+  public static String getBaselinePath(String clusterName) {
+    return String.format(BASELINE_TEMPLATE, clusterName, ASSIGNMENT_METADATA_KEY);
+  }
+
+  /**
+   * Returns the metadata store path holding the persisted WAGED best possible assignment.
+   * Exposed so that read-only consumers, such as the REST layer, can locate the assignment without
+   * duplicating the path layout.
+   * @param clusterName the cluster whose best possible assignment is being located
+   * @return the bucketized root path of the best possible assignment
+   */
+  public static String getBestPossiblePath(String clusterName) {
+    return String.format(BEST_POSSIBLE_TEMPLATE, clusterName, ASSIGNMENT_METADATA_KEY);
   }
 
   public Map<String, ResourceAssignment> getBaseline() {
@@ -234,10 +256,13 @@ public class AssignmentMetadataStore {
 
   /**
    * Returns a Map of (ResourceName, ResourceAssignment) pairs.
-   * @param property
-   * @return
+   * This is the inverse of {@link #combineAssignments(String, Map)} and is exposed so that
+   * read-only consumers, such as the REST layer, decode a persisted assignment with the exact same
+   * contract the controller used to encode it.
+   * @param property the combined assignment read from the bucketized metadata store
+   * @return the per-resource assignments
    */
-  private Map<String, ResourceAssignment> splitAssignments(HelixProperty property) {
+  public static Map<String, ResourceAssignment> splitAssignments(HelixProperty property) {
     Map<String, ResourceAssignment> assignmentMap = new HashMap<>();
     // Convert each resource's assignment String into a ResourceAssignment object and put it in a
     // map
