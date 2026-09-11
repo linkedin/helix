@@ -983,8 +983,11 @@ public class ZKHelixAdmin implements HelixAdmin {
           PartitionExclusionHelper.getCustomizedPartitionsStillOnInstance(
               currentStates, idealStates, instanceName, allowedResources, filters);
       boolean hasPartitionsStillOnInstance = !partitionsStillOnInstance.isEmpty();
-      logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
-          instanceName, clusterName, partitionsStillOnInstance.size());
+      if (hasPartitionsStillOnInstance) {
+        // Partitions are still blocking evacuation
+        logger.info("Instance {} in cluster {} (offline) has {} partitions still on instance after exclusions",
+            instanceName, clusterName, partitionsStillOnInstance.size());
+      }
       if (evacuationInfo != null) {
         evacuationInfo.setRemainingPartitionCount(partitionsStillOnInstance.size());
         evacuationInfo.setPendingMessageCount(0);
@@ -1012,8 +1015,11 @@ public class ZKHelixAdmin implements HelixAdmin {
         PartitionExclusionHelper.applyExclusions(allPartitions, filters);
 
     boolean hasRemainingPartitions = !remainingPartitions.isEmpty();
-    logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
-        instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    if (hasRemainingPartitions) {
+      // Partitions are still blocking evacuation
+      logger.info("Instance {} in cluster {} has {} partitions after applying {} exclusions (from {} total)",
+          instanceName, clusterName, remainingPartitions.size(), exclusionTypes.size(), allPartitions.size());
+    }
     if (evacuationInfo != null) {
       evacuationInfo.setRemainingPartitionCount(remainingPartitions.size());
     }
