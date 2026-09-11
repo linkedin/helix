@@ -36,6 +36,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -128,6 +129,10 @@ public class ZKHelixAdmin implements HelixAdmin {
   public static final String CONNECTION_TIMEOUT = "helixAdmin.timeOutInSec";
   private static final String MAINTENANCE_ZNODE_ID = "maintenance";
   private static final int DEFAULT_SUPERCLUSTER_REPLICA = 3;
+  // Batch size for dropInstance subtree deletion. Sized so each multi() packet
+  // stays well under jute.maxbuffer (4 MB default): ~240 bytes/op * 1000 ops
+  // ~= 240 KB. See dropInstancePathsRecursively for context.
+  private static final int DROP_INSTANCE_DELETE_BATCH_SIZE = 1000;
   private static final ImmutableSet<InstanceConstants.InstanceOperation>
       INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT =
       ImmutableSet.of(InstanceConstants.InstanceOperation.EVACUATE,
@@ -266,15 +271,15 @@ public class ZKHelixAdmin implements HelixAdmin {
     String instanceName = instanceConfig.getInstanceName();
 
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
-    if (!_zkClient.exists(instanceConfigPath)) {
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    boolean hasConfig = _zkClient.exists(instanceConfigPath);
+    boolean hasInstance = _zkClient.exists(instancePath);
+    // dropInstancePathsRecursively is no longer atomic (config is deleted before
+    // the subtree). A retry after a partial drop may find the config already
+    // gone but the subtree still present; treat that as a resume case.
+    if (!hasConfig && !hasInstance) {
       throw new HelixException(
           "Node " + instanceName + " does not exist in config for cluster " + clusterName);
-    }
-
-    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
-    if (!_zkClient.exists(instancePath)) {
-      throw new HelixException(
-          "Node " + instanceName + " does not exist in instances for cluster " + clusterName);
     }
 
     String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
@@ -286,13 +291,37 @@ public class ZKHelixAdmin implements HelixAdmin {
     dropInstancePathsRecursively(clusterName, instanceName);
   }
 
+  // Two-phase drop to avoid jute.maxbuffer violations on instances that have
+  // accumulated large subtrees (e.g. tens of thousands of MESSAGES, CURRENTSTATES,
+  // TASKCURRENTSTATES). The previous single deleteRecursivelyAtomic([instance, config])
+  // built one multi() packet whose size grew O(#znodes); on instances with ~13K
+  // messages it crossed the 4 MB jute.maxbuffer limit, which ZK surfaces as
+  // CONNECTIONLOSS. The default 24h ZK retry timeout then pinned Jetty threads
+  // until the REST pool was exhausted.
+  //
+  // Phase 1: delete InstanceConfig first. This makes the instance non-Assignable,
+  //   so the controller stops generating new state-transition messages while the
+  //   subtree delete is in flight.
+  // Phase 2: delete the /INSTANCES/{instance} subtree in batched multi() calls
+  //   sized below jute.maxbuffer.
+  //
+  // Trade-off: this is no longer atomic. If the JVM dies between Phase 1 and
+  // the end of Phase 2, a stale /INSTANCES/{instance} subtree remains. The next
+  // dropInstance call (or a follow-up retry) is idempotent and finishes the
+  // cleanup. dropInstance's own existence check is relaxed below to allow the
+  // resume case where InstanceConfig is already gone.
   private void dropInstancePathsRecursively(String clusterName, String instanceName) {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     int retryCnt = 0;
     while (true) {
       try {
-        _zkClient.deleteRecursivelyAtomic(Arrays.asList(instancePath, instanceConfigPath));
+        // Phase 1
+        if (_zkClient.exists(instanceConfigPath)) {
+          _zkClient.delete(instanceConfigPath);
+        }
+        // Phase 2
+        deleteInstanceSubtreeBatched(instancePath);
         return;
       } catch (ZkClientException e) {
         if (retryCnt < 3 && e.getCause() instanceof ZkException && e.getCause()
@@ -311,6 +340,97 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
       }
     }
+  }
+
+  // Delete the given path and all descendants using batched multi() calls. Each
+  // batch is sized so the on-wire packet stays comfortably below jute.maxbuffer.
+  // NoNode errors inside a batch are tolerated to keep retries idempotent.
+  private void deleteInstanceSubtreeBatched(String rootPath) {
+    if (!_zkClient.exists(rootPath)) {
+      return;
+    }
+    List<String> orderedPaths = collectSubtreeChildrenFirst(rootPath);
+    if (orderedPaths.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < orderedPaths.size(); i += DROP_INSTANCE_DELETE_BATCH_SIZE) {
+      int end = Math.min(i + DROP_INSTANCE_DELETE_BATCH_SIZE, orderedPaths.size());
+      List<Op> ops = new ArrayList<>(end - i);
+      for (int j = i; j < end; j++) {
+        ops.add(Op.delete(orderedPaths.get(j), -1));
+      }
+      List<OpResult> opResults;
+      try {
+        opResults = _zkClient.multi(ops);
+      } catch (Exception e) {
+        throw new ZkClientException(
+            "Failed batched delete for subtree " + rootPath + " (batch starting at index " + i
+                + ", size " + ops.size() + ")", e);
+      }
+      Map<String, KeeperException.Code> failedPathsMap = new HashMap<>();
+      Map<String, KeeperException.Code> notEmptyPathsMap = new HashMap<>();
+      for (int k = 0; k < opResults.size(); k++) {
+        if (opResults.get(k) instanceof OpResult.ErrorResult) {
+          KeeperException.Code code = KeeperException.Code
+              .get(((OpResult.ErrorResult) opResults.get(k)).getErr());
+          if (code == KeeperException.Code.OK || code == KeeperException.Code.NONODE) {
+            // NoNode is tolerated: a previous partial delete or concurrent
+            // delete may have already removed this znode.
+            continue;
+          }
+          if (code == KeeperException.Code.NOTEMPTY) {
+            // NotEmpty surfaces when a child znode (typically ParticipantHistory
+            // written by the controller) appears under a parent we are deleting.
+            // Bubble this up in the same exception shape the legacy
+            // deleteRecursivelyAtomic produced so the existing retry loop in
+            // dropInstancePathsRecursively re-walks and retries.
+            notEmptyPathsMap.put(ops.get(k).getPath(), code);
+          } else {
+            failedPathsMap.put(ops.get(k).getPath(), code);
+          }
+        }
+      }
+      if (!notEmptyPathsMap.isEmpty()) {
+        String firstNotEmptyPath = notEmptyPathsMap.keySet().iterator().next();
+        throw new ZkClientException(
+            "Batched delete for subtree " + rootPath + " hit NotEmpty on " + notEmptyPathsMap
+                .keySet(),
+            new ZkException(
+                "Batched delete for subtree " + rootPath + " hit NotEmpty on " + notEmptyPathsMap
+                    .keySet(),
+                new KeeperException.NotEmptyException(firstNotEmptyPath)));
+      }
+      if (!failedPathsMap.isEmpty()) {
+        throw new ZkClientException(
+            "Batched delete for subtree " + rootPath + " failed with errors: " + failedPathsMap);
+      }
+    }
+  }
+
+  // BFS-walk the subtree rooted at path and return all znode paths ordered so
+  // children come before their parents (safe for sequential delete). NoNode
+  // during traversal is tolerated; the missing branch is skipped.
+  private List<String> collectSubtreeChildrenFirst(String path) {
+    List<String> orderedPaths = new ArrayList<>();
+    Queue<String> queue = new LinkedList<>();
+    queue.offer(path);
+    while (!queue.isEmpty()) {
+      String node = queue.poll();
+      List<String> children;
+      try {
+        children = _zkClient.getChildren(node);
+      } catch (ZkNoNodeException e) {
+        continue;
+      }
+      if (children != null) {
+        for (String child : children) {
+          queue.offer(node + "/" + child);
+        }
+      }
+      orderedPaths.add(node);
+    }
+    Collections.reverse(orderedPaths);
+    return orderedPaths;
   }
 
   /**
