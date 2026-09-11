@@ -78,7 +78,6 @@ public class TestPipelinePerformance extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, _clusterName, "controller_0");
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, _clusterName, true);
 
     _clusterVerifier = new StrictMatchExternalViewVerifier.Builder(_clusterName)
         .setZkClient(_gZkClient)

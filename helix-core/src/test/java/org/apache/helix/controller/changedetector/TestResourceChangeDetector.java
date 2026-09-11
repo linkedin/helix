@@ -104,6 +104,21 @@ public class TestResourceChangeDetector extends ZkTestBase {
 
     _dataAccessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
     _keyBuilder = _dataAccessor.keyBuilder();
+
+    // The controller always persists the best possible assignment into the IdealStates. Wait for
+    // the cluster to converge so persistence is complete before the baseline snapshot is taken;
+    // otherwise an unconverged baseline would surface as spurious IdealState changes later.
+    HelixClusterVerifier clusterVerifier =
+        new StrictMatchExternalViewVerifier.Builder(CLUSTER_NAME).setZkClient(_gZkClient)
+            .setDeactivatedNodeAwareness(true)
+            .setResources(new HashSet<>(_dataAccessor.getChildNames(_keyBuilder.idealStates())))
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
+    try {
+      Assert.assertTrue(clusterVerifier.verify());
+    } finally {
+      clusterVerifier.close();
+    }
+
     _resourceChangeDetector = new ResourceChangeDetector();
 
     // Create a custom data provider
@@ -361,11 +376,9 @@ public class TestResourceChangeDetector extends ZkTestBase {
    */
   @Test(dependsOnMethods = "testNoChange")
   public void testIgnoreNonTopologyChanges() {
-    // Modify cluster config and IdealState to ensure the mapping field of the IdealState will be
-    // considered as the fields that are modified by Helix logic.
-    ClusterConfig clusterConfig = _dataAccessor.getProperty(_keyBuilder.clusterConfig());
-    clusterConfig.setPersistBestPossibleAssignment(true);
-    _dataAccessor.updateProperty(_keyBuilder.clusterConfig(), clusterConfig);
+    // The controller always persists the best possible assignment into the IdealState mapping
+    // field. Modify the IdealState to ensure that mapping field is considered as a field that is
+    // modified by Helix logic.
 
     // Create an new IS
     String resourceName = "Resource" + TestHelper.getTestMethodName();

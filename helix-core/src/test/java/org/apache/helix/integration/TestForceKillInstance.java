@@ -62,7 +62,6 @@ public class TestForceKillInstance extends ZkTestBase {
   public void beforeClass() throws Exception {
     System.out.println("START " + CLASS_NAME + " at " + new Date(System.currentTimeMillis()));
     _gSetupTool.addCluster(CLUSTER_NAME, true);
-    enablePersistIntermediateAssignment(_gZkClient, CLUSTER_NAME, true);
 
     IdealState wagedResource = createResourceWithWagedRebalance(CLUSTER_NAME, "Test_WAGED_Resource",
         "MasterSlave", NUM_PARTITIONS, NUM_REPLICAS, NUM_MIN_ACTIVE_REPLICAS);

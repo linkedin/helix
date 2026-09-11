@@ -49,8 +49,6 @@ public class ClusterConfig extends HelixProperty {
    * ClusterConfig.
    */
   public enum ClusterConfigProperty {
-    PERSIST_BEST_POSSIBLE_ASSIGNMENT,
-    PERSIST_INTERMEDIATE_ASSIGNMENT,
     TOPOLOGY, // cluster topology definition, for example, "/zone/rack/host/instance"
     FAULT_ZONE_TYPE, // the type in which isolation should be applied on when Helix places the
     // replicas from same partition.
@@ -397,60 +395,6 @@ public class ClusterConfig extends HelixProperty {
   public int getViewClusterRefershPeriod() {
     return _record.getIntField(ClusterConfigProperty.VIEW_CLUSTER_REFRESH_PERIOD.name(),
         DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD);
-  }
-
-  /**
-   * Whether to persist best possible assignment in a resource's idealstate.
-   * @return
-   */
-  public Boolean isPersistBestPossibleAssignment() {
-    return _record
-        .getBooleanField(ClusterConfigProperty.PERSIST_BEST_POSSIBLE_ASSIGNMENT.toString(), false);
-  }
-
-  /**
-   * Enable/Disable persist best possible assignment in a resource's idealstate.
-   * CAUTION: if both {@link #setPersistBestPossibleAssignment(Boolean)} and
-   * {@link #setPersistIntermediateAssignment(Boolean)}
-   * are set to true, the IntermediateAssignment will be persisted into IdealState's map field.
-   * By default, it is DISABLED if not set.
-   * @return
-   */
-  public void setPersistBestPossibleAssignment(Boolean enable) {
-    if (enable == null) {
-      _record.getSimpleFields()
-          .remove(ClusterConfigProperty.PERSIST_BEST_POSSIBLE_ASSIGNMENT.toString());
-    } else {
-      _record.setBooleanField(ClusterConfigProperty.PERSIST_BEST_POSSIBLE_ASSIGNMENT.toString(),
-          enable);
-    }
-  }
-
-  /**
-   * Whether to persist IntermediateAssignment in a resource's idealstate.
-   * @return
-   */
-  public Boolean isPersistIntermediateAssignment() {
-    return _record
-        .getBooleanField(ClusterConfigProperty.PERSIST_INTERMEDIATE_ASSIGNMENT.toString(), false);
-  }
-
-  /**
-   * Enable/Disable persist IntermediateAssignment in a resource's idealstate.
-   * CAUTION: if both {@link #setPersistBestPossibleAssignment(Boolean)} and
-   * {@link #setPersistIntermediateAssignment(Boolean)}
-   * are set to true, the IntermediateAssignment will be persisted into IdealState's map field.
-   * By default, it is DISABLED if not set.
-   * @return
-   */
-  public void setPersistIntermediateAssignment(Boolean enable) {
-    if (enable == null) {
-      _record.getSimpleFields()
-          .remove(ClusterConfigProperty.PERSIST_INTERMEDIATE_ASSIGNMENT.toString());
-    } else {
-      _record.setBooleanField(ClusterConfigProperty.PERSIST_INTERMEDIATE_ASSIGNMENT.toString(),
-          enable);
-    }
   }
 
   /**

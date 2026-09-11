@@ -376,9 +376,8 @@ public class IdealState extends HelixProperty {
   /**
    * Get the current mapping of a partition.
    *
-   * CAUTION: In FULL-AUTO mode, this method
-   * could return empty map if neither {@link ClusterConfig#setPersistBestPossibleAssignment(Boolean)}
-   * nor {@link ClusterConfig#setPersistIntermediateAssignment(Boolean)} is set to true.
+   * In FULL-AUTO mode, the controller persists the computed assignment into the IdealState, so
+   * this method returns that assignment.
    *
    * @param partitionName the name of the partition
    * @return the instances where the replicas live and the state of each
@@ -400,9 +399,8 @@ public class IdealState extends HelixProperty {
 
   /**
    * Get the instances who host replicas of a partition.
-   * CAUTION: In FULL-AUTO mode, this method
-   * could return empty set if neither {@link ClusterConfig#setPersistBestPossibleAssignment(Boolean)}
-   * nor {@link ClusterConfig#setPersistIntermediateAssignment(Boolean)} is set to true.
+   * In FULL-AUTO mode, the controller persists the computed assignment into the IdealState, so
+   * this reflects that assignment.
    *
    * @return set of instance names
    */

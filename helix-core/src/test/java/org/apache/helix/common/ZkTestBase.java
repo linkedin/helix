@@ -273,22 +273,6 @@ public class ZkTestBase {
     return leader.getInstanceName();
   }
 
-  protected void enablePersistBestPossibleAssignment(HelixZkClient zkClient, String clusterName,
-      Boolean enabled) {
-    ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
-    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
-    clusterConfig.setPersistBestPossibleAssignment(enabled);
-    configAccessor.setClusterConfig(clusterName, clusterConfig);
-  }
-
-  protected void enablePersistIntermediateAssignment(HelixZkClient zkClient, String clusterName,
-      Boolean enabled) {
-    ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
-    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
-    clusterConfig.setPersistIntermediateAssignment(enabled);
-    configAccessor.setClusterConfig(clusterName, clusterConfig);
-  }
-
   protected void enableTopologyAwareRebalance(HelixZkClient zkClient, String clusterName,
       Boolean enabled) {
     ConfigAccessor configAccessor = new ConfigAccessor(zkClient);

@@ -29,13 +29,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDefinedState;
-import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.AbstractRebalancer;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Partition;
@@ -311,12 +308,6 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
     switch (idealState.getRebalanceMode()) {
     case FULL_AUTO:
-      ClusterConfig clusterConfig = new ConfigAccessor(_zkClient).getClusterConfig(dataCache.getClusterName());
-      if (!clusterConfig.isPersistBestPossibleAssignment() && !clusterConfig.isPersistIntermediateAssignment()) {
-        throw new HelixException(String.format("Full-Auto IdealState verifier requires "
-            + "ClusterConfig.PERSIST_BEST_POSSIBLE_ASSIGNMENT or ClusterConfig.PERSIST_INTERMEDIATE_ASSIGNMENT "
-            + "is enabled."));
-      }
       for (String partition : idealState.getPartitionSet()) {
         if (idealState.getPreferenceList(partition) == null || idealState.getPreferenceList(partition).isEmpty()) {
           return false;

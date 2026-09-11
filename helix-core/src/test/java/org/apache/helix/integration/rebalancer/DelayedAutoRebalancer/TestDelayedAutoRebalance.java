@@ -95,7 +95,6 @@ public class TestDelayedAutoRebalance extends ZkTestBase {
             .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
             .build();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     _testingCondition = OFFLINE_NODE;
   }
 
@@ -151,7 +150,6 @@ public class TestDelayedAutoRebalance extends ZkTestBase {
    */
   @Test (dependsOnMethods = {"testMinimalActiveReplicaMaintain"})
   public void testPartitionMovementAfterDelayTime() throws Exception {
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     long delay = 4000;
     setDelayTimeInCluster(_gZkClient, CLUSTER_NAME, delay);
