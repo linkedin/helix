@@ -221,16 +221,10 @@ public class InstancesAccessor extends AbstractHelixResource {
    * available from the maintenance-signal endpoint; deriving either here would hand clients a
    * prediction where an authoritative answer already exists.
    *
-   * <p><b>Known divergence from the controller.</b> Liveness here is the raw
-   * {@code /LIVEINSTANCES} membership read from ZooKeeper. The controller instead uses
-   * {@code BaseControllerDataProvider#getLiveInstances()}, which — while the cluster is in
-   * maintenance mode and {@code OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE} is non-negative —
-   * withholds instances that had been offline longer than that window for the remainder of the
-   * maintenance mode, even after they come back up. That exclusion is sticky state accumulated
-   * across pipeline runs, so this endpoint cannot reconstruct it from a point-in-time read and
-   * will report a strictly smaller population than the controller counts. The two agree
-   * whenever the cluster is out of maintenance mode or the timeout is unset (the default,
-   * {@code -1}).
+   * <p>Liveness here is the raw {@code /LIVEINSTANCES} membership read from ZooKeeper, which
+   * matches the controller: {@code BaseControllerDataProvider#getLiveInstances()} returns the
+   * same raw membership, so this endpoint and the controller compute the same population for the
+   * same cluster state.
    */
   private Response
   getInstancesUnableToAcceptOnlineReplicas(String clusterId,
