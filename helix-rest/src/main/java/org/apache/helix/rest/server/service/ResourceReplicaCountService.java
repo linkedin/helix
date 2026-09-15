@@ -360,7 +360,7 @@ public class ResourceReplicaCountService {
         // The guard rejected the write because another writer committed after this read, so
         // nothing was changed here. Re-read on the next attempt rather than retrying against a
         // version that is already stale.
-        LOG.info(
+        LOG.debug(
             "Attempt {} to set replica counts on resource {} in cluster {} lost to a concurrent "
                 + "write of version {}.",
             attempt, resourceName, clusterName, readVersion);
@@ -378,7 +378,7 @@ public class ResourceReplicaCountService {
       // A guarded write that reports failure without a version conflict did not reach the node at
       // all, which is how a removal between the read and the write surfaces. The next attempt
       // re-reads, so the resource is reported as missing instead of being recreated.
-      LOG.info("Attempt {} to set replica counts on resource {} in cluster {} was not applied.",
+      LOG.debug("Attempt {} to set replica counts on resource {} in cluster {} was not applied.",
           attempt, resourceName, clusterName);
     }
     return new ResourceUpdateOutcome(ResourceUpdateStatus.CONFLICT, -1,
