@@ -32,6 +32,7 @@ import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -340,6 +341,15 @@ public class ResourceReplicaCountService {
       try {
         written = _baseDataAccessor.set(path, desired.getRecord(), readVersion,
             AccessOption.PERSISTENT);
+      } catch (ZkBadVersionException e) {
+        // The guard rejected the write because another writer committed after this read, so
+        // nothing was changed here. Re-read on the next attempt rather than retrying against a
+        // version that is already stale.
+        LOG.info(
+            "Attempt {} to set replica counts on resource {} in cluster {} lost to a concurrent "
+                + "write of version {}.",
+            attempt, resourceName, clusterName, readVersion);
+        continue;
       } catch (Exception e) {
         LOG.error("Failed to write the IdealState of resource {} in cluster {}.", resourceName,
             clusterName, e);
@@ -350,11 +360,11 @@ public class ResourceReplicaCountService {
       if (written) {
         return confirmIncarnation(clusterName, resourceName, path, readCreationId);
       }
-      // The guard rejected the write, so nothing was changed. The next attempt re-reads, which also
-      // distinguishes a competing writer from a deletion without assuming either.
-      LOG.info(
-          "Attempt {} to set replica counts on resource {} in cluster {} did not match version {}.",
-          attempt, resourceName, clusterName, readVersion);
+      // A guarded write that reports failure without a version conflict did not reach the node at
+      // all, which is how a removal between the read and the write surfaces. The next attempt
+      // re-reads, so the resource is reported as missing instead of being recreated.
+      LOG.info("Attempt {} to set replica counts on resource {} in cluster {} was not applied.",
+          attempt, resourceName, clusterName);
     }
     return new ResourceUpdateOutcome(ResourceUpdateStatus.CONFLICT, -1,
         "The resource was modified concurrently in each of the " + MAX_ATTEMPTS_PER_RESOURCE

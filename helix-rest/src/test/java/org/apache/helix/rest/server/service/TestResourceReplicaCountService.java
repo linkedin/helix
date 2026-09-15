@@ -33,6 +33,7 @@ import org.apache.helix.model.IdealState;
 import org.apache.helix.rest.server.service.ResourceReplicaCountService.BulkReplicaCountUpdateResult;
 import org.apache.helix.rest.server.service.ResourceReplicaCountService.ResourceUpdateStatus;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.zookeeper.data.Stat;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
@@ -123,7 +124,10 @@ public class TestResourceReplicaCountService {
             return false;
           }
           if (node._version != expectedVersion) {
-            return false;
+            // Matches ZkBaseDataAccessor, which rethrows a bad-version failure rather than
+            // reporting it through the return value.
+            throw new ZkBadVersionException(
+                "version mismatch on " + path + ", expected " + expectedVersion);
           }
           node._record = new ZNRecord(record);
           node._version++;
@@ -357,6 +361,29 @@ public class TestResourceReplicaCountService {
 
     Assert.assertFalse(result.isAllAtDesiredValues());
     assertStatus(result, RESOURCE_1, ResourceUpdateStatus.CONFLICT);
+  }
+
+  @Test
+  public void testResourceRemovedBetweenTheReadAndTheWriteIsNotRecreated() {
+    givenResource(RESOURCE_1, 1, 1);
+    boolean[] alreadyRan = new boolean[1];
+    _afterReadHook = path -> {
+      if (alreadyRan[0]) {
+        return;
+      }
+      alreadyRan[0] = true;
+      // The guarded write now reaches a node that no longer exists, which the accessor reports
+      // through the return value rather than as a version conflict.
+      _store.remove(path);
+    };
+
+    BulkReplicaCountUpdateResult result =
+        _service.updateReplicaCounts(CLUSTER, Collections.singletonList(RESOURCE_1), 3, 2);
+
+    Assert.assertFalse(result.isAllAtDesiredValues());
+    assertStatus(result, RESOURCE_1, ResourceUpdateStatus.NOT_FOUND);
+    Assert.assertFalse(_store.containsKey(path(RESOURCE_1)),
+        "A resource removed mid-update must not be brought back by the write.");
   }
 
   @Test
