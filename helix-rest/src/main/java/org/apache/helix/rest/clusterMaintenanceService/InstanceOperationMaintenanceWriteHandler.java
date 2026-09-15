@@ -28,9 +28,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.slf4j.Logger;
@@ -44,8 +46,9 @@ import org.slf4j.LoggerFactory;
  * <p>Resolution rules for the effective expiry timestamp on each write:
  * <ol>
  *   <li>If the caller supplied a positive {@code expiresAtMillis}, use it.
- *   <li>Else if the cluster has {@code DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS}
- *       configured, use {@code now + duration}.
+ *   <li>Else if the cluster has a positive
+ *       {@code DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS} configured, use
+ *       {@code now + duration}.
  *   <li>Else fail with {@link BadRequestException}.
  * </ol>
  *
@@ -62,6 +65,8 @@ import org.slf4j.LoggerFactory;
 public class InstanceOperationMaintenanceWriteHandler {
   private static final Logger LOG =
       LoggerFactory.getLogger(InstanceOperationMaintenanceWriteHandler.class);
+  private static final String INSTANCE_OPERATION_MAINTENANCE_FIELD =
+      InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name();
 
   /** Sentinel value for the request body indicating "no expiry supplied by caller." */
   public static final long EXPIRES_AT_MILLIS_UNSET = 0L;
@@ -71,11 +76,13 @@ public class InstanceOperationMaintenanceWriteHandler {
 
   private final HelixAdmin _admin;
   private final ConfigAccessor _configAccessor;
+  private final HelixDataAccessor _dataAccessor;
 
   public InstanceOperationMaintenanceWriteHandler(HelixAdmin admin,
-      ConfigAccessor configAccessor) {
+      ConfigAccessor configAccessor, HelixDataAccessor dataAccessor) {
     _admin = Objects.requireNonNull(admin, "admin");
     _configAccessor = Objects.requireNonNull(configAccessor, "configAccessor");
+    _dataAccessor = Objects.requireNonNull(dataAccessor, "dataAccessor");
   }
 
   /**
@@ -118,21 +125,27 @@ public class InstanceOperationMaintenanceWriteHandler {
     Set<String> clusterInstances = loadClusterInstances(clusterId);
     List<String> applied = new ArrayList<>(deduped.size());
     Map<String, String> rejected = new LinkedHashMap<>();
+    Set<String> writeFailures = new LinkedHashSet<>();
 
     for (String instanceName : deduped) {
       if (!clusterInstances.contains(instanceName)) {
         rejected.put(instanceName, instanceNotFound(clusterId));
         continue;
       }
-      InstanceConfig cfg = _admin.getInstanceConfig(clusterId, instanceName);
-      cfg.setInstanceOperationMaintenanceUntilMs(
+      MarkerWriteStatus writeStatus = updateMarker(clusterId, instanceName,
           InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
-      _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
-      applied.add(instanceName);
+      if (writeStatus == MarkerWriteStatus.APPLIED) {
+        applied.add(instanceName);
+      } else if (writeStatus == MarkerWriteStatus.INSTANCE_NOT_FOUND) {
+        rejected.put(instanceName, instanceNotFound(clusterId));
+      } else {
+        rejected.put(instanceName, writeFailed(clusterId));
+        writeFailures.add(instanceName);
+      }
     }
     LOG.info("Cleared instance-operation maintenance marker: cluster={}, applied={}, "
         + "rejected={}", clusterId, applied.size(), rejected.size());
-    return new InstanceOperationMaintenanceResult(applied, rejected,
+    return new InstanceOperationMaintenanceResult(applied, rejected, writeFailures,
         InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
   }
 
@@ -143,6 +156,7 @@ public class InstanceOperationMaintenanceWriteHandler {
       long nowMs) {
     Set<String> clusterInstances = loadClusterInstances(clusterId);
     Map<String, String> rejected = new LinkedHashMap<>();
+    Set<String> writeFailures = new LinkedHashSet<>();
 
     // First pass: classify input as existing-candidate vs missing-instance. Missing
     // instances are recorded against rejected and dropped from further processing; the
@@ -170,16 +184,66 @@ public class InstanceOperationMaintenanceWriteHandler {
         rejected.put(instanceName, capRejectMessage);
         continue;
       }
-      InstanceConfig cfg = _admin.getInstanceConfig(clusterId, instanceName);
-      cfg.setInstanceOperationMaintenanceUntilMs(effectiveExpiresAtMillis);
-      _configAccessor.setInstanceConfig(clusterId, instanceName, cfg);
-      applied.add(instanceName);
-      remainingQuota--;
+      MarkerWriteStatus writeStatus =
+          updateMarker(clusterId, instanceName, effectiveExpiresAtMillis);
+      if (writeStatus == MarkerWriteStatus.APPLIED) {
+        applied.add(instanceName);
+        remainingQuota--;
+      } else if (writeStatus == MarkerWriteStatus.INSTANCE_NOT_FOUND) {
+        rejected.put(instanceName, instanceNotFound(clusterId));
+      } else {
+        rejected.put(instanceName, writeFailed(clusterId));
+        writeFailures.add(instanceName);
+      }
     }
     LOG.info("Wrote instance-operation maintenance markers: cluster={}, applied={}, "
             + "rejected={}, expiresAtMillis={}", clusterId, applied.size(), rejected.size(),
         effectiveExpiresAtMillis);
-    return new InstanceOperationMaintenanceResult(applied, rejected, effectiveExpiresAtMillis);
+    return new InstanceOperationMaintenanceResult(applied, rejected, writeFailures,
+        effectiveExpiresAtMillis);
+  }
+
+  /**
+   * Optimistically updates only the marker field on the latest InstanceConfig record.
+   * Returning {@code null} from the updater prevents the underlying accessor from creating
+   * a config when the instance disappeared after the membership snapshot was read.
+   */
+  private MarkerWriteStatus updateMarker(String clusterId, String instanceName,
+      long expiresAtMillis) {
+    AtomicBoolean updaterInvoked = new AtomicBoolean(false);
+    AtomicBoolean configPresent = new AtomicBoolean(false);
+    InstanceConfig markerUpdate = new InstanceConfig(instanceName);
+    markerUpdate.setInstanceOperationMaintenanceUntilMs(expiresAtMillis);
+
+    boolean success = _dataAccessor.updateProperty(
+        _dataAccessor.keyBuilder().instanceConfig(instanceName), currentData -> {
+          updaterInvoked.set(true);
+          configPresent.set(currentData != null);
+          if (currentData == null) {
+            return null;
+          }
+          if (expiresAtMillis <= 0L) {
+            currentData.getSimpleFields().remove(INSTANCE_OPERATION_MAINTENANCE_FIELD);
+          } else {
+            currentData.setLongField(INSTANCE_OPERATION_MAINTENANCE_FIELD, expiresAtMillis);
+          }
+          return currentData;
+        }, markerUpdate);
+
+    if (!updaterInvoked.get()) {
+      LOG.warn("Instance-operation maintenance updater was not invoked: cluster={}, instance={}",
+          clusterId, instanceName);
+      return MarkerWriteStatus.WRITE_FAILED;
+    }
+    if (!configPresent.get()) {
+      return MarkerWriteStatus.INSTANCE_NOT_FOUND;
+    }
+    if (!success) {
+      LOG.warn("Failed to update instance-operation maintenance marker: cluster={}, instance={}",
+          clusterId, instanceName);
+      return MarkerWriteStatus.WRITE_FAILED;
+    }
+    return MarkerWriteStatus.APPLIED;
   }
 
   /**
@@ -212,6 +276,10 @@ public class InstanceOperationMaintenanceWriteHandler {
     return "instance not found in cluster " + clusterId;
   }
 
+  private static String writeFailed(String clusterId) {
+    return "failed to update instance config in cluster " + clusterId;
+  }
+
   /**
    * Apply the TTL resolution rules documented in the class javadoc. Visible for testing.
    */
@@ -229,12 +297,21 @@ public class InstanceOperationMaintenanceWriteHandler {
     // the operator configured one. The getter returns the sentinel -1L when the field is
     // absent; compare against it directly so the "feature off" branch is explicit.
     long defaultDuration = clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs();
-    if (defaultDuration != -1L) {
-      return nowMs + defaultDuration;
+    if (defaultDuration == -1L) {
+      throw new BadRequestException(
+          "expiresAtMillis not supplied and cluster has no "
+              + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS configured");
     }
-    throw new BadRequestException(
-        "expiresAtMillis not supplied and cluster has no "
-            + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS configured");
+    if (defaultDuration <= 0L) {
+      throw new BadRequestException(
+          "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS must be positive");
+    }
+    try {
+      return Math.addExact(nowMs, defaultDuration);
+    } catch (ArithmeticException e) {
+      throw new BadRequestException(
+          "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS produces an invalid expiry");
+    }
   }
 
   /**
@@ -291,6 +368,12 @@ public class InstanceOperationMaintenanceWriteHandler {
 
   // ---- Types ------------------------------------------------------------------------------
 
+  private enum MarkerWriteStatus {
+    APPLIED,
+    INSTANCE_NOT_FOUND,
+    WRITE_FAILED
+  }
+
   /**
    * Outcome of one {@link #apply} invocation. {@link #getApplied()} is always a list
    * (possibly empty); {@link #getRejected()} is always a map (possibly empty) keyed by
@@ -301,12 +384,14 @@ public class InstanceOperationMaintenanceWriteHandler {
   public static final class InstanceOperationMaintenanceResult {
     private final List<String> _applied;
     private final Map<String, String> _rejected;
+    private final Set<String> _writeFailures;
     private final long _resolvedExpiresAtMillis;
 
     InstanceOperationMaintenanceResult(List<String> applied, Map<String, String> rejected,
-        long resolvedExpiresAtMillis) {
+        Set<String> writeFailures, long resolvedExpiresAtMillis) {
       _applied = Collections.unmodifiableList(applied);
       _rejected = Collections.unmodifiableMap(rejected);
+      _writeFailures = Collections.unmodifiableSet(writeFailures);
       _resolvedExpiresAtMillis = resolvedExpiresAtMillis;
     }
 
@@ -316,6 +401,10 @@ public class InstanceOperationMaintenanceWriteHandler {
 
     public Map<String, String> getRejected() {
       return _rejected;
+    }
+
+    public boolean isWriteFailure(String instanceName) {
+      return _writeFailures.contains(instanceName);
     }
 
     public long getResolvedExpiresAtMillis() {
