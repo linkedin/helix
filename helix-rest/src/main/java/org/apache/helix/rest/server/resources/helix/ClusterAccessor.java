@@ -123,8 +123,8 @@ public class ClusterAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Response field names of the {@code getConvergenceStatus} command. The constant names are the
-   * wire names, so a rename is visibly a change to the response schema.
+   * Response field names of the convergence status read. The constant names are the wire names,
+   * so a rename is visibly a change to the response schema.
    */
   public enum ConvergenceProperties {
     scope,

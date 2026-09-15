@@ -64,9 +64,7 @@ public class ExternalViewConvergenceResult {
     /** A Full-Auto resource requires persisted best possible or intermediate assignment. */
     BEST_POSSIBLE_ASSIGNMENT_NOT_PERSISTED,
     /** The state model definition the resource refers to could not be read. */
-    STATE_MODEL_DEFINITION_MISSING,
-    /** A resource the caller asked about has neither an ideal state nor an external view. */
-    RESOURCE_NOT_FOUND
+    STATE_MODEL_DEFINITION_MISSING
   }
 
   private final Status _status;
@@ -133,7 +131,10 @@ public class ExternalViewConvergenceResult {
     return _failedResources;
   }
 
-  /** @return requested resources that exist in neither the ideal states nor the external views. */
+  /**
+   * @return requested resources that exist in neither the ideal states nor the external views.
+   *         They have no reason attached because there was nothing to evaluate for them.
+   */
   public SortedSet<String> getUnknownResources() {
     return _unknownResources;
   }
