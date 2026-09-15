@@ -720,6 +720,64 @@ public class InstanceConfig extends HelixProperty {
     setInstanceOperation(instanceOperation);
   }
 
+  /**
+   * Get the instance operations recorded on this instance, in the order they are stored.
+   *
+   * <p>This is the raw per-source record, not the effective operation: the last entry is the
+   * active one, and the deprecated HELIX_ENABLED field can still override it. Use
+   * {@link #getInstanceOperation()} for the operation that is actually in effect.
+   *
+   * @return an unmodifiable snapshot, empty when nothing has been recorded.
+   */
+  public List<InstanceOperation> getAllInstanceOperations() {
+    return Collections.unmodifiableList(new ArrayList<>(getInstanceOperations()));
+  }
+
+  /**
+   * Record an instance operation for a single source, leaving every other source's entry and
+   * the relative order of those entries untouched.
+   *
+   * <p>This differs from {@link #setInstanceOperation(InstanceOperation)} in two ways that
+   * matter to a caller that shares this instance with other writers. It does not first
+   * re-apply the currently effective operation, so another source's entry is never moved or
+   * rewritten as a side effect, and it only mirrors the operation into the deprecated
+   * HELIX_ENABLED, HELIX_DISABLED_REASON and HELIX_DISABLED_TYPE fields when the caller asks
+   * for it, so legacy state that belongs to somebody else is not silently overwritten.
+   *
+   * <p>Ordering follows the same rule as the other setter: an ENABLE is recorded after the
+   * last existing ENABLE, anything else is appended and therefore becomes the active
+   * operation.
+   *
+   * @param operation the operation to record. Its source identifies the entry to replace.
+   * @param mirrorToLegacyFields whether to also write the deprecated enabled/disabled fields.
+   * @throws IllegalArgumentException when the operation source is
+   *     {@link InstanceConstants.InstanceOperationSource#ADMIN}, whose documented behaviour is
+   *     to clear every other source. That is the opposite of a single source update, so it
+   *     must go through {@link #setInstanceOperation(InstanceOperation)} where it is explicit.
+   */
+  public void setInstanceOperationForSource(InstanceOperation operation,
+      boolean mirrorToLegacyFields) {
+    if (operation == null) {
+      throw new IllegalArgumentException("Instance operation must not be null");
+    }
+    if (operation.getSource() == InstanceConstants.InstanceOperationSource.ADMIN) {
+      throw new IllegalArgumentException(
+          "ADMIN instance operations clear every other source and cannot be recorded as a "
+              + "single source update for instance: " + _record.getId());
+    }
+
+    List<InstanceOperation> operations = getInstanceOperations();
+    updateInstanceOperation(operations, operation);
+    _record.setListField(InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name(),
+        serializeInstanceOperations(operations));
+
+    if (mirrorToLegacyFields) {
+      setLegacyFieldsForInstanceOperation(operation);
+    }
+
+    updateInstanceOperationState();
+  }
+
   private void setInstanceOperationInit(InstanceConstants.InstanceOperation operation) {
     if (operation == null) {
       return;

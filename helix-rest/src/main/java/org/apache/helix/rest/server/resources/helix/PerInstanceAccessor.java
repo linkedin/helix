@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,6 +52,14 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.api.instance.CheckedInstanceChanges;
+import org.apache.helix.api.instance.DisabledPartitionsChangeRequest;
+import org.apache.helix.api.instance.EffectiveDisabledPartitions;
+import org.apache.helix.api.instance.EffectiveInstanceOperation;
+import org.apache.helix.api.instance.InstanceOperationChangeRequest;
+import org.apache.helix.api.instance.LegacyFieldPolicy;
+import org.apache.helix.api.mutation.CheckedMutationResult;
+import org.apache.helix.api.mutation.NodeExpectation;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
@@ -114,7 +123,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     operation_config,
     continueOnFailures,
     skipZKRead,
-    performOperation
+    performOperation,
+    expectedDisabledPartitions
     }
 
   private static class MaintenanceOpInputFields {
@@ -485,6 +495,13 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
+      @QueryParam("expectedConfigVersion") Integer expectedConfigVersion,
+      @QueryParam("expectedConfigCreationId") Long expectedConfigCreationId,
+      @QueryParam("expectedInstanceOperation") InstanceConstants.InstanceOperation expectedInstanceOperation,
+      @QueryParam("expectedInstanceOperationSource") InstanceConstants.InstanceOperationSource expectedInstanceOperationSource,
+      @DefaultValue("true") @QueryParam("requireDesiredStateInEffect") boolean requireDesiredStateInEffect,
+      @DefaultValue("false") @QueryParam("requireRequestedSourceActive") boolean requireRequestedSourceActive,
+      @DefaultValue("OWNED_ONLY") @QueryParam("legacyFieldPolicy") LegacyFieldPolicy legacyFieldPolicy,
       @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
       String content) {
     Command cmd;
@@ -587,6 +604,88 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       force ? InstanceConstants.InstanceOperationSource.ADMIN : instanceOperationSource)
                   .build());
           break;
+        case setInstanceOperationChecked: {
+          // Checked variant of setInstanceOperation: the conditions travel with the write and
+          // are evaluated against the instance config version the write is conditioned on, so a
+          // caller no longer has to read the config first and hope nothing changed in between.
+          // Every outcome, including a conflict, is a 200 carrying a structured body: a
+          // conflict is an expected answer to a conditional request, and giving it a transport
+          // error code would make it indistinguishable from a genuine failure.
+          if (instanceOperation == null) {
+            return badRequest("instanceOperation is required for setInstanceOperationChecked");
+          }
+          if (instanceOperationSource == null) {
+            return badRequest("instanceOperationSource is required for setInstanceOperationChecked"
+                + ", because it names the only source this command is allowed to write");
+          }
+          if (force) {
+            return badRequest("force is not supported by setInstanceOperationChecked, because it "
+                + "would discard the operations recorded by every other source. Use "
+                + "setInstanceOperation when that is genuinely intended.");
+          }
+          InstanceOperationChangeRequest checkedOperationRequest;
+          try {
+            checkedOperationRequest =
+                InstanceOperationChangeRequest.newBuilder(instanceOperation, instanceOperationSource)
+                    .setReason(reason)
+                    .setNodeExpectation(
+                        NodeExpectation.of(expectedConfigVersion, expectedConfigCreationId))
+                    .setExpectedOperation(expectedInstanceOperation)
+                    .setExpectedOperationSource(expectedInstanceOperationSource)
+                    .setRequireDesiredStateInEffect(requireDesiredStateInEffect)
+                    .setRequireRequestedSourceActive(requireRequestedSourceActive)
+                    .setLegacyFieldPolicy(legacyFieldPolicy).build();
+          } catch (IllegalArgumentException e) {
+            return badRequest(e.getMessage());
+          }
+          CheckedMutationResult<EffectiveInstanceOperation> operationResult =
+              CheckedInstanceChanges.setInstanceOperation(
+                  new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,
+                  checkedOperationRequest);
+          return OK(OBJECT_MAPPER.writeValueAsString(
+              toInstanceOperationResultNode(operationResult)));
+        }
+        case disablePartitionsChecked:
+        case enablePartitionsChecked: {
+          if (node == null) {
+            return badRequest("Content is required and must name a resource and its partitions");
+          }
+          JsonNode resourceNode = node.get(PerInstanceProperties.resource.name());
+          JsonNode partitionsNode = node.get(PerInstanceProperties.partitions.name());
+          if (resourceNode == null || partitionsNode == null) {
+            return badRequest("Both " + PerInstanceProperties.resource.name() + " and "
+                + PerInstanceProperties.partitions.name() + " are required");
+          }
+          List<String> partitions = (List<String>) OBJECT_MAPPER.readValue(
+              partitionsNode.toString(), OBJECT_MAPPER.getTypeFactory()
+                  .constructCollectionType(List.class, String.class));
+          DisabledPartitionsChangeRequest checkedPartitionsRequest;
+          try {
+            DisabledPartitionsChangeRequest.Builder builder = DisabledPartitionsChangeRequest
+                .newBuilder(resourceNode.textValue(), new LinkedHashSet<>(partitions),
+                    cmd == Command.disablePartitionsChecked)
+                .setNodeExpectation(
+                    NodeExpectation.of(expectedConfigVersion, expectedConfigCreationId))
+                .setLegacyFieldPolicy(legacyFieldPolicy);
+            JsonNode expectedNode =
+                node.get(PerInstanceProperties.expectedDisabledPartitions.name());
+            if (expectedNode != null) {
+              builder.setExpectedDisabledPartitions(new LinkedHashSet<>(
+                  (List<String>) OBJECT_MAPPER.readValue(expectedNode.toString(),
+                      OBJECT_MAPPER.getTypeFactory()
+                          .constructCollectionType(List.class, String.class))));
+            }
+            checkedPartitionsRequest = builder.build();
+          } catch (IllegalArgumentException | NullPointerException e) {
+            return badRequest(String.valueOf(e.getMessage()));
+          }
+          CheckedMutationResult<EffectiveDisabledPartitions> partitionsResult =
+              CheckedInstanceChanges.setPartitionsDisabled(
+                  new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,
+                  checkedPartitionsRequest);
+          return OK(OBJECT_MAPPER.writeValueAsString(
+              toDisabledPartitionsResultNode(partitionsResult)));
+        }
         case canCompleteSwap:
           OperationCheckResult swapCheckResult = admin.canCompleteSwapWithDetails(clusterId, instanceName);
           return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
@@ -725,6 +824,60 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       return badRequest(e.getMessage());
     }
     return OK();
+  }
+
+  /**
+   * Render the shared part of a checked change result. The outcome is always present, the
+   * conflict reason only for a conflict, and the state fields only when a state was observed,
+   * so a client that does not recognise the outcome, or finds the state missing, has to treat
+   * the response as a failure rather than as permission to continue.
+   */
+  private static ObjectNode toCheckedResultNode(CheckedMutationResult<?> result) {
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put("outcome", result.getOutcome().name());
+    result.getConflictReason().ifPresent(reason -> root.put("conflictReason", reason.name()));
+    root.put("message", result.getMessage());
+    root.put("configVersion", result.getObservedVersion());
+    root.put("configCreationId", result.getObservedCreationId());
+    return root;
+  }
+
+  private static ObjectNode toInstanceOperationResultNode(
+      CheckedMutationResult<EffectiveInstanceOperation> result) {
+    ObjectNode root = toCheckedResultNode(result);
+    EffectiveInstanceOperation state = result.getEffectiveState();
+    if (state == null) {
+      return root;
+    }
+    root.put("desiredStateInEffect", state.isDesiredStateInEffect());
+    root.put("instanceOperation", state.getOperation().name());
+    root.put("instanceOperationSource", state.getSource().name());
+    root.put("instanceOperationReason", state.getReason());
+    root.put("helixEnabled", state.isHelixEnabled());
+    if (state.getRequestedSourceOperation() != null) {
+      root.put("requestedSourceOperation", state.getRequestedSourceOperation().name());
+    }
+    ArrayNode recordedSources = root.putArray("recordedSources");
+    state.getRecordedSources().forEach(source -> recordedSources.add(source.name()));
+    return root;
+  }
+
+  private static ObjectNode toDisabledPartitionsResultNode(
+      CheckedMutationResult<EffectiveDisabledPartitions> result) {
+    ObjectNode root = toCheckedResultNode(result);
+    EffectiveDisabledPartitions state = result.getEffectiveState();
+    if (state == null) {
+      return root;
+    }
+    root.put("desiredStateInEffect", state.isDesiredStateInEffect());
+    ObjectNode disabledPartitions = root.putObject("disabledPartitions");
+    state.getDisabledPartitions().forEach((resource, partitions) -> {
+      ArrayNode partitionsNode = disabledPartitions.putArray(resource);
+      partitions.forEach(partitionsNode::add);
+    });
+    ArrayNode crossResource = root.putArray("crossResourceDisabledPartitions");
+    state.getCrossResourceDisabledPartitions().forEach(crossResource::add);
+    return root;
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
