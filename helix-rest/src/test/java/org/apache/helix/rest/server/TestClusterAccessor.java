@@ -762,7 +762,64 @@ public class TestClusterAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  @Test(dependsOnMethods = "testEnableDisableMaintenanceMode")
+  @Test
+  public void testOwnedMaintenanceModeCommands() throws IOException {
+    String cluster = _clusters.iterator().next();
+    Map<String, String> acquireRequest = ImmutableMap.of(
+        "ownerId", "owner-a",
+        "windowId", "window-a",
+        "reason", "test owned maintenance");
+    Response acquireResponse = post("clusters/" + cluster,
+        ImmutableMap.of("command", Command.acquireMaintenanceMode.name()),
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(acquireRequest),
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode(), true);
+    JsonNode acquired = OBJECT_MAPPER.readTree(acquireResponse.readEntity(String.class));
+    Assert.assertEquals(acquired.get("status").asText(), "ACQUIRED");
+    JsonNode handle = acquired.get("handle");
+    Assert.assertEquals(handle.get("clusterName").asText(), cluster);
+    Assert.assertEquals(handle.get("ownerId").asText(), "owner-a");
+    Assert.assertEquals(handle.get("windowId").asText(), "window-a");
+    Assert.assertFalse(handle.get("fenceId").asText().isEmpty());
+
+    Response ensureResponse = post("clusters/" + cluster,
+        ImmutableMap.of("command", Command.acquireMaintenanceMode.name()),
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(acquireRequest),
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode(), true);
+    JsonNode ensured = OBJECT_MAPPER.readTree(ensureResponse.readEntity(String.class));
+    Assert.assertEquals(ensured.get("status").asText(), "ALREADY_OWNED");
+    Assert.assertEquals(ensured.get("handle"), handle);
+
+    Map<String, String> releaseRequest = ImmutableMap.of(
+        "ownerId", handle.get("ownerId").asText(),
+        "windowId", handle.get("windowId").asText(),
+        "fenceId", handle.get("fenceId").asText(),
+        "reason", "test complete");
+    Response releaseResponse = post("clusters/" + cluster,
+        ImmutableMap.of("command", Command.releaseMaintenanceMode.name()),
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(releaseRequest),
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode(), true);
+    JsonNode released = OBJECT_MAPPER.readTree(releaseResponse.readEntity(String.class));
+    Assert.assertEquals(released.get("status").asText(), "APPLIED");
+    Assert.assertFalse(isMaintenanceModeEnabled(cluster));
+
+    Response duplicateResponse = post("clusters/" + cluster,
+        ImmutableMap.of("command", Command.releaseMaintenanceMode.name()),
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(releaseRequest),
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode(), true);
+    JsonNode duplicate = OBJECT_MAPPER.readTree(duplicateResponse.readEntity(String.class));
+    Assert.assertEquals(duplicate.get("status").asText(), "UNCHANGED");
+
+    post("clusters/" + cluster,
+        ImmutableMap.of("command", Command.acquireMaintenanceMode.name()),
+        Entity.entity("{\"ownerId\":\"owner-a\"}", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+  }
+
+  @Test(dependsOnMethods = "testOwnedMaintenanceModeCommands")
   public void testEmptyMaintenanceSignal() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String cluster = _clusters.iterator().next();

@@ -32,7 +32,11 @@ public class MaintenanceSignal extends PauseSignal {
   public enum MaintenanceSignalProperty {
     TRIGGERED_BY,
     TIMESTAMP,
-    AUTO_TRIGGER_REASON
+    AUTO_TRIGGER_REASON,
+    MAINTENANCE_WINDOW_ID,
+    MAINTENANCE_OWNER_ID,
+    MAINTENANCE_FENCE_ID,
+    MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION
   }
 
   /**
@@ -111,5 +115,71 @@ public class MaintenanceSignal extends PauseSignal {
    */
   public long getTimestamp() {
     return _record.getLongField(MaintenanceSignalProperty.TIMESTAMP.name(), -1);
+  }
+
+  /**
+   * Sets the unique identity of this maintenance window.
+   *
+   * @param windowId caller-generated or Helix-generated window identifier
+   */
+  public void setMaintenanceWindowId(String windowId) {
+    _record.setSimpleField(MaintenanceSignalProperty.MAINTENANCE_WINDOW_ID.name(), windowId);
+  }
+
+  /**
+   * @return unique maintenance window identifier, or {@code null} for a legacy signal
+   */
+  public String getMaintenanceWindowId() {
+    return _record.getSimpleField(MaintenanceSignalProperty.MAINTENANCE_WINDOW_ID.name());
+  }
+
+  /**
+   * Sets the logical owner of this maintenance window.
+   *
+   * @param ownerId logical owner identifier
+   */
+  public void setMaintenanceOwnerId(String ownerId) {
+    _record.setSimpleField(MaintenanceSignalProperty.MAINTENANCE_OWNER_ID.name(), ownerId);
+  }
+
+  /**
+   * @return logical owner identifier, or {@code null} for an unowned window
+   */
+  public String getMaintenanceOwnerId() {
+    return _record.getSimpleField(MaintenanceSignalProperty.MAINTENANCE_OWNER_ID.name());
+  }
+
+  /**
+   * Sets the identifier of the fence that protects this maintenance window.
+   *
+   * @param fenceId cluster maintenance fence identifier
+   */
+  public void setMaintenanceFenceId(String fenceId) {
+    _record.setSimpleField(MaintenanceSignalProperty.MAINTENANCE_FENCE_ID.name(), fenceId);
+  }
+
+  /**
+   * @return cluster maintenance fence identifier, or {@code null} for a legacy signal
+   */
+  public String getMaintenanceFenceId() {
+    return _record.getSimpleField(MaintenanceSignalProperty.MAINTENANCE_FENCE_ID.name());
+  }
+
+  /**
+   * Sets the ownership protocol version used to create this signal.
+   *
+   * @param version ownership protocol version
+   */
+  public void setMaintenanceOwnershipProtocolVersion(int version) {
+    _record.setIntField(
+        MaintenanceSignalProperty.MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION.name(), version);
+  }
+
+  /**
+   * @return ownership protocol version, or {@code -1} for a legacy signal
+   */
+  public int getMaintenanceOwnershipProtocolVersion() {
+    return _record.getIntField(
+        MaintenanceSignalProperty.MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION.name(), -1);
   }
 }

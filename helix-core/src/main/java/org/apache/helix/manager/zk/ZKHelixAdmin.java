@@ -62,6 +62,9 @@ import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
+import org.apache.helix.api.status.MaintenanceModeAcquireResult;
+import org.apache.helix.api.status.MaintenanceModeOwnershipHandle;
+import org.apache.helix.api.status.MaintenanceModeReleaseResult;
 import org.apache.helix.api.topology.ClusterTopology;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
@@ -113,11 +116,16 @@ import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
 import org.apache.helix.zookeeper.routing.RoutingDataManager;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
+import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -127,6 +135,9 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   public static final String CONNECTION_TIMEOUT = "helixAdmin.timeOutInSec";
   private static final String MAINTENANCE_ZNODE_ID = "maintenance";
+  private static final String MAINTENANCE_FENCE_PREFIX = "OWNERSHIP_FENCE_";
+  private static final int MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION = 1;
+  private static final int MAINTENANCE_MUTATION_MAX_RETRIES = 5;
   private static final int DEFAULT_SUPERCLUSTER_REPLICA = 3;
   private static final ImmutableSet<InstanceConstants.InstanceOperation>
       INSTANCE_OPERATION_TO_EXCLUDE_FROM_ASSIGNMENT =
@@ -1457,6 +1468,108 @@ public class ZKHelixAdmin implements HelixAdmin {
         MaintenanceSignal.TriggeringEntity.USER);
   }
 
+  @Override
+  public MaintenanceModeAcquireResult acquireMaintenanceMode(String clusterName, String ownerId,
+      String windowId, String reason) {
+    validateOwnershipIdentity(clusterName, ownerId, windowId);
+    validateClusterForOwnedMaintenance(clusterName);
+
+    for (int attempt = 0; attempt < MAINTENANCE_MUTATION_MAX_RETRIES; attempt++) {
+      MaintenanceSignalSnapshot signal = getMaintenanceSignalSnapshot(clusterName);
+      if (signal._signal != null) {
+        return classifyMaintenanceCoverage(clusterName, ownerId, windowId, signal._signal);
+      }
+
+      String fenceId = UUID.randomUUID().toString();
+      MaintenanceSignal ownedSignal = new MaintenanceSignal(MAINTENANCE_ZNODE_ID);
+      if (reason != null) {
+        ownedSignal.setReason(reason);
+      }
+      ownedSignal.setTimestamp(System.currentTimeMillis());
+      ownedSignal.setTriggeringEntity(MaintenanceSignal.TriggeringEntity.USER);
+      ownedSignal.setAutoTriggerReason(MaintenanceSignal.AutoTriggerReason.NOT_APPLICABLE);
+      setMaintenanceIdentity(ownedSignal, ownerId, windowId, fenceId);
+
+      String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+      String fencePath = PropertyPathBuilder.maintenanceFence(clusterName, fenceId);
+      ZNRecord fenceRecord = buildMaintenanceFenceRecord(ownerId, windowId, fenceId);
+      List<Op> operations = Arrays.asList(
+          Op.create(maintenancePath, _zkClient.serialize(ownedSignal.getRecord(), maintenancePath),
+              ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+          Op.create(fencePath, _zkClient.serialize(fenceRecord, fencePath),
+              ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+      try {
+        _zkClient.multi(operations);
+        recordMaintenanceHistory(clusterName, true, reason, System.currentTimeMillis(),
+            MaintenanceSignal.AutoTriggerReason.NOT_APPLICABLE, null,
+            MaintenanceSignal.TriggeringEntity.USER);
+        return new MaintenanceModeAcquireResult(MaintenanceModeAcquireResult.Status.ACQUIRED,
+            new MaintenanceModeOwnershipHandle(clusterName, ownerId, windowId, fenceId),
+            "Owned maintenance window acquired");
+      } catch (ZkNodeExistsException | ZkNoNodeException e) {
+        // A concurrent maintenance mutation won. Re-read and classify its exact result.
+      } catch (ZkException e) {
+        MaintenanceModeAcquireResult ensured =
+            inspectMaintenanceCoverage(clusterName, ownerId, windowId);
+        if (ensured.getStatus() == MaintenanceModeAcquireResult.Status.ALREADY_OWNED) {
+          return ensured;
+        }
+        throw new HelixException("Failed to acquire owned maintenance mode for cluster "
+            + clusterName, e);
+      }
+    }
+    return inspectMaintenanceCoverage(clusterName, ownerId, windowId);
+  }
+
+  @Override
+  public MaintenanceModeReleaseResult releaseMaintenanceMode(
+      MaintenanceModeOwnershipHandle handle, String reason) {
+    validateOwnershipHandle(handle);
+    String clusterName = handle.getClusterName();
+    validateClusterForOwnedMaintenance(clusterName);
+    MaintenanceSignalSnapshot signal = getMaintenanceSignalSnapshot(clusterName);
+
+    if (signal._signal == null) {
+      return new MaintenanceModeReleaseResult(MaintenanceModeReleaseResult.Status.UNCHANGED,
+          "Maintenance mode is already inactive");
+    }
+    if (!signal.matches(handle)) {
+      return maintenanceReleaseConflict(
+          "Maintenance window was replaced or is owned by a different request");
+    }
+    MaintenanceFenceSnapshot fence = getMaintenanceFenceSnapshot(clusterName, handle.getFenceId());
+    if (fence == null || !hasOnlyExpectedMaintenanceFence(clusterName, handle.getFenceId())) {
+      return maintenanceReleaseConflict("Maintenance window fence is missing or inconsistent");
+    }
+
+    String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+    String fencePath = PropertyPathBuilder.maintenanceFence(clusterName, handle.getFenceId());
+    // The child fence and parent signal are deleted in one transaction. A delete and recreate of
+    // the parent removes the unique child, so a stale release cannot pass only because the parent
+    // version restarted at zero.
+    List<Op> operations = Arrays.asList(
+        Op.delete(fencePath, fence._stat.getVersion()),
+        Op.delete(maintenancePath, signal._stat.getVersion()));
+    try {
+      _zkClient.multi(operations);
+      recordMaintenanceHistory(clusterName, false, reason, System.currentTimeMillis(),
+          MaintenanceSignal.AutoTriggerReason.NOT_APPLICABLE, null,
+          MaintenanceSignal.TriggeringEntity.USER);
+      return new MaintenanceModeReleaseResult(MaintenanceModeReleaseResult.Status.APPLIED,
+          "Owned maintenance window released");
+    } catch (ZkBadVersionException | ZkNoNodeException e) {
+      return inspectReleaseAfterConcurrentChange(handle);
+    } catch (ZkException e) {
+      try {
+        return inspectReleaseAfterConcurrentChange(handle);
+      } catch (RuntimeException inspectionFailure) {
+        logger.warn("Unable to verify maintenance release for cluster {}", clusterName,
+            inspectionFailure);
+        return maintenanceReleaseConflict("Maintenance release outcome could not be verified");
+      }
+    }
+  }
+
   /**
    * Helper method for enabling/disabling maintenance mode.
    * @param clusterName
@@ -1470,17 +1583,15 @@ public class ZKHelixAdmin implements HelixAdmin {
       final String reason, final MaintenanceSignal.AutoTriggerReason internalReason,
       final Map<String, String> customFields,
       final MaintenanceSignal.TriggeringEntity triggeringEntity) {
-    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
-    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     logger.info("Cluster {} {} {} maintenance mode for reason {}.", clusterName,
         triggeringEntity == MaintenanceSignal.TriggeringEntity.CONTROLLER ? "automatically"
             : "manually", enabled ? "enters" : "exits", reason == null ? "NULL" : reason);
     final long currentTime = System.currentTimeMillis();
+    boolean maintenanceSignalChanged;
     if (!enabled) {
-      // Exit maintenance mode
-      accessor.removeProperty(keyBuilder.maintenance());
+      maintenanceSignalChanged =
+          removeMaintenanceSignal(clusterName, triggeringEntity, internalReason);
     } else {
-      // Enter maintenance mode
       MaintenanceSignal maintenanceSignal = new MaintenanceSignal(MAINTENANCE_ZNODE_ID);
       if (reason != null) {
         maintenanceSignal.setReason(reason);
@@ -1506,12 +1617,244 @@ public class ZKHelixAdmin implements HelixAdmin {
           }
           break;
       }
-      if (!accessor.createMaintenance(maintenanceSignal)) {
-        throw new HelixException("Failed to create maintenance signal!");
-      }
+      writeMaintenanceSignal(clusterName, maintenanceSignal);
+      maintenanceSignalChanged = true;
     }
 
-    // Record a MaintenanceSignal history
+    if (maintenanceSignalChanged) {
+      recordMaintenanceHistory(clusterName, enabled, reason, currentTime, internalReason,
+          customFields, triggeringEntity);
+    }
+  }
+
+  private void writeMaintenanceSignal(String clusterName, MaintenanceSignal maintenanceSignal) {
+    String windowId = UUID.randomUUID().toString();
+    String fenceId = UUID.randomUUID().toString();
+    for (int attempt = 0; attempt < MAINTENANCE_MUTATION_MAX_RETRIES; attempt++) {
+      MaintenanceSignalSnapshot currentSignal = getMaintenanceSignalSnapshot(clusterName);
+      setMaintenanceIdentity(maintenanceSignal, null, windowId, fenceId);
+      String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+      String fencePath = PropertyPathBuilder.maintenanceFence(clusterName, fenceId);
+      List<Op> operations = new ArrayList<>();
+      if (currentSignal._signal == null) {
+        operations.add(
+            Op.create(maintenancePath, _zkClient.serialize(maintenanceSignal.getRecord(),
+                    maintenancePath), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+      } else {
+        for (MaintenanceFenceSnapshot existingFence
+            : getMaintenanceFenceSnapshots(clusterName)) {
+          operations.add(Op.delete(existingFence._path, existingFence._stat.getVersion()));
+        }
+        operations.add(Op.setData(maintenancePath,
+            _zkClient.serialize(maintenanceSignal.getRecord(), maintenancePath),
+            currentSignal._stat.getVersion()));
+      }
+      operations.add(Op.create(fencePath,
+          _zkClient.serialize(buildMaintenanceFenceRecord(null, windowId, fenceId), fencePath),
+          ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+      try {
+        _zkClient.multi(operations);
+        return;
+      } catch (ZkBadVersionException | ZkNodeExistsException | ZkNoNodeException e) {
+        // Manual and controller entry retain their overwrite behavior, so retry current state.
+      } catch (ZkException e) {
+        throw new HelixException(
+            "Failed to write maintenance signal for cluster " + clusterName, e);
+      }
+    }
+    throw new HelixException(
+        "Failed to write maintenance signal after concurrent changes for cluster " + clusterName);
+  }
+
+  private boolean removeMaintenanceSignal(String clusterName,
+      MaintenanceSignal.TriggeringEntity triggeringEntity,
+      MaintenanceSignal.AutoTriggerReason internalReason) {
+    for (int attempt = 0; attempt < MAINTENANCE_MUTATION_MAX_RETRIES; attempt++) {
+      MaintenanceSignalSnapshot currentSignal = getMaintenanceSignalSnapshot(clusterName);
+      if (currentSignal._signal == null) {
+        return false;
+      }
+      if (triggeringEntity == MaintenanceSignal.TriggeringEntity.CONTROLLER
+          && (currentSignal._signal.getTriggeringEntity()
+          != MaintenanceSignal.TriggeringEntity.CONTROLLER
+          || currentSignal._signal.getAutoTriggerReason() != internalReason)) {
+        return false;
+      }
+
+      String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+      List<MaintenanceFenceSnapshot> fences = getMaintenanceFenceSnapshots(clusterName);
+      if (triggeringEntity == MaintenanceSignal.TriggeringEntity.CONTROLLER
+          && !fencesMatchSignal(currentSignal._signal, fences)) {
+        return false;
+      }
+      List<Op> operations = new ArrayList<>();
+      for (MaintenanceFenceSnapshot fence : fences) {
+        operations.add(Op.delete(fence._path, fence._stat.getVersion()));
+      }
+      operations.add(Op.delete(maintenancePath, currentSignal._stat.getVersion()));
+      try {
+        _zkClient.multi(operations);
+        return true;
+      } catch (ZkBadVersionException | ZkNoNodeException e) {
+        if (triggeringEntity == MaintenanceSignal.TriggeringEntity.CONTROLLER) {
+          return false;
+        }
+        // Manual disable is the operator escape path, so retry against the current signal.
+      } catch (ZkException e) {
+        if (triggeringEntity != MaintenanceSignal.TriggeringEntity.CONTROLLER
+            && _baseDataAccessor.remove(maintenancePath, AccessOption.PERSISTENT)) {
+          return true;
+        }
+        throw new HelixException(
+            "Failed to remove maintenance signal for cluster " + clusterName, e);
+      }
+    }
+    throw new HelixException(
+        "Failed to remove maintenance signal after concurrent changes for cluster " + clusterName);
+  }
+
+  private MaintenanceModeAcquireResult inspectMaintenanceCoverage(String clusterName,
+      String ownerId, String windowId) {
+    MaintenanceSignalSnapshot signal = getMaintenanceSignalSnapshot(clusterName);
+    if (signal._signal == null) {
+      return new MaintenanceModeAcquireResult(MaintenanceModeAcquireResult.Status.CONFLICT, null,
+          "No maintenance window was acquired");
+    }
+    return classifyMaintenanceCoverage(clusterName, ownerId, windowId, signal._signal);
+  }
+
+  private MaintenanceModeAcquireResult classifyMaintenanceCoverage(String clusterName,
+      String ownerId, String windowId, MaintenanceSignal maintenanceSignal) {
+    String activeOwnerId = maintenanceSignal.getMaintenanceOwnerId();
+    if (isBlank(activeOwnerId)) {
+      return new MaintenanceModeAcquireResult(
+          MaintenanceModeAcquireResult.Status.ALREADY_COVERED, null,
+          "A manual, automatic, or legacy maintenance window is already active");
+    }
+    String fenceId = maintenanceSignal.getMaintenanceFenceId();
+    if (isBlank(fenceId)
+        || maintenanceSignal.getMaintenanceOwnershipProtocolVersion()
+        != MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION
+        || getMaintenanceFenceSnapshot(clusterName, fenceId) == null
+        || !hasOnlyExpectedMaintenanceFence(clusterName, fenceId)) {
+      return new MaintenanceModeAcquireResult(MaintenanceModeAcquireResult.Status.CONFLICT, null,
+          "Owned maintenance signal does not match its fence");
+    }
+    if (activeOwnerId.equals(ownerId)
+        && windowId.equals(maintenanceSignal.getMaintenanceWindowId())) {
+      return new MaintenanceModeAcquireResult(
+          MaintenanceModeAcquireResult.Status.ALREADY_OWNED,
+          new MaintenanceModeOwnershipHandle(clusterName, ownerId, windowId, fenceId),
+          "The exact owned maintenance window is already active");
+    }
+    return new MaintenanceModeAcquireResult(MaintenanceModeAcquireResult.Status.FOREIGN_OWNED, null,
+        "A different owned maintenance window is already active");
+  }
+
+  private MaintenanceModeReleaseResult inspectReleaseAfterConcurrentChange(
+      MaintenanceModeOwnershipHandle handle) {
+    MaintenanceSignalSnapshot signal = getMaintenanceSignalSnapshot(handle.getClusterName());
+    if (signal._signal == null) {
+      return new MaintenanceModeReleaseResult(MaintenanceModeReleaseResult.Status.APPLIED,
+          "Owned maintenance window is no longer active");
+    }
+    return maintenanceReleaseConflict(
+        "Maintenance window changed concurrently and was not released");
+  }
+
+  private MaintenanceModeReleaseResult maintenanceReleaseConflict(String message) {
+    return new MaintenanceModeReleaseResult(MaintenanceModeReleaseResult.Status.CONFLICT, message);
+  }
+
+  private MaintenanceSignalSnapshot getMaintenanceSignalSnapshot(String clusterName) {
+    Stat stat = new Stat();
+    String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+    ZNRecord record = _zkClient.readDataAndStat(maintenancePath, stat, true);
+    return new MaintenanceSignalSnapshot(
+        record == null ? null : new MaintenanceSignal(record), stat);
+  }
+
+  private ZNRecord buildMaintenanceFenceRecord(String ownerId, String windowId, String fenceId) {
+    ZNRecord record = new ZNRecord(fenceId);
+    record.setSimpleField(MaintenanceSignal.MaintenanceSignalProperty.MAINTENANCE_WINDOW_ID.name(),
+        windowId);
+    record.setSimpleField(MaintenanceSignal.MaintenanceSignalProperty.MAINTENANCE_FENCE_ID.name(),
+        fenceId);
+    record.setIntField(
+        MaintenanceSignal.MaintenanceSignalProperty.MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION.name(),
+        MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION);
+    if (!isBlank(ownerId)) {
+      record.setSimpleField(
+          MaintenanceSignal.MaintenanceSignalProperty.MAINTENANCE_OWNER_ID.name(), ownerId);
+    }
+    return record;
+  }
+
+  private MaintenanceFenceSnapshot getMaintenanceFenceSnapshot(String clusterName,
+      String fenceId) {
+    String path = PropertyPathBuilder.maintenanceFence(clusterName, fenceId);
+    Stat stat = _baseDataAccessor.getStat(path, AccessOption.PERSISTENT);
+    return stat == null ? null : new MaintenanceFenceSnapshot(path, stat);
+  }
+
+  private List<MaintenanceFenceSnapshot> getMaintenanceFenceSnapshots(String clusterName) {
+    String maintenancePath = PropertyPathBuilder.maintenance(clusterName);
+    List<String> children;
+    try {
+      children = _zkClient.getChildren(maintenancePath);
+    } catch (ZkNoNodeException e) {
+      return Collections.emptyList();
+    }
+    List<MaintenanceFenceSnapshot> fences = new ArrayList<>();
+    for (String child : children) {
+      if (!child.startsWith(MAINTENANCE_FENCE_PREFIX)) {
+        continue;
+      }
+      String path = maintenancePath + "/" + child;
+      Stat stat = _baseDataAccessor.getStat(path, AccessOption.PERSISTENT);
+      if (stat != null) {
+        fences.add(new MaintenanceFenceSnapshot(path, stat));
+      }
+    }
+    return fences;
+  }
+
+  private boolean hasOnlyExpectedMaintenanceFence(String clusterName, String fenceId) {
+    List<MaintenanceFenceSnapshot> fences = getMaintenanceFenceSnapshots(clusterName);
+    return fences.size() == 1
+        && fences.get(0)._path.equals(PropertyPathBuilder.maintenanceFence(clusterName, fenceId));
+  }
+
+  private boolean fencesMatchSignal(MaintenanceSignal signal,
+      List<MaintenanceFenceSnapshot> fences) {
+    String fenceId = signal.getMaintenanceFenceId();
+    if (isBlank(fenceId)) {
+      return fences.isEmpty();
+    }
+    return signal.getMaintenanceOwnershipProtocolVersion()
+        == MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION
+        && fences.size() == 1
+        && fences.get(0)._path.endsWith("/" + MAINTENANCE_FENCE_PREFIX + fenceId);
+  }
+
+  private void setMaintenanceIdentity(MaintenanceSignal signal, String ownerId, String windowId,
+      String fenceId) {
+    signal.setMaintenanceWindowId(windowId);
+    signal.setMaintenanceFenceId(fenceId);
+    signal.setMaintenanceOwnershipProtocolVersion(MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION);
+    if (!isBlank(ownerId)) {
+      signal.setMaintenanceOwnerId(ownerId);
+    } else {
+      signal.getRecord().getSimpleFields()
+          .remove(MaintenanceSignal.MaintenanceSignalProperty.MAINTENANCE_OWNER_ID.name());
+    }
+  }
+
+  private void recordMaintenanceHistory(String clusterName, boolean enabled, String reason,
+      long timestamp, MaintenanceSignal.AutoTriggerReason internalReason,
+      Map<String, String> customFields, MaintenanceSignal.TriggeringEntity triggeringEntity) {
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     if (!accessor.getBaseDataAccessor()
         .update(keyBuilder.controllerLeaderHistory().getPath(),
             (DataUpdater<ZNRecord>) oldRecord -> {
@@ -1520,7 +1863,7 @@ public class ZKHelixAdmin implements HelixAdmin {
                   oldRecord = new ZNRecord(PropertyType.HISTORY.toString());
                 }
                 return new ControllerHistory(oldRecord)
-                    .updateMaintenanceHistory(enabled, reason, currentTime, internalReason,
+                    .updateMaintenanceHistory(enabled, reason, timestamp, internalReason,
                         customFields, triggeringEntity);
               } catch (IOException e) {
                 logger.error("Failed to update maintenance history! Exception: {}", e);
@@ -1528,6 +1871,59 @@ public class ZKHelixAdmin implements HelixAdmin {
               }
             }, AccessOption.PERSISTENT)) {
       logger.error("Failed to write maintenance history to ZK!");
+    }
+  }
+
+  private static void validateOwnershipIdentity(String clusterName, String ownerId,
+      String windowId) {
+    if (isBlank(clusterName) || isBlank(ownerId) || isBlank(windowId)) {
+      throw new IllegalArgumentException(
+          "clusterName, ownerId, and windowId must all be non-empty");
+    }
+  }
+
+  private void validateClusterForOwnedMaintenance(String clusterName) {
+    if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
+      throw new IllegalArgumentException("Cluster is not set up: " + clusterName);
+    }
+  }
+
+  private static void validateOwnershipHandle(MaintenanceModeOwnershipHandle handle) {
+    if (handle == null || isBlank(handle.getClusterName()) || isBlank(handle.getOwnerId())
+        || isBlank(handle.getWindowId()) || isBlank(handle.getFenceId())) {
+      throw new IllegalArgumentException("A complete maintenance ownership handle is required");
+    }
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.trim().isEmpty();
+  }
+
+  private static final class MaintenanceFenceSnapshot {
+    private final String _path;
+    private final Stat _stat;
+
+    private MaintenanceFenceSnapshot(String path, Stat stat) {
+      _path = path;
+      _stat = stat;
+    }
+  }
+
+  private static final class MaintenanceSignalSnapshot {
+    private final MaintenanceSignal _signal;
+    private final Stat _stat;
+
+    private MaintenanceSignalSnapshot(MaintenanceSignal signal, Stat stat) {
+      _signal = signal;
+      _stat = stat;
+    }
+
+    private boolean matches(MaintenanceModeOwnershipHandle handle) {
+      return handle.getFenceId().equals(_signal.getMaintenanceFenceId())
+          && handle.getOwnerId().equals(_signal.getMaintenanceOwnerId())
+          && handle.getWindowId().equals(_signal.getMaintenanceWindowId())
+          && _signal.getMaintenanceOwnershipProtocolVersion()
+          == MAINTENANCE_OWNERSHIP_PROTOCOL_VERSION;
     }
   }
 
