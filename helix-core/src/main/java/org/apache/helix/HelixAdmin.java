@@ -445,6 +445,9 @@ public interface HelixAdmin {
    * foreign-owned windows are reported without a handle and are never adopted.
    *
    * <p>Window identifiers must not be reused for distinct operation windows.
+   * Acquired windows are USER-triggered, so controller auto-recovery does not remove them. Manual
+   * operator disable remains an unconditional escape path. Callers must keep this API disabled
+   * while legacy automation that clears maintenance by reason can still act on the same cluster.
    *
    * @param clusterName cluster to place in maintenance mode
    * @param ownerId logical owner of the requested window

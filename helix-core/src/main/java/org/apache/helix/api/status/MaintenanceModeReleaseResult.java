@@ -32,7 +32,9 @@ public class MaintenanceModeReleaseResult {
     /** The exact owned window had already been removed. */
     UNCHANGED,
     /** A foreign, replaced, malformed, or otherwise unverifiable window was observed. */
-    CONFLICT
+    CONFLICT,
+    /** The request failed before Helix returned a typed result. */
+    FAILED
   }
 
   private Status _status;
@@ -50,6 +52,16 @@ public class MaintenanceModeReleaseResult {
       @JsonProperty("message") String message) {
     _status = status;
     _message = message;
+  }
+
+  /**
+   * Creates a conservative local failure result.
+   *
+   * @param message failure detail
+   * @return failed release result
+   */
+  public static MaintenanceModeReleaseResult failed(String message) {
+    return new MaintenanceModeReleaseResult(Status.FAILED, message);
   }
 
   /**

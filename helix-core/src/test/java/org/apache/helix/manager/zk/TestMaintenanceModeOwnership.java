@@ -224,6 +224,22 @@ public class TestMaintenanceModeOwnership extends ZkUnitTestBase {
   }
 
   @Test
+  public void testAutomaticExitDoesNotRemoveOwnedWindow() {
+    MaintenanceModeOwnershipHandle handle =
+        _admin.acquireMaintenanceMode(_clusterName, "owner-a", "window-a", "maintenance")
+            .getHandle();
+
+    _admin.autoEnableMaintenanceMode(_clusterName, false, "automatic recovery",
+        MaintenanceSignal.AutoTriggerReason.MAX_PARTITION_PER_INSTANCE_EXCEEDED);
+
+    Assert.assertNotNull(getMaintenanceSignal());
+    Assert.assertEquals(getMaintenanceSignal().getMaintenanceOwnerId(), "owner-a");
+    Assert.assertEquals(
+        _admin.releaseMaintenanceMode(handle, "complete").getStatus(),
+        MaintenanceModeReleaseResult.Status.APPLIED);
+  }
+
+  @Test
   public void testConcurrentAcquireReturnsOneOwnedWindow() throws Exception {
     ExecutorService executor = Executors.newFixedThreadPool(2);
     CountDownLatch start = new CountDownLatch(1);

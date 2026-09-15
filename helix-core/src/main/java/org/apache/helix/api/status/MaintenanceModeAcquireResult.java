@@ -36,7 +36,9 @@ public class MaintenanceModeAcquireResult {
     /** A different owned maintenance window is active. */
     FOREIGN_OWNED,
     /** The maintenance signal and its fence are inconsistent or malformed. */
-    CONFLICT
+    CONFLICT,
+    /** The request failed before Helix returned a typed result. */
+    FAILED
   }
 
   private Status _status;
@@ -59,6 +61,16 @@ public class MaintenanceModeAcquireResult {
     _status = status;
     _handle = handle;
     _message = message;
+  }
+
+  /**
+   * Creates a conservative local failure result.
+   *
+   * @param message failure detail
+   * @return failed acquisition result without a handle
+   */
+  public static MaintenanceModeAcquireResult failed(String message) {
+    return new MaintenanceModeAcquireResult(Status.FAILED, null, message);
   }
 
   /**
