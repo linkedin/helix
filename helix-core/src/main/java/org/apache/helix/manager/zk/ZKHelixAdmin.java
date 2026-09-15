@@ -874,13 +874,14 @@ public class ZKHelixAdmin implements HelixAdmin {
       SWAP_OUT_ELIGIBLE_OPERATIONS = ImmutableSet.of(InstanceConstants.InstanceOperation.ENABLE,
       InstanceConstants.InstanceOperation.DISABLE);
 
-  // A coordinated swap-in is marked SWAP_IN. Preparation will not overwrite an operation that some
-  // other party set for its own reasons (a DISABLE or an EVACUATE), because clearing it would
-  // silently undo that party's decision. Such a swap-in is reported instead.
+  // A coordinated swap-in is marked SWAP_IN, which is how the controller is told to mirror the
+  // swap-out's assignment onto it. Only an instance that is already outside the assignable set can
+  // be given that marker: an assignable instance could be handed work between any check and the
+  // write, so there is no point at which marking it SWAP_IN is known not to strand something.
+  // These are exactly the states the native instance operation rules allow to reach SWAP_IN.
   private static final ImmutableSet<InstanceConstants.InstanceOperation>
       COORDINATED_SWAP_IN_ELIGIBLE_OPERATIONS =
-      ImmutableSet.of(InstanceConstants.InstanceOperation.ENABLE,
-          InstanceConstants.InstanceOperation.UNKNOWN,
+      ImmutableSet.of(InstanceConstants.InstanceOperation.UNKNOWN,
           InstanceConstants.InstanceOperation.SWAP_IN);
 
   @Override
@@ -1023,24 +1024,12 @@ public class ZKHelixAdmin implements HelixAdmin {
       if (!COORDINATED_SWAP_IN_ELIGIBLE_OPERATIONS.contains(swapInOperation)) {
         return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
             String.format(
-                "The swap-in instance %s is in instance operation %s in cluster %s. Marking it "
-                    + "SWAP_IN would discard that operation, so it is left untouched. Clear the "
-                    + "operation deliberately and prepare the swap again.", swapInInstanceName,
-                swapInOperation, clusterName));
-      }
-      // An ENABLE instance is assignable, so marking it SWAP_IN takes it out of the assignable set
-      // and points it at the swap-out's assignment. That is only safe for an instance that is not
-      // carrying anything of its own, which is what makes it a joining replacement rather than an
-      // active member. The native ENABLE state has no transition to SWAP_IN at all, so proving the
-      // instance is empty is what this call substitutes for that rule.
-      if (swapInOperation == InstanceConstants.InstanceOperation.ENABLE
-          && instanceCarriesAnyAssignment(clusterName, swapInInstanceName)) {
-        return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
-            String.format(
-                "The swap-in instance %s is an active ENABLE member of cluster %s: it still has "
-                    + "current states or pending messages of its own. Marking it SWAP_IN would "
-                    + "strand that assignment, so the swap is not prepared.", swapInInstanceName,
-                clusterName));
+                "The swap-in instance %s is in instance operation %s in cluster %s, which is still "
+                    + "assignable or held by another party. Marking it SWAP_IN from there would "
+                    + "either strand work it is given in the meantime or discard that party's "
+                    + "decision, so it is left untouched. Put the swap-in in %s deliberately and "
+                    + "prepare the swap again.", swapInInstanceName, swapInOperation, clusterName,
+                InstanceConstants.InstanceOperation.UNKNOWN));
       }
       boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
       if (logicalIdAligned && swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
@@ -1429,35 +1418,6 @@ public class ZKHelixAdmin implements HelixAdmin {
       builder.setReason(request.getReason());
     }
     return builder.build();
-  }
-
-  /**
-   * True when the instance is still carrying something of its own: any current state under any
-   * session, including task current states, or any pending message.
-   * <p>
-   * This is deliberately stricter than the evacuation drain check, which is allowed to disregard
-   * states that have already been reassigned elsewhere. The question here is whether an assignable
-   * instance is a clean joining replacement, and for that anything the instance still holds counts.
-   */
-  private boolean instanceCarriesAnyAssignment(String clusterName, String instanceName) {
-    return hasAnyChildUnderSession(
-        PropertyPathBuilder.instanceCurrentState(clusterName, instanceName),
-        session -> PropertyPathBuilder.instanceCurrentState(clusterName, instanceName, session))
-        || hasAnyChildUnderSession(
-        PropertyPathBuilder.instanceTaskCurrentState(clusterName, instanceName),
-        session -> PropertyPathBuilder.instanceTaskCurrentState(clusterName, instanceName, session))
-        || !safeGetChildNames(_baseDataAccessor,
-        PropertyPathBuilder.instanceMessage(clusterName, instanceName)).isEmpty();
-  }
-
-  private boolean hasAnyChildUnderSession(String sessionsPath,
-      java.util.function.Function<String, String> sessionPathBuilder) {
-    for (String session : safeGetChildNames(_baseDataAccessor, sessionsPath)) {
-      if (!safeGetChildNames(_baseDataAccessor, sessionPathBuilder.apply(session)).isEmpty()) {
-        return true;
-      }
-    }
-    return false;
   }
 
   @Override

@@ -33,6 +33,7 @@ public class TestPairScopedSwapAPI extends AbstractTestClass {
   public void testCoordinatedPrepareAndCompleteOverRest() throws Exception {
     String swapOut = addInstance("pairSwapRestOut_12000", "restSlotA", "swap-out-host");
     String swapIn = addInstance("pairSwapRestIn_12001", "restSpareA", "swap-in-host");
+    setInstanceOperationDirectly(swapIn, InstanceConstants.InstanceOperation.UNKNOWN);
 
     Map<String, Object> identities = post(swapOut, "getSwapPairIdentities", false,
         body(swapOut, swapIn, null, null));
@@ -100,6 +101,7 @@ public class TestPairScopedSwapAPI extends AbstractTestClass {
   public void testStaleExpectedIdentityIsReportedNotApplied() throws Exception {
     String swapOut = addInstance("pairSwapRestStaleOut_12004", "restSlotC", "swap-out-host");
     String swapIn = addInstance("pairSwapRestStaleIn_12005", "restSpareC", "swap-in-host");
+    setInstanceOperationDirectly(swapIn, InstanceConstants.InstanceOperation.UNKNOWN);
 
     Map<String, Object> identities = post(swapOut, "getSwapPairIdentities", false,
         body(swapOut, swapIn, null, null));

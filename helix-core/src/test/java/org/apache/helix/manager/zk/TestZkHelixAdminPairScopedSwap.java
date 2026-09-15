@@ -26,11 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
-import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.ClusterConfig;
-import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.InstanceConfigIdentity;
 import org.apache.helix.model.SwapPairRequest;
@@ -69,7 +67,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", "swapInVirtualZone"), null);
+        domain(ZONE, "other_slot", "swap-in-host", "swapInVirtualZone"),
+        InstanceConstants.InstanceOperation.UNKNOWN);
 
     SwapPairResult result = admin.prepareSwapPair(clusterName,
         coordinated().setReason("unit test").build());
@@ -96,7 +95,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
 
     Assert.assertEquals(
         admin.prepareSwapPair(clusterName, coordinated().build()).getStatus(),
@@ -189,7 +189,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
     InstanceConfig heldSwapInConfig = configAccessor.getInstanceConfig(clusterName, SWAP_IN);
     heldSwapInConfig.setInstanceOperation(
@@ -209,43 +210,25 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
   }
 
   @Test
-  public void testCoordinatedPrepareRefusesAnActiveEnabledSwapIn() {
-    String clusterName = newCluster("coordinatedPrepareActiveSwapIn");
+  public void testCoordinatedPrepareRefusesAnAssignableSwapIn() {
+    String clusterName = newCluster("coordinatedPrepareAssignableSwapIn");
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
+    // ENABLE is assignable, so the controller can hand this instance work at any moment. There is
+    // no point at which marking it SWAP_IN is known not to strand that work.
     addInstance(admin, clusterName, SWAP_IN,
         domain(ZONE, "other_slot", "swap-in-host", null), null);
-    // The swap-in is an assignable member carrying its own replica. Marking it SWAP_IN would point
-    // it at the swap-out's assignment and strand that replica.
-    writeCurrentState(clusterName, SWAP_IN, "TestDB", "TestDB_0", "MASTER");
 
     SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
 
     Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
         result.toString());
-    Assert.assertTrue(result.getBlockers().get(0).contains("active ENABLE member"),
+    Assert.assertTrue(result.getBlockers().get(0).contains("still assignable"),
         result.getBlockers().get(0));
     InstanceConfig swapInConfig = getInstanceConfig(clusterName, SWAP_IN);
     Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.ENABLE);
     Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), "other_slot");
-  }
-
-  @Test
-  public void testCoordinatedPrepareAcceptsAnUnassignableSwapInThatIsNotEmpty() {
-    String clusterName = newCluster("coordinatedPrepareUnknownSwapIn");
-    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
-    addSwapOut(admin, clusterName);
-    // UNKNOWN is already outside the assignable set, so the native rules allow it to become
-    // SWAP_IN without the emptiness argument that ENABLE needs.
-    addInstance(admin, clusterName, SWAP_IN, domain(ZONE, "other_slot", "swap-in-host", null),
-        InstanceConstants.InstanceOperation.UNKNOWN);
-
-    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
-
-    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PREPARED, result.toString());
-    Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getInstanceOperation()
-        .getOperation(), InstanceConstants.InstanceOperation.SWAP_IN);
   }
 
   // ===========================================================================================
@@ -258,7 +241,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     // Some other actor moved a third instance into the swap-out's slot, so a swap resolved by
     // logical id could act on that instance instead of the one the caller named.
     String intruder = "intruderInstance_12002";
@@ -276,7 +260,9 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     Assert.assertTrue(result.getBlockers().get(0).contains(intruder), result.getBlockers().get(0));
     // Neither the named swap-in nor the intruder was touched.
     Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getInstanceOperation()
-        .getOperation(), InstanceConstants.InstanceOperation.ENABLE);
+        .getOperation(), InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getDomainAsMap()
+        .get(LOGICAL_ID_KEY), "other_slot");
     Assert.assertEquals(getInstanceConfig(clusterName, intruder).getInstanceOperation()
         .getOperation(), InstanceConstants.InstanceOperation.UNKNOWN);
   }
@@ -287,7 +273,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
 
     SwapPairResult sameInstance = admin.prepareSwapPair(clusterName,
         new SwapPairRequest.Builder(SWAP_OUT, SWAP_OUT).setSwapMode(
@@ -319,7 +306,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     bumpConfigVersion(clusterName, SWAP_OUT);
     bumpConfigVersion(clusterName, SWAP_IN);
     InstanceConfigIdentity swapOutIdentity = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
@@ -360,7 +348,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     bumpConfigVersion(clusterName, SWAP_IN);
     InstanceConfigIdentity swapInIdentity = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
 
@@ -368,7 +357,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     // config version is back to what the caller expects while being a different config.
     admin.dropInstance(clusterName, new InstanceConfig(SWAP_IN));
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     bumpConfigVersion(clusterName, SWAP_IN);
     InstanceConfigIdentity recreated = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
     Assert.assertEquals(recreated.getConfigVersion(), swapInIdentity.getConfigVersion());
@@ -392,7 +382,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     InstanceConfigIdentity swapInIdentity = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
     Assert.assertEquals(swapInIdentity.getConfigVersion(), 0);
 
@@ -422,7 +413,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     addSwapOut(admin, clusterName);
     admin.addInstanceTag(clusterName, SWAP_OUT, "swapOutTag");
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", "swapInVirtualZone"), null);
+        domain(ZONE, "other_slot", "swap-in-host", "swapInVirtualZone"),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     Assert.assertEquals(admin.prepareSwapPair(clusterName, coordinated().build()).getStatus(),
         SwapPairResult.Status.PREPARED);
 
@@ -449,7 +441,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     admin.prepareSwapPair(clusterName, coordinated().build());
     Assert.assertEquals(
         admin.completeSwapPair(clusterName, coordinated().setForceComplete(true).build())
@@ -474,7 +467,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
 
     SwapPairResult result =
         admin.completeSwapPair(clusterName, coordinated().setForceComplete(true).build());
@@ -491,7 +485,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     admin.prepareSwapPair(clusterName, coordinated().build());
 
     // The pair was prepared as a coordinated swap, so it is not a direct swap even under force.
@@ -534,7 +529,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(setupAdmin, clusterName);
     addInstance(setupAdmin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     setupAdmin.prepareSwapPair(clusterName, coordinated().build());
 
     // A writer changes the swap-out config after the swap has read it and decided what to write,
@@ -572,7 +568,8 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     addSwapOut(admin, clusterName);
     addInstance(admin, clusterName, SWAP_IN,
-        domain(ZONE, "other_slot", "swap-in-host", null), null);
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
     admin.prepareSwapPair(clusterName, coordinated().build());
 
     // Neither instance is live, so the readiness check reports the swap-in being offline.
@@ -699,24 +696,6 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     instanceConfig.getRecord()
         .setSimpleField("TEST_CONFIG_REVISION", String.valueOf(System.nanoTime()));
     configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
-  }
-
-  /**
-   * Give the instance a current state of its own, the way a participant that is already serving a
-   * partition would have one.
-   */
-  private void writeCurrentState(String clusterName, String instanceName, String resourceName,
-      String partitionName, String state) {
-    String sessionId = "session_" + instanceName;
-    CurrentState currentState = new CurrentState(resourceName);
-    currentState.setSessionId(sessionId);
-    currentState.setStateModelDefRef("MasterSlave");
-    currentState.setState(partitionName, state);
-    HelixDataAccessor accessor =
-        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
-    Assert.assertTrue(accessor.setProperty(
-        accessor.keyBuilder().currentState(instanceName, sessionId, resourceName), currentState),
-        "Failed to write a current state for " + instanceName);
   }
 
   /**
