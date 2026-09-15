@@ -366,10 +366,7 @@ final class InstanceReplicaStatusCalculator {
 
   private static List<String> getChildNames(BaseDataAccessor<ZNRecord> baseAccessor, String path) {
     List<String> childNames = baseAccessor.getChildNames(path, 0);
-    if (childNames == null) {
-      throw new HelixException("Failed to enumerate metadata children at " + path + ".");
-    }
-    if (childNames.isEmpty()) {
+    if (childNames == null || childNames.isEmpty()) {
       return Collections.emptyList();
     }
     List<String> sorted = new ArrayList<>(childNames);

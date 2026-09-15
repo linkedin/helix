@@ -274,6 +274,23 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
   }
 
   @Test
+  public void testAbsentCurrentStateRootsRepresentAnEmptyScope() {
+    _gZkClient.deleteRecursively(
+        PropertyPathBuilder.instanceCurrentState(CLUSTER_NAME, INSTANCE_NAME));
+    _gZkClient.deleteRecursively(
+        PropertyPathBuilder.instanceTaskCurrentState(CLUSTER_NAME, INSTANCE_NAME));
+
+    InstanceReplicaStatus status =
+        _admin.getInstanceReplicaStatus(CLUSTER_NAME, INSTANCE_NAME);
+
+    Assert.assertEquals(status.getReplicaStates().getCoverage(), CoverageStatus.COMPLETE);
+    Assert.assertTrue(status.getReplicaStates().isReplicasEmpty());
+    Assert.assertTrue(status.getReplicaStates().getExcludedTaskResources().isEmpty());
+    Assert.assertEquals(status.getDrain().getCoverage(), CoverageStatus.COMPLETE);
+    Assert.assertTrue(status.getDrain().isDrained());
+  }
+
+  @Test
   public void testMetadataReadFailureIsNotConvertedToSuccessfulCoverage() {
     HelixDataAccessor accessor = Mockito.mock(HelixDataAccessor.class);
     BaseDataAccessor<ZNRecord> baseAccessor = Mockito.mock(BaseDataAccessor.class);
