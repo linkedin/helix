@@ -56,7 +56,7 @@ Helix REST reports whether the external views of a cluster match the mapping the
 imply, without the caller running a cluster verifier of its own:
 
 ```text
-GET /clusters/exampleCluster?command=getConvergenceStatus&matchMode=LENIENT&resources=db0,db1
+GET /clusters/exampleCluster/convergence-status?matchMode=LENIENT&resources=db0,db1
 ```
 
 ```json
@@ -77,9 +77,7 @@ GET /clusters/exampleCluster?command=getConvergenceStatus&matchMode=LENIENT&reso
 }
 ```
 
-The calculation is shared with `StrictMatchExternalViewVerifier`. The read is selected by the exact
-command name; any other `command` value keeps returning the cluster information this endpoint has
-always returned. `matchMode` defaults to `STRICT`;
+The calculation is shared with `StrictMatchExternalViewVerifier`. `matchMode` defaults to `STRICT`;
 `LENIENT` ignores replicas in the state model's initial state and in `DROPPED`. `resources`
 restricts the evaluation, and the response says which scope was used. `CONVERGED` is claimed only
 when every evaluated resource matched. `PENDING` means retrying can change the answer, and
@@ -87,6 +85,8 @@ when every evaluated resource matched. `PENDING` means retrying can change the a
 its state model definition is missing, so neither may be read as convergence. An invalid
 `matchMode` or an empty `resources` list is rejected rather than defaulted, a missing cluster
 returns 404, and a failed metadata read returns an error instead of an empty successful result.
+The status has its own path, so a server that predates it answers 404 instead of a successful
+response that carries no status, which matters while a deployment is still rolling.
 
 This is a single bounded read: it never waits for convergence, so a caller that wants to wait
 polls at an interval it chooses. It opens no connection of its own and leaves behind no verifier,

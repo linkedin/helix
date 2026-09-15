@@ -163,15 +163,7 @@ public class ClusterAccessor extends AbstractHelixResource {
   @GET
   @ApiOperation (value = "Return information for particular cluster", notes = "Helix REST Cluster  Get API")
   @Path("{clusterId}")
-  public Response getClusterInfo(@PathParam("clusterId") String clusterId,
-      @QueryParam("command") String commandStr, @QueryParam("resources") String resources,
-      @QueryParam("matchMode") String matchMode) {
-    if (Command.getConvergenceStatus.name().equals(commandStr)) {
-      return getConvergenceStatus(clusterId, resources, matchMode);
-    }
-    // Any other command value stays ignored by this read, as it has always been, so the status
-    // read is selected only by the exact command name.
-
+  public Response getClusterInfo(@PathParam("clusterId") String clusterId) {
     if (!doesClusterExist(clusterId)) {
       return notFound();
     }
@@ -208,42 +200,31 @@ public class ClusterAccessor extends AbstractHelixResource {
   /**
    * Reports whether the external views of the cluster match the mapping their ideal states imply,
    * using {@link ExternalViewConvergenceEvaluator}, the calculation
-   * {@link org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier} performs.
-   *
-   * <p>Response (HTTP 200):
-   * <pre>{@code
-   * { "id": "cluster0",
-   *   "scope": "CLUSTER",
-   *   "matchMode": "LENIENT",
-   *   "status": "PENDING",
-   *   "observedAtMillis": 1750000000000,
-   *   "evaluatedResourceCount": 2,
-   *   "pendingResourceCount": 1,
-   *   "failedResourceCount": 0,
-   *   "unknownResourceCount": 0,
-   *   "pendingResources": { "db0": "MAPPING_MISMATCH" },
-   *   "failedResources": {},
-   *   "unknownResources": [],
-   *   "detailTruncated": false }
-   * }</pre>
+   * {@link org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier} performs. The
+   * response schema is documented in the project README.
    *
    * <p>{@code CONVERGED} is claimed only when every evaluated resource matched. {@code PENDING}
-   * means retrying can change the answer, and {@code FAILED} means at least one resource could not
-   * be evaluated, so neither may be read as convergence. A caller that cannot parse {@code status}
-   * must not treat HTTP 200 as convergence.
+   * means retrying can change the answer and {@code FAILED} means a resource could not be
+   * evaluated, so neither may be read as convergence, and a caller that cannot parse
+   * {@code status} must not treat HTTP 200 as convergence. A server that predates this endpoint
+   * answers 404, which is also not convergence.
    *
-   * <p>This is a single bounded read of the cluster, not a subscription: it never waits for
-   * convergence, so a caller that wants to wait polls at an interval it chooses. It opens no
-   * connection of its own and leaves no verifier, callback or background task behind.
-   *
-   * <p>{@code observedAtMillis} is when the evaluation started reading. Its inputs are collected
-   * with several requests, so the result is not an atomic snapshot and is not a statement about
-   * what the controller has processed by the time the response is read. The read never writes
-   * cluster or participant metadata and never triggers a rebalance. Responses use
-   * {@code Cache-Control: no-store}.
+   * <p>This is a single bounded read, not a subscription: it never waits for convergence, opens no
+   * connection of its own, leaves behind no verifier or background task, never writes cluster or
+   * participant metadata and never triggers a rebalance. {@code observedAtMillis} is when the
+   * evaluation started reading, and its inputs are collected with several requests, so the result
+   * is not an atomic snapshot of the cluster.
    */
-  private Response getConvergenceStatus(String clusterId, String resourcesParam,
-      String matchModeParam) {
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{clusterId}/convergence-status")
+  @ApiOperation(value = "Return whether the cluster has converged",
+      notes = "Helix REST Cluster Convergence Status Get API")
+  public Response getConvergenceStatus(@PathParam("clusterId") String clusterId,
+      @QueryParam("resources") String resourcesParam,
+      @QueryParam("matchMode") String matchModeParam) {
     boolean lenientMatch;
     if (matchModeParam == null || matchModeParam.isEmpty()
         || MATCH_MODE_STRICT.equalsIgnoreCase(matchModeParam)) {

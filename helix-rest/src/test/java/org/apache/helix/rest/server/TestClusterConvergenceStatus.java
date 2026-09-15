@@ -50,7 +50,6 @@ public class TestClusterConvergenceStatus extends AbstractTestClass {
   private static final String PENDING_CLUSTER = "TestPendingConvergenceStatusCluster";
   private static final String PENDING_RESOURCE = PENDING_CLUSTER + "_db_0";
   private static final String PENDING_INSTANCE = PENDING_CLUSTER + "localhost_12918";
-  private static final String COMMAND = "getConvergenceStatus";
   private static final long CONVERGENCE_TIMEOUT_MS = 60_000L;
 
   private final ObjectMapper _objectMapper = new ObjectMapper();
@@ -131,18 +130,18 @@ public class TestClusterConvergenceStatus extends AbstractTestClass {
   }
 
   @Test
-  public void testOtherCommandValuesStillReturnClusterInfo() throws IOException {
-    // This read has always ignored a command it does not act on, so the status read is selected
-    // only by the exact command name and a caller cannot get convergence from a misspelling.
-    for (String command : new String[] {"enableMaintenanceMode", "getConvergenceStatuss"}) {
-      WebTarget target =
-          target("clusters/" + PENDING_CLUSTER).queryParam("command", command);
-      try (Response response = target.request().get()) {
-        Assert.assertEquals(response.getStatus(), 200);
-        JsonNode body = _objectMapper.readTree(response.readEntity(String.class));
-        Assert.assertNull(body.get("status"));
-        Assert.assertNotNull(body.get("liveInstances"));
-      }
+  public void testClusterInfoReadIsUnchanged() throws IOException {
+    // The status lives on its own path, so the existing cluster read keeps its response and a
+    // server without the status path answers 404 rather than a successful payload with no status.
+    try (Response response = target("clusters/" + PENDING_CLUSTER).request().get()) {
+      Assert.assertEquals(response.getStatus(), 200);
+      JsonNode body = _objectMapper.readTree(response.readEntity(String.class));
+      Assert.assertNull(body.get("status"));
+      Assert.assertNotNull(body.get("liveInstances"));
+    }
+    try (Response response =
+        target("clusters/" + PENDING_CLUSTER + "/convergence-statuss").request().get()) {
+      Assert.assertEquals(response.getStatus(), 404);
     }
   }
 
@@ -229,7 +228,7 @@ public class TestClusterConvergenceStatus extends AbstractTestClass {
   }
 
   private Response request(String cluster, String resources, String matchMode) {
-    WebTarget target = target("clusters/" + cluster).queryParam("command", COMMAND);
+    WebTarget target = target("clusters/" + cluster + "/convergence-status");
     if (resources != null) {
       target = target.queryParam("resources", resources);
     }
