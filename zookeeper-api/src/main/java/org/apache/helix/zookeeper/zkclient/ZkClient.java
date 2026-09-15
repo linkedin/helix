@@ -1937,6 +1937,16 @@ public class ZkClient implements Watcher {
                 + " prefetch data: " + listener.isPrefetchData()) {
           @Override
           public void run() throws Exception {
+            // The ZkClient may be closed (e.g. during shutdown or a session change) while a
+            // data-change event is still queued in the event thread. There is nothing to deliver
+            // for a closed client, and attempting the prefetch getStat/readData would throw
+            // IllegalStateException("ZkClient already closed!"), surfacing as a spurious ERROR.
+            // Skip delivery quietly in that case.
+            if (isClosed()) {
+              LOG.debug("zkclient {} skipping data changed event for path: {} because the client "
+                  + "is already closed", _uid, path);
+              return;
+            }
             if (!pathStatRecord.pathChecked()) {
               // getStat() wrapp two ways to install data watch by using exists() or getData().
               // getData() aka useGetData (true) would not install the watch if the node not ]
@@ -1987,6 +1997,15 @@ public class ZkClient implements Watcher {
         _eventThread.send(new ZkEventThread.ZkEvent("Children of " + path + " changed sent to " + listener) {
           @Override
           public void run() throws Exception {
+            // See fireDataChangedEvents: a child-change event may still be queued when the
+            // ZkClient is closed. Attempting getStat/getChildren on a closed client throws
+            // IllegalStateException("ZkClient already closed!") and logs a spurious ERROR, so
+            // skip delivery quietly for a closed client.
+            if (isClosed()) {
+              LOG.debug("zkclient {} skipping child changed event for path: {} because the client "
+                  + "is already closed", _uid, path);
+              return;
+            }
             if (!pathStatRecord.pathChecked()) {
               Stat stat = null;
               if (_usePersistWatcher || !pathExists || !hasChildOrDataListeners(path)) {
