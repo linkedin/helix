@@ -1028,6 +1028,20 @@ public class ZKHelixAdmin implements HelixAdmin {
                     + "operation deliberately and prepare the swap again.", swapInInstanceName,
                 swapInOperation, clusterName));
       }
+      // An ENABLE instance is assignable, so marking it SWAP_IN takes it out of the assignable set
+      // and points it at the swap-out's assignment. That is only safe for an instance that is not
+      // carrying anything of its own, which is what makes it a joining replacement rather than an
+      // active member. The native ENABLE state has no transition to SWAP_IN at all, so proving the
+      // instance is empty is what this call substitutes for that rule.
+      if (swapInOperation == InstanceConstants.InstanceOperation.ENABLE
+          && instanceCarriesAnyAssignment(clusterName, swapInInstanceName)) {
+        return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+            String.format(
+                "The swap-in instance %s is an active ENABLE member of cluster %s: it still has "
+                    + "current states or pending messages of its own. Marking it SWAP_IN would "
+                    + "strand that assignment, so the swap is not prepared.", swapInInstanceName,
+                clusterName));
+      }
       boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
       if (logicalIdAligned && swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
         return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_PREPARED)
@@ -1243,12 +1257,14 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     InstanceConfigIdentity writtenSwapOutIdentity =
-        identityAfterWrite(swapOutIdentity, opResults.get(0));
+        identityAfterCommit(clusterName, swapOutIdentity, opResults.get(0));
     InstanceConfigIdentity writtenSwapInIdentity =
-        identityAfterWrite(swapInIdentity, opResults.get(1));
-    // The conditional write can only assert a data version. Confirming afterwards that the nodes
-    // written are still the nodes inspected is the only way to notice a config that was replaced
-    // outright, and it is reported rather than being folded into a success.
+        identityAfterCommit(clusterName, swapInIdentity, opResults.get(1));
+    // The conditional write can only assert a data version. Reading the creation ids back is the
+    // only way to notice a config that was replaced outright rather than changed, and it is
+    // reported rather than being folded into a success. This detects the replacement; it cannot
+    // prevent it, which is why a caller that needs the stronger promise asserts an identity and is
+    // refused up front when that promise cannot be kept.
     List<String> replaced = new ArrayList<>();
     if (writtenSwapOutIdentity.getConfigCreationId() != swapOutIdentity.getConfigCreationId()) {
       replaced.add(swapOutIdentity.getInstanceName());
@@ -1272,17 +1288,25 @@ public class ZKHelixAdmin implements HelixAdmin {
         .setObservedSwapInIdentity(writtenSwapInIdentity).build();
   }
 
-  private static InstanceConfigIdentity identityAfterWrite(InstanceConfigIdentity before,
-      OpResult opResult) {
-    if (!(opResult instanceof OpResult.SetDataResult)) {
-      // A checked but unwritten config keeps the revision the check asserted.
-      return before;
+  /**
+   * Report the identity a config has once the transaction has committed. A written config carries
+   * its new state in the result; a config that was only checked has to be read back, because a
+   * check result says the version matched but not which node it matched on.
+   */
+  private InstanceConfigIdentity identityAfterCommit(String clusterName,
+      InstanceConfigIdentity before, OpResult opResult) {
+    if (opResult instanceof OpResult.SetDataResult) {
+      Stat stat = ((OpResult.SetDataResult) opResult).getStat();
+      if (stat != null) {
+        return new InstanceConfigIdentity(before.getInstanceName(), stat.getVersion(),
+            stat.getCzxid());
+      }
     }
-    Stat stat = ((OpResult.SetDataResult) opResult).getStat();
-    if (stat == null) {
-      return before;
-    }
-    return new InstanceConfigIdentity(before.getInstanceName(), stat.getVersion(), stat.getCzxid());
+    InstanceConfigIdentity reread = getInstanceConfigIdentity(clusterName,
+        before.getInstanceName());
+    return reread != null ? reread
+        : new InstanceConfigIdentity(before.getInstanceName(),
+            InstanceConfigIdentity.UNKNOWN_VERSION, InstanceConfigIdentity.UNKNOWN_CREATION_ID);
   }
 
   private static List<String> validateSwapPairRequestShape(SwapPairRequest request) {
@@ -1405,6 +1429,35 @@ public class ZKHelixAdmin implements HelixAdmin {
       builder.setReason(request.getReason());
     }
     return builder.build();
+  }
+
+  /**
+   * True when the instance is still carrying something of its own: any current state under any
+   * session, including task current states, or any pending message.
+   * <p>
+   * This is deliberately stricter than the evacuation drain check, which is allowed to disregard
+   * states that have already been reassigned elsewhere. The question here is whether an assignable
+   * instance is a clean joining replacement, and for that anything the instance still holds counts.
+   */
+  private boolean instanceCarriesAnyAssignment(String clusterName, String instanceName) {
+    return hasAnyChildUnderSession(
+        PropertyPathBuilder.instanceCurrentState(clusterName, instanceName),
+        session -> PropertyPathBuilder.instanceCurrentState(clusterName, instanceName, session))
+        || hasAnyChildUnderSession(
+        PropertyPathBuilder.instanceTaskCurrentState(clusterName, instanceName),
+        session -> PropertyPathBuilder.instanceTaskCurrentState(clusterName, instanceName, session))
+        || !safeGetChildNames(_baseDataAccessor,
+        PropertyPathBuilder.instanceMessage(clusterName, instanceName)).isEmpty();
+  }
+
+  private boolean hasAnyChildUnderSession(String sessionsPath,
+      java.util.function.Function<String, String> sessionPathBuilder) {
+    for (String session : safeGetChildNames(_baseDataAccessor, sessionsPath)) {
+      if (!safeGetChildNames(_baseDataAccessor, sessionPathBuilder.apply(session)).isEmpty()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override

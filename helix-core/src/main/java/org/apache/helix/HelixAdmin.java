@@ -956,6 +956,12 @@ public interface HelixAdmin {
    * guarantee it cannot make, this call refuses such a request with
    * {@link SwapPairResult.Status#IDENTITY_UNVERIFIABLE} and writes nothing. A config that has been
    * written at least once since it was created is unaffected.
+   * <p>
+   * A call that asserts no identity makes no promise about which node it acts on beyond the
+   * conditional write itself, which still aborts on any concurrent change. Creation ids are read
+   * back after the transaction either way, so a config that was replaced is reported as
+   * {@link SwapPairResult.Status#FAILED} instead of being folded into a success, but that is
+   * detection after the fact and not prevention.
    *
    * @param clusterName The cluster name
    * @param request     The pair, mode, force flag and optional expected identities

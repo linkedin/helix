@@ -26,9 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.InstanceConfigIdentity;
 import org.apache.helix.model.SwapPairRequest;
@@ -204,6 +206,46 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.DISABLE);
     Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), "other_slot");
+  }
+
+  @Test
+  public void testCoordinatedPrepareRefusesAnActiveEnabledSwapIn() {
+    String clusterName = newCluster("coordinatedPrepareActiveSwapIn");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, "other_slot", "swap-in-host", null), null);
+    // The swap-in is an assignable member carrying its own replica. Marking it SWAP_IN would point
+    // it at the swap-out's assignment and strand that replica.
+    writeCurrentState(clusterName, SWAP_IN, "TestDB", "TestDB_0", "MASTER");
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
+        result.toString());
+    Assert.assertTrue(result.getBlockers().get(0).contains("active ENABLE member"),
+        result.getBlockers().get(0));
+    InstanceConfig swapInConfig = getInstanceConfig(clusterName, SWAP_IN);
+    Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.ENABLE);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), "other_slot");
+  }
+
+  @Test
+  public void testCoordinatedPrepareAcceptsAnUnassignableSwapInThatIsNotEmpty() {
+    String clusterName = newCluster("coordinatedPrepareUnknownSwapIn");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    // UNKNOWN is already outside the assignable set, so the native rules allow it to become
+    // SWAP_IN without the emptiness argument that ENABLE needs.
+    addInstance(admin, clusterName, SWAP_IN, domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PREPARED, result.toString());
+    Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getInstanceOperation()
+        .getOperation(), InstanceConstants.InstanceOperation.SWAP_IN);
   }
 
   // ===========================================================================================
@@ -657,6 +699,24 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     instanceConfig.getRecord()
         .setSimpleField("TEST_CONFIG_REVISION", String.valueOf(System.nanoTime()));
     configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+  }
+
+  /**
+   * Give the instance a current state of its own, the way a participant that is already serving a
+   * partition would have one.
+   */
+  private void writeCurrentState(String clusterName, String instanceName, String resourceName,
+      String partitionName, String state) {
+    String sessionId = "session_" + instanceName;
+    CurrentState currentState = new CurrentState(resourceName);
+    currentState.setSessionId(sessionId);
+    currentState.setStateModelDefRef("MasterSlave");
+    currentState.setState(partitionName, state);
+    HelixDataAccessor accessor =
+        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+    Assert.assertTrue(accessor.setProperty(
+        accessor.keyBuilder().currentState(instanceName, sessionId, resourceName), currentState),
+        "Failed to write a current state for " + instanceName);
   }
 
   /**
