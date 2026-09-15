@@ -167,7 +167,8 @@ public class ResourceAccessor extends AbstractHelixResource {
    * {@code resources} is required for {@code EXPLICIT} and must be absent for
    * {@code ALL_RESOURCES}, which selects every resource that has an IdealState when the request is
    * served. At least one of {@code replicas} and {@code minActiveReplicas} is required; an omitted
-   * one is left untouched. Any other field is rejected.
+   * one is left untouched, although the resulting combination is still checked per resource. Any
+   * other field is rejected.
    *
    * <p>A {@code 200} means the request was processed, not that every resource was updated. The
    * operation is not atomic and does not roll back, so the caller must read

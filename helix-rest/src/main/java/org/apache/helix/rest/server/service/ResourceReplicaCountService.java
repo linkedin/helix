@@ -63,6 +63,11 @@ import org.slf4j.LoggerFactory;
  *       znode incarnation. Each successful write is therefore followed by a check that the creation
  *       id is still the one that was read. A mismatch is reported as
  *       {@link ResourceUpdateStatus#CONFLICT} after the fact; it is not prevented.</li>
+ *   <li><b>Checks the resulting values, not only the requested ones.</b> Setting one of the two
+ *       counts can leave a resource whose minimum exceeds its replica count, so each resource is
+ *       compared against the values it would end up with and is reported as
+ *       {@link ResourceUpdateStatus#REJECTED} without a write when the combination cannot be
+ *       satisfied.</li>
  * </ul>
  *
  * <p>Every outcome other than {@link ResourceUpdateStatus#APPLIED} and
@@ -93,6 +98,11 @@ public class ResourceReplicaCountService {
     CONFLICT,
     /** The resource had no IdealState; this operation does not create one. */
     NOT_FOUND,
+    /**
+     * The desired values cannot be honoured on this resource, so nothing was written. This is a
+     * rejection decided from the resource's own state, not an error.
+     */
+    REJECTED,
     /** The attempt ended in an error, so the state of the resource is unknown. */
     FAILED
   }
@@ -323,6 +333,11 @@ public class ResourceReplicaCountService {
         return new ResourceUpdateOutcome(ResourceUpdateStatus.NOT_FOUND, -1,
             "The resource has no IdealState. This operation does not create one.");
       }
+      String unsatisfiable = findUnsatisfiableCombination(current, replicas, minActiveReplicas);
+      if (unsatisfiable != null) {
+        return new ResourceUpdateOutcome(ResourceUpdateStatus.REJECTED, stat.getVersion(),
+            unsatisfiable);
+      }
       if (isAtDesiredValues(current, replicas, minActiveReplicas)) {
         return new ResourceUpdateOutcome(ResourceUpdateStatus.UNCHANGED, stat.getVersion(), null);
       }
@@ -367,8 +382,8 @@ public class ResourceReplicaCountService {
           attempt, resourceName, clusterName);
     }
     return new ResourceUpdateOutcome(ResourceUpdateStatus.CONFLICT, -1,
-        "The resource was modified concurrently in each of the " + MAX_ATTEMPTS_PER_RESOURCE
-            + " attempts, so the desired values were not confirmed on it.");
+        "The desired values were not confirmed on this resource: each of the "
+            + MAX_ATTEMPTS_PER_RESOURCE + " attempts either lost a race or was not applied.");
   }
 
   /**
@@ -412,5 +427,35 @@ public class ResourceReplicaCountService {
     }
     return minActiveReplicas == null
         || new IdealState(record).getMinActiveReplicas() == minActiveReplicas;
+  }
+
+  /**
+   * Checks the values the resource would end up with, not only the values named in the request, so
+   * that changing one of the two counts cannot leave a resource whose minimum exceeds its replica
+   * count. The check is skipped when the resulting replica count is not a plain number, for example
+   * one of the documented special replica values, because those cannot be compared to a minimum.
+   *
+   * @return a description of why the combination cannot be honoured, or null when it can
+   */
+  private static String findUnsatisfiableCombination(ZNRecord record, Integer replicas,
+      Integer minActiveReplicas) {
+    String resultingReplicas = replicas != null ? Integer.toString(replicas)
+        : record.getSimpleField(REPLICAS_FIELD);
+    int resultingMinActive = minActiveReplicas != null ? minActiveReplicas
+        : new IdealState(record).getMinActiveReplicas();
+    if (resultingReplicas == null || resultingMinActive < 0) {
+      return null;
+    }
+    int replicaCount;
+    try {
+      replicaCount = Integer.parseInt(resultingReplicas);
+    } catch (NumberFormatException e) {
+      return null;
+    }
+    if (resultingMinActive <= replicaCount) {
+      return null;
+    }
+    return "The resource would be left with minActiveReplicas " + resultingMinActive
+        + " above a replica count of " + replicaCount + ", which cannot be satisfied.";
   }
 }

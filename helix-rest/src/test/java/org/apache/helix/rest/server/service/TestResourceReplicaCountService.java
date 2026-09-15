@@ -387,6 +387,42 @@ public class TestResourceReplicaCountService {
   }
 
   @Test
+  public void testUnsatisfiableResultingCombinationIsRejectedWithoutAWrite() {
+    // Raising only the minimum above the resource's existing replica count.
+    givenResource(RESOURCE_1, 2, 1);
+    // Lowering only the replica count below the resource's existing minimum.
+    givenResource(RESOURCE_2, 5, 4);
+    // A combination that is satisfiable after the update is still applied.
+    givenResource(RESOURCE_3, 5, 1);
+
+    BulkReplicaCountUpdateResult raiseMinimum = _service.updateReplicaCounts(CLUSTER,
+        Arrays.asList(RESOURCE_1, RESOURCE_3), null, 3);
+    assertStatus(raiseMinimum, RESOURCE_1, ResourceUpdateStatus.REJECTED);
+    assertStatus(raiseMinimum, RESOURCE_3, ResourceUpdateStatus.APPLIED);
+    Assert.assertFalse(raiseMinimum.isAllAtDesiredValues());
+    assertStored(RESOURCE_1, "2", 1);
+
+    BulkReplicaCountUpdateResult lowerReplicas =
+        _service.updateReplicaCounts(CLUSTER, Collections.singletonList(RESOURCE_2), 2, null);
+    assertStatus(lowerReplicas, RESOURCE_2, ResourceUpdateStatus.REJECTED);
+    assertStored(RESOURCE_2, "5", 4);
+  }
+
+  @Test
+  public void testASpecialReplicaValueIsNotComparedToAMinimum() {
+    ZNRecord record = new ZNRecord(RESOURCE_1);
+    record.setSimpleField(REPLICAS_FIELD, "ANY_LIVEINSTANCE");
+    _store.put(path(RESOURCE_1), new StoredNode(record, _nextCreationId++));
+
+    BulkReplicaCountUpdateResult result =
+        _service.updateReplicaCounts(CLUSTER, Collections.singletonList(RESOURCE_1), null, 3);
+
+    assertStatus(result, RESOURCE_1, ResourceUpdateStatus.APPLIED);
+    Assert.assertEquals(_store.get(path(RESOURCE_1))._record.getSimpleField(REPLICAS_FIELD),
+        "ANY_LIVEINSTANCE", "A replica value this operation did not name must be left alone.");
+  }
+
+  @Test
   public void testWriteFailureIsReportedAsFailedForThatResourceOnly() {
     givenResource(RESOURCE_1, 1, 1);
     givenResource(RESOURCE_2, 1, 1);
@@ -406,13 +442,13 @@ public class TestResourceReplicaCountService {
   @Test
   public void testOnlyTheRequestedFieldsAreChanged() {
     givenResource(RESOURCE_1, 1, 1);
-    givenResource(RESOURCE_2, 1, 1);
+    givenResource(RESOURCE_2, 5, 1);
 
     _service.updateReplicaCounts(CLUSTER, Collections.singletonList(RESOURCE_1), 3, null);
     _service.updateReplicaCounts(CLUSTER, Collections.singletonList(RESOURCE_2), null, 4);
 
     assertStored(RESOURCE_1, "3", 1);
-    assertStored(RESOURCE_2, "1", 4);
+    assertStored(RESOURCE_2, "5", 4);
   }
 
   @Test
