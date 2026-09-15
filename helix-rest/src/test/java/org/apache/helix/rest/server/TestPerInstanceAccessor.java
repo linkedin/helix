@@ -95,6 +95,58 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   @Test
+  public void testGetInstanceReplicaStatus() throws IOException {
+    String instanceName = INSTANCE_NAME + "_replica_status";
+    InstanceConfig instanceConfig = new InstanceConfig(instanceName);
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    admin.addInstance(CLUSTER_NAME, instanceConfig);
+    try {
+      String response =
+          new JerseyUriRequestBuilder("clusters/{}/instances/{}/replicaStatus")
+              .format(CLUSTER_NAME, instanceName).get(this);
+      Map<String, Object> result =
+          OBJECT_MAPPER.readValue(response, Map.class);
+      Assert.assertEquals(result.get("schemaVersion"), 1);
+      Assert.assertEquals(result.get("clusterName"), CLUSTER_NAME);
+      Assert.assertEquals(result.get("instanceName"), instanceName);
+      Assert.assertEquals(result.get("live"), false);
+      Assert.assertTrue(result.containsKey("observationTime"));
+      Assert.assertTrue(result.containsKey("activeSessionId"));
+      Assert.assertEquals(result.get("currentStateSessions"), Collections.emptyList());
+
+      Map<String, Object> replicaStates =
+          (Map<String, Object>) result.get("replicaStates");
+      Assert.assertEquals(replicaStates.get("scope"), "NON_TASK_CURRENT_STATES");
+      Assert.assertEquals(replicaStates.get("coverage"), "COMPLETE");
+      Assert.assertEquals(replicaStates.get("replicaCount"), 0);
+      Assert.assertEquals(replicaStates.get("replicasEmpty"), true);
+      Assert.assertEquals(replicaStates.get("allOffline"), false);
+      Assert.assertEquals(replicaStates.get("allOfflineOrError"), false);
+      Assert.assertEquals(replicaStates.get("allError"), false);
+
+      Map<String, Object> drain = (Map<String, Object>) result.get("drain");
+      Assert.assertEquals(drain.get("scope"), "FULL_AUTO_AND_CUSTOMIZED");
+      Assert.assertEquals(drain.get("coverage"), "COMPLETE");
+      Assert.assertEquals(drain.get("drained"), true);
+      Assert.assertEquals(drain.get("pendingMessageCount"), 0);
+      Assert.assertEquals(drain.get("supportedRebalanceModes"),
+          Arrays.asList("FULL_AUTO", "CUSTOMIZED"));
+
+      Map<String, Object> assignment = (Map<String, Object>) result.get("assignment");
+      Assert.assertEquals(assignment.get("scope"), "INSTANCE_OPERATION");
+      Assert.assertEquals(assignment.get("coverage"), "COMPLETE");
+      Assert.assertEquals(assignment.get("futureAssignmentEligible"), true);
+      Assert.assertEquals(assignment.get("instanceOperation"), "ENABLE");
+
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}/replicaStatus")
+          .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+          .format(CLUSTER_NAME, instanceName + "_missing").get(this);
+    } finally {
+      admin.dropInstance(CLUSTER_NAME, instanceConfig);
+    }
+  }
+
+  @Test
   public void testIsInstanceStoppable() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     Map<String, String> params = ImmutableMap.of("client", "espresso");
