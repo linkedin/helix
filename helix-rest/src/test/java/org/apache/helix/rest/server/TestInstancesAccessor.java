@@ -931,6 +931,59 @@ public class TestInstancesAccessor extends AbstractTestClass {
   }
 
   @Test
+  public void testInstanceOperationMaintenanceBatchPartialAcceptance() throws Exception {
+    String clusterName = "TestInstanceOperationMaintenanceBatch";
+    String instance0 = "markerInstance0";
+    String instance1 = "markerInstance1";
+    String missingInstance = "missingMarkerInstance";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    _gSetupTool.addInstanceToCluster(clusterName, instance0);
+    _gSetupTool.addInstanceToCluster(clusterName, instance1);
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceOperationMaintenanceBudget(1);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+    long expiresAtMillis = System.currentTimeMillis() + 600_000L;
+    String content = String.format(
+        "{\"instances\":[\"%s\",\"%s\",\"%s\"],\"expiresAtMillis\":%d}",
+        instance0, instance1, missingInstance, expiresAtMillis);
+    Response response = new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=instanceOperationMaintenance")
+        .isBodyReturnExpected(true)
+        .expectedReturnStatusCode(Response.Status.OK.getStatusCode())
+        .format(clusterName)
+        .post(this, Entity.entity(content, MediaType.APPLICATION_JSON_TYPE));
+    JsonNode responseNode = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+
+    Assert.assertEquals(getStringSet(responseNode, "applied"),
+        Collections.singleton(instance0));
+    Assert.assertTrue(responseNode.path("rejected").path(instance1).asText()
+        .contains("INSTANCE_OPERATION_MAINTENANCE_BUDGET=1"));
+    Assert.assertTrue(responseNode.path("rejected").path(missingInstance).asText()
+        .contains("not found"));
+    Assert.assertEquals(responseNode.path("expiresAtMillis").asLong(), expiresAtMillis);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(clusterName, instance0)
+            .getInstanceOperationMaintenanceUntilMs(),
+        expiresAtMillis);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(clusterName, instance1)
+            .getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+    String expiredContent = String.format(
+        "{\"instances\":[\"%s\"],\"expiresAtMillis\":%d}",
+        instance0, System.currentTimeMillis() - 1L);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=instanceOperationMaintenance")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(clusterName)
+        .post(this, Entity.entity(expiredContent, MediaType.APPLICATION_JSON_TYPE));
+  }
+
+  @Test
   public void testGetInstancesUnableToAcceptOnlineReplicas() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
 
