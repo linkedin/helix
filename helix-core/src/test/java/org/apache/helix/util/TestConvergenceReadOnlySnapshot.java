@@ -78,7 +78,8 @@ public class TestConvergenceReadOnlySnapshot extends ZkTestBase {
     givenHistoryWithoutRecordedOfflineTime();
     Stat before = readHistoryStat();
 
-    // The controller path is unchanged, which is also what makes the assertion above meaningful.
+    // An ordinary controller refresh still records the offline time, which is what makes the
+    // read-only expectation in this class meaningful.
     ResourceControllerDataProvider cache = new ResourceControllerDataProvider(CLUSTER);
     cache.refresh(_accessor);
 
