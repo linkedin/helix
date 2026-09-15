@@ -112,29 +112,76 @@ public class DelayedRebalanceUtil {
       Map<String, Long> instanceOfflineTimeMap, Set<String> liveNodes, Map<String, InstanceConfig> instanceConfigMap,
       long delay, ClusterConfig clusterConfig) {
     Set<String> activeNodes =  new HashSet<>(liveEnabledNodes);
+    activeNodes.addAll(
+        getDelayedRebalanceRetainedInstances(allNodes, liveEnabledNodes, instanceOfflineTimeMap,
+            liveNodes, instanceConfigMap, delay, clusterConfig, System.currentTimeMillis())
+            .keySet());
+    return activeNodes;
+  }
+
+  /**
+   * Returns delay-retained instances and their expiry times for the cluster-default configuration.
+   *
+   * <p>Uses the same calculation as {@link #getActiveNodes(Set, Set, Map, Set, Map, ClusterConfig)}
+   * for the supplied inputs. Ordinary live and enabled instances are not delay-retained.
+   *
+   * @param allNodes the candidate nodes, normally the assignable instances
+   * @param liveEnabledNodes the nodes that are both live and enabled
+   * @param instanceOfflineTimeMap the recorded offline timestamp per instance
+   * @param liveNodes the live nodes
+   * @param instanceConfigMap the configuration of each candidate
+   * @param clusterConfig the cluster configuration
+   * @param observedTimeMillis the epoch timestamp used for every expiry comparison
+   * @return a new modifiable map of retained instance names to expiry timestamps strictly after
+   *     {@code observedTimeMillis}; empty when no instance is retained or cluster delay is disabled
+   * @throws IllegalArgumentException if an evaluated candidate has no instance configuration
+   */
+  public static Map<String, Long> getDelayedRebalanceRetainedInstances(Set<String> allNodes,
+      Set<String> liveEnabledNodes, Map<String, Long> instanceOfflineTimeMap, Set<String> liveNodes,
+      Map<String, InstanceConfig> instanceConfigMap, ClusterConfig clusterConfig,
+      long observedTimeMillis) {
+    if (!isDelayRebalanceEnabled(clusterConfig)) {
+      return new HashMap<>();
+    }
+    return getDelayedRebalanceRetainedInstances(allNodes, liveEnabledNodes, instanceOfflineTimeMap,
+        liveNodes, instanceConfigMap, clusterConfig.getRebalanceDelayTime(), clusterConfig,
+        observedTimeMillis);
+  }
+
+  /**
+   * Applies an explicit delay after the caller has checked cluster or resource enablement.
+   */
+  static Map<String, Long> getDelayedRebalanceRetainedInstances(Set<String> allNodes,
+      Set<String> liveEnabledNodes, Map<String, Long> instanceOfflineTimeMap, Set<String> liveNodes,
+      Map<String, InstanceConfig> instanceConfigMap, long delay, ClusterConfig clusterConfig,
+      long observedTimeMillis) {
+    Map<String, Long> retainedInstances = new HashMap<>();
     Set<String> offlineOrDisabledInstances = new HashSet<>(allNodes);
     offlineOrDisabledInstances.removeAll(liveEnabledNodes);
-    long currentTime = System.currentTimeMillis();
     for (String ins : offlineOrDisabledInstances) {
-      long inactiveTime = getInactiveTime(ins, liveNodes, instanceOfflineTimeMap.get(ins), delay,
-          instanceConfigMap.get(ins), clusterConfig);
       InstanceConfig instanceConfig = instanceConfigMap.get(ins);
-      if (inactiveTime > currentTime && instanceConfig != null && instanceConfig
-          .isDelayRebalanceEnabled()) {
-        activeNodes.add(ins);
+      if (instanceConfig == null) {
+        throw new IllegalArgumentException("Missing instance config for " + ins);
+      }
+      long inactiveTime = getInactiveTime(ins, liveNodes, instanceOfflineTimeMap.get(ins), delay,
+          instanceConfig, clusterConfig, observedTimeMillis);
+      if (inactiveTime > observedTimeMillis && instanceConfig.isDelayRebalanceEnabled()) {
+        retainedInstances.put(ins, inactiveTime);
       }
     }
-    return activeNodes;
+    return retainedInstances;
   }
 
   /**
    * Return the time when an offline or disabled instance should be treated as inactive. Return -1
    * if it is inactive now or forced to be rebalanced by an on-demand rebalance.
    *
+   * @param observedTimeMillis the timestamp that stands for "now" for this computation
    * @return A timestamp that represents the expected inactive time of a node.
    */
   private static long getInactiveTime(String instance, Set<String> liveInstances, Long offlineTime,
-      long delay, InstanceConfig instanceConfig, ClusterConfig clusterConfig) {
+      long delay, InstanceConfig instanceConfig, ClusterConfig clusterConfig,
+      long observedTimeMillis) {
     long inactiveTime = Long.MAX_VALUE;
     long lastOnDemandRebalanceTime = clusterConfig.getLastOnDemandRebalanceTimestamp();
 
@@ -142,7 +189,8 @@ public class DelayedRebalanceUtil {
     if (!liveInstances.contains(instance)) {
       // Check if the offline instance is forced to be rebalanced by an on-demand rebalance.
       // If so, return it as an inactive instance.
-      if (isInstanceForcedToBeRebalanced(offlineTime, delay, lastOnDemandRebalanceTime)) {
+      if (isInstanceForcedToBeRebalanced(offlineTime, delay, lastOnDemandRebalanceTime,
+          observedTimeMillis)) {
         return -1L;
       }
 
@@ -166,7 +214,8 @@ public class DelayedRebalanceUtil {
 
       // Check if the disabled instance is forced to be rebalanced by an on-demand rebalance.
       // If so, return it as an inactive instance.
-      if (isInstanceForcedToBeRebalanced(disabledTime, delay, lastOnDemandRebalanceTime)) {
+      if (isInstanceForcedToBeRebalanced(disabledTime, delay, lastOnDemandRebalanceTime,
+          observedTimeMillis)) {
         return -1L;
       }
 
@@ -277,7 +326,7 @@ public class DelayedRebalanceUtil {
     // calculate the closest future rebalance time
     for (String ins : offlineOrDisabledInstances) {
       long inactiveTime = getInactiveTime(ins, liveNodes, instanceOfflineTimeMap.get(ins), delay,
-          instanceConfigMap.get(ins), clusterConfig);
+          instanceConfigMap.get(ins), clusterConfig, currentTime);
       if (inactiveTime != -1 && inactiveTime > currentTime && inactiveTime < nextRebalanceTime) {
         nextRebalanceTime = inactiveTime;
       }
@@ -448,12 +497,13 @@ public class DelayedRebalanceUtil {
    * @param delay The delay window configuration of the current cluster
    * @param lastOnDemandRebalanceTime A unix timestamp representing the most recent time when an
    *                                  on-demand rebalance was triggered.
+   * @param observedTimeMillis the timestamp used as the current time in this computation
    * @return A boolean indicating whether a node is forced to be rebalanced
    */
   private static boolean isInstanceForcedToBeRebalanced(Long offlineOrDisabledTime, long delay,
-      long lastOnDemandRebalanceTime) {
+      long lastOnDemandRebalanceTime, long observedTimeMillis) {
     if (lastOnDemandRebalanceTime == -1 || offlineOrDisabledTime == null
-        || offlineOrDisabledTime <= 0 || System.currentTimeMillis() > (offlineOrDisabledTime
+        || offlineOrDisabledTime <= 0 || observedTimeMillis > (offlineOrDisabledTime
         + delay)) {
       return false;
     }

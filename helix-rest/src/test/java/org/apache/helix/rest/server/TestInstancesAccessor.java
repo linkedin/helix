@@ -36,22 +36,43 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.helix.AccessOption;
 import org.apache.helix.ConfigAccessor;
+import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.RESTConfig;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
 import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestInstancesAccessor extends AbstractTestClass {
   private final static String CLUSTER_NAME = "TestCluster_5";
+
+  private static final String SCOPE =
+      InstancesAccessor.DelayedRebalanceProperties.scope.name();
+  private static final String LIVE_VIEW =
+      InstancesAccessor.DelayedRebalanceProperties.liveView.name();
+  private static final String OBSERVED_AT_MILLIS =
+      InstancesAccessor.DelayedRebalanceProperties.observedAtMillis.name();
+  private static final String DELAY_ENABLED =
+      InstancesAccessor.DelayedRebalanceProperties.delayEnabled.name();
+  private static final String DELAYED_INSTANCES =
+      InstancesAccessor.DelayedRebalanceProperties.delayedInstances.name();
+  private static final String EXPIRES_AT_MILLIS =
+      InstancesAccessor.DelayedRebalanceProperties.expiresAtMillis.name();
+  private static final String LIVE = InstancesAccessor.DelayedRebalanceProperties.live.name();
+  private static final String ENABLED = InstancesAccessor.DelayedRebalanceProperties.enabled.name();
 
   @DataProvider
   public Object[][] generatePayloadCrossZoneStoppableCheckWithZoneOrder() {
@@ -943,7 +964,6 @@ public class TestInstancesAccessor extends AbstractTestClass {
     for (String instance : instances) {
       _gSetupTool.addInstanceToCluster(clusterName, instance);
     }
-
     // Baseline: no participants are running, so all 5 instances are offline and unmarked and all
     // 5 count.
     Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName), sorted(instances));
@@ -994,6 +1014,229 @@ public class TestInstancesAccessor extends AbstractTestClass {
         .format("TestOfflineBudgetClusterDoesNotExist").get(this);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetDelayedRebalanceStatus() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Dedicated cluster with no controller: the endpoint answers from metadata alone, and a
+    // controller running against the same cluster would keep rewriting that metadata underneath
+    // the assertions.
+    String clusterName = "TestDelayedRebalanceCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+
+    String offlineInWindow = "drInstance0";
+    String disabledLive = "drInstance1";
+    String enabledLive = "drInstance2";
+    String delayOptedOut = "drInstance3";
+    String evacuating = "drInstance4";
+    String swappingIn = "drInstance5";
+    String unknownOperation = "drInstance6";
+    String disabledLongAgo = "drInstance7";
+    String neverJoined = "drInstance8";
+    List<String> instances =
+        Arrays.asList(offlineInWindow, disabledLive, enabledLive, delayOptedOut, evacuating,
+            swappingIn, unknownOperation, disabledLongAgo, neverJoined);
+    for (String instance : instances) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+    // Instance creation initializes history; remove this one to cover genuinely absent metadata.
+    Assert.assertTrue(_baseAccessor.remove(
+        PropertyPathBuilder.instanceHistory(clusterName, neverJoined), AccessOption.PERSISTENT));
+    Assert.assertNull(readParticipantHistory(clusterName, neverJoined));
+
+    // Wide enough that no window opened during this test can expire while it runs.
+    long delayMs = 10 * 60 * 1000L;
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setDelayRebalaceEnabled(true);
+    clusterConfig.setRebalanceDelayTime(delayMs);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+    // Every instance is offline and none has a recorded offline time yet, so nothing is being
+    // retained. An empty population is a meaningful answer and is not an error.
+    JsonNode emptyStatus = fetchDelayedRebalanceStatus(clusterName);
+    assertDelayedRebalanceEnvelope(emptyStatus, clusterName);
+    Assert.assertTrue(emptyStatus.get(DELAYED_INSTANCES).isEmpty(),
+        "Instances with no recorded offline time are not in a delay window");
+
+    startInstances(clusterName, new TreeSet<>(Arrays.asList(disabledLive, enabledLive)), 2);
+
+    long offlineTime = recordOfflineTime(clusterName, offlineInWindow);
+    recordOfflineTime(clusterName, delayOptedOut);
+    recordOfflineTime(clusterName, evacuating);
+    recordOfflineTime(clusterName, swappingIn);
+    recordOfflineTime(clusterName, unknownOperation);
+
+    disableInstance(clusterName, disabledLive);
+    disableInstance(clusterName, disabledLongAgo);
+    // A disable recorded on the cluster config that predates the window: the calculation takes the
+    // earlier of the two disable timestamps, so this instance is already out of its window.
+    setBatchDisableTimestamp(clusterName, disabledLongAgo,
+        System.currentTimeMillis() - 2 * delayMs);
+
+    InstanceConfig optedOutConfig = _configAccessor.getInstanceConfig(clusterName, delayOptedOut);
+    optedOutConfig.setDelayRebalanceEnabled(false);
+    _configAccessor.setInstanceConfig(clusterName, delayOptedOut, optedOutConfig);
+
+    setInstanceOperation(clusterName, evacuating, InstanceConstants.InstanceOperation.EVACUATE);
+    setInstanceOperation(clusterName, swappingIn, InstanceConstants.InstanceOperation.SWAP_IN);
+    setInstanceOperation(clusterName, unknownOperation, InstanceConstants.InstanceOperation.UNKNOWN);
+    ParticipantHistory recordedHistory = readParticipantHistory(clusterName, offlineInWindow);
+
+    Set<String> expectedDelayedInstances = ImmutableSet.of(offlineInWindow, disabledLive);
+    Assert.assertTrue(TestHelper.verify(
+        () -> fieldNames(fetchDelayedRebalanceStatus(clusterName).get(DELAYED_INSTANCES))
+            .equals(expectedDelayedInstances), TestHelper.WAIT_DURATION),
+        "Expected exactly the delay-retained instances but got " + fieldNames(
+            fetchDelayedRebalanceStatus(clusterName).get(DELAYED_INSTANCES)));
+
+    long beforeCallMs = System.currentTimeMillis();
+    JsonNode status = fetchDelayedRebalanceStatus(clusterName);
+    long afterCallMs = System.currentTimeMillis();
+
+    assertDelayedRebalanceEnvelope(status, clusterName);
+    long observedAtMillis = status.get(OBSERVED_AT_MILLIS).longValue();
+    Assert.assertTrue(observedAtMillis >= beforeCallMs && observedAtMillis <= afterCallMs,
+        "observedAtMillis must be the server time the answer was computed at, but " + observedAtMillis
+            + " is outside [" + beforeCallMs + ", " + afterCallMs + "]");
+
+    JsonNode delayedInstances = status.get(DELAYED_INSTANCES);
+    Assert.assertEquals(fieldNames(delayedInstances), expectedDelayedInstances,
+        "Only delay-retained instances are reported: an enabled and live instance is active on "
+            + "its own, an instance that opted out of delayed rebalance and instances under a "
+            + "non-assignable operation are never retained, and a window that has expired is over");
+
+    JsonNode offlineEntry = delayedInstances.get(offlineInWindow);
+    Assert.assertEquals(fieldNames(offlineEntry),
+        ImmutableSet.of(EXPIRES_AT_MILLIS, LIVE, ENABLED));
+    Assert.assertTrue(offlineEntry.get(EXPIRES_AT_MILLIS).isIntegralNumber());
+    Assert.assertEquals(offlineEntry.get(EXPIRES_AT_MILLIS).longValue(), offlineTime + delayMs,
+        "The window closes at the recorded offline time plus the cluster delay");
+    Assert.assertTrue(offlineEntry.get(EXPIRES_AT_MILLIS).longValue() > observedAtMillis,
+        "A reported instance is still inside its window at the observation timestamp");
+    Assert.assertFalse(offlineEntry.get(LIVE).booleanValue());
+    Assert.assertTrue(offlineEntry.get(ENABLED).booleanValue());
+
+    JsonNode disabledEntry = delayedInstances.get(disabledLive);
+    Assert.assertEquals(fieldNames(disabledEntry),
+        ImmutableSet.of(EXPIRES_AT_MILLIS, LIVE, ENABLED));
+    Assert.assertTrue(disabledEntry.get(EXPIRES_AT_MILLIS).longValue() > observedAtMillis);
+    Assert.assertTrue(disabledEntry.get(LIVE).booleanValue(),
+        "A disabled instance is retained while it is still live, and is reported as live");
+    Assert.assertFalse(disabledEntry.get(ENABLED).booleanValue());
+
+    // The read must not create or update participant history the way the controller's refresh
+    // does, so an instance that never joined still has none and a recorded history is untouched.
+    Assert.assertNull(readParticipantHistory(clusterName, neverJoined),
+        "Reading the status must not create participant history");
+    ParticipantHistory afterReads = readParticipantHistory(clusterName, offlineInWindow);
+    Assert.assertEquals(afterReads.getRecord(), recordedHistory.getRecord(),
+        "Reading the status must not change participant history");
+    Assert.assertEquals(afterReads.getRecord().getVersion(), recordedHistory.getRecord().getVersion(),
+        "Reading the status must not write participant history");
+
+    // The cluster-level switch turns the whole population off rather than reporting a population
+    // no rebalancer is acting on.
+    clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setDelayRebalaceEnabled(false);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    JsonNode disabledStatus = fetchDelayedRebalanceStatus(clusterName);
+    Assert.assertFalse(disabledStatus.get(DELAY_ENABLED).booleanValue());
+    Assert.assertTrue(disabledStatus.get(DELAYED_INSTANCES).isEmpty(),
+        "Delayed rebalance being off for the cluster means nothing is being retained");
+
+    clusterConfig.setDelayRebalaceEnabled(true);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    Assert.assertEquals(fieldNames(fetchDelayedRebalanceStatus(clusterName).get(DELAYED_INSTANCES)),
+        expectedDelayedInstances, "Turning the switch back on restores the same population");
+
+    // Required cluster metadata that cannot be read must surface as an error. An empty population
+    // would read as "no instance is in a delay window", which is the answer a caller acts on.
+    String clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterName);
+    ZNRecord clusterConfigRecord = _baseAccessor.get(clusterConfigPath, null, AccessOption.PERSISTENT);
+    Assert.assertTrue(_baseAccessor.remove(clusterConfigPath, AccessOption.PERSISTENT));
+    new JerseyUriRequestBuilder("clusters/{}/instances?command=getDelayedRebalanceStatus")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode()).format(clusterName)
+        .get(this);
+    Assert.assertTrue(
+        _baseAccessor.set(clusterConfigPath, clusterConfigRecord, AccessOption.PERSISTENT));
+    Assert.assertEquals(fieldNames(fetchDelayedRebalanceStatus(clusterName).get(DELAYED_INSTANCES)),
+        expectedDelayedInstances);
+
+    new JerseyUriRequestBuilder("clusters/{}/instances?command=getDelayedRebalanceStatus")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestDelayedRebalanceClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void assertDelayedRebalanceEnvelope(JsonNode status, String clusterName) {
+    Assert.assertEquals(fieldNames(status),
+        ImmutableSet.of(InstancesAccessor.Properties.id.name(), SCOPE, LIVE_VIEW,
+            OBSERVED_AT_MILLIS, DELAY_ENABLED, DELAYED_INSTANCES));
+    Assert.assertEquals(status.get(InstancesAccessor.Properties.id.name()).textValue(),
+        clusterName);
+    Assert.assertEquals(status.get(SCOPE).textValue(), "CLUSTER_DEFAULT",
+        "This command answers with the cluster-default rules, not resource overrides");
+    Assert.assertEquals(status.get(LIVE_VIEW).textValue(), "RAW",
+        "Liveness is the raw ZooKeeper membership");
+    Assert.assertTrue(status.get(OBSERVED_AT_MILLIS).isIntegralNumber());
+    Assert.assertTrue(status.get(DELAY_ENABLED).isBoolean());
+    Assert.assertTrue(status.get(DELAYED_INSTANCES).isObject());
+  }
+
+  private JsonNode fetchDelayedRebalanceStatus(String clusterName) {
+    try {
+      return OBJECT_MAPPER.readTree(
+          new JerseyUriRequestBuilder("clusters/{}/instances?command=getDelayedRebalanceStatus")
+              .isBodyReturnExpected(true).format(clusterName).get(this));
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to read the delayed rebalance status response", e);
+    }
+  }
+
+  /**
+   * Records that an instance went offline, which is what the controller does when it first sees a
+   * participant missing. The endpoint reads this metadata and must never write it.
+   *
+   * @return the recorded offline timestamp.
+   */
+  private long recordOfflineTime(String clusterName, String instanceName) {
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
+    ParticipantHistory history = new ParticipantHistory(instanceName);
+    history.reportOffline();
+    Assert.assertTrue(accessor.setProperty(accessor.keyBuilder().participantHistory(instanceName),
+        history));
+    return history.getLastOfflineTime();
+  }
+
+  private ParticipantHistory readParticipantHistory(String clusterName, String instanceName) {
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
+    return accessor.getProperty(accessor.keyBuilder().participantHistory(instanceName));
+  }
+
+  private void disableInstance(String clusterName, String instanceName) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
+        InstanceConstants.InstanceOperation.DISABLE).build());
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+  }
+
+  private void setBatchDisableTimestamp(String clusterName, String instanceName,
+      long disabledTimeMs) {
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setDisabledInstancesWithInfo(Collections.singletonMap(instanceName,
+        ClusterConfig.ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP + "="
+            + disabledTimeMs));
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+  }
+
+  private static Set<String> fieldNames(JsonNode node) {
+    Set<String> names = new HashSet<>();
+    node.fieldNames().forEachRemaining(names::add);
+    return names;
   }
 
   private List<String> fetchOfflineBudgetPopulation(String clusterName) throws IOException {

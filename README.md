@@ -50,6 +50,41 @@ Helix is a generic cluster management framework used for automatic management of
 5. Pluggable distributed state machine to manage the state of a resource via state transitions
 6. Automatic load balancing and throttling of transitions 
 
+## Delayed-rebalance status
+
+Helix REST exposes the cluster-default delayed-active population without requiring clients to
+reconstruct it from configuration, liveness and participant history:
+
+```text
+GET /clusters/exampleCluster/instances?command=getDelayedRebalanceStatus
+```
+
+```json
+{
+  "id": "exampleCluster",
+  "scope": "CLUSTER_DEFAULT",
+  "liveView": "RAW",
+  "observedAtMillis": 1750000000000,
+  "delayEnabled": true,
+  "delayedInstances": {
+    "node1": {
+      "expiresAtMillis": 1750000060000,
+      "live": false,
+      "enabled": true
+    }
+  }
+}
+```
+
+The calculation is shared with the rebalancers. Ordinary enabled/live and non-assignable instances
+are excluded. An empty map is valid; missing clusters return 404 and failed metadata reads return
+an error rather than an empty successful result.
+
+This read uses recorded timestamps and raw ZooKeeper liveness. It does not initialize history,
+apply resource-specific delay overrides, or reproduce the controller's maintenance-timeout history.
+`observedAtMillis` is the expiry-comparison time, not a globally atomic snapshot version.
+Responses use `Cache-Control: no-store`.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 
