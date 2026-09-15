@@ -754,6 +754,9 @@ public class InstanceConfig extends HelixProperty {
    *     {@link InstanceConstants.InstanceOperationSource#ADMIN}, whose documented behaviour is
    *     to clear every other source. That is the opposite of a single source update, so it
    *     must go through {@link #setInstanceOperation(InstanceOperation)} where it is explicit.
+   *     Also thrown when an already recorded operation cannot be read by this version, because
+   *     this method rewrites the whole list: an entry that cannot be deserialised would be
+   *     dropped, and one whose type or source cannot be recognised cannot be ordered against.
    */
   public void setInstanceOperationForSource(InstanceOperation operation,
       boolean mirrorToLegacyFields) {
@@ -765,6 +768,7 @@ public class InstanceConfig extends HelixProperty {
           "ADMIN instance operations clear every other source and cannot be recorded as a "
               + "single source update for instance: " + _record.getId());
     }
+    assertRecordedInstanceOperationsAreReadable();
 
     List<InstanceOperation> operations = getInstanceOperations();
     updateInstanceOperation(operations, operation);
@@ -776,6 +780,33 @@ public class InstanceConfig extends HelixProperty {
     }
 
     updateInstanceOperationState();
+  }
+
+  /**
+   * Reject a single source update against operations this version cannot read, instead of
+   * failing somewhere inside the ordering or the legacy mirroring with an error that does not
+   * say what is wrong.
+   */
+  private void assertRecordedInstanceOperationsAreReadable() {
+    List<InstanceOperation> operations = getInstanceOperations();
+    List<String> stored =
+        _record.getListField(InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
+    int storedCount = stored == null ? 0 : stored.size();
+    if (storedCount != operations.size()) {
+      throw new IllegalArgumentException(
+          "Instance " + _record.getId() + " stores " + storedCount + " instance operations but "
+              + operations.size() + " could be read, and rewriting them would drop the rest");
+    }
+    for (InstanceOperation operation : operations) {
+      try {
+        operation.getOperation();
+        operation.getSource();
+      } catch (IllegalArgumentException e) {
+        throw new IllegalArgumentException("Instance " + _record.getId()
+            + " records an instance operation this version cannot read, so it cannot be "
+            + "ordered against: " + e.getMessage(), e);
+      }
+    }
   }
 
   private void setInstanceOperationInit(InstanceConstants.InstanceOperation operation) {

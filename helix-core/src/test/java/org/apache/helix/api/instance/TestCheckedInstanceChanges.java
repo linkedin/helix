@@ -436,26 +436,50 @@ public class TestCheckedInstanceChanges extends ZkTestBase {
   }
 
   @Test
-  public void testOperationRecordedByANewerVersionIsPreserved() {
+  public void testOperationRecordedByANewerVersionIsRefused() {
     String instance = addInstance();
     writeUnrecognisedOperation(instance);
     ZNRecord before = readRecord(instance);
 
-    // The unrecognised operation is the active one, so it is read as UNKNOWN. Moving from
-    // UNKNOWN to DISABLE is validated against the other instances, and is allowed here because
-    // no other instance shares this one's logical id.
-    CheckedMutationResult<EffectiveInstanceOperation> result =
-        CheckedInstanceChanges.setInstanceOperation(_accessor, _clusterName, instance,
-            disableRequest("automation disable"));
-    Assert.assertEquals(result.getOutcome(), CheckedMutationOutcome.APPLIED, result.getMessage());
+    // An operation this version cannot read can mean something it has no way to respect, and
+    // the recorded operations have to be ordered against it, so a change is refused rather
+    // than guessed at, and the entry is left exactly as it was.
+    for (InstanceConstants.InstanceOperation desired : new InstanceConstants.InstanceOperation[] {
+        InstanceConstants.InstanceOperation.DISABLE,
+        InstanceConstants.InstanceOperation.ENABLE }) {
+      CheckedMutationResult<EffectiveInstanceOperation> result =
+          CheckedInstanceChanges.setInstanceOperation(_accessor, _clusterName, instance,
+              InstanceOperationChangeRequest
+                  .newBuilder(desired, InstanceConstants.InstanceOperationSource.AUTOMATION)
+                  .build());
+      Assert.assertEquals(result.getOutcome(), CheckedMutationOutcome.CONFLICT,
+          result.getMessage());
+      Assert.assertEquals(result.getConflictReason().orElse(null),
+          CheckedMutationConflictReason.UNREADABLE_STATE);
+      assertSameRecord(readRecord(instance), before);
+    }
+  }
 
-    List<String> operationsBefore = before.getListField(
-        InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
-    List<String> operationsAfter = readRecord(instance).getListField(
-        InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
-    Assert.assertEquals(operationsAfter.get(0), operationsBefore.get(0),
-        "An operation this version does not recognise must be kept exactly as it was");
-    Assert.assertEquals(operationsAfter.size(), operationsBefore.size() + 1);
+  @Test
+  public void testSingleSourceUpdateRejectsOperationsItCannotOrderAgainst() {
+    // The data model method behind the checked change refuses the same records, so a caller
+    // reaching for it directly gets a clear rejection rather than a failure from inside the
+    // ordering or the legacy mirroring.
+    ZNRecord record = new ZNRecord("localhost_1234");
+    record.setListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name(),
+        Collections.singletonList(
+            "{\"OPERATION\":\"AN_OPERATION_FROM_THE_FUTURE\",\"REASON\":\"newer writer\","
+                + "\"SOURCE\":\"USER\",\"TIMESTAMP\":\"1\"}"));
+    InstanceConfig config = new InstanceConfig(record);
+
+    try {
+      config.setInstanceOperationForSource(new InstanceConfig.InstanceOperation.Builder()
+          .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+          .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build(), false);
+      Assert.fail("An operation that cannot be read must not be ordered against");
+    } catch (IllegalArgumentException e) {
+      Assert.assertTrue(e.getMessage().contains("cannot read"), e.getMessage());
+    }
   }
 
   @Test

@@ -516,12 +516,12 @@ public final class CheckedInstanceChanges {
    * Describes the first recorded operation this version cannot read well enough to change the
    * instance safely, if there is one.
    *
-   * <p>Two things make an operation unreadable. A source or a timestamp that cannot be parsed
-   * leaves no way to tell whether the entry belongs to the caller, or to attribute the
-   * deprecated fields. An entry that fails to deserialise at all is worse: it is dropped when
-   * the recorded operations are read, so writing them back would silently discard another
-   * writer's state. An operation type this version does not know is fine, because such an
-   * entry is still carried through unchanged.
+   * <p>An entry that fails to deserialise is dropped when the recorded operations are read, so
+   * writing them back would silently discard another writer's state. An operation type, source
+   * or timestamp that cannot be read leaves no way to order the entry, to tell whether it
+   * belongs to the caller, or to attribute the deprecated fields to it. Both are refused
+   * rather than guessed at: a newer writer's operation can mean something this version has no
+   * way to respect.
    */
   private static Optional<String> findUnreadableRecordedOperation(InstanceConfig config) {
     List<String> stored = config.getRecord()
@@ -536,6 +536,10 @@ public final class CheckedInstanceChanges {
       if (safeSource(operation) == null) {
         return Optional.of("an operation with an unrecognised source");
       }
+      if (!isOperationTypeReadable(operation)) {
+        return Optional.of("an operation from source " + safeSourceName(operation)
+            + " with an unrecognised type");
+      }
       if (safeTimestamp(operation) == null) {
         return Optional.of(
             "an operation from source " + safeSourceName(operation) + " with no readable "
@@ -543,6 +547,15 @@ public final class CheckedInstanceChanges {
       }
     }
     return Optional.empty();
+  }
+
+  private static boolean isOperationTypeReadable(InstanceConfig.InstanceOperation operation) {
+    try {
+      operation.getOperation();
+      return true;
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
   }
 
   @Nullable
