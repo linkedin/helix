@@ -176,11 +176,11 @@ final class InstanceReplicaStatusCalculator {
     List<ReplicaInfo> errorReplicas = new ArrayList<>();
     int replicaCount = 0;
     for (ObservedCurrentState observed : observedCurrentStates) {
-      resourceReplicaCounts.putIfAbsent(observed.resourceName, 0);
       Map<String, String> partitionStateMap = observed.currentState.getPartitionStateMap();
       if (partitionStateMap == null || partitionStateMap.isEmpty()) {
         continue;
       }
+      resourceReplicaCounts.putIfAbsent(observed.resourceName, 0);
       for (String partitionName : new TreeSet<>(partitionStateMap.keySet())) {
         replicaCount++;
         resourceReplicaCounts.merge(observed.resourceName, 1, Integer::sum);

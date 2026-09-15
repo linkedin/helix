@@ -151,7 +151,8 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
 
   @Test
   public void testEmptyReplicaScopeDoesNotHidePendingMessages() {
-    setLive();
+    String sessionId = setLive();
+    setEmptyCurrentState(sessionId, "droppedResource");
     String messagePath =
         PropertyPathBuilder.instanceMessage(CLUSTER_NAME, INSTANCE_NAME, "message_0");
     _gZkClient.createPersistent(messagePath, true);
@@ -307,6 +308,15 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     currentState.setSessionId(sessionId);
     currentState.setStateModelDefRef(stateModelDefRef);
     currentState.setState(partitionName, state);
+    _accessor.setProperty(
+        _accessor.keyBuilder().currentState(INSTANCE_NAME, sessionId, resourceName),
+        currentState);
+  }
+
+  private void setEmptyCurrentState(String sessionId, String resourceName) {
+    CurrentState currentState = new CurrentState(resourceName);
+    currentState.setSessionId(sessionId);
+    currentState.setStateModelDefRef("MasterSlave");
     _accessor.setProperty(
         _accessor.keyBuilder().currentState(INSTANCE_NAME, sessionId, resourceName),
         currentState);
