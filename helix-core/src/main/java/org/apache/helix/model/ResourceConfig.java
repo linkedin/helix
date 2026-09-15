@@ -695,6 +695,12 @@ public class ResourceConfig extends HelixProperty {
       return _numPartitions;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setNumPartitions(int)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setNumPartitions(int numPartitions) {
       _numPartitions = numPartitions;
       return this;
@@ -704,6 +710,12 @@ public class ResourceConfig extends HelixProperty {
       return _stateModelDefRef;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setStateModelDefRef(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setStateModelDefRef(String stateModelDefRef) {
       _stateModelDefRef = stateModelDefRef;
       return this;
@@ -713,6 +725,12 @@ public class ResourceConfig extends HelixProperty {
       return _stateModelFactoryName;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setStateModelFactoryName(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setStateModelFactoryName(String stateModelFactoryName) {
       _stateModelFactoryName = stateModelFactoryName;
       return this;
@@ -722,11 +740,24 @@ public class ResourceConfig extends HelixProperty {
       return _numReplica;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setReplicas(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setNumReplica(String numReplica) {
       _numReplica = numReplica;
       return this;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setReplicas(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
+    @SuppressWarnings("deprecation")
     public Builder setNumReplica(int numReplica) {
       return setNumReplica(String.valueOf(numReplica));
     }
@@ -735,6 +766,12 @@ public class ResourceConfig extends HelixProperty {
       return _minActiveReplica;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setMinActiveReplicas(int)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setMinActiveReplica(int minActiveReplica) {
       _minActiveReplica = minActiveReplica;
       return this;
@@ -744,6 +781,12 @@ public class ResourceConfig extends HelixProperty {
       return _maxPartitionsPerInstance;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setMaxPartitionsPerInstance(int)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setMaxPartitionsPerInstance(int maxPartitionsPerInstance) {
       _maxPartitionsPerInstance = maxPartitionsPerInstance;
       return this;
@@ -753,6 +796,12 @@ public class ResourceConfig extends HelixProperty {
       return _instanceGroupTag;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setInstanceGroupTag(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setInstanceGroupTag(String instanceGroupTag) {
       _instanceGroupTag = instanceGroupTag;
       return this;
@@ -762,6 +811,12 @@ public class ResourceConfig extends HelixProperty {
       return _helixEnabled;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#enable(boolean)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setHelixEnabled(boolean helixEnabled) {
       _helixEnabled = helixEnabled;
       return this;
@@ -771,6 +826,12 @@ public class ResourceConfig extends HelixProperty {
       return _resourceType;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setResourceType(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setResourceType(String resourceType) {
       _resourceType = resourceType;
       return this;
@@ -780,6 +841,12 @@ public class ResourceConfig extends HelixProperty {
       return _resourceGroupName;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setResourceGroupName(String)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setResourceGroupName(String resourceGroupName) {
       _resourceGroupName = resourceGroupName;
       return this;
@@ -789,6 +856,12 @@ public class ResourceConfig extends HelixProperty {
       return _groupRoutingEnabled;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#enableGroupRouting(boolean)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setGroupRoutingEnabled(boolean groupRoutingEnabled) {
       _groupRoutingEnabled = groupRoutingEnabled;
       return this;
@@ -798,6 +871,12 @@ public class ResourceConfig extends HelixProperty {
       return _externalViewDisabled;
     }
 
+    /**
+     * @deprecated Resource structure is canonically owned by {@link IdealState}; this value is
+     *     not persisted or honored by production writers on ResourceConfig. Use
+     *     {@code IdealState#setDisableExternalView(boolean)} instead. Scheduled for removal.
+     */
+    @Deprecated
     public Builder setExternalViewDisabled(boolean externalViewDisabled) {
       _externalViewDisabled = externalViewDisabled;
       return this;

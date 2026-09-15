@@ -289,6 +289,7 @@ public class WeightAwareRebalanceUtilExample {
     printAssignmentInfo(assignment);
   }
 
+  @SuppressWarnings("deprecation") // demonstrates legacy ResourceConfig.Builder structural setters
   private static void setup() {
     for (int i = 0; i < nParticipants; i++) {
       instanceNames.add("node" + i);
