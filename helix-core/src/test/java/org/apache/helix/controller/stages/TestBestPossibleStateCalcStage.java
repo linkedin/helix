@@ -157,10 +157,11 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
         "OFFLINE",
         "Actual state should not be DROPPED");
 
-    // No state change for localhost_2 because the replica is already MASTER
-    Assert.assertNull(
+    // localhost_2 already holds MASTER and is retained as MASTER by the maintenance rebalancer.
+    Assert.assertEquals(
         output.getInstanceStateMap("testResourceName", new Partition("testResourceName_1"))
-            .get("localhost_2"));
+            .get("localhost_2"),
+        "MASTER");
   }
 
   /**
