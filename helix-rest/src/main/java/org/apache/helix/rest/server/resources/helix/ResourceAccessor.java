@@ -20,9 +20,13 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +45,7 @@ import javax.ws.rs.core.Response;
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -60,6 +65,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.service.ResourceReplicaCountService;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.slf4j.Logger;
@@ -82,6 +88,33 @@ public class ResourceAccessor extends AbstractHelixResource {
     HEALTHY,
     PARTIAL_HEALTHY,
     UNHEALTHY
+  }
+
+  /**
+   * Fields of the {@code updateReplicaCounts} request body. Any other field is rejected, so that a
+   * misspelled field cannot be silently dropped and reported as a successful update.
+   */
+  public enum ReplicaCountUpdateRequestProperties {
+    selection,
+    resources,
+    replicas,
+    minActiveReplicas
+  }
+
+  /**
+   * Fields of the {@code updateReplicaCounts} response body.
+   */
+  public enum ReplicaCountUpdateResponseProperties {
+    selection,
+    replicas,
+    minActiveReplicas,
+    selectedResourceCount,
+    allAtDesiredValues,
+    statusCounts,
+    resourceResults,
+    status,
+    version,
+    message
   }
 
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
@@ -110,6 +143,227 @@ public class ResourceAccessor extends AbstractHelixResource {
     }
 
     return JSONRepresentation(root);
+  }
+
+  /**
+   * Applies one replica count and/or one minimum active replica count to a scoped set of resources
+   * in a single request, and returns what happened to each of them.
+   *
+   * <p>The desired values stay with the caller; this endpoint does not derive them. What it removes
+   * from the caller is the resource enumeration, the per-resource write sequencing and the
+   * partial-failure bookkeeping.
+   *
+   * <p>The request body is a JSON object:
+   *
+   * <pre>
+   * {
+   *   "selection": "ALL_RESOURCES" | "EXPLICIT",
+   *   "resources": ["resource1", "resource2"],
+   *   "replicas": 3,
+   *   "minActiveReplicas": 2
+   * }
+   * </pre>
+   *
+   * {@code resources} is required for {@code EXPLICIT} and must be absent for
+   * {@code ALL_RESOURCES}, which selects every resource that has an IdealState when the request is
+   * served. At least one of {@code replicas} and {@code minActiveReplicas} is required; an omitted
+   * one is left untouched. Any other field is rejected.
+   *
+   * <p>A {@code 200} means the request was processed, not that every resource was updated. The
+   * operation is not atomic and does not roll back, so the caller must read
+   * {@code resourceResults} and treat anything other than {@code APPLIED} or {@code UNCHANGED} as
+   * "desired values not confirmed on this resource". Re-sending the same request is safe.
+   *
+   * @param clusterId the cluster that owns the resources
+   * @param commandStr must be {@code updateReplicaCounts}
+   * @param content the JSON request body
+   * @return the per-resource outcomes, or an error when the request or the cluster is not valid
+   */
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @POST
+  public Response updateResources(@PathParam("clusterId") String clusterId,
+      @QueryParam("command") String commandStr, String content) {
+    Command command;
+    try {
+      command = getCommand(commandStr);
+    } catch (HelixException ex) {
+      return badRequest(ex.getMessage());
+    }
+    if (command != Command.updateReplicaCounts) {
+      return badRequest(String.format("Unsupported command: %s", commandStr));
+    }
+
+    JsonNode request;
+    try {
+      request = content == null ? null : OBJECT_MAPPER.readTree(content);
+    } catch (IOException e) {
+      return badRequest("Input is not valid JSON: " + e.getMessage());
+    }
+    if (request == null || !request.isObject()) {
+      return badRequest("Input must be a JSON object.");
+    }
+    Optional<String> unknownField = findUnknownRequestField(request);
+    if (unknownField.isPresent()) {
+      return badRequest("Unsupported request field: " + unknownField.get());
+    }
+
+    ResourceReplicaCountService.ResourceSelection selection;
+    Integer replicas;
+    Integer minActiveReplicas;
+    try {
+      selection = readSelection(request);
+      replicas =
+          readOptionalInt(request, ReplicaCountUpdateRequestProperties.replicas.name());
+      minActiveReplicas =
+          readOptionalInt(request, ReplicaCountUpdateRequestProperties.minActiveReplicas.name());
+      // Reject values that cannot be honoured before the cluster is read at all, so that an
+      // invalid request never reaches the metadata store.
+      ResourceReplicaCountService.validateReplicaCounts(replicas, minActiveReplicas);
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    }
+
+    ResourceReplicaCountService service =
+        new ResourceReplicaCountService(getDataAccssor(clusterId).getBaseDataAccessor());
+    List<String> selectedResources;
+    try {
+      if (selection == ResourceReplicaCountService.ResourceSelection.EXPLICIT) {
+        selectedResources = readExplicitResources(request);
+      } else {
+        if (request.has(ReplicaCountUpdateRequestProperties.resources.name())) {
+          return badRequest(String.format("%s must not be set when selection is %s.",
+              ReplicaCountUpdateRequestProperties.resources.name(),
+              ResourceReplicaCountService.ResourceSelection.ALL_RESOURCES.name()));
+        }
+        selectedResources = service.listResources(clusterId);
+        if (selectedResources == null) {
+          return notFound("Cluster " + clusterId + " has no IdealState path.");
+        }
+      }
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      _logger.error("Failed to select resources of cluster {}.", clusterId, ex);
+      return serverError(ex);
+    }
+
+    ResourceReplicaCountService.BulkReplicaCountUpdateResult result;
+    try {
+      result = service.updateReplicaCounts(clusterId, selectedResources, replicas,
+          minActiveReplicas);
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      _logger.error("Failed to update replica counts of cluster {}.", clusterId, ex);
+      return serverError(ex);
+    }
+    return JSONRepresentation(
+        toReplicaCountUpdateNode(clusterId, selection, replicas, minActiveReplicas, result));
+  }
+
+  private static Optional<String> findUnknownRequestField(JsonNode request) {
+    Set<String> known = new HashSet<>();
+    for (ReplicaCountUpdateRequestProperties property : ReplicaCountUpdateRequestProperties
+        .values()) {
+      known.add(property.name());
+    }
+    Iterator<String> fields = request.fieldNames();
+    while (fields.hasNext()) {
+      String field = fields.next();
+      if (!known.contains(field)) {
+        return Optional.of(field);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static ResourceReplicaCountService.ResourceSelection readSelection(JsonNode request) {
+    JsonNode node = request.get(ReplicaCountUpdateRequestProperties.selection.name());
+    if (node == null || !node.isTextual()) {
+      return throwMissingField(ReplicaCountUpdateRequestProperties.selection.name(),
+          "one of " + Arrays.toString(
+              ResourceReplicaCountService.ResourceSelection.values()));
+    }
+    try {
+      return ResourceReplicaCountService.ResourceSelection.valueOf(node.textValue());
+    } catch (IllegalArgumentException ex) {
+      throw new IllegalArgumentException(String.format("Unsupported %s: %s. Expected one of %s.",
+          ReplicaCountUpdateRequestProperties.selection.name(), node.textValue(),
+          Arrays.toString(ResourceReplicaCountService.ResourceSelection.values())));
+    }
+  }
+
+  private static List<String> readExplicitResources(JsonNode request) {
+    JsonNode node = request.get(ReplicaCountUpdateRequestProperties.resources.name());
+    if (node == null || !node.isArray() || node.size() == 0) {
+      return throwMissingField(ReplicaCountUpdateRequestProperties.resources.name(),
+          "a non-empty array of resource names");
+    }
+    List<String> resources = new ArrayList<>(node.size());
+    for (JsonNode entry : node) {
+      if (!entry.isTextual()) {
+        throw new IllegalArgumentException(String.format("%s must contain only resource names.",
+            ReplicaCountUpdateRequestProperties.resources.name()));
+      }
+      resources.add(entry.textValue());
+    }
+    return resources;
+  }
+
+  private static Integer readOptionalInt(JsonNode request, String field) {
+    JsonNode node = request.get(field);
+    if (node == null || node.isNull()) {
+      return null;
+    }
+    if (!node.isInt()) {
+      throw new IllegalArgumentException(field + " must be an integer.");
+    }
+    return node.intValue();
+  }
+
+  private static <T> T throwMissingField(String field, String expected) {
+    throw new IllegalArgumentException(field + " is required and must be " + expected + ".");
+  }
+
+  private static ObjectNode toReplicaCountUpdateNode(String clusterId,
+      ResourceReplicaCountService.ResourceSelection selection, Integer replicas,
+      Integer minActiveReplicas,
+      ResourceReplicaCountService.BulkReplicaCountUpdateResult result) {
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    root.put(ReplicaCountUpdateResponseProperties.selection.name(), selection.name());
+    if (replicas != null) {
+      root.put(ReplicaCountUpdateResponseProperties.replicas.name(), replicas.intValue());
+    }
+    if (minActiveReplicas != null) {
+      root.put(ReplicaCountUpdateResponseProperties.minActiveReplicas.name(),
+          minActiveReplicas.intValue());
+    }
+    root.put(ReplicaCountUpdateResponseProperties.selectedResourceCount.name(),
+        result.getSelectedResources().size());
+    root.put(ReplicaCountUpdateResponseProperties.allAtDesiredValues.name(),
+        result.isAllAtDesiredValues());
+
+    ObjectNode statusCounts =
+        root.putObject(ReplicaCountUpdateResponseProperties.statusCounts.name());
+    result.getStatusCounts().forEach((status, count) -> statusCounts.put(status.name(), count));
+
+    ObjectNode resourceResults =
+        root.putObject(ReplicaCountUpdateResponseProperties.resourceResults.name());
+    for (String resourceName : result.getSelectedResources()) {
+      ResourceReplicaCountService.ResourceUpdateOutcome outcome =
+          result.getOutcomes().get(resourceName);
+      ObjectNode outcomeNode = resourceResults.putObject(resourceName);
+      outcomeNode.put(ReplicaCountUpdateResponseProperties.status.name(),
+          outcome.getStatus().name());
+      outcomeNode.put(ReplicaCountUpdateResponseProperties.version.name(), outcome.getVersion());
+      if (outcome.getMessage() != null) {
+        outcomeNode.put(ReplicaCountUpdateResponseProperties.message.name(),
+            outcome.getMessage());
+      }
+    }
+    return root;
   }
 
   /**
