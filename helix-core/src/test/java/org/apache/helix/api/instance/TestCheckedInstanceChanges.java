@@ -314,6 +314,28 @@ public class TestCheckedInstanceChanges extends ZkTestBase {
   }
 
   @Test
+  public void testAppliedVersionDescribesTheStateItReports() {
+    String instance = addInstance();
+    int versionBefore = readStat(instance).getVersion();
+    // Another writer lands immediately after the conditional write. The reported version must
+    // still be the one this write produced: a caller that chained the next conditional change
+    // on a later version would be accepting that writer's content as its own.
+    PostWriteInterferingAccessor accessor = new PostWriteInterferingAccessor(_gZkClient,
+        () -> _gSetupTool.getClusterManagementTool().addInstanceTag(_clusterName, instance, "t9"));
+
+    CheckedMutationResult<EffectiveInstanceOperation> result =
+        CheckedInstanceChanges.setInstanceOperation(accessor, _clusterName, instance,
+            disableRequest("automation disable"));
+
+    Assert.assertEquals(result.getOutcome(), CheckedMutationOutcome.APPLIED, result.getMessage());
+    Assert.assertEquals(result.getObservedVersion(), versionBefore + 1);
+    Assert.assertEquals(readStat(instance).getVersion(), versionBefore + 2,
+        "The other writer's change is expected to be there, one version later");
+    Assert.assertEquals(result.getEffectiveState().getOperation(),
+        InstanceConstants.InstanceOperation.DISABLE);
+  }
+
+  @Test
   public void testConcurrentWriterThatAlwaysWinsEndsInConflict() {
     String instance = addInstance();
     AtomicInteger counter = new AtomicInteger();
@@ -821,6 +843,31 @@ public class TestCheckedInstanceChanges extends ZkTestBase {
 
     int getReadCount() {
       return _readCount;
+    }
+  }
+
+  /**
+   * An accessor that lets another writer change the node immediately after a conditional write
+   * lands, which is what makes a read back an unreliable source for the version a write
+   * produced.
+   */
+  private static class PostWriteInterferingAccessor extends ZkBaseDataAccessor<ZNRecord> {
+    private final Runnable _interference;
+    private boolean _interfered;
+
+    PostWriteInterferingAccessor(RealmAwareZkClient zkClient, Runnable interference) {
+      super(zkClient);
+      _interference = interference;
+    }
+
+    @Override
+    public boolean set(String path, ZNRecord record, int expectVersion, int options) {
+      boolean written = super.set(path, record, expectVersion, options);
+      if (written && !_interfered) {
+        _interfered = true;
+        _interference.run();
+      }
+      return written;
     }
   }
 }

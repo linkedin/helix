@@ -237,7 +237,7 @@ public final class CheckedMutationExecutor {
       if (written) {
         return appliedResult(accessor, path, stat, decision);
       }
-      LOG.info("Conditional write on {} lost to a concurrent writer at version {}, attempt {} of "
+      LOG.debug("Conditional write on {} lost to a concurrent writer at version {}, attempt {} of "
           + "{}. Re-evaluating on fresh content.", path, stat.getVersion(), attempt, MAX_ATTEMPTS);
     }
 
@@ -248,36 +248,43 @@ public final class CheckedMutationExecutor {
   }
 
   /**
-   * Build the applied result, reporting the node metadata as observed right after the write.
-   * The read back can already include a later writer's change, which is exactly why it is
-   * reported instead of assumed: a creation id that no longer matches the one the mutation was
-   * evaluated on means the node was deleted and recreated around this write.
+   * Build the applied result.
+   *
+   * <p>The version reported is the one this write produced: the metadata store increments the
+   * data version by exactly one per write, and the conditional write succeeded from the version
+   * that was evaluated. Reporting whatever a read back happens to see instead would hand the
+   * caller a version belonging to content it was never shown, and a later conditional change
+   * expecting that version would then accept another writer's state as its own.
+   *
+   * <p>The read back is only used to notice that the node was deleted and recreated around
+   * this write, which is the window an expected creation id cannot close by itself.
    */
   private static <S> CheckedMutationResult<S> appliedResult(BaseDataAccessor<ZNRecord> accessor,
       String path, Stat evaluatedStat, Decision<S> decision) {
     int version = evaluatedStat.getVersion() + 1;
     long creationId = evaluatedStat.getCzxid();
+    boolean identityChanged = false;
     Stat afterWrite = new Stat();
     try {
-      if (accessor.get(path, afterWrite, AccessOption.PERSISTENT) != null) {
-        version = afterWrite.getVersion();
-        creationId = afterWrite.getCzxid();
+      if (accessor.get(path, afterWrite, AccessOption.PERSISTENT) == null) {
+        // The node was removed after our write landed. The write itself did happen, so the
+        // outcome stays APPLIED and the caller is told which version it produced.
+        LOG.warn("Node {} disappeared right after a checked write at version {}.", path, version);
+      } else {
+        identityChanged = afterWrite.getCzxid() != creationId;
       }
     } catch (ZkNoNodeException e) {
-      // The node was removed after our write landed. The write itself did happen, so the
-      // outcome stays APPLIED and the caller is told which version it produced.
-      LOG.warn("Node {} disappeared right after a checked write at version {}.", path,
-          evaluatedStat.getVersion());
+      LOG.warn("Node {} disappeared right after a checked write at version {}.", path, version);
     }
 
-    if (creationId != evaluatedStat.getCzxid()) {
+    if (identityChanged) {
       LOG.warn("Node {} carries creation id {} after a checked write that was evaluated against "
               + "creation id {}. The node was deleted and recreated around this write.", path,
-          creationId, evaluatedStat.getCzxid());
+          afterWrite.getCzxid(), creationId);
       return CheckedMutationResult.applied(decision._message
-              + " Warning: the node creation id changed during this write, so it was deleted and "
-              + "recreated around it. Re-read before trusting the reported state.",
-          decision._effectiveState, version, creationId);
+              + " Warning: the node creation id changed around this write, so it was deleted and "
+              + "recreated. Re-read before trusting the reported state.", decision._effectiveState,
+          version, creationId);
     }
     return CheckedMutationResult.applied(decision._message, decision._effectiveState, version,
         creationId);

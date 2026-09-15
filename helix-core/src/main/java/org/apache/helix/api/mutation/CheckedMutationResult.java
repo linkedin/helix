@@ -112,16 +112,18 @@ public final class CheckedMutationResult<S> {
   }
 
   /**
-   * @return the node data version the write produced for {@link CheckedMutationOutcome#APPLIED},
-   *     or the version the decision was based on otherwise. {@link #UNKNOWN_VERSION} when the
-   *     node was not observed.
+   * @return the node data version this write produced for
+   *     {@link CheckedMutationOutcome#APPLIED}, or the version the decision was based on
+   *     otherwise. {@link #UNKNOWN_VERSION} when the node was not observed. The version and the
+   *     reported state always describe each other, so a caller can chain the next conditional
+   *     change on it.
    */
   public int getObservedVersion() {
     return _observedVersion;
   }
 
   /**
-   * @return the node creation id observed with the version above, or
+   * @return the node creation id belonging to the version above, or
    *     {@link #UNKNOWN_CREATION_ID} when the node was not observed. Comparing this value
    *     across calls detects a node that was deleted and recreated in between.
    */
