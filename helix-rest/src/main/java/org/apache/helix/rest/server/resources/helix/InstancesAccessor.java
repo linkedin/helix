@@ -347,7 +347,7 @@ public class InstancesAccessor extends AbstractHelixResource {
     } catch (HelixException | ZkException | IllegalArgumentException e) {
       // An empty population is indistinguishable from "nothing is being retained", which is the
       // answer a caller acts on, so a partial read must fail loudly rather than return 200.
-      _logger.error("Failed to compute delayed rebalance status for cluster {}", clusterId, e);
+      _logger.warn("Failed to compute delayed rebalance status for cluster {}", clusterId, e);
       return serverError(e);
     }
   }
