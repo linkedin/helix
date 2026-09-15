@@ -89,6 +89,7 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   private ClusterConfig _clusterConfig;
 
   private boolean _updateInstanceOfflineTime = true;
+  private boolean _persistOfflineInstanceHistory = true;
   private MaintenanceSignal _maintenanceSignal;
   private PauseSignal _pauseSignal;
   private boolean _isMaintenanceModeEnabled;
@@ -571,6 +572,21 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   public String getClusterName() {
     // We have some assumption in code that we rely on cluster config to get cluster name
     return _clusterConfig == null ? _clusterName : _clusterConfig.getClusterName();
+  }
+
+  /**
+   * Controls whether {@link #refresh} is allowed to write participant offline history back to
+   * ZooKeeper. It is enabled by default because the controller pipeline is responsible for
+   * recording when a participant went offline.
+   * <p>
+   * A caller that only reads cluster state, such as a status API, disables it so that observing
+   * the cluster does not change participant metadata. While disabled, an instance whose recorded
+   * history still reads as online is left untouched and is omitted from
+   * {@link #getInstanceOfflineTimeMap()}, which is the same state the map has before the
+   * controller records the offline time.
+   */
+  public void setPersistOfflineInstanceHistory(boolean persistOfflineInstanceHistory) {
+    _persistOfflineInstanceHistory = persistOfflineInstanceHistory;
   }
 
   @Override
@@ -1065,6 +1081,11 @@ public class BaseControllerDataProvider implements ControlContextProvider {
         continue;
       }
       if (history.getLastOfflineTime() == ParticipantHistory.ONLINE) {
+        if (!_persistOfflineInstanceHistory) {
+          // A read-only refresh must not record an offline time the cluster has not recorded yet,
+          // so the instance is left out of the map exactly as an instance with no history is.
+          continue;
+        }
         history.reportOffline();
         // persist history back to ZK only if the node still exists
         boolean succeed = accessor.updateProperty(propertyKey,
