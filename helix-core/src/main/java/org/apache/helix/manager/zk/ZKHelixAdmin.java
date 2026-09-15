@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -76,6 +77,7 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterConstraints;
 import org.apache.helix.model.ClusterConstraints.ConstraintType;
 import org.apache.helix.model.ClusterStatus;
+import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CurrentState;
@@ -87,6 +89,7 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceConfigIdentity;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Message;
@@ -97,6 +100,8 @@ import org.apache.helix.model.PauseSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
+import org.apache.helix.model.SwapPairRequest;
+import org.apache.helix.model.SwapPairResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.ConfigStringUtil;
@@ -114,10 +119,12 @@ import org.apache.helix.zookeeper.routing.RoutingDataManager;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -844,6 +851,560 @@ public class ZKHelixAdmin implements HelixAdmin {
               + "The ZooKeeper update did not succeed.", clusterName));
     }
     return OperationCheckResult.success();
+  }
+
+  // ===========================================================================================
+  // Pair-scoped swap preparation and completion.
+  //
+  // The single-instance swap APIs above find the peer by matching logical ids at call time, so the
+  // peer is an output of the call. Everything below takes both instances as inputs instead, checks
+  // that they really are each other's only peer, and writes both configs in one conditional
+  // transaction keyed on the exact config revisions the decision was made from.
+  // ===========================================================================================
+
+  // A config that has never been written since it was created sits at data version 0. A conditional
+  // write on version 0 cannot tell that config apart from a different config that was created in
+  // its place, because a newly created node also starts at 0. Callers asserting an identity on such
+  // a config are refused instead of being given a guarantee that does not hold.
+  private static final int UNVERIFIABLE_SWAP_CONFIG_VERSION = 0;
+
+  // An instance can only be swapped out while it is an active member of the cluster. These are the
+  // same states the native UNKNOWN -> SWAP_IN transition rule requires of a matching peer.
+  private static final ImmutableSet<InstanceConstants.InstanceOperation>
+      SWAP_OUT_ELIGIBLE_OPERATIONS = ImmutableSet.of(InstanceConstants.InstanceOperation.ENABLE,
+      InstanceConstants.InstanceOperation.DISABLE);
+
+  // A coordinated swap-in is marked SWAP_IN. Preparation will not overwrite an operation that some
+  // other party set for its own reasons (a DISABLE or an EVACUATE), because clearing it would
+  // silently undo that party's decision. Such a swap-in is reported instead.
+  private static final ImmutableSet<InstanceConstants.InstanceOperation>
+      COORDINATED_SWAP_IN_ELIGIBLE_OPERATIONS =
+      ImmutableSet.of(InstanceConstants.InstanceOperation.ENABLE,
+          InstanceConstants.InstanceOperation.UNKNOWN,
+          InstanceConstants.InstanceOperation.SWAP_IN);
+
+  @Override
+  public InstanceConfigIdentity getInstanceConfigIdentity(String clusterName, String instanceName) {
+    Stat stat = _baseDataAccessor.getStat(
+        PropertyPathBuilder.instanceConfig(clusterName, instanceName), AccessOption.PERSISTENT);
+    return stat == null ? null
+        : new InstanceConfigIdentity(instanceName, stat.getVersion(), stat.getCzxid());
+  }
+
+  @Override
+  public SwapPairResult prepareSwapPair(String clusterName, SwapPairRequest request) {
+    return executeSwapPairOperation(clusterName, request, true);
+  }
+
+  @Override
+  public SwapPairResult completeSwapPair(String clusterName, SwapPairRequest request) {
+    return executeSwapPairOperation(clusterName, request, false);
+  }
+
+  private SwapPairResult executeSwapPairOperation(String clusterName, SwapPairRequest request,
+      boolean prepare) {
+    List<String> requestProblems = validateSwapPairRequestShape(request);
+    if (!requestProblems.isEmpty()) {
+      return new SwapPairResult.Builder(SwapPairResult.Status.INVALID_REQUEST)
+          .addBlockers(requestProblems).build();
+    }
+
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    String swapOutPath = PropertyPathBuilder.instanceConfig(clusterName, swapOutInstanceName);
+    String swapInPath = PropertyPathBuilder.instanceConfig(clusterName, swapInInstanceName);
+
+    Stat swapOutStat = new Stat();
+    Stat swapInStat = new Stat();
+    ZNRecord swapOutRecord =
+        _baseDataAccessor.get(swapOutPath, swapOutStat, AccessOption.PERSISTENT);
+    ZNRecord swapInRecord = _baseDataAccessor.get(swapInPath, swapInStat, AccessOption.PERSISTENT);
+    if (swapOutRecord == null || swapInRecord == null) {
+      SwapPairResult.Builder missing =
+          new SwapPairResult.Builder(SwapPairResult.Status.INVALID_REQUEST);
+      if (swapOutRecord == null) {
+        missing.addBlocker(String.format("The swap-out instance %s has no config in cluster %s.",
+            swapOutInstanceName, clusterName));
+      }
+      if (swapInRecord == null) {
+        missing.addBlocker(String.format("The swap-in instance %s has no config in cluster %s.",
+            swapInInstanceName, clusterName));
+      }
+      return missing.build();
+    }
+
+    InstanceConfigIdentity swapOutIdentity = new InstanceConfigIdentity(swapOutInstanceName,
+        swapOutStat.getVersion(), swapOutStat.getCzxid());
+    InstanceConfigIdentity swapInIdentity =
+        new InstanceConfigIdentity(swapInInstanceName, swapInStat.getVersion(),
+            swapInStat.getCzxid());
+
+    SwapPairResult identityRefusal =
+        checkExpectedSwapPairIdentities(request, swapOutIdentity, swapInIdentity);
+    if (identityRefusal != null) {
+      return identityRefusal;
+    }
+
+    String logicalIdKey;
+    try {
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+      if (clusterConfig == null) {
+        return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity,
+            swapInIdentity,
+            String.format("Cluster %s has no cluster config, so its topology definition and "
+                + "therefore the logical id of a swap pair cannot be resolved.", clusterName));
+      }
+      logicalIdKey = ClusterTopologyConfig.createFromClusterConfig(clusterConfig).getEndNodeType();
+    } catch (HelixException | IllegalArgumentException e) {
+      return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity, swapInIdentity,
+          String.format("Could not resolve the topology definition of cluster %s: %s", clusterName,
+              e.getMessage()));
+    }
+
+    InstanceConfig swapOutConfig = new InstanceConfig(swapOutRecord);
+    InstanceConfig swapInConfig = new InstanceConfig(swapInRecord);
+    Map<String, String> swapOutDomain = swapOutConfig.getDomainAsMap();
+    Map<String, String> swapInDomain = swapInConfig.getDomainAsMap();
+    String swapOutLogicalId = swapOutDomain.get(logicalIdKey);
+    if (swapOutLogicalId == null || swapOutLogicalId.isEmpty()) {
+      return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-out instance %s has no %s entry in its DOMAIN, so it does not occupy a "
+                  + "topology slot that a swap-in could take over.", swapOutInstanceName,
+              logicalIdKey));
+    }
+
+    // Reject an ambiguous pairing outright. If some third instance already carries the swap-out's
+    // logical id then "the peer" is not well defined, and a swap resolved by logical id could act
+    // on that third instance instead of the one the caller named.
+    List<String> otherPeers =
+        InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
+            swapOutConfig).stream().map(InstanceConfig::getInstanceName)
+            .filter(name -> !name.equals(swapInInstanceName)).sorted()
+            .collect(Collectors.toList());
+    if (!otherPeers.isEmpty()) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "Instances %s also carry logical id %s in cluster %s, so %s and %s are not an "
+                  + "unambiguous swap pair. Resolve the duplicate logical ids before swapping.",
+              otherPeers, swapOutLogicalId, clusterName, swapOutInstanceName, swapInInstanceName));
+    }
+
+    return prepare ? prepareSwapPairInternal(clusterName, request, swapOutPath, swapInPath,
+        swapOutConfig, swapInConfig, swapOutDomain, swapInDomain, logicalIdKey, swapOutLogicalId,
+        swapOutIdentity, swapInIdentity)
+        : completeSwapPairInternal(clusterName, request, swapOutPath, swapInPath, swapOutConfig,
+            swapInConfig, swapInDomain, logicalIdKey, swapOutLogicalId, swapOutIdentity,
+            swapInIdentity);
+  }
+
+  private SwapPairResult prepareSwapPairInternal(String clusterName, SwapPairRequest request,
+      String swapOutPath, String swapInPath, InstanceConfig swapOutConfig,
+      InstanceConfig swapInConfig, Map<String, String> swapOutDomain,
+      Map<String, String> swapInDomain, String logicalIdKey, String swapOutLogicalId,
+      InstanceConfigIdentity swapOutIdentity, InstanceConfigIdentity swapInIdentity) {
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    InstanceConstants.InstanceOperation swapOutOperation =
+        swapOutConfig.getInstanceOperation().getOperation();
+    InstanceConstants.InstanceOperation swapInOperation =
+        swapInConfig.getInstanceOperation().getOperation();
+
+    if (!SWAP_OUT_ELIGIBLE_OPERATIONS.contains(swapOutOperation)) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-out instance %s is in instance operation %s in cluster %s. Only an "
+                  + "instance in %s is an active member that can be swapped out.",
+              swapOutInstanceName, swapOutOperation, clusterName, SWAP_OUT_ELIGIBLE_OPERATIONS));
+    }
+
+    ZNRecord desiredSwapInRecord;
+    if (request.getSwapMode() == SwapPairRequest.SwapMode.COORDINATED) {
+      if (!COORDINATED_SWAP_IN_ELIGIBLE_OPERATIONS.contains(swapInOperation)) {
+        return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+            String.format(
+                "The swap-in instance %s is in instance operation %s in cluster %s. Marking it "
+                    + "SWAP_IN would discard that operation, so it is left untouched. Clear the "
+                    + "operation deliberately and prepare the swap again.", swapInInstanceName,
+                swapInOperation, clusterName));
+      }
+      boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
+      if (logicalIdAligned && swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
+        return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_PREPARED)
+            .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
+            .build();
+      }
+
+      InstanceConfig updatedSwapInConfig = new InstanceConfig(new ZNRecord(swapInConfig.getRecord()));
+      // Only the logical id moves. Every other field the swap-in carries, in the domain and
+      // outside it, keeps the value the swap-in already has.
+      Map<String, String> alignedDomain = new LinkedHashMap<>(swapInDomain);
+      alignedDomain.put(logicalIdKey, swapOutLogicalId);
+      updatedSwapInConfig.setDomain(alignedDomain);
+      updatedSwapInConfig.setInstanceOperation(
+          swapPairInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN, request));
+      desiredSwapInRecord = updatedSwapInConfig.getRecord();
+    } else {
+      // A direct swap-in takes over the whole topology slot, so it must not be assignable while it
+      // still carries its own slot, and it must not become assignable in the swap-out's slot before
+      // completion transfers the config.
+      if (swapInOperation != InstanceConstants.InstanceOperation.UNKNOWN) {
+        return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+            String.format(
+                "The swap-in instance %s is in instance operation %s in cluster %s. A direct swap "
+                    + "moves the whole topology slot onto the swap-in, so the swap-in has to be "
+                    + "UNKNOWN and therefore unassignable until the swap is completed.",
+                swapInInstanceName, swapInOperation, clusterName));
+      }
+
+      Map<String, String> mergedDomain = new LinkedHashMap<>(swapOutDomain);
+      for (String preservedKey : request.getPreservedSwapInDomainKeys()) {
+        String preservedValue = swapInDomain.get(preservedKey);
+        if (preservedValue == null) {
+          return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity,
+              swapInIdentity, String.format(
+                  "The swap-in instance %s has no %s entry in its DOMAIN, so that entry cannot be "
+                      + "preserved across the topology slot transfer in cluster %s.",
+                  swapInInstanceName, preservedKey, clusterName));
+        }
+        mergedDomain.put(preservedKey, preservedValue);
+      }
+      if (mergedDomain.equals(swapInDomain)) {
+        return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_PREPARED)
+            .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
+            .build();
+      }
+
+      InstanceConfig updatedSwapInConfig = new InstanceConfig(new ZNRecord(swapInConfig.getRecord()));
+      updatedSwapInConfig.setDomain(mergedDomain);
+      // No instance operation is set here on purpose. The swap-in stays UNKNOWN, and completion is
+      // what makes it take over.
+      desiredSwapInRecord = updatedSwapInConfig.getRecord();
+    }
+
+    logger.info(
+        "Preparing {} swap pair in cluster {}: swapOut={} (version {}), swapIn={} (version {}).",
+        request.getSwapMode(), clusterName, swapOutInstanceName, swapOutIdentity.getConfigVersion(),
+        swapInInstanceName, swapInIdentity.getConfigVersion());
+    return applySwapPairWrite(clusterName, swapOutPath, swapInPath, null, desiredSwapInRecord,
+        swapOutIdentity, swapInIdentity, SwapPairResult.Status.PREPARED);
+  }
+
+  private SwapPairResult completeSwapPairInternal(String clusterName, SwapPairRequest request,
+      String swapOutPath, String swapInPath, InstanceConfig swapOutConfig,
+      InstanceConfig swapInConfig, Map<String, String> swapInDomain, String logicalIdKey,
+      String swapOutLogicalId, InstanceConfigIdentity swapOutIdentity,
+      InstanceConfigIdentity swapInIdentity) {
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    InstanceConstants.InstanceOperation swapOutOperation =
+        swapOutConfig.getInstanceOperation().getOperation();
+    InstanceConstants.InstanceOperation swapInOperation =
+        swapInConfig.getInstanceOperation().getOperation();
+    boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
+
+    // A completed pair looks the same in both modes: the swap-in holds the slot and carries the
+    // operation it inherited, and the swap-out has been retired to UNKNOWN. Recognising that shape
+    // is what makes a replayed completion harmless instead of a second config move.
+    if (swapOutOperation == InstanceConstants.InstanceOperation.UNKNOWN) {
+      if (logicalIdAligned && swapInOperation != InstanceConstants.InstanceOperation.UNKNOWN
+          && swapInOperation != InstanceConstants.InstanceOperation.SWAP_IN) {
+        return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_COMPLETED)
+            .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
+            .build();
+      }
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-out instance %s is already UNKNOWN in cluster %s but the swap-in %s is in "
+                  + "instance operation %s and %s the swap-out's logical id %s, so this is not a "
+                  + "completed swap and not a swap that can be completed.", swapOutInstanceName,
+              clusterName, swapInInstanceName, swapInOperation,
+              logicalIdAligned ? "holds" : "does not hold", swapOutLogicalId));
+    }
+
+    if (!SWAP_OUT_ELIGIBLE_OPERATIONS.contains(swapOutOperation)) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-out instance %s is in instance operation %s in cluster %s. Only an "
+                  + "instance in %s is an active member whose swap can be completed.",
+              swapOutInstanceName, swapOutOperation, clusterName, SWAP_OUT_ELIGIBLE_OPERATIONS));
+    }
+    if (!logicalIdAligned) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-in instance %s carries logical id %s but the swap-out %s carries %s in "
+                  + "cluster %s. Prepare the swap before completing it.", swapInInstanceName,
+              swapInDomain.get(logicalIdKey), swapOutInstanceName, swapOutLogicalId, clusterName));
+    }
+
+    InstanceConstants.InstanceOperation expectedSwapInOperation =
+        request.getSwapMode() == SwapPairRequest.SwapMode.COORDINATED
+            ? InstanceConstants.InstanceOperation.SWAP_IN
+            : InstanceConstants.InstanceOperation.UNKNOWN;
+    if (swapInOperation != expectedSwapInOperation) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "A %s swap expects the swap-in instance %s to be in instance operation %s before "
+                  + "completion, but it is in %s in cluster %s.", request.getSwapMode(),
+              swapInInstanceName, expectedSwapInOperation, swapInOperation, clusterName));
+    }
+
+    // Force skips only this readiness check. Everything that decides which instances are touched
+    // has already run above, and the conditional write below still applies.
+    if (!request.isForceComplete()) {
+      OperationCheckResult readiness =
+          canCompleteSwap(clusterName, swapOutInstanceName, swapInInstanceName);
+      if (!readiness.isSuccessful()) {
+        return new SwapPairResult.Builder(SwapPairResult.Status.NOT_READY)
+            .addBlockers(readiness.getBlockers()).setObservedSwapOutIdentity(swapOutIdentity)
+            .setObservedSwapInIdentity(swapInIdentity).build();
+      }
+    }
+
+    InstanceConfig updatedSwapInConfig = new InstanceConfig(new ZNRecord(swapInConfig.getRecord()));
+    // The swap-out config used here is the one this call read and validated, not a second read, so
+    // the conditional write below covers exactly the content being copied.
+    updatedSwapInConfig.overwriteInstanceConfig(swapOutConfig);
+
+    InstanceConfig retiredSwapOutConfig =
+        new InstanceConfig(new ZNRecord(swapOutConfig.getRecord()));
+    retiredSwapOutConfig.setInstanceOperation(
+        swapPairInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN, request));
+
+    logger.info(
+        "Completing {} swap pair in cluster {}: swapOut={} (version {}), swapIn={} (version {}), "
+            + "force={}.", request.getSwapMode(), clusterName, swapOutInstanceName,
+        swapOutIdentity.getConfigVersion(), swapInInstanceName, swapInIdentity.getConfigVersion(),
+        request.isForceComplete());
+    return applySwapPairWrite(clusterName, swapOutPath, swapInPath,
+        retiredSwapOutConfig.getRecord(), updatedSwapInConfig.getRecord(), swapOutIdentity,
+        swapInIdentity, SwapPairResult.Status.COMPLETED);
+  }
+
+  /**
+   * Write the pair in one transaction, conditional on both config versions. A null record for a
+   * side means that side is only checked, not written, which still makes a concurrent change to it
+   * abort the whole operation.
+   */
+  private SwapPairResult applySwapPairWrite(String clusterName, String swapOutPath,
+      String swapInPath, ZNRecord swapOutRecordToWrite, ZNRecord swapInRecordToWrite,
+      InstanceConfigIdentity swapOutIdentity, InstanceConfigIdentity swapInIdentity,
+      SwapPairResult.Status successStatus) {
+    List<Op> ops = Arrays.asList(
+        swapOutRecordToWrite != null ? Op.setData(swapOutPath,
+            _zkClient.serialize(swapOutRecordToWrite, swapOutPath),
+            swapOutIdentity.getConfigVersion())
+            : Op.check(swapOutPath, swapOutIdentity.getConfigVersion()),
+        swapInRecordToWrite != null ? Op.setData(swapInPath,
+            _zkClient.serialize(swapInRecordToWrite, swapInPath),
+            swapInIdentity.getConfigVersion())
+            : Op.check(swapInPath, swapInIdentity.getConfigVersion()));
+
+    List<OpResult> opResults;
+    try {
+      opResults = _zkClient.multi(ops);
+    } catch (ZkBadVersionException | ZkNoNodeException e) {
+      return swapPairRefusal(SwapPairResult.Status.CONFLICT, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The instance configs of %s and %s in cluster %s changed while the swap was being "
+                  + "evaluated, so nothing was written. Re-read both configs and retry. Cause: %s",
+              swapOutIdentity.getInstanceName(), swapInIdentity.getInstanceName(), clusterName,
+              e.getMessage()));
+    } catch (ZkException e) {
+      logger.error("Failed to write swap pair {} and {} in cluster {}.",
+          swapOutIdentity.getInstanceName(), swapInIdentity.getInstanceName(), clusterName, e);
+      return swapPairRefusal(SwapPairResult.Status.FAILED, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap write for %s and %s in cluster %s failed and may or may not have taken "
+                  + "effect. Re-read both configs before retrying. Cause: %s",
+              swapOutIdentity.getInstanceName(), swapInIdentity.getInstanceName(), clusterName,
+              e.getMessage()));
+    }
+
+    if (opResults == null || opResults.size() != ops.size()) {
+      return swapPairRefusal(SwapPairResult.Status.FAILED, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap write for %s and %s in cluster %s returned %s results for %d operations, "
+                  + "so whether it took effect is unknown. Re-read both configs before retrying.",
+              swapOutIdentity.getInstanceName(), swapInIdentity.getInstanceName(), clusterName,
+              opResults == null ? "no" : String.valueOf(opResults.size()), ops.size()));
+    }
+    for (OpResult opResult : opResults) {
+      if (opResult instanceof OpResult.ErrorResult
+          && ((OpResult.ErrorResult) opResult).getErr() != KeeperException.Code.OK.intValue()) {
+        return swapPairRefusal(SwapPairResult.Status.CONFLICT, swapOutIdentity, swapInIdentity,
+            String.format(
+                "The instance configs of %s and %s in cluster %s changed while the swap was being "
+                    + "evaluated, so nothing was written (ZooKeeper error %d). Re-read both "
+                    + "configs and retry.", swapOutIdentity.getInstanceName(),
+                swapInIdentity.getInstanceName(), clusterName,
+                ((OpResult.ErrorResult) opResult).getErr()));
+      }
+    }
+
+    InstanceConfigIdentity writtenSwapOutIdentity =
+        identityAfterWrite(swapOutIdentity, opResults.get(0));
+    InstanceConfigIdentity writtenSwapInIdentity =
+        identityAfterWrite(swapInIdentity, opResults.get(1));
+    // The conditional write can only assert a data version. Confirming afterwards that the nodes
+    // written are still the nodes inspected is the only way to notice a config that was replaced
+    // outright, and it is reported rather than being folded into a success.
+    List<String> replaced = new ArrayList<>();
+    if (writtenSwapOutIdentity.getConfigCreationId() != swapOutIdentity.getConfigCreationId()) {
+      replaced.add(swapOutIdentity.getInstanceName());
+    }
+    if (writtenSwapInIdentity.getConfigCreationId() != swapInIdentity.getConfigCreationId()) {
+      replaced.add(swapInIdentity.getInstanceName());
+    }
+    if (!replaced.isEmpty()) {
+      logger.error("Swap write in cluster {} landed on recreated instance configs for {}.",
+          clusterName, replaced);
+      return new SwapPairResult.Builder(SwapPairResult.Status.FAILED).addBlocker(String.format(
+              "The instance configs of %s in cluster %s were deleted and created again while the "
+                  + "swap was being evaluated, so the write landed on a different config than the "
+                  + "one it was derived from. Inspect both instances before retrying.", replaced,
+              clusterName)).setObservedSwapOutIdentity(writtenSwapOutIdentity)
+          .setObservedSwapInIdentity(writtenSwapInIdentity).build();
+    }
+
+    return new SwapPairResult.Builder(successStatus)
+        .setObservedSwapOutIdentity(writtenSwapOutIdentity)
+        .setObservedSwapInIdentity(writtenSwapInIdentity).build();
+  }
+
+  private static InstanceConfigIdentity identityAfterWrite(InstanceConfigIdentity before,
+      OpResult opResult) {
+    if (!(opResult instanceof OpResult.SetDataResult)) {
+      // A checked but unwritten config keeps the revision the check asserted.
+      return before;
+    }
+    Stat stat = ((OpResult.SetDataResult) opResult).getStat();
+    if (stat == null) {
+      return before;
+    }
+    return new InstanceConfigIdentity(before.getInstanceName(), stat.getVersion(), stat.getCzxid());
+  }
+
+  private static List<String> validateSwapPairRequestShape(SwapPairRequest request) {
+    List<String> problems = new ArrayList<>();
+    if (request == null) {
+      problems.add("The swap pair request is null.");
+      return problems;
+    }
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    if (swapOutInstanceName == null || swapOutInstanceName.isEmpty()) {
+      problems.add("The swap pair request does not name a swap-out instance.");
+    }
+    if (swapInInstanceName == null || swapInInstanceName.isEmpty()) {
+      problems.add("The swap pair request does not name a swap-in instance.");
+    }
+    if (swapOutInstanceName != null && swapOutInstanceName.equals(swapInInstanceName)) {
+      problems.add(String.format(
+          "The swap pair request names %s as both the swap-out and the swap-in instance.",
+          swapOutInstanceName));
+    }
+    if (request.getSwapMode() == null) {
+      problems.add("The swap pair request does not specify a swap mode.");
+    }
+    problems.addAll(
+        validateExpectedIdentityShape(request.getExpectedSwapOutIdentity(), swapOutInstanceName,
+            "swap-out"));
+    problems.addAll(
+        validateExpectedIdentityShape(request.getExpectedSwapInIdentity(), swapInInstanceName,
+            "swap-in"));
+    return problems;
+  }
+
+  private static List<String> validateExpectedIdentityShape(InstanceConfigIdentity expected,
+      String instanceName, String role) {
+    if (expected == null) {
+      return Collections.emptyList();
+    }
+    if (!expected.isFullySpecified()) {
+      return Collections.singletonList(String.format(
+          "The expected %s config identity %s is missing an instance name, a config version or a "
+              + "creation id. A partial identity cannot be enforced, so it is rejected instead of "
+              + "being enforced in part.", role, expected));
+    }
+    if (!expected.getInstanceName().equals(instanceName)) {
+      return Collections.singletonList(String.format(
+          "The expected %s config identity names instance %s but the request names %s.", role,
+          expected.getInstanceName(), instanceName));
+    }
+    return Collections.emptyList();
+  }
+
+  private static SwapPairResult checkExpectedSwapPairIdentities(SwapPairRequest request,
+      InstanceConfigIdentity observedSwapOut, InstanceConfigIdentity observedSwapIn) {
+    List<String> mismatches = new ArrayList<>();
+    List<String> unverifiable = new ArrayList<>();
+    collectIdentityProblems(request.getExpectedSwapOutIdentity(), observedSwapOut, "swap-out",
+        mismatches, unverifiable);
+    collectIdentityProblems(request.getExpectedSwapInIdentity(), observedSwapIn, "swap-in",
+        mismatches, unverifiable);
+    if (!mismatches.isEmpty()) {
+      return new SwapPairResult.Builder(SwapPairResult.Status.IDENTITY_MISMATCH)
+          .addBlockers(mismatches).setObservedSwapOutIdentity(observedSwapOut)
+          .setObservedSwapInIdentity(observedSwapIn).build();
+    }
+    if (!unverifiable.isEmpty()) {
+      return new SwapPairResult.Builder(SwapPairResult.Status.IDENTITY_UNVERIFIABLE)
+          .addBlockers(unverifiable).setObservedSwapOutIdentity(observedSwapOut)
+          .setObservedSwapInIdentity(observedSwapIn).build();
+    }
+    return null;
+  }
+
+  private static void collectIdentityProblems(InstanceConfigIdentity expected,
+      InstanceConfigIdentity observed, String role, List<String> mismatches,
+      List<String> unverifiable) {
+    if (expected == null) {
+      return;
+    }
+    if (expected.getConfigCreationId() != observed.getConfigCreationId()) {
+      mismatches.add(String.format(
+          "The %s instance config for %s was replaced since it was read: expected creation id %d, "
+              + "found %d. The instance was removed and added again, so the caller's view of it is "
+              + "no longer about the same config.", role, observed.getInstanceName(),
+          expected.getConfigCreationId(), observed.getConfigCreationId()));
+      return;
+    }
+    if (expected.getConfigVersion() != observed.getConfigVersion()) {
+      mismatches.add(String.format(
+          "The %s instance config for %s changed since it was read: expected config version %d, "
+              + "found %d.", role, observed.getInstanceName(), expected.getConfigVersion(),
+          observed.getConfigVersion()));
+      return;
+    }
+    if (observed.getConfigVersion() == UNVERIFIABLE_SWAP_CONFIG_VERSION) {
+      unverifiable.add(String.format(
+          "The %s instance config for %s is at config version %d, which is also the version a "
+              + "freshly created config has. A write conditional on that version cannot tell the "
+              + "config apart from one deleted and created again before the write lands, so the "
+              + "asserted identity cannot be enforced and the request is refused rather than "
+              + "granted on a weaker guarantee. Retry once the config has been written at least "
+              + "once.", role, observed.getInstanceName(), UNVERIFIABLE_SWAP_CONFIG_VERSION));
+    }
+  }
+
+  private static SwapPairResult swapPairRefusal(SwapPairResult.Status status,
+      InstanceConfigIdentity swapOutIdentity, InstanceConfigIdentity swapInIdentity,
+      String blocker) {
+    return new SwapPairResult.Builder(status).addBlocker(blocker)
+        .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
+        .build();
+  }
+
+  private static InstanceConfig.InstanceOperation swapPairInstanceOperation(
+      InstanceConstants.InstanceOperation operation, SwapPairRequest request) {
+    InstanceConfig.InstanceOperation.Builder builder =
+        new InstanceConfig.InstanceOperation.Builder().setOperation(operation)
+            .setSource(request.getOperationSource());
+    if (request.getReason() != null) {
+      builder.setReason(request.getReason());
+    }
+    return builder.build();
   }
 
   @Override

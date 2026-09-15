@@ -41,10 +41,13 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceConfigIdentity;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
+import org.apache.helix.model.SwapPairRequest;
+import org.apache.helix.model.SwapPairResult;
 
 /*
  * Helix cluster management
@@ -881,6 +884,85 @@ public interface HelixAdmin {
   default OperationCheckResult completeSwapIfPossibleWithDetails(String clusterName,
       String instanceName, boolean forceComplete) {
     throw new UnsupportedOperationException("completeSwapIfPossibleWithDetails is not implemented.");
+  }
+
+  /**
+   * Read the current identity of an instance config, so it can be asserted on a later
+   * {@link #prepareSwapPair(String, SwapPairRequest)} or
+   * {@link #completeSwapPair(String, SwapPairRequest)} call.
+   *
+   * @param clusterName  The cluster name
+   * @param instanceName The instance whose config identity is read
+   * @return the identity, or null if the instance config does not exist.
+   */
+  default InstanceConfigIdentity getInstanceConfigIdentity(String clusterName,
+      String instanceName) {
+    throw new UnsupportedOperationException("getInstanceConfigIdentity is not implemented.");
+  }
+
+  /**
+   * Prepare a named swap-out and swap-in pair for swapping, without discovering either side from
+   * cluster state.
+   * <p>
+   * The existing {@link #canCompleteSwap(String, String)} and
+   * {@link #completeSwapIfPossible(String, String, boolean)} take a single instance and find the
+   * peer by matching logical ids. That makes the peer an output of the call rather than an input,
+   * so a caller cannot state which instance it meant, and a pair that became ambiguous between two
+   * calls is resolved silently. This call takes both instances and refuses to act on any other.
+   * <p>
+   * What preparation does depends on {@link SwapPairRequest#getSwapMode()}; see
+   * {@link SwapPairRequest.SwapMode} for the difference. In both modes the swap-out config is never
+   * modified by preparation, and fields of the swap-in that the mode does not target are left as
+   * they are.
+   * <p>
+   * Preparation is safe to repeat. When the swap-in already has the requested shape, the call
+   * reports {@link SwapPairResult.Status#ALREADY_PREPARED} and writes nothing, so a retry cannot
+   * re-apply an instance operation change on top of whatever the instance has since been set to.
+   *
+   * @param clusterName The cluster name
+   * @param request     The pair, mode and optional expected identities
+   * @return the explicit outcome, including the identities the call acted on.
+   */
+  default SwapPairResult prepareSwapPair(String clusterName, SwapPairRequest request) {
+    throw new UnsupportedOperationException("prepareSwapPair is not implemented.");
+  }
+
+  /**
+   * Complete a swap between a named swap-out and swap-in pair, without discovering either side
+   * from cluster state.
+   * <p>
+   * The completion moves the overwritable config fields from the swap-out onto the swap-in and
+   * retires the swap-out, in one conditional write covering both configs. The write asserts the
+   * data versions of both configs as observed during this call, so a concurrent change to either
+   * side aborts the whole operation and reports {@link SwapPairResult.Status#CONFLICT} rather than
+   * writing a config derived from a stale read. Neither config is left half-updated.
+   * <p>
+   * Completion is safe to replay. When the pair is already completed, the call reports
+   * {@link SwapPairResult.Status#ALREADY_COMPLETED} and writes nothing.
+   * <p>
+   * {@link SwapPairRequest#isForceComplete()} skips the replica readiness checks only. It does not
+   * skip pair validation, expected identity assertions or the conditional write, so forcing can
+   * move a swap that is not finished mirroring but can never move the wrong instance.
+   * <p>
+   * <b>What the identity assertions do and do not guarantee.</b> When
+   * {@link SwapPairRequest#getExpectedSwapOutIdentity()} or
+   * {@link SwapPairRequest#getExpectedSwapInIdentity()} is supplied, the call compares both the
+   * creation id and the data version of that config before acting, and the write itself is
+   * conditional on the data version. The underlying store can only make a write conditional on the
+   * data version, not on the creation id, so a config that is deleted and created again between the
+   * read and the write is only caught because the new node restarts at data version 0 and therefore
+   * fails the condition. That argument does not hold when the asserted data version is itself 0,
+   * where a deleted and recreated config would satisfy the condition. Rather than report a
+   * guarantee it cannot make, this call refuses such a request with
+   * {@link SwapPairResult.Status#IDENTITY_UNVERIFIABLE} and writes nothing. A config that has been
+   * written at least once since it was created is unaffected.
+   *
+   * @param clusterName The cluster name
+   * @param request     The pair, mode, force flag and optional expected identities
+   * @return the explicit outcome, including the identities the call acted on.
+   */
+  default SwapPairResult completeSwapPair(String clusterName, SwapPairRequest request) {
+    throw new UnsupportedOperationException("completeSwapPair is not implemented.");
   }
 
   /**

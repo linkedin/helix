@@ -90,6 +90,9 @@ public class AbstractResource {
     setInstanceOperation, // TODO: Name is just a place holder, may change in future
     canCompleteSwap,
     completeSwapIfPossible,
+    getSwapPairIdentities,
+    prepareSwapPair,
+    completeSwapPair,
     onDemandRebalance,
     isEvacuateFinished,
     isInstanceDrained,
