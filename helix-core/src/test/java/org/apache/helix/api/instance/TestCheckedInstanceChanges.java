@@ -490,6 +490,44 @@ public class TestCheckedInstanceChanges extends ZkTestBase {
   }
 
   @Test
+  public void testOperationWithAnUnreadableSourceIsRefused() {
+    String instance = addInstance();
+    writeRawOperations(instance, Collections.singletonList(
+        "{\"OPERATION\":\"DISABLE\",\"REASON\":\"newer writer\",\"SOURCE\":\"A_NEW_SOURCE\","
+            + "\"TIMESTAMP\":\"1\"}"));
+    ZNRecord before = readRecord(instance);
+
+    CheckedMutationResult<EffectiveInstanceOperation> result =
+        CheckedInstanceChanges.setInstanceOperation(_accessor, _clusterName, instance,
+            disableRequest("automation disable"));
+
+    Assert.assertEquals(result.getOutcome(), CheckedMutationOutcome.CONFLICT);
+    Assert.assertEquals(result.getConflictReason().orElse(null),
+        CheckedMutationConflictReason.UNREADABLE_STATE);
+    assertSameRecord(readRecord(instance), before);
+  }
+
+  @Test
+  public void testOperationThatCannotBeDeserialisedIsRefused() {
+    String instance = addInstance();
+    // An entry that cannot be read is dropped when the recorded operations are parsed, so
+    // writing them back would silently discard it.
+    writeRawOperations(instance, Arrays.asList("this is not an operation",
+        "{\"OPERATION\":\"DISABLE\",\"REASON\":\"operator\",\"SOURCE\":\"USER\","
+            + "\"TIMESTAMP\":\"1\"}"));
+    ZNRecord before = readRecord(instance);
+
+    CheckedMutationResult<EffectiveInstanceOperation> result =
+        CheckedInstanceChanges.setInstanceOperation(_accessor, _clusterName, instance,
+            disableRequest("automation disable"));
+
+    Assert.assertEquals(result.getOutcome(), CheckedMutationOutcome.CONFLICT);
+    Assert.assertEquals(result.getConflictReason().orElse(null),
+        CheckedMutationConflictReason.UNREADABLE_STATE);
+    assertSameRecord(readRecord(instance), before);
+  }
+
+  @Test
   public void testAdminSourceIsRejected() {
     try {
       InstanceOperationChangeRequest.newBuilder(InstanceConstants.InstanceOperation.DISABLE,
@@ -668,11 +706,15 @@ public class TestCheckedInstanceChanges extends ZkTestBase {
    * newer writer in a mixed version cluster produces.
    */
   private void writeUnrecognisedOperation(String instance) {
+    writeRawOperations(instance, Collections.singletonList(
+        "{\"OPERATION\":\"AN_OPERATION_FROM_THE_FUTURE\",\"REASON\":\"newer writer\","
+            + "\"SOURCE\":\"USER\",\"TIMESTAMP\":\"1\"}"));
+  }
+
+  private void writeRawOperations(String instance, List<String> serializedOperations) {
     ZNRecord record = readRecord(instance);
     record.setListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name(),
-        Collections.singletonList(
-            "{\"OPERATION\":\"AN_OPERATION_FROM_THE_FUTURE\",\"REASON\":\"newer writer\","
-                + "\"SOURCE\":\"USER\",\"TIMESTAMP\":\"1\"}"));
+        serializedOperations);
     Assert.assertTrue(_accessor.set(PropertyPathBuilder.instanceConfig(_clusterName, instance),
         record, -1, AccessOption.PERSISTENT));
   }

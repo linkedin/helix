@@ -70,6 +70,9 @@ import org.apache.zookeeper.data.Stat;
  *   <li>By default, a change that would be recorded but would not result in the requested
  *       operation being in effect is refused rather than written, so a caller cannot mistake a
  *       write for a completed change.</li>
+ *   <li>A change is refused when the instance config holds a recorded operation this version
+ *       cannot read, rather than deciding against state whose meaning is unknown or dropping
+ *       it on the way back out.</li>
  * </ul>
  *
  * <p><b>What is not guaranteed.</b>
@@ -165,6 +168,15 @@ public final class CheckedInstanceChanges {
           "Instance " + instanceName + " config is at version " + stat.getVersion()
               + " and creation id " + stat.getCzxid() + ", which does not match "
               + request.getNodeExpectation() + ". Nothing was written.", observed);
+    }
+
+    Optional<String> unreadable = findUnreadableRecordedOperation(config);
+    if (unreadable.isPresent()) {
+      return CheckedMutationExecutor.Decision.conflict(
+          CheckedMutationConflictReason.UNREADABLE_STATE,
+          "Instance " + instanceName + " records an operation this version cannot read: "
+              + unreadable.get() + ". Writing would mean deciding against state whose meaning "
+              + "is unknown, and could drop it, so nothing was written.", observed);
     }
 
     if (request.getExpectedOperation() != null
@@ -493,11 +505,44 @@ public final class CheckedInstanceChanges {
 
     List<InstanceConfig.InstanceOperation> candidates = config.getAllInstanceOperations().stream()
         .filter(op -> safeOperation(op) == InstanceConstants.InstanceOperation.DISABLE)
-        .filter(op -> op.getTimestamp() == legacyTimestamp)
+        .filter(op -> Objects.equals(safeTimestamp(op), legacyTimestamp))
         .filter(op -> legacyReason == null || legacyReason.equals(op.getReason()))
         .collect(Collectors.toList());
 
     return candidates.size() == 1 && safeSource(candidates.get(0)) == source;
+  }
+
+  /**
+   * Describes the first recorded operation this version cannot read well enough to change the
+   * instance safely, if there is one.
+   *
+   * <p>Two things make an operation unreadable. A source or a timestamp that cannot be parsed
+   * leaves no way to tell whether the entry belongs to the caller, or to attribute the
+   * deprecated fields. An entry that fails to deserialise at all is worse: it is dropped when
+   * the recorded operations are read, so writing them back would silently discard another
+   * writer's state. An operation type this version does not know is fine, because such an
+   * entry is still carried through unchanged.
+   */
+  private static Optional<String> findUnreadableRecordedOperation(InstanceConfig config) {
+    List<String> stored = config.getRecord()
+        .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name());
+    List<InstanceConfig.InstanceOperation> readable = config.getAllInstanceOperations();
+    int storedCount = stored == null ? 0 : stored.size();
+    if (storedCount != readable.size()) {
+      return Optional.of(
+          storedCount + " operations are stored but only " + readable.size() + " could be read");
+    }
+    for (InstanceConfig.InstanceOperation operation : readable) {
+      if (safeSource(operation) == null) {
+        return Optional.of("an operation with an unrecognised source");
+      }
+      if (safeTimestamp(operation) == null) {
+        return Optional.of(
+            "an operation from source " + safeSourceName(operation) + " with no readable "
+                + "timestamp");
+      }
+    }
+    return Optional.empty();
   }
 
   @Nullable
@@ -537,6 +582,19 @@ public final class CheckedInstanceChanges {
     try {
       return operation.getSource();
     } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Read the timestamp of a recorded operation, reporting null when it is missing or not a
+   * number rather than throwing, so a malformed entry becomes a refusal instead of a failure.
+   */
+  @Nullable
+  private static Long safeTimestamp(InstanceConfig.InstanceOperation operation) {
+    try {
+      return operation.getTimestamp();
+    } catch (NumberFormatException | NullPointerException e) {
       return null;
     }
   }

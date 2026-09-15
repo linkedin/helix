@@ -62,5 +62,11 @@ public enum CheckedMutationConflictReason {
    * Another writer kept winning the conditional write, so the bounded retry budget was
    * exhausted without applying anything. Retrying is safe.
    */
-  CONCURRENT_MODIFICATION
+  CONCURRENT_MODIFICATION,
+  /**
+   * The node holds state this version cannot interpret, so the change was refused rather than
+   * guessed at. Writing would mean deciding against state whose meaning is unknown, and could
+   * drop it.
+   */
+  UNREADABLE_STATE
 }
