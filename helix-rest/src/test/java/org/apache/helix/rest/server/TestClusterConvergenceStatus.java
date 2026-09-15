@@ -88,6 +88,7 @@ public class TestClusterConvergenceStatus extends AbstractTestClass {
     Assert.assertEquals(status.get("pendingResourceCount").intValue(), 0);
     Assert.assertEquals(status.get("failedResourceCount").intValue(), 0);
     Assert.assertEquals(status.get("unknownResourceCount").intValue(), 0);
+    Assert.assertEquals(status.get("skippedResourceCount").intValue(), 0);
     Assert.assertEquals(status.get("pendingResources").size(), 0);
     Assert.assertFalse(status.get("detailTruncated").booleanValue());
   }
@@ -121,6 +122,7 @@ public class TestClusterConvergenceStatus extends AbstractTestClass {
     Assert.assertEquals(status.get("unknownResourceCount").intValue(), 1);
     Assert.assertEquals(status.get("unknownResources").get(0).textValue(), "noSuchResource");
     Assert.assertEquals(status.get("evaluatedResourceCount").intValue(), 0);
+    Assert.assertEquals(status.get("skippedResourceCount").intValue(), 0);
   }
 
   @Test

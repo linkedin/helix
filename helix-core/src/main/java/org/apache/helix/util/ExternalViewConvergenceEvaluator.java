@@ -175,15 +175,11 @@ public class ExternalViewConvergenceEvaluator {
     if (expectLiveInstances != null && !expectLiveInstances.isEmpty()
         && !expectLiveInstances.equals(cache.getLiveInstances().keySet())) {
       return new ExternalViewConvergenceResult(observedAtMillis, 0, pending, failed,
-          Collections.emptySet(), ExternalViewConvergenceResult.Reason.LIVE_INSTANCES_MISMATCH);
+          Collections.emptySet(), Collections.emptySet(),
+          ExternalViewConvergenceResult.Reason.LIVE_INSTANCES_MISMATCH);
     }
 
     Map<String, IdealState> idealStates = new HashMap<>(cache.getIdealStates());
-    // Jobs are managed by the task framework and have no external view to match.
-    idealStates.values()
-        .removeIf(idealState -> TaskConstants.STATE_MODEL_NAME
-            .equals(idealState.getStateModelDefRef()));
-
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     // Reading with throwException set keeps a failed read distinguishable from a cluster that
     // genuinely has no external views, which would otherwise look converged.
@@ -193,6 +189,8 @@ public class ExternalViewConvergenceEvaluator {
 
     Set<String> unknownResources = Collections.emptySet();
     if (resources != null && !resources.isEmpty()) {
+      // Computed before any resource is filtered out, so a resource that exists but is not
+      // evaluated is never reported as one Helix does not know about.
       unknownResources = new TreeSet<>(resources);
       unknownResources.removeAll(idealStates.keySet());
       unknownResources.removeAll(externalViews.keySet());
@@ -203,12 +201,23 @@ public class ExternalViewConvergenceEvaluator {
       }
     }
 
+    // Jobs are managed by the task framework and have no external view to match.
+    Set<String> skippedResources = new TreeSet<>();
+    idealStates.entrySet().removeIf(entry -> {
+      if (TaskConstants.STATE_MODEL_NAME.equals(entry.getValue().getStateModelDefRef())) {
+        skippedResources.add(entry.getKey());
+        return true;
+      }
+      return false;
+    });
+
     // A resource can have an external view the controller has not finished removing after its
     // ideal state is gone. Comparing it against an empty ideal state reports it as pending rather
     // than skipping it.
     for (String resource : externalViews.keySet()) {
       idealStates.computeIfAbsent(resource, IdealState::new);
     }
+    skippedResources.removeAll(idealStates.keySet());
 
     int evaluatedResourceCount = 0;
     for (Map.Entry<String, IdealState> entry : idealStates.entrySet()) {
@@ -220,6 +229,7 @@ public class ExternalViewConvergenceEvaluator {
         if (idealState.isExternalViewDisabled()) {
           // The resource publishes no external view by configuration, so there is nothing to
           // compare and nothing to wait for.
+          skippedResources.add(resourceName);
           continue;
         }
         evaluatedResourceCount++;
@@ -248,7 +258,7 @@ public class ExternalViewConvergenceEvaluator {
     }
 
     return new ExternalViewConvergenceResult(observedAtMillis, evaluatedResourceCount, pending,
-        failed, unknownResources, null);
+        failed, unknownResources, skippedResources, null);
   }
 
   private static boolean isFailure(ExternalViewConvergenceResult.Reason reason) {

@@ -73,16 +73,18 @@ public class ExternalViewConvergenceResult {
   private final SortedMap<String, Reason> _pendingResources;
   private final SortedMap<String, Reason> _failedResources;
   private final SortedSet<String> _unknownResources;
+  private final SortedSet<String> _skippedResources;
   private final Reason _clusterReason;
 
   ExternalViewConvergenceResult(long observedAtMillis, int evaluatedResourceCount,
       Map<String, Reason> pendingResources, Map<String, Reason> failedResources,
-      Set<String> unknownResources, Reason clusterReason) {
+      Set<String> unknownResources, Set<String> skippedResources, Reason clusterReason) {
     _observedAtMillis = observedAtMillis;
     _evaluatedResourceCount = evaluatedResourceCount;
     _pendingResources = Collections.unmodifiableSortedMap(new TreeMap<>(pendingResources));
     _failedResources = Collections.unmodifiableSortedMap(new TreeMap<>(failedResources));
     _unknownResources = Collections.unmodifiableSortedSet(new TreeSet<>(unknownResources));
+    _skippedResources = Collections.unmodifiableSortedSet(new TreeSet<>(skippedResources));
     _clusterReason = clusterReason;
     if (!_failedResources.isEmpty() || !_unknownResources.isEmpty()) {
       _status = Status.FAILED;
@@ -139,6 +141,14 @@ public class ExternalViewConvergenceResult {
     return _unknownResources;
   }
 
+  /**
+   * @return resources that exist but were not compared, because they use the task state model or
+   *         publish no external view by configuration. They are not evidence of convergence.
+   */
+  public SortedSet<String> getSkippedResources() {
+    return _skippedResources;
+  }
+
   /** @return a cluster wide reason, or null when the cluster level checks passed. */
   public Reason getClusterReason() {
     return _clusterReason;
@@ -149,6 +159,7 @@ public class ExternalViewConvergenceResult {
     return "ExternalViewConvergenceResult{status=" + _status + ", observedAtMillis="
         + _observedAtMillis + ", evaluatedResourceCount=" + _evaluatedResourceCount
         + ", clusterReason=" + _clusterReason + ", pendingResources=" + _pendingResources
-        + ", failedResources=" + _failedResources + ", unknownResources=" + _unknownResources + "}";
+        + ", failedResources=" + _failedResources + ", unknownResources=" + _unknownResources
+        + ", skippedResources=" + _skippedResources + "}";
   }
 }

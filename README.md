@@ -70,9 +70,11 @@ GET /clusters/exampleCluster/convergence-status?matchMode=LENIENT&resources=db0,
   "pendingResourceCount": 1,
   "failedResourceCount": 0,
   "unknownResourceCount": 0,
+  "skippedResourceCount": 0,
   "pendingResources": { "db0": "MAPPING_MISMATCH" },
   "failedResources": {},
   "unknownResources": [],
+  "skippedResources": [],
   "detailTruncated": false
 }
 ```
@@ -82,7 +84,9 @@ The calculation is shared with `StrictMatchExternalViewVerifier`. `matchMode` de
 restricts the evaluation, and the response says which scope was used. `CONVERGED` is claimed only
 when every evaluated resource matched. `PENDING` means retrying can change the answer, and
 `FAILED` means a resource could not be evaluated at all, for example because it does not exist or
-its state model definition is missing, so neither may be read as convergence. An invalid
+its state model definition is missing, so neither may be read as convergence. A resource that
+exists but is not compared, because it uses the task state model or publishes no external view, is
+reported as skipped rather than counted as evaluated. An invalid
 `matchMode` or an empty `resources` list is rejected rather than defaulted, a missing cluster
 returns 404, and a failed metadata read returns an error instead of an empty successful result.
 The status has its own path, so a server that predates it answers 404 instead of a successful

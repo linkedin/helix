@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -135,9 +136,11 @@ public class ClusterAccessor extends AbstractHelixResource {
     pendingResourceCount,
     failedResourceCount,
     unknownResourceCount,
+    skippedResourceCount,
     pendingResources,
     failedResources,
     unknownResources,
+    skippedResources,
     clusterReason,
     detailTruncated
   }
@@ -295,6 +298,7 @@ public class ClusterAccessor extends AbstractHelixResource {
     root.put(ConvergenceProperties.pendingResourceCount.name(), result.getPendingResources().size());
     root.put(ConvergenceProperties.failedResourceCount.name(), result.getFailedResources().size());
     root.put(ConvergenceProperties.unknownResourceCount.name(), result.getUnknownResources().size());
+    root.put(ConvergenceProperties.skippedResourceCount.name(), result.getSkippedResources().size());
 
     // The counts above are always complete. The per resource detail is capped so a cluster with
     // many resources cannot turn one status read into an unbounded response.
@@ -304,16 +308,14 @@ public class ClusterAccessor extends AbstractHelixResource {
     ObjectNode failedNode = root.putObject(ConvergenceProperties.failedResources.name());
     budget = putReasons(failedNode, result.getFailedResources(), budget);
     ArrayNode unknownNode = root.putArray(ConvergenceProperties.unknownResources.name());
-    for (String resource : result.getUnknownResources()) {
-      if (budget-- <= 0) {
-        break;
-      }
-      unknownNode.add(resource);
-    }
-    int reported = pendingNode.size() + failedNode.size() + unknownNode.size();
+    budget = putNames(unknownNode, result.getUnknownResources(), budget);
+    ArrayNode skippedNode = root.putArray(ConvergenceProperties.skippedResources.name());
+    putNames(skippedNode, result.getSkippedResources(), budget);
+    int reported =
+        pendingNode.size() + failedNode.size() + unknownNode.size() + skippedNode.size();
     root.put(ConvergenceProperties.detailTruncated.name(),
         reported < result.getPendingResources().size() + result.getFailedResources().size()
-            + result.getUnknownResources().size());
+            + result.getUnknownResources().size() + result.getSkippedResources().size());
 
     if (result.getClusterReason() != null) {
       root.put(ConvergenceProperties.clusterReason.name(), result.getClusterReason().name());
@@ -329,6 +331,17 @@ public class ClusterAccessor extends AbstractHelixResource {
         break;
       }
       target.put(entry.getKey(), entry.getValue().name());
+      budget--;
+    }
+    return budget;
+  }
+
+  private static int putNames(ArrayNode target, Collection<String> names, int budget) {
+    for (String name : names) {
+      if (budget <= 0) {
+        break;
+      }
+      target.add(name);
       budget--;
     }
     return budget;

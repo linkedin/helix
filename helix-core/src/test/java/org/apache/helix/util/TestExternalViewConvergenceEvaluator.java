@@ -151,6 +151,7 @@ public class TestExternalViewConvergenceEvaluator {
 
     Assert.assertEquals(result.getStatus(), ExternalViewConvergenceResult.Status.CONVERGED);
     Assert.assertEquals(result.getEvaluatedResourceCount(), 0);
+    Assert.assertEquals(result.getSkippedResources(), Collections.singleton(RESOURCE));
   }
 
   @Test
@@ -165,6 +166,44 @@ public class TestExternalViewConvergenceEvaluator {
 
     Assert.assertEquals(result.getStatus(), ExternalViewConvergenceResult.Status.CONVERGED);
     Assert.assertEquals(result.getEvaluatedResourceCount(), 0);
+    Assert.assertEquals(result.getSkippedResources(), Collections.singleton(RESOURCE));
+  }
+
+  @Test
+  public void testRequestedTaskResourceIsSkippedNotUnknown() {
+    IdealState taskIdealState = new IdealState(RESOURCE);
+    taskIdealState.setStateModelDefRef(TaskConstants.STATE_MODEL_NAME);
+    taskIdealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
+    taskIdealState.setPreferenceList(PARTITION, Arrays.asList(NODE_0, NODE_1));
+    _cache.setIdealStates(Collections.singletonList(taskIdealState));
+
+    ExternalViewConvergenceResult result =
+        new ExternalViewConvergenceEvaluator.Builder().setLenientMatch(true).build()
+            .evaluate(_accessor, _cache, Collections.singleton(RESOURCE), null);
+
+    // The resource exists, so calling it unknown would be wrong; it is simply not compared.
+    Assert.assertTrue(result.getUnknownResources().isEmpty());
+    Assert.assertEquals(result.getSkippedResources(), Collections.singleton(RESOURCE));
+    Assert.assertEquals(result.getEvaluatedResourceCount(), 0);
+    Assert.assertEquals(result.getStatus(), ExternalViewConvergenceResult.Status.CONVERGED);
+  }
+
+  @Test
+  public void testTaskResourceWithExternalViewIsStillCompared() {
+    IdealState taskIdealState = new IdealState(RESOURCE);
+    taskIdealState.setStateModelDefRef(TaskConstants.STATE_MODEL_NAME);
+    taskIdealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
+    taskIdealState.setPreferenceList(PARTITION, Arrays.asList(NODE_0, NODE_1));
+    _cache.setIdealStates(Collections.singletonList(taskIdealState));
+    setExternalViews(externalView(masterSlaveMapping(NODE_0, NODE_1)));
+
+    ExternalViewConvergenceResult result = evaluate(true);
+
+    // An external view left behind is compared against an empty ideal state, as it has always
+    // been, so it is not reported as skipped.
+    Assert.assertTrue(result.getSkippedResources().isEmpty());
+    Assert.assertEquals(result.getPendingResources().get(RESOURCE),
+        ExternalViewConvergenceResult.Reason.MAPPING_MISMATCH);
   }
 
   @Test
