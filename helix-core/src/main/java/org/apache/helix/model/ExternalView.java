@@ -112,7 +112,10 @@ public class ExternalView extends HelixProperty {
    * Get the resource group name
    *
    * @return the name of the resource group this resource belongs to.
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _record.getSimpleField(ExternalViewProperty.RESOURCE_GROUP_NAME.toString());
   }
@@ -121,7 +124,10 @@ public class ExternalView extends HelixProperty {
    * Check whether the group routing is enabled for this resource.
    *
    * @return true if the group routing enabled for this resource; false otherwise
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public boolean isGroupRoutingEnabled() {
     return _record.getBooleanField(ExternalViewProperty.GROUP_ROUTING_ENABLED.name(), false);
   }

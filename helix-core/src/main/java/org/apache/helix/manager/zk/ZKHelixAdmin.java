@@ -1373,9 +1373,6 @@ public class ZKHelixAdmin implements HelixAdmin {
         message.setFromState("*");
         message.setToState(HelixDefinedState.ERROR.toString());
       }
-      if (idealState.getResourceGroupName() != null) {
-        message.setResourceGroupName(idealState.getResourceGroupName());
-      }
       if (idealState.getInstanceGroupTag() != null) {
         message.setResourceTag(idealState.getInstanceGroupTag());
       }

@@ -241,7 +241,10 @@ public abstract class IdealStateBuilder {
    *
    * @param resourceGroupName
    * @return
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. This builder setter is inert; slated for removal in a future major release.
    */
+  @Deprecated
   public IdealStateBuilder setResourceGroupName(String resourceGroupName) {
     this.resourceGroupName = resourceGroupName;
     return this;
@@ -250,7 +253,10 @@ public abstract class IdealStateBuilder {
   /**
    * @param resourceType
    * @return
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. This builder setter is inert; slated for removal in a future major release.
    */
+  @Deprecated
   public IdealStateBuilder setResourceType(String resourceType) {
     this.resourceType = resourceType;
     return this;
@@ -259,7 +265,10 @@ public abstract class IdealStateBuilder {
   /**
    * Enable Group Routing for this resource.
    * @return
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. This builder setter is inert; slated for removal in a future major release.
    */
+  @Deprecated
   public IdealStateBuilder enableGroupRouting() {
     this.enableGroupRouting = true;
     return this;

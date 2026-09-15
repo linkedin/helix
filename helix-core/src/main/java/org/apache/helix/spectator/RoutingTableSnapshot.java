@@ -73,7 +73,11 @@ public class RoutingTableSnapshot {
    * @param resourceGroupName
    * @param state
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state,
       List<String> resourceTags) {
     return _routingTable.getInstancesForResourceGroup(resourceGroupName, state, resourceTags);
@@ -84,7 +88,11 @@ public class RoutingTableSnapshot {
    * @param resourceGroupName
    * @param state
    * @return empty set if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state) {
     return _routingTable.getInstancesForResourceGroup(resourceGroupName, state);
   }
@@ -98,7 +106,11 @@ public class RoutingTableSnapshot {
    * @param partitionName
    * @param state
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
       String partitionName, String state) {
     return _routingTable.getInstancesForResourceGroup(resourceGroupName, partitionName, state);
@@ -114,7 +126,11 @@ public class RoutingTableSnapshot {
    * @param state
    * @param resourceTags
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
       String partitionName, String state, List<String> resourceTags) {
     return _routingTable.getInstancesForResourceGroup(resourceGroupName, partitionName, state,

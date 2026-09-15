@@ -181,7 +181,10 @@ public class Resource {
   /**
    * Get resource group name
    * @return the resource group name
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _resourceGroupName;
   }
@@ -189,7 +192,10 @@ public class Resource {
   /**
    * Set resource group name
    * @param resourceGroupName
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public void setResourceGroupName(String resourceGroupName) {
     _resourceGroupName = resourceGroupName;
   }

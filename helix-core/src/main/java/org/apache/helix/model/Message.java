@@ -462,7 +462,10 @@ public class Message extends HelixProperty {
   /**
    * Set the resource group associated with this message
    * @param resourceGroupName resource group name to set
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public void setResourceGroupName(String resourceGroupName) {
     _record.setSimpleField(Attributes.RESOURCE_GROUP_NAME.toString(), resourceGroupName);
   }
@@ -470,7 +473,10 @@ public class Message extends HelixProperty {
   /**
    * Get the resource group name associated with this message
    * @return resource group name
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _record.getSimpleField(Attributes.RESOURCE_GROUP_NAME.toString());
   }

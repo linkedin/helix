@@ -113,12 +113,7 @@ class RoutingTable {
             String currentState = stateMap.get(instanceName);
             if (instanceConfigMap.containsKey(instanceName)) {
               InstanceConfig instanceConfig = instanceConfigMap.get(instanceName);
-              if (extView.isGroupRoutingEnabled()) {
-                addEntry(resourceName, extView.getResourceGroupName(),
-                    extView.getInstanceGroupTag(), partitionName, currentState, instanceConfig);
-              } else {
-                addEntry(resourceName, partitionName, currentState, instanceConfig);
-              }
+              addEntry(resourceName, partitionName, currentState, instanceConfig);
             } else {
               logger.warn(
                   "Participant {} is not found with proper configuration information. It might already be removed from the cluster. "
@@ -177,21 +172,6 @@ class RoutingTable {
     resourceInfo.addEntry(partitionName, state, config);
   }
 
-  /**
-   * add an entry with a resource with resourceGrouping enabled.
-   */
-  private void addEntry(String resourceName, String resourceGroupName, String resourceTag,
-      String partitionName, String state, InstanceConfig config) {
-    addEntry(resourceName, partitionName, state, config);
-
-    if (!_resourceGroupInfoMap.containsKey(resourceGroupName)) {
-      _resourceGroupInfoMap.put(resourceGroupName, new ResourceGroupInfo());
-    }
-
-    ResourceGroupInfo resourceGroupInfo = _resourceGroupInfoMap.get(resourceGroupName);
-    resourceGroupInfo.addEntry(resourceTag, partitionName, state, config);
-  }
-
   ResourceInfo get(String resourceName) {
     return _resourceInfoMap.get(resourceName);
   }
@@ -223,7 +203,11 @@ class RoutingTable {
    * @param resourceGroupName
    * @param state
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state) {
     Set<InstanceConfig> instanceSet = null;
     ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);
@@ -242,7 +226,11 @@ class RoutingTable {
    * @param resourceGroupName
    * @param state
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state,
       List<String> resourceTags) {
     Set<InstanceConfig> instanceSet = null;
@@ -295,7 +283,11 @@ class RoutingTable {
    * @param partitionName
    * @param state
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
       String partitionName, String state) {
     List<InstanceConfig> instanceList = null;
@@ -345,7 +337,11 @@ class RoutingTable {
    * @param state
    * @param resourceTags
    * @return empty list if there is no instance in a given state
+   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
+   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
+   *     instead. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
       String partitionName, String state, List<String> resourceTags) {
     ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);

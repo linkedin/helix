@@ -492,7 +492,11 @@ public class ClusterSetup {
    * Create an IdealState for a resource that belongs to a resource group We use
    * "resourceGroupName$resourceInstanceTag" as the IdealState znode name to differetiate different
    * resources from the same resourceGroup.
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the spectator routing
+   *     path has been removed, so the resulting IdealState's group-routing fields are inert.
+   *     Slated for removal in a future major release.
    */
+  @Deprecated
   public IdealState createIdealStateForResourceGroup(String resourceGroupName,
       String resourceTag, int numPartition, int replica, String rebalanceMode, String stateModelDefName) {
     String idealStateId = genIdealStateNameWithResourceTag(resourceGroupName, resourceTag);

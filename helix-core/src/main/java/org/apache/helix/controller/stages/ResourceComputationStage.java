@@ -117,7 +117,6 @@ public class ResourceComputationStage extends AbstractBaseStage {
             batchMessageMode |= clusterConfig.getBatchMessageMode();
           }
           resource.setBatchMessageMode(batchMessageMode);
-          resource.setResourceGroupName(idealState.getResourceGroupName());
           resource.setResourceTag(idealState.getInstanceGroupTag());
         }
 
@@ -215,7 +214,6 @@ public class ResourceComputationStage extends AbstractBaseStage {
 
             IdealState idealState = idealStates.get(resourceName);
             if (idealState != null) {
-              resource.setResourceGroupName(idealState.getResourceGroupName());
               resource.setResourceTag(idealState.getInstanceGroupTag());
             }
             resourceMap.put(resourceName, resource);
@@ -262,7 +260,6 @@ public class ResourceComputationStage extends AbstractBaseStage {
       batchMessageMode |= clusterConfig.getBatchMessageMode();
     }
     resource.setBatchMessageMode(batchMessageMode);
-    resource.setResourceGroupName(resourceConfig.getResourceGroupName());
     resource.setResourceTag(resourceConfig.getInstanceGroupTag());
     resourceToRebalance.put(resourceName, resource);
   }

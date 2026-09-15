@@ -353,7 +353,10 @@ public class ResourceConfig extends HelixProperty {
   /**
    * Get the resource type
    * @return the resource type, or null if none is being set
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceType() {
     return _record.getSimpleField(ResourceConfigProperty.RESOURCE_TYPE.name());
   }
@@ -362,7 +365,10 @@ public class ResourceConfig extends HelixProperty {
    * Get the resource group name
    *
    * @return
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _record.getSimpleField(ResourceConfigProperty.RESOURCE_GROUP_NAME.name());
   }
@@ -372,7 +378,10 @@ public class ResourceConfig extends HelixProperty {
    * By default, it's disabled
    *
    * @return true if enabled; false otherwise
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public Boolean isGroupRoutingEnabled() {
     return _record.getBooleanField(ResourceConfigProperty.GROUP_ROUTING_ENABLED.name(), false);
   }
@@ -948,6 +957,7 @@ public class ResourceConfig extends HelixProperty {
    *  2. The value shall be fully compatible, no additional calculation involved.
    *  3. Resource Config items have a high priority.
    */
+  @SuppressWarnings("deprecation")
   public static ResourceConfig mergeIdealStateWithResourceConfig(
       final ResourceConfig resourceConfig, final IdealState idealState) {
     if (idealState == null) {

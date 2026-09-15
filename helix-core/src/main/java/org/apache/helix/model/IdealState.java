@@ -206,7 +206,10 @@ public class IdealState extends HelixProperty {
   /**
    * Set the resource group name
    * @param resourceGroupName
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public void setResourceGroupName(String resourceGroupName) {
     _record.setSimpleField(IdealStateProperty.RESOURCE_GROUP_NAME.toString(), resourceGroupName);
   }
@@ -214,7 +217,10 @@ public class IdealState extends HelixProperty {
   /**
    * Set the resource type
    * @param resourceType
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public void setResourceType(String resourceType) {
     _record.setSimpleField(IdealStateProperty.RESOURCE_TYPE.toString(), resourceType);
   }
@@ -222,7 +228,10 @@ public class IdealState extends HelixProperty {
   /**
    * Get the resource type
    * @return the resource type, or null if none is being set
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceType() {
     return _record.getSimpleField(IdealStateProperty.RESOURCE_TYPE.toString());
   }
@@ -265,7 +274,10 @@ public class IdealState extends HelixProperty {
    * Get the resource group name
    *
    * @return
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _record.getSimpleField(IdealStateProperty.RESOURCE_GROUP_NAME.toString());
   }
@@ -275,7 +287,10 @@ public class IdealState extends HelixProperty {
    * By default, it's disabled
    *
    * @return true if enabled; false otherwise
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public boolean isResourceGroupEnabled() {
     return _record.getBooleanField(IdealStateProperty.GROUP_ROUTING_ENABLED.name(), false);
   }
@@ -284,7 +299,10 @@ public class IdealState extends HelixProperty {
    * Enable/Disable the aggregated routing on resource group.
    *
    * @param enabled
+   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
+   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
    */
+  @Deprecated
   public void enableGroupRouting(boolean enabled) {
     _record.setSimpleField(IdealStateProperty.GROUP_ROUTING_ENABLED.name(),
         Boolean.toString(enabled));
