@@ -69,6 +69,7 @@ import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
@@ -901,6 +902,40 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
 
     return JSONRepresentation(root);
+  }
+
+  /**
+   * Returns one read-only observation of replica states, native drain coverage, and future
+   * assignment eligibility for an instance.
+   *
+   * @param clusterId cluster identifier
+   * @param instanceName instance name
+   * @return the instance replica status, or 404 if the instance does not exist
+   * @throws IOException if the response cannot be serialized
+   */
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("replicaStatus")
+  public Response getInstanceReplicaStatus(@PathParam("clusterId") String clusterId,
+      @PathParam("instanceName") String instanceName) throws IOException {
+    try {
+      HelixDataAccessor accessor = getDataAccssor(clusterId);
+      List<InstanceConfig> instanceConfigs = accessor.getProperty(
+          Collections.singletonList(accessor.keyBuilder().instanceConfig(instanceName)), true);
+      if (instanceConfigs == null || instanceConfigs.isEmpty()
+          || instanceConfigs.get(0) == null) {
+        return notFound();
+      }
+      HelixAdmin admin = getHelixAdmin();
+      InstanceReplicaStatus status =
+          admin.getInstanceReplicaStatus(clusterId, instanceName);
+      return OK(OBJECT_MAPPER.writeValueAsString(status));
+    } catch (HelixException e) {
+      LOG.error("Failed to observe replica status for cluster: {}, instance: {}", clusterId,
+          instanceName, e);
+      return serverError(e);
+    }
   }
 
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
