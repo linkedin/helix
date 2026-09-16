@@ -862,10 +862,8 @@ public class ZKHelixAdmin implements HelixAdmin {
   // transaction keyed on the exact config revisions the decision was made from.
   // ===========================================================================================
 
-  // A config that has never been written since it was created sits at data version 0. A conditional
-  // write on version 0 cannot tell that config apart from a different config that was created in
-  // its place, because a newly created node also starts at 0. Callers asserting an identity on such
-  // a config are refused instead of being given a guarantee that does not hold.
+  // Conservatively refuse version-zero expectations, which a fresh replacement also satisfies.
+  // Nonzero versions still do not atomically fence a recreated node that is written again.
   private static final int UNVERIFIABLE_SWAP_CONFIG_VERSION = 0;
 
   // An instance can only be swapped out while it is an active member of the cluster. These are the
@@ -1032,6 +1030,13 @@ public class ZKHelixAdmin implements HelixAdmin {
                 InstanceConstants.InstanceOperation.UNKNOWN));
       }
       boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
+      if (swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN && !logicalIdAligned) {
+        return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+            String.format(
+                "The swap-in instance %s is already SWAP_IN for logical id %s in cluster %s, "
+                    + "so it cannot be reassigned to logical id %s.",
+                swapInInstanceName, swapInDomain.get(logicalIdKey), clusterName, swapOutLogicalId));
+      }
       if (logicalIdAligned && swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
         return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_PREPARED)
             .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
@@ -1192,8 +1197,8 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   /**
    * Write the pair in one transaction, conditional on both config versions. A null record for a
-   * side means that side is only checked, not written, which still makes a concurrent change to it
-   * abort the whole operation.
+   * side means that side is only checked, not written. A different data version on either side
+   * aborts the whole operation; creation identity is not part of the transaction condition.
    */
   private SwapPairResult applySwapPairWrite(String clusterName, String swapOutPath,
       String swapInPath, ZNRecord swapOutRecordToWrite, ZNRecord swapInRecordToWrite,
@@ -1255,11 +1260,8 @@ public class ZKHelixAdmin implements HelixAdmin {
         identityAfterCommit(clusterName, swapOutIdentity, opResults.get(0));
     InstanceConfigIdentity writtenSwapInIdentity =
         identityAfterCommit(clusterName, swapInIdentity, opResults.get(1));
-    // The conditional write can only assert a data version. Reading the creation ids back is the
-    // only way to notice a config that was replaced outright rather than changed, and it is
-    // reported rather than being folded into a success. This detects the replacement; it cannot
-    // prevent it, which is why a caller that needs the stronger promise asserts an identity and is
-    // refused up front when that promise cannot be kept.
+    // A recreated node can reach the expected data version before the transaction. Creation-id
+    // comparison detects that replacement afterward, so FAILED may follow an applied write.
     List<String> replaced = new ArrayList<>();
     if (writtenSwapOutIdentity.getConfigCreationId() != swapOutIdentity.getConfigCreationId()) {
       replaced.add(swapOutIdentity.getInstanceName());
@@ -1399,11 +1401,10 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (observed.getConfigVersion() == UNVERIFIABLE_SWAP_CONFIG_VERSION) {
       unverifiable.add(String.format(
           "The %s instance config for %s is at config version %d, which is also the version a "
-              + "freshly created config has. A write conditional on that version cannot tell the "
-              + "config apart from one deleted and created again before the write lands, so the "
-              + "asserted identity cannot be enforced and the request is refused rather than "
-              + "granted on a weaker guarantee. Retry once the config has been written at least "
-              + "once.", role, observed.getInstanceName(), UNVERIFIABLE_SWAP_CONFIG_VERSION));
+              + "freshly created config has. Requests asserting this version are conservatively "
+              + "refused. Nonzero versions also do not atomically fence config recreation; see "
+              + "the swap API identity limitations.",
+          role, observed.getInstanceName(), UNVERIFIABLE_SWAP_CONFIG_VERSION));
     }
   }
 

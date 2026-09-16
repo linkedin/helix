@@ -918,10 +918,13 @@ public interface HelixAdmin {
    * Preparation is safe to repeat. When the swap-in already has the requested shape, the call
    * reports {@link SwapPairResult.Status#ALREADY_PREPARED} and writes nothing, so a retry cannot
    * re-apply an instance operation change on top of whatever the instance has since been set to.
+   * A coordinated swap-in already marked SWAP_IN is accepted only when its logical id is aligned;
+   * an in-progress swap for a different logical id is refused. The identity limitations described
+   * in {@link #completeSwapPair(String, SwapPairRequest)} apply to preparation too.
    *
    * @param clusterName The cluster name
    * @param request     The pair, mode and optional expected identities
-   * @return the explicit outcome, including the identities the call acted on.
+   * @return the explicit outcome, including observed config identities
    */
   default SwapPairResult prepareSwapPair(String clusterName, SwapPairRequest request) {
     throw new UnsupportedOperationException("prepareSwapPair is not implemented.");
@@ -933,39 +936,36 @@ public interface HelixAdmin {
    * <p>
    * The completion moves the overwritable config fields from the swap-out onto the swap-in and
    * retires the swap-out, in one conditional write covering both configs. The write asserts the
-   * data versions of both configs as observed during this call, so a concurrent change to either
-   * side aborts the whole operation and reports {@link SwapPairResult.Status#CONFLICT} rather than
-   * writing a config derived from a stale read. Neither config is left half-updated.
+   * data versions of both configs as observed during this call. A different data version on either
+   * side aborts the whole operation and reports {@link SwapPairResult.Status#CONFLICT}. The
+   * transaction does not leave a partial update across the two addressed config paths.
    * <p>
    * Completion is safe to replay. When the pair is already completed, the call reports
    * {@link SwapPairResult.Status#ALREADY_COMPLETED} and writes nothing.
    * <p>
    * {@link SwapPairRequest#isForceComplete()} skips the replica readiness checks only. It does not
-   * skip pair validation, expected identity assertions or the conditional write, so forcing can
-   * move a swap that is not finished mirroring but can never move the wrong instance.
+   * skip pair validation, expected identity checks or the conditional write. The identity
+   * limitations below still apply to a forced completion.
    * <p>
    * <b>What the identity assertions do and do not guarantee.</b> When
    * {@link SwapPairRequest#getExpectedSwapOutIdentity()} or
    * {@link SwapPairRequest#getExpectedSwapInIdentity()} is supplied, the call compares both the
-   * creation id and the data version of that config before acting, and the write itself is
-   * conditional on the data version. The underlying store can only make a write conditional on the
-   * data version, not on the creation id, so a config that is deleted and created again between the
-   * read and the write is only caught because the new node restarts at data version 0 and therefore
-   * fails the condition. That argument does not hold when the asserted data version is itself 0,
-   * where a deleted and recreated config would satisfy the condition. Rather than report a
-   * guarantee it cannot make, this call refuses such a request with
-   * {@link SwapPairResult.Status#IDENTITY_UNVERIFIABLE} and writes nothing. A config that has been
-   * written at least once since it was created is unaffected.
+   * creation id and the data version before acting. The transaction is conditional only on the
+   * data version, not the creation id. Expected version 0 is conservatively refused with
+   * {@link SwapPairResult.Status#IDENTITY_UNVERIFIABLE}, but a nonzero version is not an identity
+   * fence: a config can be deleted, recreated, and written back to the expected version between
+   * the read and the transaction. The transaction can then modify that replacement.
    * <p>
-   * A call that asserts no identity makes no promise about which node it acts on beyond the
-   * conditional write itself, which still aborts on any concurrent change. Creation ids are read
-   * back after the transaction either way, so a config that was replaced is reported as
-   * {@link SwapPairResult.Status#FAILED} instead of being folded into a success, but that is
-   * detection after the fact and not prevention.
+   * Creation ids are compared after the transaction whether or not the caller supplied an
+   * expectation. A detected replacement is reported as {@link SwapPairResult.Status#FAILED}, but
+   * the write may already have taken effect. This is detection, not prevention, and FAILED must
+   * not be interpreted as proof that nothing was written. Callers requiring atomic incarnation
+   * fencing need a protocol that coordinates config replacement with writes; this API does not
+   * provide one.
    *
    * @param clusterName The cluster name
    * @param request     The pair, mode, force flag and optional expected identities
-   * @return the explicit outcome, including the identities the call acted on.
+   * @return the explicit outcome, including observed config identities
    */
   default SwapPairResult completeSwapPair(String clusterName, SwapPairRequest request) {
     throw new UnsupportedOperationException("completeSwapPair is not implemented.");

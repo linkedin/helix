@@ -32,8 +32,8 @@ import java.util.List;
  * apart from replicas not being ready yet, apart from the named pair no longer being a pair.
  * <p>
  * {@link #getObservedSwapOutIdentity()} and {@link #getObservedSwapInIdentity()} report the
- * identities the operation actually acted on, or the identities found when it refused to act, so a
- * caller can assert them on its next call without an extra read.
+ * config metadata observed while processing the request or after its transaction. These values
+ * are not an atomic snapshot of both configs and do not confer ownership or incarnation fencing.
  */
 public class SwapPairResult {
 
@@ -77,8 +77,8 @@ public class SwapPairResult {
      */
     IDENTITY_MISMATCH(false),
     /**
-     * The caller asserted an identity that cannot be enforced safely, so the call was refused
-     * without writing. See
+     * An asserted version-zero identity was conservatively refused without writing. Other
+     * versions still do not provide atomic creation-identity fencing. See
      * {@link org.apache.helix.HelixAdmin#completeSwapPair(String, SwapPairRequest)} for the exact
      * condition and the reason a conditional write alone cannot cover it.
      */

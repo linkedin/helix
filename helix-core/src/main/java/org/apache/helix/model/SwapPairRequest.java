@@ -31,8 +31,9 @@ import org.apache.helix.constants.InstanceConstants;
  * <p>
  * The pair is always given explicitly. Nothing in the request is discovered from cluster state, so
  * a prepare or complete can never act on a peer other than the one the caller named. The optional
- * expected identities extend that to the content of the two configs: when supplied, the operation
- * acts only if both configs are still the exact nodes and revisions the caller observed.
+ * expected identities are checked against the config metadata observed before the write. They
+ * do not atomically fence config replacement; see
+ * {@link org.apache.helix.HelixAdmin#completeSwapPair(String, SwapPairRequest)} for the limits.
  * <p>
  * {@code swapMode} selects how the swap-in is prepared, and the two modes are deliberately
  * different:
@@ -40,7 +41,8 @@ import org.apache.helix.constants.InstanceConstants;
  *   <li>{@link SwapMode#COORDINATED} moves only the logical id field of the swap-in domain onto the
  *       swap-out's value and marks the swap-in with
  *       {@link InstanceConstants.InstanceOperation#SWAP_IN}, so the controller mirrors replicas onto
- *       it before the swap is completed. Every other domain field of the swap-in is left alone.</li>
+ *       it before the swap is completed. Every other domain field of the swap-in is left alone.
+ *       An existing SWAP_IN is accepted only as a replay for the same logical id.</li>
  *   <li>{@link SwapMode#DIRECT} copies the whole swap-out domain onto the swap-in, except for the
  *       keys named in {@link #getPreservedSwapInDomainKeys()}, which keep the swap-in's own values.
  *       It sets no instance operation at all, so the swap-in stays outside the assignable set until

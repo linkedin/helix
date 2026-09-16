@@ -114,6 +114,39 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
   }
 
   @Test
+  public void testCoordinatedPrepareDoesNotRetargetAnExistingSwap() {
+    String clusterName = newCluster("coordinatedPrepareExistingPair");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    String originalSwapOut = "originalSwapOut_12002";
+    addInstance(admin, clusterName, originalSwapOut,
+        domain(ZONE, "original_slot", "original-out-host", null), null);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, "spare_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertEquals(admin.prepareSwapPair(clusterName,
+        new SwapPairRequest.Builder(originalSwapOut, SWAP_IN)
+            .setSwapMode(SwapPairRequest.SwapMode.COORDINATED).build()).getStatus(),
+        SwapPairResult.Status.PREPARED);
+    InstanceConfigIdentity originalOutBefore =
+        admin.getInstanceConfigIdentity(clusterName, originalSwapOut);
+    InstanceConfigIdentity newOutBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
+        result.toString());
+    Assert.assertFalse(result.isSuccessful());
+    Assert.assertTrue(result.getBlockers().get(0).contains("original_slot"),
+        result.getBlockers().get(0));
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, originalSwapOut),
+        originalOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), newOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN), swapInBefore);
+  }
+
+  @Test
   public void testDirectPrepareCopiesWholeSlotAndKeepsPreservedKeys() {
     String clusterName = newCluster("directPrepare");
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
@@ -406,6 +439,50 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
   }
 
   @Test
+  public void testRecreateAndRewriteDuringMutationIsReportedAsFailed() {
+    String clusterName = newCluster("recreateAndRewriteDuringMutation");
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(setupAdmin, clusterName);
+    addInstance(setupAdmin, clusterName, SWAP_IN,
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    bumpConfigVersion(clusterName, SWAP_OUT);
+    bumpConfigVersion(clusterName, SWAP_IN);
+    InstanceConfigIdentity swapOutBefore =
+        setupAdmin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInBefore =
+        setupAdmin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+    ConcurrentWriterSerializer serializer = new ConcurrentWriterSerializer(SWAP_IN, () -> {
+      setupAdmin.dropInstance(clusterName, new InstanceConfig(SWAP_IN));
+      addInstance(setupAdmin, clusterName, SWAP_IN,
+          domain(ZONE, "replacement_slot", "replacement-host", null),
+          InstanceConstants.InstanceOperation.UNKNOWN);
+      bumpConfigVersion(clusterName, SWAP_IN);
+      Assert.assertEquals(setupAdmin.getInstanceConfigIdentity(clusterName, SWAP_IN)
+          .getConfigVersion(), swapInBefore.getConfigVersion());
+    });
+    HelixZkClient racingZkClient = DedicatedZkClientFactory.getInstance()
+        .buildZkClient(new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+            new HelixZkClient.ZkClientConfig().setZkSerializer(serializer));
+    try {
+      SwapPairResult result = new ZKHelixAdmin(racingZkClient).prepareSwapPair(clusterName,
+          coordinated().setExpectedSwapOutIdentity(swapOutBefore)
+              .setExpectedSwapInIdentity(swapInBefore).build());
+
+      Assert.assertTrue(serializer.fired());
+      Assert.assertEquals(result.getStatus(), SwapPairResult.Status.FAILED, result.toString());
+      Assert.assertFalse(result.isSuccessful());
+      Assert.assertTrue(result.getObservedSwapInIdentity().getConfigCreationId()
+          != swapInBefore.getConfigCreationId());
+      // Detection follows the write: FAILED is not proof that the replacement was untouched.
+      Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getDomainAsMap()
+          .get(LOGICAL_ID_KEY), LOGICAL_ID);
+    } finally {
+      racingZkClient.close();
+    }
+  }
+
+  @Test
   public void testIdentityAtVersionZeroIsRefusedRatherThanWeaklyEnforced() {
     String clusterName = newCluster("unverifiableIdentity");
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
@@ -425,8 +502,7 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getDomainAsMap().get(
         LOGICAL_ID_KEY), "other_slot");
 
-    // The same call without an assertion is not blocked; only the promise the caller asked for
-    // could not be made.
+    // Unasserted requests do not use the conservative version-zero refusal.
     Assert.assertEquals(admin.prepareSwapPair(clusterName, coordinated().build()).getStatus(),
         SwapPairResult.Status.PREPARED);
   }

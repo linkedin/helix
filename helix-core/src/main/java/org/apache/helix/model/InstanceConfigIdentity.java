@@ -35,10 +35,10 @@ import java.util.Objects;
  *       {@code configVersion} alone, because a recreated node restarts at version 0.</li>
  * </ul>
  * <p>
- * Callers obtain an identity from a read and pass it back on a later mutating call to state "act
- * only if this is still the exact config I looked at". An identity is a pure observation. It does
- * not express or confer ownership of the instance, and holding one does not reserve the instance
- * against other writers.
+ * Callers can pass an identity to a later mutating call to identify the config they observed.
+ * The mutating API defines when the identity is checked and which conditions the store can
+ * enforce. An identity is a pure observation, not ownership or an atomic incarnation fence, and
+ * holding one does not reserve the instance against other writers.
  * <p>
  * Instances of this class are immutable.
  */
