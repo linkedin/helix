@@ -945,6 +945,10 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
 
     String logicalIdKey;
+    // Read from the same cluster config the logical id key is resolved from, so both come from one
+    // read. Null here means the cluster does not define a fault zone type at all; only the
+    // coordinated preparation path needs one, so it is the path that refuses.
+    String faultZoneType;
     try {
       ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
       if (clusterConfig == null) {
@@ -954,6 +958,7 @@ public class ZKHelixAdmin implements HelixAdmin {
                 + "therefore the logical id of a swap pair cannot be resolved.", clusterName));
       }
       logicalIdKey = ClusterTopologyConfig.createFromClusterConfig(clusterConfig).getEndNodeType();
+      faultZoneType = clusterConfig.getFaultZoneType();
     } catch (HelixException | IllegalArgumentException e) {
       return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity, swapInIdentity,
           String.format("Could not resolve the topology definition of cluster %s: %s", clusterName,
@@ -991,23 +996,47 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     return prepare ? prepareSwapPairInternal(clusterName, request, swapOutPath, swapInPath,
         swapOutConfig, swapInConfig, swapOutDomain, swapInDomain, logicalIdKey, swapOutLogicalId,
-        swapOutIdentity, swapInIdentity)
+        faultZoneType, swapOutIdentity, swapInIdentity)
         : completeSwapPairInternal(clusterName, request, swapOutPath, swapInPath, swapOutConfig,
             swapInConfig, swapInDomain, logicalIdKey, swapOutLogicalId, swapOutIdentity,
             swapInIdentity);
+  }
+
+  /**
+   * Whether the pair is already in the terminal shape a completed swap leaves behind: the swap-out
+   * has been retired to UNKNOWN, and the swap-in holds the swap-out's logical id in an operation it
+   * could only have taken over from the swap-out. Preparation and completion both answer from this
+   * one definition, so the two paths cannot come to different conclusions about the same pair.
+   */
+  private static boolean isCompletedSwapPair(InstanceConstants.InstanceOperation swapOutOperation,
+      InstanceConstants.InstanceOperation swapInOperation, boolean logicalIdAligned) {
+    return swapOutOperation == InstanceConstants.InstanceOperation.UNKNOWN && logicalIdAligned
+        && swapInOperation != InstanceConstants.InstanceOperation.UNKNOWN
+        && swapInOperation != InstanceConstants.InstanceOperation.SWAP_IN;
   }
 
   private SwapPairResult prepareSwapPairInternal(String clusterName, SwapPairRequest request,
       String swapOutPath, String swapInPath, InstanceConfig swapOutConfig,
       InstanceConfig swapInConfig, Map<String, String> swapOutDomain,
       Map<String, String> swapInDomain, String logicalIdKey, String swapOutLogicalId,
-      InstanceConfigIdentity swapOutIdentity, InstanceConfigIdentity swapInIdentity) {
+      String faultZoneType, InstanceConfigIdentity swapOutIdentity,
+      InstanceConfigIdentity swapInIdentity) {
     String swapOutInstanceName = request.getSwapOutInstanceName();
     String swapInInstanceName = request.getSwapInInstanceName();
     InstanceConstants.InstanceOperation swapOutOperation =
         swapOutConfig.getInstanceOperation().getOperation();
     InstanceConstants.InstanceOperation swapInOperation =
         swapInConfig.getInstanceOperation().getOperation();
+    boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
+
+    // A caller that lost the response of a completion restarts its flow from preparation, so
+    // preparation has to recognise the shape a completed swap leaves behind and say so, rather than
+    // refuse the pair forever because the swap-out is no longer an active member.
+    if (isCompletedSwapPair(swapOutOperation, swapInOperation, logicalIdAligned)) {
+      return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_COMPLETED)
+          .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
+          .build();
+    }
 
     if (!SWAP_OUT_ELIGIBLE_OPERATIONS.contains(swapOutOperation)) {
       return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
@@ -1029,7 +1058,6 @@ public class ZKHelixAdmin implements HelixAdmin {
                     + "prepare the swap again.", swapInInstanceName, swapInOperation, clusterName,
                 InstanceConstants.InstanceOperation.UNKNOWN));
       }
-      boolean logicalIdAligned = swapOutLogicalId.equals(swapInDomain.get(logicalIdKey));
       if (swapInOperation == InstanceConstants.InstanceOperation.SWAP_IN && !logicalIdAligned) {
         return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
             String.format(
@@ -1041,6 +1069,17 @@ public class ZKHelixAdmin implements HelixAdmin {
         return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_PREPARED)
             .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
             .build();
+      }
+
+      // A coordinated swap only moves the logical id, so the swap-in stays in its own fault zone
+      // while taking over the swap-out's slot. Unless the two are already in one fault zone, the
+      // slot would change fault zone, which is a placement decision this call must not make on its
+      // own. This is checked before anything is written, so a refused pair is left untouched.
+      SwapPairResult faultZoneRefusal =
+          checkCoordinatedSwapFaultZone(clusterName, request, faultZoneType, swapOutDomain,
+              swapInDomain, swapOutIdentity, swapInIdentity);
+      if (faultZoneRefusal != null) {
+        return faultZoneRefusal;
       }
 
       InstanceConfig updatedSwapInConfig = new InstanceConfig(new ZNRecord(swapInConfig.getRecord()));
@@ -1072,6 +1111,11 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
 
       Map<String, String> mergedDomain = new LinkedHashMap<>(swapOutDomain);
+      // There is deliberately no fault zone precondition here. A direct swap copies the whole
+      // swap-out domain onto the swap-in, so the swap-in inherits the swap-out's fault zone by
+      // construction instead of having to already be in it. A caller that preserves the fault zone
+      // key is stating that it wants the swap-in's own value kept, which is an explicit request
+      // rather than a slot silently changing fault zone.
       for (String preservedKey : request.getPreservedSwapInDomainKeys()) {
         String preservedValue = swapInDomain.get(preservedKey);
         if (preservedValue == null) {
@@ -1104,6 +1148,50 @@ public class ZKHelixAdmin implements HelixAdmin {
         swapOutIdentity, swapInIdentity, SwapPairResult.Status.PREPARED);
   }
 
+  /**
+   * Refuse a coordinated preparation whose two instances are not already in one fault zone, so a
+   * swap that only moves a logical id cannot move a topology slot to a different fault zone.
+   *
+   * @return the refusal, or null when the pair shares one fault zone and may be prepared.
+   */
+  private static SwapPairResult checkCoordinatedSwapFaultZone(String clusterName,
+      SwapPairRequest request, String faultZoneType, Map<String, String> swapOutDomain,
+      Map<String, String> swapInDomain, InstanceConfigIdentity swapOutIdentity,
+      InstanceConfigIdentity swapInIdentity) {
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    // Treated like any other part of the topology this call cannot resolve: without a fault zone
+    // type there is nothing to compare, so the check is refused rather than skipped.
+    if (faultZoneType == null || faultZoneType.isEmpty()) {
+      return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity, swapInIdentity,
+          String.format(
+              "Cluster %s defines no fault zone type, so it cannot be established that the swap-in "
+                  + "%s is in the same fault zone as the swap-out %s. Define the fault zone type "
+                  + "of the cluster, or use a %s swap, which transfers the whole topology slot.",
+              clusterName, swapInInstanceName, swapOutInstanceName,
+              SwapPairRequest.SwapMode.DIRECT));
+    }
+
+    String swapOutFaultZone = swapOutDomain.get(faultZoneType);
+    String swapInFaultZone = swapInDomain.get(faultZoneType);
+    if (swapOutFaultZone == null || swapOutFaultZone.isEmpty()
+        || !swapOutFaultZone.equals(swapInFaultZone)) {
+      return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+          String.format(
+              "The swap-out instance %s has %s=%s and the swap-in instance %s has %s=%s in cluster "
+                  + "%s. A %s swap moves only the logical id, so the swap-in would hold the "
+                  + "swap-out's topology slot from a different fault zone.", swapOutInstanceName,
+              faultZoneType, describeSwapPairDomainValue(swapOutFaultZone), swapInInstanceName,
+              faultZoneType, describeSwapPairDomainValue(swapInFaultZone), clusterName,
+              SwapPairRequest.SwapMode.COORDINATED));
+    }
+    return null;
+  }
+
+  private static String describeSwapPairDomainValue(String value) {
+    return value == null || value.isEmpty() ? "<unset>" : value;
+  }
+
   private SwapPairResult completeSwapPairInternal(String clusterName, SwapPairRequest request,
       String swapOutPath, String swapInPath, InstanceConfig swapOutConfig,
       InstanceConfig swapInConfig, Map<String, String> swapInDomain, String logicalIdKey,
@@ -1121,8 +1209,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     // operation it inherited, and the swap-out has been retired to UNKNOWN. Recognising that shape
     // is what makes a replayed completion harmless instead of a second config move.
     if (swapOutOperation == InstanceConstants.InstanceOperation.UNKNOWN) {
-      if (logicalIdAligned && swapInOperation != InstanceConstants.InstanceOperation.UNKNOWN
-          && swapInOperation != InstanceConstants.InstanceOperation.SWAP_IN) {
+      if (isCompletedSwapPair(swapOutOperation, swapInOperation, logicalIdAligned)) {
         return new SwapPairResult.Builder(SwapPairResult.Status.ALREADY_COMPLETED)
             .setObservedSwapOutIdentity(swapOutIdentity).setObservedSwapInIdentity(swapInIdentity)
             .build();

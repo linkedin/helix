@@ -57,6 +57,7 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
   private static final String SWAP_IN = "swapInInstance_12001";
   private static final String LOGICAL_ID = "slot_0";
   private static final String ZONE = "zone_a";
+  private static final String OTHER_ZONE = "zone_b";
 
   // ===========================================================================================
   // Preparation
@@ -291,6 +292,84 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.ENABLE);
     Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), "other_slot");
+  }
+
+  // ===========================================================================================
+  // Fault zones
+  // ===========================================================================================
+
+  @Test
+  public void testCoordinatedPrepareRefusesACrossFaultZonePair() {
+    String clusterName = newCluster("coordinatedPrepareCrossFaultZone");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    // A coordinated swap only moves the logical id, so this swap-in would hold the swap-out's slot
+    // from another fault zone.
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(OTHER_ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    InstanceConfigIdentity swapOutBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
+        result.toString());
+    Assert.assertFalse(result.isSuccessful());
+    // Both fault zones are named, so the caller can see which side is where.
+    Assert.assertTrue(result.getBlockers().get(0).contains(ZONE), result.getBlockers().get(0));
+    Assert.assertTrue(result.getBlockers().get(0).contains(OTHER_ZONE),
+        result.getBlockers().get(0));
+    // Neither config was written, so the refused pair is exactly as it was.
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), swapOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN), swapInBefore);
+    InstanceConfig swapInConfig = getInstanceConfig(clusterName, SWAP_IN);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), "other_slot");
+    Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+  }
+
+  @Test
+  public void testCoordinatedPrepareAcceptsAPairInOneFaultZone() {
+    String clusterName = newCluster("coordinatedPrepareSameFaultZone");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PREPARED, result.toString());
+    InstanceConfig swapInConfig = getInstanceConfig(clusterName, SWAP_IN);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), LOGICAL_ID);
+    // The swap-in keeps the fault zone it was already in, which is the one it shares with the
+    // swap-out.
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(ZONE_KEY), ZONE);
+    Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.SWAP_IN);
+  }
+
+  @Test
+  public void testDirectPrepareAcceptsACrossFaultZonePair() {
+    String clusterName = newCluster("directPrepareCrossFaultZone");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(OTHER_ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName, direct().build());
+
+    // A direct swap transfers the whole topology slot, so the swap-in ends up in the swap-out's
+    // fault zone instead of having to already be in it.
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.PREPARED, result.toString());
+    InstanceConfig swapInConfig = getInstanceConfig(clusterName, SWAP_IN);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(ZONE_KEY), ZONE);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(LOGICAL_ID_KEY), LOGICAL_ID);
+    Assert.assertEquals(swapInConfig.getDomainAsMap().get(HOST_KEY), "swap-in-host");
+    Assert.assertEquals(swapInConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
   }
 
   // ===========================================================================================
@@ -567,6 +646,75 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
   }
 
   @Test
+  public void testPrepareReplayAfterCompletionIsReportedAsCompleted() {
+    String clusterName = newCluster("prepareReplayAfterCompletion");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertEquals(admin.prepareSwapPair(clusterName, coordinated().build()).getStatus(),
+        SwapPairResult.Status.PREPARED);
+    Assert.assertEquals(
+        admin.completeSwapPair(clusterName, coordinated().setForceComplete(true).build())
+            .getStatus(), SwapPairResult.Status.COMPLETED);
+    InstanceConfigIdentity swapOutAfter = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInAfter = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    // A caller that lost the response of the completion starts its flow again from preparation.
+    SwapPairResult replayedPrepare = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(replayedPrepare.getStatus(), SwapPairResult.Status.ALREADY_COMPLETED,
+        replayedPrepare.toString());
+    Assert.assertTrue(replayedPrepare.isSuccessful());
+    Assert.assertEquals(replayedPrepare.getObservedSwapOutIdentity(), swapOutAfter);
+    Assert.assertEquals(replayedPrepare.getObservedSwapInIdentity(), swapInAfter);
+    // The swap already happened, so preparation must not write anything on top of it.
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), swapOutAfter);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN), swapInAfter);
+  }
+
+  @Test
+  public void testPrepareRefusesAPairThatIsNotFullyCompleted() {
+    String clusterName = newCluster("prepareIncompletePair");
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, "other_slot", "swap-in-host", null),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertEquals(admin.prepareSwapPair(clusterName, coordinated().build()).getStatus(),
+        SwapPairResult.Status.PREPARED);
+    // The swap-out is retired without the swap-in ever taking over, so the pair carries part of
+    // the completed shape without being a completed swap.
+    setInstanceOperationDirectly(clusterName, SWAP_OUT,
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    InstanceConfigIdentity swapOutBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    SwapPairResult stillSwapIn = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(stillSwapIn.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
+        stillSwapIn.toString());
+    Assert.assertFalse(stillSwapIn.isSuccessful());
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), swapOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN), swapInBefore);
+
+    // A swap-in that holds the slot but is unassignable is not a completed swap either: nothing
+    // took over the work the swap-out was doing.
+    setInstanceOperationDirectly(clusterName, SWAP_IN, InstanceConstants.InstanceOperation.UNKNOWN);
+    InstanceConfigIdentity unassignableSwapInBefore =
+        admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    SwapPairResult unassignableSwapIn = admin.prepareSwapPair(clusterName, coordinated().build());
+
+    Assert.assertEquals(unassignableSwapIn.getStatus(), SwapPairResult.Status.PAIR_MISMATCH,
+        unassignableSwapIn.toString());
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), swapOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN),
+        unassignableSwapInBefore);
+  }
+
+  @Test
   public void testCompleteRefusesAnUnpreparedPair() {
     String clusterName = newCluster("completeUnprepared");
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
@@ -789,6 +937,18 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
 
   private InstanceConfig getInstanceConfig(String clusterName, String instanceName) {
     return new ConfigAccessor(_gZkClient).getInstanceConfig(clusterName, instanceName);
+  }
+
+  /**
+   * Write an instance operation straight onto the config, the way a party that is not this API
+   * would leave the cluster in a state the swap has to make sense of.
+   */
+  private void setInstanceOperationDirectly(String clusterName, String instanceName,
+      InstanceConstants.InstanceOperation operation) {
+    ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+    InstanceConfig instanceConfig = configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperation(operation);
+    configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
   }
 
   /**

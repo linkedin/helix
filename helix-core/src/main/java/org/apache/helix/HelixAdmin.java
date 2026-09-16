@@ -915,12 +915,23 @@ public interface HelixAdmin {
    * modified by preparation, and fields of the swap-in that the mode does not target are left as
    * they are.
    * <p>
+   * A {@link SwapPairRequest.SwapMode#COORDINATED} preparation additionally requires both
+   * instances to already carry the same value for the cluster's fault zone type. That mode moves
+   * only the logical id, so the swap-in keeps its own topology position, and without this the
+   * topology slot would change fault zone. {@link SwapPairRequest.SwapMode#DIRECT} has no such
+   * precondition, because it transfers the whole slot and the swap-in therefore inherits the
+   * swap-out's fault zone.
+   * <p>
    * Preparation is safe to repeat. When the swap-in already has the requested shape, the call
    * reports {@link SwapPairResult.Status#ALREADY_PREPARED} and writes nothing, so a retry cannot
    * re-apply an instance operation change on top of whatever the instance has since been set to.
    * A coordinated swap-in already marked SWAP_IN is accepted only when its logical id is aligned;
-   * an in-progress swap for a different logical id is refused. The identity limitations described
-   * in {@link #completeSwapPair(String, SwapPairRequest)} apply to preparation too.
+   * an in-progress swap for a different logical id is refused. A pair that is already in the
+   * completed shape reports {@link SwapPairResult.Status#ALREADY_COMPLETED} and writes nothing,
+   * the same answer {@link #completeSwapPair(String, SwapPairRequest)} gives, so a caller that
+   * lost the response of a completion and restarts from preparation still gets a definite answer.
+   * The identity limitations described in {@link #completeSwapPair(String, SwapPairRequest)} apply
+   * to preparation too.
    *
    * @param clusterName The cluster name
    * @param request     The pair, mode and optional expected identities

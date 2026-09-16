@@ -26,6 +26,7 @@ public class TestPairScopedSwapAPI extends AbstractTestClass {
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final String CLUSTER_NAME = "TestCluster_1";
   private static final String HOST_KEY = "host";
+  private static final String FAULT_ZONE = "restZoneA";
   private static final Entity<String> EMPTY_BODY =
       Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
 
@@ -187,6 +188,10 @@ public class TestPairScopedSwapAPI extends AbstractTestClass {
     return ClusterTopologyConfig.createFromClusterConfig(clusterConfig).getEndNodeType();
   }
 
+  private String faultZoneKey() {
+    return _configAccessor.getClusterConfig(CLUSTER_NAME).getFaultZoneType();
+  }
+
   private String addInstance(String instanceName, String logicalId, String host) throws Exception {
     InstanceConfig instanceConfig = new InstanceConfig(instanceName);
     Entity<String> entity =
@@ -199,6 +204,9 @@ public class TestPairScopedSwapAPI extends AbstractTestClass {
     Map<String, String> domain = new HashMap<>(stored.getDomainAsMap());
     domain.put(logicalIdKey(), logicalId);
     domain.put(HOST_KEY, host);
+    // Every instance here is placed in one fault zone, which is what a coordinated swap between
+    // any two of them requires.
+    domain.put(faultZoneKey(), FAULT_ZONE);
     stored.setDomain(ConfigStringUtil.concatenateMapping(domain));
     _configAccessor.setInstanceConfig(CLUSTER_NAME, instanceName, stored);
     return instanceName;
