@@ -27,7 +27,6 @@ import java.util.Map;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixException;
-import org.apache.helix.controller.rebalancer.constraint.MockAbnormalStateResolver;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -354,47 +353,6 @@ public class TestClusterConfig {
   }
 
   @Test
-  public void testAbnormalStatesResolverConfig() {
-    ClusterConfig testConfig = new ClusterConfig("testConfig");
-    // Default value is empty
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), Collections.EMPTY_MAP);
-    // Test set
-    Map<String, String> resolverMap =
-        ImmutableMap.of(MasterSlaveSMD.name, MockAbnormalStateResolver.class.getName());
-    testConfig.setAbnormalStateResolverMap(resolverMap);
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), resolverMap);
-    // Test empty the map
-    testConfig.setAbnormalStateResolverMap(Collections.emptyMap());
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), Collections.EMPTY_MAP);
-
-    testConfig.setAbnormalStateResolverMap(null);
-    Assert.assertTrue(testConfig.getRecord()
-        .getMapField(ClusterConfig.ClusterConfigProperty.ABNORMAL_STATES_RESOLVER_MAP.name())
-        == null);
-  }
-
-  @Test
-  public void testSetInvalidAbnormalStatesResolverConfig() {
-    ClusterConfig testConfig = new ClusterConfig("testConfig");
-
-    Map<String, String> resolverMap = new HashMap<>();
-    resolverMap.put(null, MockAbnormalStateResolver.class.getName());
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put("", MockAbnormalStateResolver.class.getName());
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put(MasterSlaveSMD.name, null);
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put(MasterSlaveSMD.name, "");
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-  }
-
-  @Test
   public void testGetLastOnDemandRebalanceTimestamp() {
     ClusterConfig testConfig = new ClusterConfig("testConfig");
     Assert.assertEquals(testConfig.getLastOnDemandRebalanceTimestamp(), -1L);
@@ -413,17 +371,6 @@ public class TestClusterConfig {
     Assert.assertEquals(testConfig.getRecord()
         .getLongField(ClusterConfig.ClusterConfigProperty.LAST_ON_DEMAND_REBALANCE_TIMESTAMP.name(),
             -1), 10000L);
-  }
-
-
-  private void trySetInvalidAbnormalStatesResolverMap(ClusterConfig testConfig,
-      Map<String, String> resolverMap) {
-    try {
-      testConfig.setAbnormalStateResolverMap(resolverMap);
-      Assert.fail("Invalid resolver setup shall fail.");
-    } catch (IllegalArgumentException ex) {
-      // expected
-    }
   }
 
   @Test
