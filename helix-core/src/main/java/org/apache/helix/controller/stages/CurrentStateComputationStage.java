@@ -375,9 +375,11 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
 
         // Cluster-wide weighted-usage distribution: max / mean / min / max-to-mean ratio of the
         // per-instance capacity-weighted load, for the all-replica ("partition") and top-state
-        // dimensions separately. This summarizes the load WAGED's MaxCapacityUsageInstanceConstraint
-        // / TopStateMaxCapacityUsageInstanceConstraint balance; the max-to-mean ratio is the evenness
-        // indicator (1.0 == perfectly even). Top-state weighted usage is otherwise unmeasured.
+        // dimensions separately. Computed from the observed current-state assignment above, so it
+        // summarizes the live weighted load -- the dimension WAGED's MaxCapacityUsageInstanceConstraint
+        // / TopStateMaxCapacityUsageInstanceConstraint balance -- rather than WAGED's computed target.
+        // The max-to-mean ratio is the evenness indicator (1.0 == perfectly even); top-state weighted
+        // usage is otherwise unmeasured.
         clusterStatusMonitor.updateWeightedCapacityUsageStats(
             computeUsageStats(generalUtilizations), computeUsageStats(topStateUtilizations));
       } catch (Exception ex) {
@@ -410,11 +412,12 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
   }
 
   /**
-   * Summarizes the distribution of per-instance WAGED weighted capacity utilization as the maximum,
-   * arithmetic mean, minimum, and max-to-mean ratio across instances. This describes how the
-   * capacity-weighted load -- the quantity WAGED's capacity-usage soft constraints balance -- is
-   * spread across the cluster. The max-to-mean ratio (peak-to-average) is the evenness indicator:
-   * {@code 1.0} means perfectly even, larger means the busiest instance is further above average.
+   * Summarizes the distribution of the supplied per-instance weighted capacity utilization values as
+   * the maximum, arithmetic mean, minimum, and max-to-mean ratio across instances. Callers pass the
+   * observed current-state utilizations, so this describes how the live capacity-weighted load -- the
+   * dimension WAGED's capacity-usage soft constraints balance -- is spread across the cluster. The
+   * max-to-mean ratio (peak-to-average) is the evenness indicator: {@code 1.0} means perfectly even,
+   * larger means the busiest instance is further above average.
    * <p>
    * The ratio is {@code >= 1.0} when defined; it is reported as {@code 0.0} (undefined) when there
    * are no values or the mean is {@code 0} (all-zero usage), which also avoids a divide-by-zero.

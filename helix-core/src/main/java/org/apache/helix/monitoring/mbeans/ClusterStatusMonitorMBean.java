@@ -281,12 +281,14 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   // ---- WAGED weighted capacity-usage distribution across live instances ----
   // Cluster-level summary (max / mean / min / max-to-mean ratio) of each live instance's highest
-  // per-capacity-key WEIGHTED utilization -- the quantity WAGED's capacity-usage soft constraints
-  // balance. Two dimensions are exposed: "partition" counts all replicas (mirrors the per-instance
-  // MaxCapacityUsageGauge) and "top-state" counts top-state replicas only (otherwise unmeasured).
-  // The max-to-mean ratio is the evenness indicator (peak-to-average): 1.0 is perfectly even
-  // (WAGED's goal), larger is more skewed. Individual utilizations are >= 0.0 and may exceed 1.0
-  // when a node is oversubscribed.
+  // per-capacity-key WEIGHTED utilization -- the capacity-weighted load that WAGED's capacity-usage
+  // soft constraints balance. These are derived from the OBSERVED current-state assignment (what is
+  // actually placed on each instance now), so they reflect the live weighted balance, which converges
+  // to -- but is not -- the ideal/best-possible target WAGED computes. Two dimensions are exposed:
+  // "partition" counts all replicas (mirrors the per-instance MaxCapacityUsageGauge) and "top-state"
+  // counts replicas currently in the top state only (otherwise unmeasured). The max-to-mean ratio is
+  // the evenness indicator (peak-to-average): 1.0 is perfectly even (WAGED's goal), larger is more
+  // skewed. Individual utilizations are >= 0.0 and may exceed 1.0 when a node is oversubscribed.
 
   /**
    * @return highest per-instance general (all-replica) weighted capacity utilization across live

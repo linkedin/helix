@@ -127,8 +127,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private volatile double _estimatedMaxClusterCapacityUsage = 0.0d;
 
   // Cluster-level distribution (max / mean / min / max-to-mean ratio) of per-instance WAGED weighted
-  // capacity utilization -- the load WAGED's capacity-usage soft constraints balance. "Partition"
-  // counts all replicas; "topState" counts top-state replicas only. Refreshed every pipeline run.
+  // capacity utilization, computed from the OBSERVED current-state assignment -- the live
+  // capacity-weighted load that WAGED's capacity-usage soft constraints balance (which converges to,
+  // but is not, WAGED's computed ideal/best-possible target). "Partition" counts all replicas;
+  // "topState" counts replicas currently in the top state only. Refreshed every pipeline run.
   // Ratios are >= 1.0 when defined, or 0.0 (undefined) when there is no instance or usage (mean 0).
   private volatile double _weightedPartitionUsageMax = 0.0d;
   private volatile double _weightedPartitionUsageMean = 0.0d;
