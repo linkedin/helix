@@ -40,6 +40,7 @@ import org.apache.helix.zookeeper.zkclient.exception.ZkMarshallingError;
 import org.apache.helix.zookeeper.zkclient.serialize.PathBasedZkSerializer;
 import org.mockito.Mockito;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -163,6 +164,34 @@ public class TestZkHelixAdminPairScopedSwap extends ZkUnitTestBase {
     Assert.assertTrue(result.getBlockers().get(0).contains(HOST_KEY), result.getBlockers().get(0));
     Assert.assertEquals(getInstanceConfig(clusterName, SWAP_IN).getDomainAsMap().get(
         LOGICAL_ID_KEY), "other_slot");
+  }
+
+  @DataProvider
+  public Object[][] swapInLogicalIds() {
+    return new Object[][] {{"other_slot"}, {LOGICAL_ID}};
+  }
+
+  @Test(dataProvider = "swapInLogicalIds")
+  public void testDirectPrepareRefusesPreservingLogicalId(String swapInLogicalId) {
+    String clusterName = newCluster("directPreparePreservedLogicalId_" + swapInLogicalId);
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    addSwapOut(admin, clusterName);
+    addInstance(admin, clusterName, SWAP_IN,
+        domain(ZONE, swapInLogicalId, "swap-in-host", "swapInVirtualZone"),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    InstanceConfigIdentity swapOutBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_OUT);
+    InstanceConfigIdentity swapInBefore = admin.getInstanceConfigIdentity(clusterName, SWAP_IN);
+
+    SwapPairResult result = admin.prepareSwapPair(clusterName,
+        direct().setPreservedSwapInDomainKeys(Collections.singleton(LOGICAL_ID_KEY)).build());
+
+    Assert.assertEquals(result.getStatus(), SwapPairResult.Status.INVALID_REQUEST,
+        result.toString());
+    Assert.assertFalse(result.isSuccessful());
+    Assert.assertTrue(result.getBlockers().get(0).contains(LOGICAL_ID_KEY),
+        result.getBlockers().get(0));
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_OUT), swapOutBefore);
+    Assert.assertEquals(admin.getInstanceConfigIdentity(clusterName, SWAP_IN), swapInBefore);
   }
 
   @Test

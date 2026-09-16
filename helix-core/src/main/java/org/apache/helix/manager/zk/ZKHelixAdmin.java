@@ -1048,6 +1048,12 @@ public class ZKHelixAdmin implements HelixAdmin {
           swapPairInstanceOperation(InstanceConstants.InstanceOperation.SWAP_IN, request));
       desiredSwapInRecord = updatedSwapInConfig.getRecord();
     } else {
+      if (request.getPreservedSwapInDomainKeys().contains(logicalIdKey)) {
+        return swapPairRefusal(SwapPairResult.Status.INVALID_REQUEST, swapOutIdentity,
+            swapInIdentity, String.format(
+                "A direct swap must transfer the logical id domain key %s from the swap-out, "
+                    + "so that key cannot be preserved from the swap-in.", logicalIdKey));
+      }
       // A direct swap-in takes over the whole topology slot, so it must not be assignable while it
       // still carries its own slot, and it must not become assignable in the swap-out's slot before
       // completion transfers the config.

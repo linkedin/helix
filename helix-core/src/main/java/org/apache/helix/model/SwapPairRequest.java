@@ -120,7 +120,8 @@ public class SwapPairRequest {
 
   /**
    * @return the domain keys whose swap-in values survive a {@link SwapMode#DIRECT} preparation.
-   *         Every other domain key is taken from the swap-out. Unused in
+   *         The topology's logical-id key cannot be preserved. Every other domain key is taken
+   *         from the swap-out. Unused in
    *         {@link SwapMode#COORDINATED}, which only touches the logical id key.
    */
   public Set<String> getPreservedSwapInDomainKeys() {
