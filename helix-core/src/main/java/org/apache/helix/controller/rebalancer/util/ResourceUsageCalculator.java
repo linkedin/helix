@@ -19,6 +19,7 @@ package org.apache.helix.controller.rebalancer.util;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -141,6 +142,49 @@ public class ResourceUsageCalculator {
 
     return numTotalBestPossibleReplicas == 0 ? 1.0d
         : (1.0d - (double) numMatchedReplicas / (double) numTotalBestPossibleReplicas);
+  }
+
+  /**
+   * Counts the number of replica placements in {@code newAssignment} that are new or changed
+   * relative to {@code oldAssignment}. A replica placement (identified by partition name and
+   * instance name) counts as a movement when the instance does not hold that partition's replica in
+   * the previous assignment, or holds it in a different state. This approximates the amount of churn
+   * a rebalance introduces (i.e. the number of state-transition messages it will generate), which is
+   * a useful blast-radius signal independent of how long the rebalance took.
+   *
+   * Note: replicas that were dropped (present in {@code oldAssignment} but absent in
+   * {@code newAssignment}) are intentionally not counted; the metric measures work introduced by the
+   * new assignment. A replica whose instance is unchanged but whose state changed (e.g. a
+   * SLAVE promoted to MASTER) is counted, because it still produces a state transition.
+   *
+   * @param oldAssignment the previous assignment (e.g. previous baseline or best possible)
+   * @param newAssignment the newly computed assignment
+   * @return the number of new or changed replica placements introduced by {@code newAssignment}
+   */
+  public static long countReplicaMovements(Map<String, ResourceAssignment> oldAssignment,
+      Map<String, ResourceAssignment> newAssignment) {
+    long movements = 0L;
+    for (Map.Entry<String, ResourceAssignment> resourceEntry : newAssignment.entrySet()) {
+      String resourceName = resourceEntry.getKey();
+      Map<String, Map<String, String>> newPartitions =
+          resourceEntry.getValue().getRecord().getMapFields();
+      ResourceAssignment oldResource = oldAssignment.get(resourceName);
+      Map<String, Map<String, String>> oldPartitions =
+          oldResource == null ? Collections.emptyMap() : oldResource.getRecord().getMapFields();
+
+      for (Map.Entry<String, Map<String, String>> partitionEntry : newPartitions.entrySet()) {
+        Map<String, String> newReplicas = partitionEntry.getValue();
+        Map<String, String> oldReplicas =
+            oldPartitions.getOrDefault(partitionEntry.getKey(), Collections.emptyMap());
+        for (Map.Entry<String, String> replicaEntry : newReplicas.entrySet()) {
+          // New or changed placement for this (partition, instance) => a movement.
+          if (!replicaEntry.getValue().equals(oldReplicas.get(replicaEntry.getKey()))) {
+            movements++;
+          }
+        }
+      }
+    }
+    return movements;
   }
 
   /**

@@ -80,6 +80,10 @@ class GlobalRebalanceRunner implements AutoCloseable {
   private final LatencyMetric _writeLatency;
   private final CountMetric _baselineCalcCounter;
   private final LatencyMetric _baselineCalcLatency;
+  // Sub-phase latencies of _baselineCalcLatency: time spent building the cluster model vs. solving
+  // it with the assignment algorithm. Together they let a slow baseline be attributed to either half.
+  private final LatencyMetric _baselineCalcBuildLatency;
+  private final LatencyMetric _baselineCalcSolveLatency;
   // Reporter that ticks RebalanceFailureCounter plus the per-FailureCategory counters on both
   // the Rebalancer-domain and ClusterStatus-domain MBeans. Owned by WagedRebalancer; injected
   // so the runner doesn't need a direct ClusterStatusMonitor reference. For the Baseline phase this
@@ -113,6 +117,12 @@ class GlobalRebalanceRunner implements AutoCloseable {
         CountMetric.class);
     _baselineCalcLatency = metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcLatencyGauge.name(),
+        LatencyMetric.class);
+    _baselineCalcBuildLatency = metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcBuildLatencyGauge.name(),
+        LatencyMetric.class);
+    _baselineCalcSolveLatency = metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcSolveLatencyGauge.name(),
         LatencyMetric.class);
     _asyncFailureReporter = asyncFailureReporter;
     _baselineComputeStatusReporter = baselineComputeStatusReporter;
@@ -217,6 +227,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
     Map<String, ResourceAssignment> currentBaseline =
         _assignmentManager.getBaselineAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
     ClusterModel clusterModel;
+    _baselineCalcBuildLatency.startMeasuringLatency();
     try {
       clusterModel = ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
           allAssignableInstances, clusterChanges, currentBaseline);
@@ -224,9 +235,17 @@ class GlobalRebalanceRunner implements AutoCloseable {
       throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
+    } finally {
+      _baselineCalcBuildLatency.endMeasuringLatency();
     }
 
-    Map<String, ResourceAssignment> newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    _baselineCalcSolveLatency.startMeasuringLatency();
+    Map<String, ResourceAssignment> newBaseline;
+    try {
+      newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    } finally {
+      _baselineCalcSolveLatency.endMeasuringLatency();
+    }
     boolean isBaselineChanged =
         _assignmentMetadataStore != null && _assignmentMetadataStore.isBaselineChanged(newBaseline);
     // Write the new baseline to metadata store
