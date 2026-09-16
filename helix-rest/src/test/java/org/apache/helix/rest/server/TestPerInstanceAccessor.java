@@ -1885,6 +1885,135 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  // Self contained: it creates and drops its own instance, so it does not depend on, and does
+  // not disturb, the ordered flow the rest of this class shares.
+  @Test
+  public void testSetInstanceOperationChecked() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instance = "checkedOperationInstance_12999";
+    _gSetupTool.addInstanceToCluster(CLUSTER_NAME, instance);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+    try {
+      JsonNode applied = postChecked(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=DISABLE"
+              + "&instanceOperationSource=AUTOMATION&reason=checked", instance, entity);
+      Assert.assertEquals(applied.get("outcome").textValue(), "APPLIED", applied.toString());
+      Assert.assertTrue(applied.get("desiredStateInEffect").booleanValue(), applied.toString());
+      Assert.assertEquals(applied.get("instanceOperation").textValue(), "DISABLE");
+      Assert.assertEquals(applied.get("requestedSourceOperation").textValue(), "DISABLE");
+      Assert.assertFalse(applied.get("helixEnabled").booleanValue());
+      int version = applied.get("configVersion").intValue();
+
+      // Repeating the same intent must not write again, which the reported version proves.
+      JsonNode unchanged = postChecked(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=DISABLE"
+              + "&instanceOperationSource=AUTOMATION&reason=checked", instance, entity);
+      Assert.assertEquals(unchanged.get("outcome").textValue(), "UNCHANGED",
+          unchanged.toString());
+      Assert.assertEquals(unchanged.get("configVersion").intValue(), version);
+
+      // A stale expected version is reported as a conflict on a 200, because a conflict is an
+      // answer to a conditional request rather than a transport failure.
+      JsonNode conflict = postChecked(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=ENABLE"
+              + "&instanceOperationSource=AUTOMATION&expectedConfigVersion=" + (version + 5),
+          instance, entity);
+      Assert.assertEquals(conflict.get("outcome").textValue(), "CONFLICT", conflict.toString());
+      Assert.assertEquals(conflict.get("conflictReason").textValue(), "VERSION_MISMATCH");
+      Assert.assertEquals(
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceOperation()
+              .getOperation(), InstanceConstants.InstanceOperation.DISABLE);
+
+      JsonNode missing = postChecked(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=DISABLE"
+              + "&instanceOperationSource=AUTOMATION", "noSuchInstance_1", entity);
+      Assert.assertEquals(missing.get("outcome").textValue(), "NOT_FOUND", missing.toString());
+      Assert.assertFalse(missing.has("instanceOperation"),
+          "No state may be reported for a node that was not observed");
+
+      // The source names the only entry the command may write, so it is required, and the
+      // clear-every-source override is deliberately not reachable through this command.
+      new JerseyUriRequestBuilder(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=DISABLE")
+          .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .format(CLUSTER_NAME, instance).post(this, entity);
+      new JerseyUriRequestBuilder(
+          "clusters/{}/instances/{}?command=setInstanceOperationChecked&instanceOperation=DISABLE"
+              + "&instanceOperationSource=AUTOMATION&force=true")
+          .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .format(CLUSTER_NAME, instance).post(this, entity);
+    } finally {
+      _gSetupTool.getClusterManagementTool().dropInstance(CLUSTER_NAME,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance));
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Self contained, for the same reason as the checked operation test above.
+  @Test
+  public void testCheckedPartitionCommands() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instance = "checkedPartitionsInstance_12999";
+    String resource = "CheckedResource";
+    _gSetupTool.addInstanceToCluster(CLUSTER_NAME, instance);
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(
+        ImmutableMap.of(AbstractResource.Properties.id.name(), instance,
+            PerInstanceAccessor.PerInstanceProperties.resource.name(), resource,
+            PerInstanceAccessor.PerInstanceProperties.partitions.name(),
+            ImmutableList.of("p0", "p1"))), MediaType.APPLICATION_JSON_TYPE);
+    try {
+      JsonNode disabled = postChecked(
+          "clusters/{}/instances/{}?command=disablePartitionsChecked", instance, entity);
+      Assert.assertEquals(disabled.get("outcome").textValue(), "APPLIED", disabled.toString());
+      Assert.assertTrue(disabled.get("desiredStateInEffect").booleanValue());
+      Assert.assertEquals(new HashSet<>(OBJECT_MAPPER.convertValue(
+              disabled.get("disabledPartitions").get(resource), List.class)),
+          new HashSet<>(Arrays.asList("p0", "p1")));
+      int version = disabled.get("configVersion").intValue();
+
+      JsonNode unchanged = postChecked(
+          "clusters/{}/instances/{}?command=disablePartitionsChecked", instance, entity);
+      Assert.assertEquals(unchanged.get("outcome").textValue(), "UNCHANGED",
+          unchanged.toString());
+      Assert.assertEquals(unchanged.get("configVersion").intValue(), version);
+
+      JsonNode enabled = postChecked(
+          "clusters/{}/instances/{}?command=enablePartitionsChecked", instance, entity);
+      Assert.assertEquals(enabled.get("outcome").textValue(), "APPLIED", enabled.toString());
+      Assert.assertTrue(enabled.get("desiredStateInEffect").booleanValue());
+
+      // An expectation that no longer holds is reported rather than written over.
+      Entity mismatch = Entity.entity(OBJECT_MAPPER.writeValueAsString(
+          ImmutableMap.of(AbstractResource.Properties.id.name(), instance,
+              PerInstanceAccessor.PerInstanceProperties.resource.name(), resource,
+              PerInstanceAccessor.PerInstanceProperties.partitions.name(),
+              ImmutableList.of("p2"),
+              PerInstanceAccessor.PerInstanceProperties.expectedDisabledPartitions.name(),
+              ImmutableList.of("p0"))), MediaType.APPLICATION_JSON_TYPE);
+      JsonNode conflict = postChecked(
+          "clusters/{}/instances/{}?command=disablePartitionsChecked", instance, mismatch);
+      Assert.assertEquals(conflict.get("outcome").textValue(), "CONFLICT", conflict.toString());
+      Assert.assertEquals(conflict.get("conflictReason").textValue(), "EXPECTED_STATE_MISMATCH");
+
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disablePartitionsChecked")
+          .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .format(CLUSTER_NAME, instance)
+          .post(this, Entity.entity("", MediaType.APPLICATION_JSON_TYPE));
+    } finally {
+      _gSetupTool.getClusterManagementTool().dropInstance(CLUSTER_NAME,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance));
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private JsonNode postChecked(String uriTemplate, String instance, Entity entity)
+      throws IOException {
+    Response response =
+        new JerseyUriRequestBuilder(uriTemplate).format(CLUSTER_NAME, instance).post(this, entity);
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+    return OBJECT_MAPPER.readTree(response.readEntity(String.class));
+  }
+
   private Map<String, ExternalView> getEVs() {
     Map<String, ExternalView> externalViews = new HashMap<String, ExternalView>();
     for (String db : _resourcesMap.get(CLUSTER_NAME)) {
