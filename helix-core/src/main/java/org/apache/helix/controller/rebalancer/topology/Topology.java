@@ -241,10 +241,17 @@ public class Topology {
         // Topology-aware placement requires an explicit cluster TOPOLOGY definition together with
         // each instance's DOMAIN. The legacy default "/root/zone/instance" mode backed by the
         // per-instance ZONE_ID field has been removed.
-        throw new IllegalArgumentException(String.format(
+        String errorMessage = String.format(
             "Cluster %s has topology-aware rebalance enabled but no TOPOLOGY defined. The legacy "
                 + "per-instance ZONE_ID topology mode has been removed; configure "
-                + "ClusterConfig.TOPOLOGY and each instance's DOMAIN.", clusterName));
+                + "ClusterConfig.TOPOLOGY and each instance's DOMAIN.", clusterName);
+        // Log loudly before throwing: under WAGED this failure surfaces as
+        // HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, which is not in
+        // WagedRebalancer.FAILURE_TYPES_TO_PROPAGATE and would otherwise be swallowed while the
+        // rebalancer silently falls back to the last known-good assignment, leaving the cluster
+        // stuck without a visible signal.
+        logger.error(errorMessage);
+        throw new IllegalArgumentException(errorMessage);
       } else {
         /*
          * Return a ordered map representing the instance path. The topology order is defined in
