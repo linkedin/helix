@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableMap;
@@ -53,11 +54,10 @@ import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
-import org.testng.collections.Sets;
 
 public class TestIndependentTaskRebalancer extends TaskTestBase {
-  private Set<String> _invokedClasses = Sets.newHashSet();
-  private Map<String, Integer> _runCounts = Maps.newHashMap();
+  private final Set<String> _invokedClasses = ConcurrentHashMap.newKeySet();
+  private final Map<String, Integer> _runCounts = new ConcurrentHashMap<>();
   private static final AtomicBoolean _failureCtl = new AtomicBoolean(true);
 
   @BeforeClass
@@ -266,7 +266,7 @@ public class TestIndependentTaskRebalancer extends TaskTestBase {
         .setTaskRetryDelay(delay).addTaskConfigs(taskConfigs).setJobCommandConfigMap(jobCommandMap);
     workflowBuilder.addJob(jobName, jobBuilder);
 
-    SingleFailTask.hasFailed = false;
+    SingleFailTask.hasFailed.set(false);
     _driver.start(workflowBuilder.build());
 
     // Ensure completion
@@ -299,17 +299,13 @@ public class TestIndependentTaskRebalancer extends TaskTestBase {
       }
       _shouldFail = shouldFail;
 
-      // Initialize the count for this instance if not already done
-      if (!_runCounts.containsKey(instanceName)) {
-        _runCounts.put(instanceName, 0);
-      }
       _instanceName = instanceName;
     }
 
     @Override
     public synchronized TaskResult run() {
       _invokedClasses.add(getClass().getName());
-      _runCounts.put(_instanceName, _runCounts.get(_instanceName) + 1);
+      _runCounts.merge(_instanceName, 1, Integer::sum);
 
       // Fail the task if it should fail
       if (_shouldFail) {
@@ -327,12 +323,11 @@ public class TestIndependentTaskRebalancer extends TaskTestBase {
   }
 
   private static class SingleFailTask implements Task {
-    static boolean hasFailed = false;
+    static final AtomicBoolean hasFailed = new AtomicBoolean();
 
     @Override
     public synchronized TaskResult run() {
-      if (!hasFailed) {
-        hasFailed = true;
+      if (hasFailed.compareAndSet(false, true)) {
         return new TaskResult(Status.ERROR, null);
       }
       return new TaskResult(Status.COMPLETED, null);

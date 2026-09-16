@@ -21,7 +21,7 @@
   <parent>
     <groupId>org.apache.helix</groupId>
     <artifactId>helix</artifactId>
-    <version>1.4.4-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -43,11 +43,9 @@
   </organization>
 
   <properties>
-    <revision>1.4.4-SNAPSHOT</revision>
     <osgi.import>
       org.apache.helix*,
       org.apache.commons.cli*,
-      org.restlet*,
       org.slf4j*;version="[1.7,2)",
       org.apache.logging.log4j*;version="[2.17,3)",
       org.apache.logging.slf4j*;version="[2.17,3)",
@@ -62,7 +60,7 @@
     <dependency>
       <groupId>org.apache.helix</groupId>
       <artifactId>metadata-store-directory-common</artifactId>
-      <version>${revision}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.yaml</groupId>
@@ -77,7 +75,7 @@
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-slf4j-impl</artifactId>
-      <version>2.17.1</version>
+      <version>2.25.4</version>
     </dependency>
     <dependency>
       <groupId>org.apache.helix</groupId>
@@ -86,12 +84,12 @@
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-lang3</artifactId>
-      <version>3.8.1</version>
+      <version>3.18.0</version>
     </dependency>
     <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-server</artifactId>
-      <version>9.4.56.v20240826</version>
+      <version>9.4.58.v20250814</version>
     </dependency>
     <dependency>
       <groupId>org.glassfish.jersey.core</groupId>
@@ -116,22 +114,17 @@
     <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-servlet</artifactId>
-      <version>9.4.48.v20220622</version>
-    </dependency>
-    <dependency>
-      <groupId>com.thoughtworks.xstream</groupId>
-      <artifactId>xstream</artifactId>
-      <version>1.4.19</version>
+      <version>9.4.58.v20250814</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <version>2.12.7.1</version>
+      <version>2.15.4</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <version>2.12.7</version>
+      <version>2.15.4</version>
     </dependency>
     <dependency>
       <groupId>commons-cli</groupId>

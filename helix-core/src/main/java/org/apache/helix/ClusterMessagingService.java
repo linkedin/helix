@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.helix.messaging.AsyncCallback;
+import org.apache.helix.messaging.ParticipantMessageOptions;
 import org.apache.helix.messaging.handling.MessageHandlerFactory;
 import org.apache.helix.model.Message;
 
@@ -160,5 +161,21 @@ public interface ClusterMessagingService {
    */
   public Map<InstanceType, List<Message>> generateMessage(final Criteria recipientCriteria,
       final Message messageTemplate);
+
+  /**
+   * Optimized API to send message to a specific live participant instance in a target cluster.
+   * Options such as session scoping, self exclusion, callback, timeout, and retry are provided via
+   * {@link ParticipantMessageOptions}.
+   */
+  int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      ParticipantMessageOptions options);
+
+  /**
+   * Optimized API to send message to all live participant instances in a target cluster.
+   * Options such as session scoping, self exclusion, callback, timeout, and retry are provided via
+   * {@link ParticipantMessageOptions}.
+   */
+  int sendToAllParticipantInstances(String clusterName, Message message,
+      ParticipantMessageOptions options);
 
 }

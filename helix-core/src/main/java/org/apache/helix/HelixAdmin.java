@@ -44,6 +44,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.model.OperationCheckResult;
 
 /*
  * Helix cluster management
@@ -730,14 +731,6 @@ public interface HelixAdmin {
   void enableBatchMessageMode(String clusterName, String resourceName, boolean enabled);
 
   /**
-   * Get batch disabled instance map (disabled instance -> disabled time) in a cluster. It will
-   * include disabled instances and instances in disabled zones
-   * @param clusterName
-   * @return
-   */
-  Map<String, String> getBatchDisabledInstances(String clusterName);
-
-  /**
    * Get list of instances by domain for a cluster
    * Example : domain could be "helixZoneId=1,rackId=3". All the instances domain contains these
    * two domains will be selected.
@@ -848,6 +841,19 @@ public interface HelixAdmin {
   }
 
   /**
+   * Check to see if swapping between two instances can be completed and return detailed
+   * results including specific blockers if the swap cannot complete. Either the swapOut
+   * or swapIn instance can be passed in.
+   *
+   * @param clusterName  The cluster name
+   * @param instanceName The instance that is being swapped out or swapped in
+   * @return OperationCheckResult containing whether the swap can complete and any blockers.
+   */
+  default OperationCheckResult canCompleteSwapWithDetails(String clusterName, String instanceName) {
+    throw new UnsupportedOperationException("canCompleteSwapWithDetails is not implemented.");
+  }
+
+  /**
    * Check to see if swapping between two instances is ready to be completed and complete it if
    * possible. Either the swapOut or swapIn instance can be passed in.
    *
@@ -860,6 +866,21 @@ public interface HelixAdmin {
   default boolean completeSwapIfPossible(String clusterName, String instanceName,
       boolean forceComplete) {
     throw new UnsupportedOperationException("completeSwapIfPossible is not implemented.");
+  }
+
+  /**
+   * Check to see if swapping between two instances is ready to be completed and complete it if
+   * possible, returning detailed results including blockers if the swap cannot complete.
+   * Either the swapOut or swapIn instance can be passed in.
+   *
+   * @param clusterName  The cluster name
+   * @param instanceName The instance that is being swapped out or swapped in
+   * @param forceComplete Whether to force complete the swap without checking if it is ready
+   * @return OperationCheckResult containing whether the swap completed and any blockers.
+   */
+  default OperationCheckResult completeSwapIfPossibleWithDetails(String clusterName,
+      String instanceName, boolean forceComplete) {
+    throw new UnsupportedOperationException("completeSwapIfPossibleWithDetails is not implemented.");
   }
 
   /**

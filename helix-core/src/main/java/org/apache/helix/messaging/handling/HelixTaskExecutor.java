@@ -739,9 +739,9 @@ public class HelixTaskExecutor implements MessageListener, TaskExecutor {
 
     StringBuilder sb = new StringBuilder();
     // Log all tasks that fail to terminate
-    for (String taskId : _taskMap.keySet()) {
-      MessageTaskInfo info = _taskMap.get(taskId);
-      sb.append("Task: " + taskId + " fails to terminate. Message: " + info._task.getMessage() + "\n");
+    for (Map.Entry<String, MessageTaskInfo> entry : _taskMap.entrySet()) {
+      sb.append("Task: " + entry.getKey() + " fails to terminate. Message: "
+          + entry.getValue()._task.getMessage() + "\n");
     }
 
     LOG.info(sb.toString());

@@ -20,6 +20,7 @@ package org.apache.helix.model;
  */
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -60,7 +61,8 @@ public class ResourceConfig extends HelixProperty {
     EXTERNAL_VIEW_DISABLED,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
-    RELAXED_DISABLED_PARTITION_CONSTRAINT // Resource-level override for relaxed disabled partition constraint
+    RELAXED_DISABLED_PARTITION_CONSTRAINT, // Resource-level override for relaxed disabled partition constraint
+    ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
 
   public enum ResourceConfigConstants {
@@ -277,6 +279,53 @@ public class ResourceConfig extends HelixProperty {
    */
   public int getMinActiveReplica() {
     return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
+  }
+
+  // Delimiter used for storing active states as a comma-separated string in simpleField
+  private static final String ACTIVE_STATES_DELIMITER = ",";
+
+  /**
+   * Get the list of states that should be considered as "active" for min active replica check.
+   * If not configured, the default behavior applies (all states except DROPPED, ERROR, and initial state).
+   * 
+   * Note: The configured states should be valid states from the resource's state model definition.
+   * Any state NOT in this list will NOT count as active (including top states like LEADER).
+   *
+   * @return List of state names to be considered active, or null if not configured
+   */
+  public List<String> getActiveStatesForMinActiveReplicaCheck() {
+    String statesStr = _record.getSimpleField(
+        ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    if (statesStr == null || statesStr.isEmpty()) {
+      return null;
+    }
+    return Arrays.asList(statesStr.split(ACTIVE_STATES_DELIMITER));
+  }
+
+  /**
+   * Set the list of states that should be considered as "active" for min active replica check.
+   * When configured, only replicas in these states will count toward the min active replica constraint.
+   * 
+   * IMPORTANT:
+   * - The configured states should be valid states from the resource's state model definition.
+   * - If a state is NOT in this list, it will NOT be counted as active, even if it's a top state like LEADER.
+   *   For example, if you configure ["STANDBY"] only, then LEADER replicas will NOT count as active.
+   * - State names are matched case-insensitively.
+   * 
+   * Example: For a state model with states [LEADER, STANDBY, BOOTSTRAP, OFFLINE],
+   * setting this to ["LEADER", "STANDBY"] will only count replicas in LEADER or STANDBY states.
+   *
+   * @param activeStates List of state names to be considered active, or null to use default behavior
+   */
+  public void setActiveStatesForMinActiveReplicaCheck(List<String> activeStates) {
+    if (activeStates == null || activeStates.isEmpty()) {
+      _record.getSimpleFields().remove(
+          ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name());
+    } else {
+      _record.setSimpleField(
+          ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(),
+          String.join(ACTIVE_STATES_DELIMITER, activeStates));
+    }
   }
 
   public int getMaxPartitionsPerInstance() {

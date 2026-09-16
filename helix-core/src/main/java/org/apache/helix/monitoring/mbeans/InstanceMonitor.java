@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 import javax.management.JMException;
 import javax.management.ObjectName;
 
@@ -60,7 +61,10 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE("InstanceOperationDuration_SWAP_IN"),
     INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE("InstanceOperationDuration_UNKNOWN"),
     PARTITION_COUNT_GAUGE("PartitionGauge"),
-    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge");
+    TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge"),
+    ACTUAL_PARTITION_COUNT_GAUGE("ActualPartitionGauge"),
+    ACTUAL_TOP_STATE_PARTITION_COUNT_GAUGE("ActualTopStatePartitionGauge"),
+    DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge");
 
     private final String metricName;
 
@@ -76,6 +80,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private final String _clusterName;
   private final String _participantName;
   private final ObjectName _initObjectName;
+  private final LongSupplier _currentTimeMillis;
 
   private List<String> _tags;
 
@@ -93,6 +98,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _errorPartitionsGauge;
   private SimpleDynamicMetric<Long> _partitionCountGauge;
   private SimpleDynamicMetric<Long> _topStatePartitionCountGauge;
+  private SimpleDynamicMetric<Long> _actualPartitionCountGauge;
+  private SimpleDynamicMetric<Long> _actualTopStatePartitionCountGauge;
+  private SimpleDynamicMetric<Long> _domainInfoValidGauge;
 
   // Instance Operation Duration Gauges (in milliseconds)
   private SimpleDynamicMetric<Long> _instanceOperationDurationEnableGauge;
@@ -115,8 +123,14 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    * @param objectName the MBean object name
    */
   public InstanceMonitor(String clusterName, String participantName, ObjectName objectName) {
+    this(clusterName, participantName, objectName, System::currentTimeMillis);
+  }
+
+  InstanceMonitor(String clusterName, String participantName, ObjectName objectName,
+      LongSupplier currentTimeMillis) {
     _clusterName = clusterName;
     _participantName = participantName;
+    _currentTimeMillis = currentTimeMillis;
     _tags = ImmutableList.of(ClusterStatusMonitor.DEFAULT_TAG);
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
@@ -159,6 +173,11 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     _topStatePartitionCountGauge =
         new SimpleDynamicMetric<>(InstanceMonitorMetric.TOP_STATE_PARTITION_COUNT_GAUGE.metricName(),
             0L);
+    _actualPartitionCountGauge =
+        new SimpleDynamicMetric<>(InstanceMonitorMetric.ACTUAL_PARTITION_COUNT_GAUGE.metricName(),
+            0L);
+    _actualTopStatePartitionCountGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.ACTUAL_TOP_STATE_PARTITION_COUNT_GAUGE.metricName(), 0L);
 
     // Initialize instance operation duration gauges
     _instanceOperationDurationEnableGauge = new SimpleDynamicMetric<>(
@@ -171,6 +190,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_SWAP_IN_GAUGE.metricName(), 0L);
     _instanceOperationDurationUnknownGauge = new SimpleDynamicMetric<>(
         InstanceMonitorMetric.INSTANCE_OPERATION_DURATION_UNKNOWN_GAUGE.metricName(), 0L);
+
+    _domainInfoValidGauge = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.DOMAIN_INFO_VALID_GAUGE.metricName(), 1L);
   }
 
   private List<DynamicMetric<?, ?>> buildAttributeList() {
@@ -186,11 +208,14 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _errorPartitionsGauge,
         _partitionCountGauge,
         _topStatePartitionCountGauge,
+        _actualPartitionCountGauge,
+        _actualTopStatePartitionCountGauge,
         _instanceOperationDurationEnableGauge,
         _instanceOperationDurationDisableGauge,
         _instanceOperationDurationEvacuateGauge,
         _instanceOperationDurationSwapInGauge,
-        _instanceOperationDurationUnknownGauge
+        _instanceOperationDurationUnknownGauge,
+        _domainInfoValidGauge
     );
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
@@ -229,6 +254,22 @@ public class InstanceMonitor extends DynamicMBeanProvider {
   protected long getPartitionCount() { return _partitionCountGauge.getValue(); }
 
   protected long getTopStatePartitionCount() { return _topStatePartitionCountGauge.getValue(); }
+
+  protected long getActualPartitionCount() { return _actualPartitionCountGauge.getValue(); }
+
+  protected long getActualTopStatePartitionCount() {
+    return _actualTopStatePartitionCountGauge.getValue();
+  }
+
+  protected long getDomainInfoValid() { return _domainInfoValidGauge.getValue(); }
+
+  /**
+   * Updates whether this instance has valid domain info for the cluster's topology configuration.
+   * @param isValid true if domain info is correctly populated, false otherwise
+   */
+  public synchronized void updateDomainInfoValid(boolean isValid) {
+    _domainInfoValidGauge.updateValue(isValid ? 1L : 0L);
+  }
 
   /**
    * Get the current duration in ENABLE operation (in milliseconds)
@@ -389,7 +430,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     // Handle backward compatibility: if timestamp is -1 (unknown), use current time
     // This happens when InstanceOperation is not set and we're using legacy HELIX_ENABLED field
     // We capture current time ONCE to ensure consistency across calculations
-    long currentTime = System.currentTimeMillis();
+    long currentTime = _currentTimeMillis.getAsLong();
     if (operationStartTime == -1L) {
       operationStartTime = currentTime;
     }
@@ -456,6 +497,48 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    */
   public synchronized void updateTopStatePartitionCount(long topStatePartitionCount) {
     _topStatePartitionCountGauge.updateValue(topStatePartitionCount);
+  }
+
+  /**
+   * Updates the number of partitions this instance actually holds, as reported in its CurrentState.
+   * This is the observed-state counterpart of {@link #updatePartitionCount(long)}, which reflects
+   * the controller's target assignment.
+   * <p>
+   * Definition: partitions this instance has transitioned into a functional state, that is, any
+   * state other than the state model's initial state (typically OFFLINE), plus the partitions that
+   * are in the initial state <i>because that is where the controller wants them</i>. The
+   * rebalancer parks a partition in the initial state when the instance is disabled, when that
+   * partition is disabled on the instance, or when the whole resource is disabled, and those
+   * partitions are counted: they are exactly where they are supposed to be.
+   * <p>
+   * A partition left in the initial state with no such reason is not counted, because it means the
+   * transition has either not finished or has failed. That is the condition this gauge exists to
+   * expose: without the exclusion, an instance stuck part way through its transitions would report
+   * the same count as a fully caught up one.
+   * <p>
+   * Note that this measures state machine progress, not disk residency. A partition may occupy
+   * disk while sitting in the initial state; whether it is counted here depends on whether being
+   * OFFLINE is intended, not on whether its data is present.
+   * @param actualPartitionCount number of partitions this instance holds according to CurrentState
+   */
+  public synchronized void updateActualPartitionCount(long actualPartitionCount) {
+    _actualPartitionCountGauge.updateValue(actualPartitionCount);
+  }
+
+  /**
+   * Updates the number of partitions this instance holds in the resource top state, as reported in
+   * its CurrentState. This is the observed-state counterpart of
+   * {@link #updateTopStatePartitionCount(long)}, which reflects the controller's target assignment.
+   * <p>
+   * Unlike {@link #updateActualPartitionCount(long)}, this gauge has no disablement allowance to
+   * make: a disabled instance, partition, or resource has no top-state replica by design, so both
+   * this gauge and the target it is compared against are legitimately zero.
+   * @param actualTopStatePartitionCount number of top-state partitions on this instance from
+   *          CurrentState
+   */
+  public synchronized void updateActualTopStatePartitionCount(
+      long actualTopStatePartitionCount) {
+    _actualTopStatePartitionCountGauge.updateValue(actualTopStatePartitionCount);
   }
 
   /**

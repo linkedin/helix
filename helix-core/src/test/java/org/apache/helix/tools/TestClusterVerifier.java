@@ -21,19 +21,26 @@ package org.apache.helix.tools;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.mock.participant.SleepTransition;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
@@ -319,5 +326,108 @@ public class TestClusterVerifier extends ZkUnitTestBase {
         .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
         .build();
     Assert.assertTrue(bestPossibleVerifier.verify(10000));
+  }
+
+  @Test
+  public void testLenientMatchStableCluster() throws InterruptedException {
+    // When cluster is fully stable, lenient match should pass just like strict match
+    HelixClusterVerifier strictVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(strictVerifier.verify(10000));
+
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+  }
+
+  @Test
+  public void testLenientMatchWithOfflineEntryInExternalView() throws InterruptedException {
+    // Ensure stable first
+    final String resource = SEMI_AUTO_RESOURCES[0];
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(resource)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+
+    // Pause the cluster and inject an OFFLINE entry into ExternalView that strict matching should
+    // reject while lenient matching strips away.
+    _admin.enableCluster(_clusterName, false);
+    try {
+      HelixDataAccessor accessor =
+          new ZKHelixDataAccessor(_clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+      PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+      ExternalView externalView = accessor.getProperty(keyBuilder.externalView(resource));
+      String partitionName = resource + "_0";
+      Map<String, String> currentStateMap = new HashMap<>(externalView.getStateMap(partitionName));
+      String extraOfflineInstance =
+          Arrays.stream(_participants).map(MockParticipantManager::getInstanceName)
+              .filter(instance -> !currentStateMap.containsKey(instance)).findFirst().orElseThrow(
+                  () -> new IllegalStateException(
+                      "No spare participant found for OFFLINE entry injection."));
+      currentStateMap.put(extraOfflineInstance,
+          BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition().getInitialState());
+      externalView.getRecord().setMapField(partitionName, currentStateMap);
+      Assert.assertTrue(accessor.setProperty(keyBuilder.externalView(resource), externalView));
+
+      // Strict mode: OFFLINE entries don't match ideal state -> fails within short timeout.
+      HelixClusterVerifier strictVerifier =
+          new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+              .setResources(Sets.newHashSet(resource)).setDeactivatedNodeAwareness(true)
+              .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+              .build();
+      Assert.assertFalse(strictVerifier.verify(3000));
+
+      // Lenient mode: OFFLINE entries stripped -> remaining active states match.
+      lenientVerifier =
+          new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+              .setResources(Sets.newHashSet(resource)).setDeactivatedNodeAwareness(true)
+              .setLenientMatch(true)
+              .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+              .build();
+      Assert.assertTrue(lenientVerifier.verify(10000));
+    } finally {
+      _admin.enableCluster(_clusterName, true);
+    }
+  }
+
+  @Test
+  public void testLenientMatchWithSleepTransition() throws InterruptedException {
+    // Ensure stable first
+    HelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertTrue(lenientVerifier.verify(10000));
+
+    // Restart participant with stuck transitions — state transitions never complete,
+    // so MASTER/SLAVE assignments won't match ExternalView
+    _participants[0].syncStop();
+    Thread.sleep(1000);
+
+    _participants[0] = new MockParticipantManager(ZK_ADDR, _clusterName, _participants[0].getInstanceName());
+    _participants[0].setTransition(new SleepTransition(99999999));
+    _participants[0].syncStart();
+
+    // Even lenient mode should fail — this is an active state mismatch (stuck transitions),
+    // not just OFFLINE/DROPPED entries
+    lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setResources(Sets.newHashSet(RESOURCES)).setDeactivatedNodeAwareness(true)
+            .setLenientMatch(true)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
+            .build();
+    Assert.assertFalse(lenientVerifier.verify(3000));
   }
 }

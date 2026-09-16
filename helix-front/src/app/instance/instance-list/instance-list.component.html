@@ -44,21 +44,33 @@
           >check_circle</mat-icon
         >
         <mat-icon
-          *ngIf="!row.healthy && row.enabled"
-          class="status-not-healthy"
-          matTooltip="The instance is offline."
-          >cancel</mat-icon
+          *ngIf="!row.healthy && row.operationState === 'UNKNOWN'"
+          class="status-unknown"
+          matTooltip="The instance is in UNKNOWN state."
+          >help</mat-icon
         >
         <mat-icon
-          *ngIf="!row.healthy && row.liveInstance"
-          class="status-not-healthy"
+          *ngIf="!row.healthy && row.operationState === 'EVACUATE'"
+          class="status-evacuate"
+          matTooltip="The instance is being evacuated."
+          >exit_to_app</mat-icon
+        >
+        <mat-icon
+          *ngIf="!row.healthy && row.operationState === 'SWAP_IN'"
+          class="status-swap-in"
+          matTooltip="The instance is swapping in."
+          >swap_horiz</mat-icon
+        >
+        <mat-icon
+          *ngIf="!row.healthy && row.operationState === 'DISABLE'"
+          class="status-disabled-icon"
           matTooltip="The instance is disabled."
-          >cancel</mat-icon
+          >block</mat-icon
         >
         <mat-icon
-          *ngIf="!row.healthy && !row.enabled && !row.liveInstance"
-          class="status-not-healthy"
-          matTooltip="The instance is offline and disabled."
+          *ngIf="!row.healthy && row.operationState === 'ENABLE' && !row.online"
+          class="status-offline"
+          matTooltip="The instance is offline."
           >cancel</mat-icon
         >
       </ng-template>
@@ -68,8 +80,23 @@
         <section fxLayout="row" fxLayoutAlign="start center">
           {{ row.name }}
           <hi-disabled-label
-            *ngIf="!row.enabled"
+            *ngIf="row.operationState === 'DISABLE'"
             text="DISABLED"
+          ></hi-disabled-label>
+          <hi-disabled-label
+            *ngIf="row.operationState === 'UNKNOWN'"
+            text="UNKNOWN"
+            class="label-unknown"
+          ></hi-disabled-label>
+          <hi-disabled-label
+            *ngIf="row.operationState === 'EVACUATE'"
+            text="EVACUATING"
+            class="label-evacuate"
+          ></hi-disabled-label>
+          <hi-disabled-label
+            *ngIf="row.operationState === 'SWAP_IN'"
+            text="SWAP IN"
+            class="label-swap-in"
           ></hi-disabled-label>
         </section>
       </ng-template>

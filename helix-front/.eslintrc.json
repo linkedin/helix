@@ -15,6 +15,7 @@
         "prettier"
       ],
       "rules": {
+        "jsdoc/newline-after-description": "off",
         "@angular-eslint/component-selector": [
           "error",
           {

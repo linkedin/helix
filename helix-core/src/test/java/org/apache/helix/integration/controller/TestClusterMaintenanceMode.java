@@ -21,6 +21,7 @@ package org.apache.helix.integration.controller;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
@@ -432,7 +433,17 @@ public class TestClusterMaintenanceMode extends TaskTestBase {
     clusterConfig.setMaxPartitionsPerInstance(-1);
     _manager.getConfigAccessor().setClusterConfig(CLUSTER_NAME, clusterConfig);
 
-    TestHelper.verify(() -> _dataAccessor.getProperty(_keyBuilder.maintenance()) == null, 2000L);
+    // The maintenance signal and history are separate ZK writes. Wait for both.
+    Assert.assertTrue(TestHelper.verify(() -> {
+      if (_dataAccessor.getProperty(_keyBuilder.maintenance()) != null) {
+        return false;
+      }
+      ControllerHistory currentHistory =
+          _dataAccessor.getProperty(_keyBuilder.controllerLeaderHistory());
+      List<String> entries = currentHistory.getMaintenanceHistoryList();
+      return !entries.isEmpty() && "EXIT".equals(
+          convertStringToMap(entries.get(entries.size() - 1)).get("OPERATION_TYPE"));
+    }, TestHelper.WAIT_DURATION), "Maintenance exit history was not persisted");
 
     // Now check that the cluster exited maintenance
     // EXIT, CONTROLLER, for MAX_PARTITION_PER_INSTANCE_EXCEEDED

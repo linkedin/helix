@@ -39,9 +39,9 @@ import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.messaging.handling.MessageHandler.ErrorCode;
+import org.apache.helix.mock.participant.BlockingTransition;
 import org.apache.helix.mock.participant.MockMSStateModel;
 import org.apache.helix.mock.participant.MockTransition;
-import org.apache.helix.mock.participant.SleepTransition;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
@@ -98,8 +98,8 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
   })
   public static class TimeOutStateModel extends MockMSStateModel {
     boolean _sleep = false;
-    StateTransitionError _error;
-    int _errorCallcount = 0;
+    volatile StateTransitionError _error;
+    volatile int _errorCallcount = 0;
 
     public TimeOutStateModel(MockTransition transition, boolean sleep) {
       super(transition);
@@ -125,11 +125,6 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
 
   public static class SleepStateModelFactory extends StateModelFactory<TimeOutStateModel> {
     Set<String> partitionsToSleep = new HashSet<String>();
-    int _sleepTime;
-
-    public SleepStateModelFactory(int sleepTime) {
-      _sleepTime = sleepTime;
-    }
 
     public void setPartitions(Collection<String> partitions) {
       partitionsToSleep.addAll(partitions);
@@ -141,7 +136,7 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
 
     @Override
     public TimeOutStateModel createNewStateModel(String resource, String stateUnitKey) {
-      return new TimeOutStateModel(new SleepTransition(_sleepTime),
+      return new TimeOutStateModel(new BlockingTransition("SLAVE", "MASTER"),
           partitionsToSleep.contains(stateUnitKey));
     }
   }
@@ -170,8 +165,8 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
             .verifyByPolling(new MasterNbInExtViewVerifier(ZK_ADDR, CLUSTER_NAME));
     Assert.assertTrue(result);
 
-    TestHelper.verify(() -> verify(TEST_DB), 5000);
-    Assert.assertTrue(verify(TEST_DB));
+    Assert.assertTrue(TestHelper.verify(() -> verify(TEST_DB), TestHelper.WAIT_DURATION),
+        "Expected one resource-configured timeout and ERROR state for every ideal master");
   }
 
   @Test
@@ -195,8 +190,8 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
             .verifyByPolling(new MasterNbInExtViewVerifier(ZK_ADDR, CLUSTER_NAME));
     Assert.assertTrue(result);
 
-    TestHelper.verify(() -> verify(TEST_DB + 1), 5000);
-    Assert.assertTrue(verify(TEST_DB + 1));
+    Assert.assertTrue(TestHelper.verify(() -> verify(TEST_DB + 1), TestHelper.WAIT_DURATION),
+        "Expected one cluster-configured timeout and ERROR state for every ideal master");
   }
 
   private boolean verify(String dbName) {
@@ -204,14 +199,18 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
         _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, dbName);
     HelixDataAccessor accessor = _manager.getHelixDataAccessor();
     ExternalView ev = accessor.getProperty(accessor.keyBuilder().externalView(dbName));
+    if (ev == null) {
+      return false;
+    }
     for (String p : idealState.getPartitionSet()) {
       String idealMaster = idealState.getPreferenceList(p).get(0);
-      if(!ev.getStateMap(p).get(idealMaster).equals("ERROR")) {
+      if (ev.getStateMap(p) == null || !"ERROR".equals(ev.getStateMap(p).get(idealMaster))) {
         return false;
       }
 
       TimeOutStateModel model = _factories.get(idealMaster).getStateModel(dbName, p);
-      if (model._errorCallcount != 1 || model._error.getCode() != ErrorCode.TIMEOUT) {
+      if (model == null || model._errorCallcount != 1 || model._error == null
+          || model._error.getCode() != ErrorCode.TIMEOUT) {
         return false;
       }
     }
@@ -229,7 +228,7 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
       }
       Thread.sleep(1000);
       String instanceName = PARTICIPANT_PREFIX + "_" + (START_PORT + i);
-      SleepStateModelFactory factory = new SleepStateModelFactory(1000);
+      SleepStateModelFactory factory = new SleepStateModelFactory();
       _factories.put(instanceName, factory);
       for (String p : idealState.getPartitionSet()) {
         if (idealState.getPreferenceList(p).get(0).equals(instanceName)) {

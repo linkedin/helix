@@ -31,6 +31,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -56,12 +58,26 @@ import org.slf4j.LoggerFactory;
  * The goal is to accumulate the most points(rewards) from "soft constraints" while avoiding any
  * "hard constraints"
  */
-class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
+public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   private static final float DIV_GUARD = 0.01f;
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithm.class);
   private final List<HardConstraint> _hardConstraints;
   private final Map<SoftConstraint, Float> _softConstraints;
   private final ForkJoinPool _constraintEvaluationPool;
+  // Optional listener invoked when a partition fails to find any eligible node. Fires once per
+  // distinct HardConstraint.Type that contributed to the failure (set union, not sum), so
+  // observers get partition-level attribution rather than node-rejection counts. May be null
+  // when the algorithm runs outside a pipeline that wants metric attribution.
+  private volatile Consumer<HardConstraint.Type> _hardConstraintFailureReporter;
+  // Optional listener invoked once per calculate() run with the rebalance scope that produced the
+  // model plus the complete set of HardConstraint.Types that blocked placement that run (empty when
+  // the run placed everything). Unlike the cumulative _hardConstraintFailureReporter, this is a
+  // reversible per-run snapshot, so observers can drive a "currently blocking" gauge that resets to
+  // 0 on the next clean run -- letting a transient blip be told apart from a persistent failure by
+  // value. The scope lets the observer attribute the snapshot to a single rebalance phase (e.g.
+  // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
+  private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
+      _blockingSnapshotReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -70,8 +86,46 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     _constraintEvaluationPool = constraintEvaluationPool;
   }
 
+  /**
+   * Attach a per-partition-failure reporter that fires once per distinct {@link HardConstraint.Type}
+   * that prevented placement. Safe to call from any thread; subsequent calls replace the
+   * reference. May be null to disable reporting.
+   */
+  public void setHardConstraintFailureReporter(Consumer<HardConstraint.Type> reporter) {
+    _hardConstraintFailureReporter = reporter;
+  }
+
+  /**
+   * Attach a per-run blocking-snapshot reporter. It fires exactly once per {@link #calculate} run
+   * with the rebalance scope and the complete set of {@link HardConstraint.Type}s that blocked
+   * placement that run -- empty when the run placed everything. This is a reversible "currently
+   * blocking" view (resets on the next clean run), complementing the monotonic per-type counters
+   * from {@link #setHardConstraintFailureReporter}. The scope lets observers route the snapshot to a
+   * single owning phase. Safe to call from any thread; null disables it.
+   */
+  public void setBlockingSnapshotReporter(
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> reporter) {
+    _blockingSnapshotReporter = reporter;
+  }
+
   @Override
   public OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException {
+    // Track every HardConstraint.Type that blocks placement during this run, then publish the
+    // complete set once (success or failure) as a reversible "currently blocking" snapshot.
+    Set<HardConstraint.Type> blockingTypes = ConcurrentHashMap.newKeySet();
+    try {
+      return calculateInternal(clusterModel, blockingTypes);
+    } finally {
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshotReporter =
+          _blockingSnapshotReporter;
+      if (snapshotReporter != null) {
+        snapshotReporter.accept(clusterModel.getRebalanceScopeType(), blockingTypes);
+      }
+    }
+  }
+
+  private OptimalAssignment calculateInternal(ClusterModel clusterModel,
+      Set<HardConstraint.Type> blockingTypes) throws HelixRebalanceException {
     OptimalAssignment optimalAssignment = new OptimalAssignment();
     List<AssignableNode> nodes = new ArrayList<>(clusterModel.getAssignableNodes().values());
     Set<String> busyInstances =
@@ -90,7 +144,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         throw new HelixRebalanceException(String
             .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
                 clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
       }
       // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
       positiveEstimateClusterRemainCap.put(capacityKey,
@@ -108,14 +163,20 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       AssignableReplica replica = replicaWithScore.getAssignableReplica();
       Optional<AssignableNode> maybeBestNode =
           getNodeWithHighestPoints(replica, nodes, clusterModel.getContext(), busyInstances,
-              optimalAssignment);
+              optimalAssignment, blockingTypes);
       // stop immediately if any replica cannot find best assignable node
       if (!maybeBestNode.isPresent() || optimalAssignment.hasAnyFailure()) {
         String errorMessage = String.format(
-            "Unable to find any available candidate node for partition %s; Fail reasons: %s",
-            replica.getPartitionName(), optimalAssignment.getFailures());
+            "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
+                + "Failure summary: %s; Fail reasons: %s",
+            replica.getPartitionName(),
+            replica.getResourceName(),
+            clusterModel.getContext().getClusterName(),
+            optimalAssignment.getFailureSummary(),
+            optimalAssignment.getFailures());
         throw new HelixRebalanceException(errorMessage,
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
       }
       AssignableNode bestNode = maybeBestNode.get();
       // Assign the replica and update the cluster model.
@@ -129,7 +190,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,
       List<AssignableNode> assignableNodes, ClusterContext clusterContext, Set<String> busyInstances,
-      OptimalAssignment optimalAssignment) throws HelixRebalanceException {
+      OptimalAssignment optimalAssignment, Set<HardConstraint.Type> blockingTypes)
+      throws HelixRebalanceException {
     Map<AssignableNode, List<HardConstraint>> hardConstraintFailures = new ConcurrentHashMap<>(assignableNodes.size());
 
     // Execute first parallelStream within custom ForkJoinPool context
@@ -156,6 +218,19 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     if (candidateNodes.isEmpty()) {
       LOG.info("Found no eligible candidate nodes. Enabling hard constraint level logging for cluster: {}", clusterContext.getClusterName());
       enableFullLoggingForCluster();
+      // Distinct constraint types that contributed to this partition's failure -- partition-level
+      // attribution, not per-node-rejection. Feed both the cumulative per-type reporter (+1 per
+      // failed partition, not +N nodes) and this run's reversible blocking snapshot.
+      Set<HardConstraint.Type> partitionBlockingTypes = hardConstraintFailures.values().stream()
+          .flatMap(List::stream)
+          .map(HardConstraint::getType)
+          .map(type -> type == null ? HardConstraint.Type.UNKNOWN : type)
+          .collect(Collectors.toSet());
+      blockingTypes.addAll(partitionBlockingTypes);
+      Consumer<HardConstraint.Type> reporter = _hardConstraintFailureReporter;
+      if (reporter != null) {
+        partitionBlockingTypes.forEach(reporter);
+      }
       optimalAssignment.recordAssignmentFailure(replica,
           Maps.transformValues(hardConstraintFailures, this::convertFailureReasons));
       return Optional.empty();
@@ -349,7 +424,8 @@ class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       LOG.error("Constraint evaluation failed during {}: {}", errorContext, e.getMessage(), e);
       throw new HelixRebalanceException(
           String.format("Failed during %s: %s", errorContext, e.getMessage()),
-          HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+          HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL, e);
     }
   }
 }

@@ -44,7 +44,8 @@ public class ClusterModelTestHelper extends AbstractTestClusterModel {
 
     ClusterContext context =
         new ClusterContext(assignableReplicas, assignableNodes, Collections.emptyMap(), Collections.emptyMap());
-    return new ClusterModel(context, assignableReplicas, assignableNodes);
+    return new ClusterModel(context, assignableReplicas, assignableNodes,
+        ClusterModel.RebalanceScopeType.PARTIAL);
   }
 
   public ClusterModel getMultiNodeClusterModel() throws IOException {
@@ -72,6 +73,7 @@ public class ClusterModelTestHelper extends AbstractTestClusterModel {
     ClusterContext context =
         new ClusterContext(assignableReplicas, assignableNodes, Collections.emptyMap(),
             Collections.emptyMap(), clusterConfig);
-    return new ClusterModel(context, assignableReplicas, assignableNodes);
+    return new ClusterModel(context, assignableReplicas, assignableNodes,
+        ClusterModel.RebalanceScopeType.PARTIAL);
   }
 }

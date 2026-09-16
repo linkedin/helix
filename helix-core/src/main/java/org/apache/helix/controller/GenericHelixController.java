@@ -46,6 +46,7 @@ import org.apache.helix.HelixManager;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
+import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.api.listeners.ClusterConfigChangeListener;
 import org.apache.helix.api.listeners.ControllerChangeListener;
@@ -111,7 +112,6 @@ import org.apache.helix.model.Message;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.monitoring.mbeans.ClusterEventMonitor;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
-import org.apache.helix.util.StageThreadPoolHelper;
 import org.apache.helix.zookeeper.zkclient.exception.ZkInterruptedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -149,6 +149,19 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   final AtomicReference<Map<String, LiveInstance>> _lastSeenInstances;
   final AtomicReference<Map<String, LiveInstance>> _lastSeenSessions;
+
+  // Pending per-instance listener registrations collected during INIT for parallel registration.
+  // Maps session -> instanceName for current-state/task-current-state listeners,
+  // and a set of instance names for message/customized-state-root listeners.
+  private volatile PendingInstanceListeners _pendingInstanceListeners;
+
+  // Feature gate (default OFF) for the deferred + parallel per-instance listener registration
+  // during leadership acquisition. Read once here so a whole leadership epoch is
+  // decided consistently. When off, checkLiveInstancesObservation registers inline exactly as
+  // before (legacy), and the controller drain in ZKHelixManager never runs (_pendingInstanceListeners
+  // stays null). Flip on per deployment via the system property to ramp on a canary.
+  private final boolean _parallelInstanceRegistrationEnabled =
+      Boolean.getBoolean(SystemPropertyKeys.CONTROLLER_PARALLEL_INSTANCE_LISTENER_REGISTRATION_ENABLED);
 
   // map that stores the mapping between instance and the customized state types available on that
   //instance
@@ -220,7 +233,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private final StatefulRebalancerRef _rebalancerRef = new StatefulRebalancerRef() {
     @Override
     protected StatefulRebalancer createRebalancer(HelixManager helixManager) {
-      return new WagedRebalancer(helixManager);
+      WagedRebalancer wagedRebalancer = new WagedRebalancer(helixManager);
+      // Mirror per-FailureCategory and per-HardConstraint failure counters and the fallback
+      // gauge onto the cluster status monitor so they appear under ClusterStatus:cluster=<name>.
+      wagedRebalancer.setClusterStatusMonitor(_clusterStatusMonitor);
+      return wagedRebalancer;
     }
   };
 
@@ -718,6 +735,13 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       _eventThread = new ClusterEventProcessor(_resourceControlDataProvider, _eventQueue,
           "default-" + clusterName);
       initPipeline(_eventThread, _resourceControlDataProvider);
+      // Wire the pipeline liveness check so ControllerPipelineStalledGauge can report a dead DEFAULT
+      // processing thread (a leader that stopped processing entirely) immediately, read lazily at
+      // metric-scrape time even though the dead thread can no longer report anything itself.
+      _clusterStatusMonitor.setPipelineLivenessSupplier(() -> {
+        Thread eventThread = _eventThread;
+        return eventThread == null || eventThread.isAlive();
+      });
       logger.info("Initialized {} pipeline", Pipeline.Type.DEFAULT.name());
     } else {
       _eventQueue = null;
@@ -971,6 +995,18 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _clusterStatusMonitor
             .updateClusterEventDuration(ClusterEventMonitor.PhaseName.TotalProcessed.name(),
                 _lastPipelineEndTimestamp - startTime);
+        // Report DEFAULT-pipeline progress so ControllerPipelineStalledGauge can tell a wedged
+        // controller (queue not draining) apart from an idle or busy-but-progressing one.
+        _clusterStatusMonitor.setLastPipelineEndTimestamp(_lastPipelineEndTimestamp);
+        // Keep the stall threshold in sync with ClusterConfig so it can be tuned without a redeploy.
+        ClusterConfig stallThresholdConfig = dataProvider.getClusterConfig();
+        if (stallThresholdConfig != null) {
+          _clusterStatusMonitor.setPipelineStallThresholdMs(
+              stallThresholdConfig.getControllerPipelineStallThresholdMs());
+        }
+        if (shouldCountTopologyEventAsProcessed(rebalanceFail, dataProvider)) {
+          _clusterStatusMonitor.incrementTopologyChangeEventProcessed(event.getEventType());
+        }
       }
       sb.append(String.format("InQueue time for event: %s took: %s ms\n", event.getEventType(),
           startTime - enqueueTime));
@@ -984,6 +1020,19 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // So reset ClusterStatusMonitor according to it's status after all event handling.
     // TODO remove this once clusterStatusMonitor blocks any MBean register on isMonitoring = false.
     resetClusterStatusMonitor();
+  }
+
+  /**
+   * Gate for the topology-change "processed" counter increment in {@link #handleEvent}. Counts
+   * only resource-pipeline runs that completed without failure -- the management-mode and
+   * task-framework pipelines run their own logic (the management registry only handles
+   * {@code LiveInstanceChange} and short-circuits the other four topology types as empty
+   * pipeline lists, which would otherwise leave {@code rebalanceFail=false} and falsely credit
+   * those events as processed). Package-private for direct unit testing.
+   */
+  static boolean shouldCountTopologyEventAsProcessed(boolean rebalanceFail,
+      BaseControllerDataProvider dataProvider) {
+    return !rebalanceFail && dataProvider instanceof ResourceControllerDataProvider;
   }
 
   private void updateContinuousRebalancedFailureCount(boolean isTaskFrameworkPipeline,
@@ -1287,6 +1336,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
   private void pushToEventQueues(ClusterEventType eventType, NotificationContext changeContext,
       Map<String, Object> eventAttributes) {
+    // Count topology-change events received from ZK before they get coalesced in the
+    // cluster event queue. Counted once per logical event (not per pipeline fan-out into
+    // DEFAULT/TASK queues) so the metric reflects ZK-driven churn, not internal queueing.
+    if (_isMonitoring) {
+      _clusterStatusMonitor.incrementTopologyChangeEventReceived(eventType);
+    }
     // No need for completed UUID, prefixed should be fine
     String uid = UUID.randomUUID().toString().substring(0, 8);
     ClusterEvent event = new ClusterEvent(_clusterName, eventType,
@@ -1317,6 +1372,21 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       return;
     }
     queue.put(event);
+    if (queue == _eventQueue) {
+      updateControllerEventQueueSizeGauge();
+    }
+  }
+
+  /**
+   * Publish the current DEFAULT cluster-event pipeline backlog to the per-cluster monitor. Invoked
+   * on both the enqueue side (ZK-callback / periodic-rebalance threads) and the dequeue side (the
+   * pipeline thread) so the gauge climbs when events pile up faster than they are drained, which
+   * surfaces a controller that still holds leadership but has stopped processing ("zombie leader").
+   */
+  private void updateControllerEventQueueSizeGauge() {
+    if (_isMonitoring && _clusterStatusMonitor != null && _eventQueue != null) {
+      _clusterStatusMonitor.setControllerEventQueueSizeGauge(_eventQueue.size());
+    }
   }
 
   @Override
@@ -1398,34 +1468,61 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         }
       }
 
-      for (String session : curSessions.keySet()) {
-        if (lastSessions == null || !lastSessions.containsKey(session)) {
-          String instanceName = curSessions.get(session).getInstanceName();
-          try {
-            // add current-state listeners for new sessions
-            manager.addCurrentStateChangeListener(this, instanceName, session);
-            manager.addTaskCurrentStateChangeListener(this, instanceName, session);
-            logger.info(manager.getInstanceName() + " added current-state listener for instance: "
-                + instanceName + ", session: " + session + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add current state listener for instance: " + instanceName
-                + " with session: " + session, e);
-          }
-        }
-      }
+      boolean isInit = changeContext.getType() == NotificationContext.Type.INIT;
 
-      for (String instance : curInstances.keySet()) {
-        if (lastInstances == null || !lastInstances.containsKey(instance)) {
-          try {
-            // add message listeners for new instances
-            manager.addMessageListener(this, instance);
-            logger.info(manager.getInstanceName() + " added message listener for " + instance
-                + ", listener: " + this);
-          } catch (Exception e) {
-            logger.error("Fail to add message listener for instance: " + instance, e);
+      if (isInit && _parallelInstanceRegistrationEnabled) {
+        // Feature ON: during controller leadership acquisition, defer per-instance listener
+        // registration. These are registered in parallel by
+        // ZKHelixManager.registerDeferredInstanceListenersAsync(), triggered from
+        // DistributedLeaderElection.onControllerChange() for every leadership path (both new-session
+        // INIT and failover CALLBACK), after invoke() releases synchronized(_manager).
+        Map<String, String> sessionToInstance = new HashMap<>();
+        Set<String> newInstances = new HashSet<>();
+
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            sessionToInstance.put(session, curSessions.get(session).getInstanceName());
           }
         }
-      }
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            newInstances.add(instance);
+          }
+        }
+        _pendingInstanceListeners = new PendingInstanceListeners(sessionToInstance, newInstances);
+        logger.info("Deferred {} session listeners and {} instance listeners for parallel registration",
+            sessionToInstance.size(), newInstances.size());
+      } else {
+        // Legacy/inline path. Runs when the feature is OFF (any leadership INIT registers inline,
+        // exactly as before this change) OR for the incremental CALLBACK path (typically 0-1 new
+        // instances per event). On INIT with the flag off, lastSessions/lastInstances are null so
+        // every live instance is registered here inline via the unchanged addXxxListener path.
+        for (String session : curSessions.keySet()) {
+          if (lastSessions == null || !lastSessions.containsKey(session)) {
+            String instanceName = curSessions.get(session).getInstanceName();
+            try {
+              manager.addCurrentStateChangeListener(this, instanceName, session);
+              manager.addTaskCurrentStateChangeListener(this, instanceName, session);
+              logger.info(manager.getInstanceName() + " added current-state listener for instance: "
+                  + instanceName + ", session: " + session + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add current state listener for instance: " + instanceName
+                  + " with session: " + session, e);
+            }
+          }
+        }
+
+        for (String instance : curInstances.keySet()) {
+          if (lastInstances == null || !lastInstances.containsKey(instance)) {
+            try {
+              manager.addMessageListener(this, instance);
+              logger.info(manager.getInstanceName() + " added message listener for " + instance
+                  + ", listener: " + this);
+            } catch (Exception e) {
+              logger.error("Fail to add message listener for instance: " + instance, e);
+            }
+          }
+        }
 
         for (String instance : curInstances.keySet()) {
           if (lastInstances == null || !lastInstances.containsKey(instance)) {
@@ -1438,6 +1535,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
                   "Fail to add root path listener for customized state change for instance: "
                       + instance, e);
             }
+          }
         }
       }
 
@@ -1475,8 +1573,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     // shutdown async workers
     shutdownAsyncFIFOWorkers();
 
-    // shutdown shared stage thread pool
-    StageThreadPoolHelper.shutdown();
+    // NOTE: StageThreadPoolHelper is a JVM-wide shared pool. Do not shutdown here to avoid
+    // cross-cluster interference when a single controller shuts down.
 
     enableClusterStatusMonitor(false);
 
@@ -1498,6 +1596,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             _resourceControlDataProvider.clearMonitoringRecords();
           }
           _clusterStatusMonitor.active();
+          // Seed the pipeline-progress baseline at monitoring-enable (leadership acquisition) so a
+          // controller that wedges before completing its very first pipeline run is still caught:
+          // with a 0 baseline the stalled gauge cannot fire. Cold-start slowness that briefly reads
+          // as stalled is covered by the EKG warm-up window and the configurable stall threshold.
+          _clusterStatusMonitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
         } else {
           logger.info("Disable clusterStatusMonitor for cluster " + _clusterName);
           // Reset will be done if (_isMonitoring = false) later, no matter if the state is changed or not.
@@ -1554,6 +1657,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       while (!isInterrupted()) {
         try {
           ClusterEvent newClusterEvent = _eventBlockingQueue.take();
+          if (_eventBlockingQueue == _eventQueue) {
+            updateControllerEventQueueSizeGauge();
+          }
           String threadName = String.format(
               "HelixController-pipeline-%s-(%s)", _processorName, newClusterEvent.getEventId());
           this.setName(threadName);
@@ -1639,6 +1745,77 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       if (_rebalancer != null) {
         _rebalancer.close();
         _rebalancer = null;
+      }
+    }
+  }
+
+  /**
+   * Per-instance listener registrations deferred during initial controller setup.
+   * Collected by {@link #checkLiveInstancesObservation} during a leadership acquisition, then
+   * registered in parallel by
+   * {@code ZKHelixManager.registerDeferredInstanceListenersAsync}, which
+   * {@code DistributedLeaderElection.onControllerChange} triggers for every leadership path.
+   */
+  public static class PendingInstanceListeners {
+    private final Map<String, String> _sessionToInstance;
+    private final Set<String> _newInstances;
+
+    public PendingInstanceListeners(Map<String, String> sessionToInstance, Set<String> newInstances) {
+      _sessionToInstance = sessionToInstance;
+      _newInstances = newInstances;
+    }
+
+    public Map<String, String> getSessionToInstance() {
+      return _sessionToInstance;
+    }
+
+    public Set<String> getNewInstances() {
+      return _newInstances;
+    }
+
+    public boolean isEmpty() {
+      return _sessionToInstance.isEmpty() && _newInstances.isEmpty();
+    }
+  }
+
+  public PendingInstanceListeners takePendingInstanceListeners() {
+    PendingInstanceListeners result = _pendingInstanceListeners;
+    _pendingInstanceListeners = null;
+    return result;
+  }
+
+  /**
+   * Drop a session from the last-seen set so its per-instance current-state and task-current-state
+   * listeners are re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred
+   * parallel registration for this session ultimately failed, so {@code _lastSeenSessions} reflects
+   * only sessions whose listeners actually registered (not ones that were merely attempted).
+   * Uses the same {@code synchronized(_lastSeenInstances)} monitor as
+   * {@link #checkLiveInstancesObservation} to stay consistent with the diffing logic.
+   */
+  public void forgetSessionForReregistration(String session) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> sessions = _lastSeenSessions.get();
+      if (sessions != null && sessions.containsKey(session)) {
+        Map<String, LiveInstance> updated = new HashMap<>(sessions);
+        updated.remove(session);
+        _lastSeenSessions.set(updated);
+      }
+    }
+  }
+
+  /**
+   * Drop an instance from the last-seen set so its message and customized-state-root listeners are
+   * re-registered on the next {@link #onLiveInstanceChange}. Called when the deferred parallel
+   * registration for this instance ultimately failed, so {@code _lastSeenInstances} reflects only
+   * instances whose listeners actually registered.
+   */
+  public void forgetInstanceForReregistration(String instance) {
+    synchronized (_lastSeenInstances) {
+      Map<String, LiveInstance> instances = _lastSeenInstances.get();
+      if (instances != null && instances.containsKey(instance)) {
+        Map<String, LiveInstance> updated = new HashMap<>(instances);
+        updated.remove(instance);
+        _lastSeenInstances.set(updated);
       }
     }
   }

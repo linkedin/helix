@@ -30,6 +30,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.messaging.AsyncCallback;
+import org.apache.helix.messaging.ParticipantMessageOptions;
 import org.apache.helix.messaging.handling.HelixTaskResult;
 import org.apache.helix.messaging.handling.MessageHandler;
 import org.apache.helix.messaging.handling.MultiTypeMessageHandlerFactory;
@@ -130,6 +131,48 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
 
   }
 
+  @Test()
+  public void TestSendToParticipantInstanceAndAllLiveInstances() throws Exception {
+    String hostSrc = "localhost_" + START_PORT;
+    String hostDest = "localhost_" + (START_PORT + 1);
+
+    TestMessagingHandlerFactory factory = new TestMessagingHandlerFactory();
+    for (int i = 0; i < NODE_NR; i++) {
+      _participants[i].getMessagingService().registerMessageHandlerFactory(factory.getMessageTypes(),
+          factory);
+    }
+
+    // Single-target optimized send
+    String paraSingle = "SendToParticipantInstancePara";
+    Message msgInstance = createMessage(factory, hostSrc, paraSingle);
+    ParticipantMessageOptions singleInstanceOptions =
+        ParticipantMessageOptions.builder().sessionSpecific(false).selfExcluded(false).build();
+    int sent =
+        _participants[0].getMessagingService()
+            .sendToParticipantInstance(CLUSTER_NAME, hostDest, msgInstance, singleInstanceOptions);
+    AssertJUnit.assertEquals(1, sent);
+    Thread.sleep(2000);
+    AssertJUnit.assertTrue(TestMessagingHandlerFactory._processedMsgIds.contains(paraSingle));
+
+    // Broadcast to all live instances
+    String paraAll = "SendToAllParticipantInstancesPara";
+    Message msgAll = createMessage(factory, hostSrc, paraAll);
+    TestAsyncCallback callback = new TestAsyncCallback(60000);
+    ParticipantMessageOptions broadcastOptions = ParticipantMessageOptions.builder()
+        .sessionSpecific(false)
+        .selfExcluded(false)
+        .callbackOnReply(callback)
+        .timeoutMs(60000)
+        .build();
+    int sentAll =
+        _participants[0].getMessagingService()
+            .sendToAllParticipantInstances(CLUSTER_NAME, msgAll, broadcastOptions);
+    AssertJUnit.assertEquals(NODE_NR, sentAll);
+    Thread.sleep(3000);
+    AssertJUnit.assertEquals(NODE_NR, callback.getMessageReplied().size());
+    AssertJUnit.assertTrue(TestMessagingHandlerFactory._processedMsgIds.contains(paraAll));
+  }
+
   // Performance test - excluded from CI to reduce test execution time
   // Enable test in local to fetch performance numbers before and after your change
   @Test(enabled = false)
@@ -167,6 +210,23 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
       System.out.println("  Total time for " + iterations + " sends: " + totalTimeMs + " ms");
       System.out.println("  Average time per send: " + avgTimeMs + " ms\n");
     }
+
+    // Measure optimized single-instance API
+    long optimizedTotalTime = 0;
+    ParticipantMessageOptions optimizedOptions = ParticipantMessageOptions.defaults();
+    for (int i = 0; i < iterations; i++) {
+      Message msg = createMessage(factory, hostSrc, "Optimized Iteration " + i);
+      long startTime = System.nanoTime();
+      _participants[0].getMessagingService()
+          .sendToParticipantInstance(CLUSTER_NAME, hostDest, msg, optimizedOptions);
+      long endTime = System.nanoTime();
+      optimizedTotalTime += (endTime - startTime);
+    }
+    long optimizedAvgMs = (optimizedTotalTime / iterations) / NANOS_TO_MILLIS;
+    long optimizedTotalMs = optimizedTotalTime / NANOS_TO_MILLIS;
+    System.out.println("Optimized sendToParticipantInstance:");
+    System.out.println("  Total time for " + iterations + " sends: " + optimizedTotalMs + " ms");
+    System.out.println("  Average time per send: " + optimizedAvgMs + " ms\n");
 
     System.out.println("========== Performance Test Complete ==========\n");
   }

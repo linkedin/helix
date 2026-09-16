@@ -1,6 +1,7 @@
 package org.apache.helix.rest.server;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.ws.rs.client.Entity;
 
@@ -308,20 +309,34 @@ public class TestCanSwapCompleteAPI extends AbstractTestClass {
   }
 
   /**
-   * Verifies the canCompleteSwap API response.
+   * Verifies the canCompleteSwap API response includes successful field and blockers list.
    */
   private void verifyCanCompleteSwap(String instanceName, Entity<String> empty, boolean expectedResult) throws JsonProcessingException {
-    Response canComplete = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=canCompleteSwap")
-        .format(CLUSTER_NAME, instanceName).post(this, empty);
-    Assert.assertEquals(canComplete.getStatus(), Response.Status.OK.getStatusCode());
-
-    Map<String, Object> canCompleteMap = (Map<String, Object>) OBJECT_MAPPER.readValue(canComplete.readEntity(String.class), Map.class);
+    Map<String, Object> canCompleteMap = getCanCompleteSwapResponse(instanceName, empty);
     Assert.assertEquals((boolean) canCompleteMap.get("successful"), expectedResult,
         "canCompleteSwap should return " + expectedResult);
+    // Verify blockers field is always present
+    Assert.assertNotNull(canCompleteMap.get("blockers"), "Response should contain 'blockers' field");
+    List<String> blockers = (List<String>) canCompleteMap.get("blockers");
+    if (expectedResult) {
+      Assert.assertTrue(blockers.isEmpty(), "Successful result should have empty blockers");
+    } else {
+      Assert.assertFalse(blockers.isEmpty(), "Failed result should have non-empty blockers");
+    }
   }
 
   /**
-   * Verifies the completeSwapIfPossible API response.
+   * Gets the canCompleteSwap response as a map.
+   */
+  private Map<String, Object> getCanCompleteSwapResponse(String instanceName, Entity<String> empty) throws JsonProcessingException {
+    Response canComplete = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=canCompleteSwap")
+        .format(CLUSTER_NAME, instanceName).post(this, empty);
+    Assert.assertEquals(canComplete.getStatus(), Response.Status.OK.getStatusCode());
+    return (Map<String, Object>) OBJECT_MAPPER.readValue(canComplete.readEntity(String.class), Map.class);
+  }
+
+  /**
+   * Verifies the completeSwapIfPossible API response includes successful field and blockers list.
    */
   private void verifyCompleteSwapIfPossible(String instanceName, Entity<String> empty, boolean expectedResult) throws JsonProcessingException {
     Response complete = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=completeSwapIfPossible")
@@ -331,6 +346,8 @@ public class TestCanSwapCompleteAPI extends AbstractTestClass {
     Map<String, Object> completeMap = (Map<String, Object>) OBJECT_MAPPER.readValue(complete.readEntity(String.class), Map.class);
     Assert.assertEquals((boolean) completeMap.get("successful"), expectedResult,
         "completeSwapIfPossible should return " + expectedResult);
+    // Verify blockers field is always present
+    Assert.assertNotNull(completeMap.get("blockers"), "Response should contain 'blockers' field");
   }
 
   private void clearMessages(String instance) {

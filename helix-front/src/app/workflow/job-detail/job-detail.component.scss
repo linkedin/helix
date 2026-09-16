@@ -1,0 +1,69 @@
+.task-summary {
+  padding: 16px;
+
+  .summary-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+
+    .chip {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 13px;
+      background: #eeeeee;
+
+      &.completed {
+        background: #e6f4ea;
+        color: #1e7e34;
+      }
+
+      &.failed.has-failures {
+        background: #fdecea;
+        color: #c5221f;
+        font-weight: 600;
+      }
+
+      &.timed-out.has-timed-out {
+        background: #fef7e0;
+        color: #b06000;
+        font-weight: 600;
+      }
+
+      &.in-progress {
+        background: #e8f0fe;
+        color: #1967d2;
+      }
+
+      &.pending {
+        background: #f1f3f4;
+        color: #5f6368;
+      }
+    }
+  }
+
+  .failed-tasks {
+    margin-bottom: 12px;
+    color: #c5221f;
+  }
+
+  .timed-out-tasks {
+    margin-bottom: 12px;
+    color: #b06000;
+  }
+
+  .in-progress-tasks {
+    margin-bottom: 12px;
+    color: #1967d2;
+  }
+
+  .pending-tasks {
+    margin-bottom: 12px;
+    color: #5f6368;
+  }
+
+  .no-summary {
+    color: rgba(0, 0, 0, 0.54);
+    font-style: italic;
+  }
+}

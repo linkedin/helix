@@ -74,8 +74,16 @@ public class InstanceConfig extends HelixProperty {
     INSTANCE_CAPACITY_MAP,
     TARGET_TASK_THREAD_POOL_SIZE,
     HELIX_INSTANCE_OPERATIONS,
-    INSTANCE_OPERATION_STATE
+    INSTANCE_OPERATION_STATE,
+    INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS
   }
+
+  /**
+   * Sentinel returned by {@link #getInstanceOperationMaintenanceUntilMs()} when no marker is
+   * set. Callers clear the marker by passing this value to
+   * {@link #setInstanceOperationMaintenanceUntilMs(long)}.
+   */
+  public static final long INSTANCE_OPERATION_MAINTENANCE_NOT_SET = -1L;
 
   public static class InstanceOperation {
     private static final String DEFAULT_INSTANCE_OPERATION_SOURCE =
@@ -234,11 +242,14 @@ public class InstanceConfig extends HelixProperty {
   private static final ObjectMapper _objectMapper = new ObjectMapper();
 
   // These fields are not allowed to be overwritten by the merge method because
-  // they are unique properties of an instance.
+  // they are unique properties of an instance. INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS is
+  // included because the marker is tied to a specific operation window on the source
+  // instance and must not transfer onto a swap-in target via overwriteInstanceConfig.
   private static final ImmutableSet<InstanceConfigProperty> NON_OVERWRITABLE_PROPERTIES =
       ImmutableSet.of(InstanceConfigProperty.HELIX_HOST, InstanceConfigProperty.HELIX_PORT,
           InstanceConfigProperty.HELIX_ZONE_ID, InstanceConfigProperty.DOMAIN,
-          InstanceConfigProperty.INSTANCE_INFO_MAP);
+          InstanceConfigProperty.INSTANCE_INFO_MAP,
+          InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS);
 
   private static final Logger _logger = LoggerFactory.getLogger(InstanceConfig.class.getName());
 
@@ -435,6 +446,52 @@ public class InstanceConfig extends HelixProperty {
   public long getInstanceEnabledTime() {
     return _record.getLongField(InstanceConfigProperty.HELIX_ENABLED_TIMESTAMP.name(),
         HELIX_ENABLED_TIMESTAMP_DEFAULT_VALUE);
+  }
+
+  /**
+   * Get the instance-operation maintenance expiry timestamp (Unix millis). While
+   * {@code now < returnedValue}, this instance is excluded from the cluster-wide offline
+   * budget check (`MAX_OFFLINE_INSTANCES_ALLOWED`) that drives auto Maintenance Mode entry.
+   * The marker is an attribute on the instance only; it does not change cluster-level state.
+   *
+   * @return the expiry timestamp, or {@link #INSTANCE_OPERATION_MAINTENANCE_NOT_SET} when no
+   *     marker is set.
+   */
+  public long getInstanceOperationMaintenanceUntilMs() {
+    return _record.getLongField(
+        InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name(),
+        INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+  }
+
+  /**
+   * Set or clear the instance-operation maintenance expiry timestamp. Passing
+   * {@link #INSTANCE_OPERATION_MAINTENANCE_NOT_SET} (or any non-positive value) clears the
+   * marker. Callers writing a real expiry must supply a Unix-millis value strictly greater
+   * than zero.
+   *
+   * @param expiresAtMillis the new expiry timestamp, or a non-positive value to clear.
+   */
+  public void setInstanceOperationMaintenanceUntilMs(long expiresAtMillis) {
+    if (expiresAtMillis <= 0L) {
+      _record.getSimpleFields()
+          .remove(InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name());
+      return;
+    }
+    _record.setLongField(
+        InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name(),
+        expiresAtMillis);
+  }
+
+  /**
+   * Returns true when this instance currently carries an unexpired instance-operation
+   * maintenance marker. The check is purely a wall-clock comparison against {@code nowMs};
+   * callers pass {@code System.currentTimeMillis()} (or a deterministic clock in tests).
+   *
+   * @param nowMs the current time in Unix millis.
+   */
+  public boolean isUnderInstanceOperationMaintenance(long nowMs) {
+    long until = getInstanceOperationMaintenanceUntilMs();
+    return until > 0L && nowMs < until;
   }
 
   /**

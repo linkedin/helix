@@ -20,11 +20,14 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
@@ -43,12 +46,16 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
@@ -58,6 +65,7 @@ import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.rest.server.resources.exceptions.HelixHealthException;
 import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,7 +92,8 @@ public class InstancesAccessor extends AbstractHelixResource {
     skip_stoppable_check_list,
     customized_values,
     instance_stoppable_parallel,
-    instance_not_stoppable_with_reasons
+    instance_not_stoppable_with_reasons,
+    instances_unable_to_accept_online_replicas
   }
 
   public enum InstanceHealthSelectionBase {
@@ -121,7 +130,7 @@ public class InstancesAccessor extends AbstractHelixResource {
       ArrayNode instancesNode =
           root.putArray(InstancesAccessor.InstancesProperties.instances.name());
       instancesNode.addAll((ArrayNode) OBJECT_MAPPER.valueToTree(instances));
-      
+
       ArrayNode onlineNode = root.putArray(InstancesAccessor.InstancesProperties.online.name());
       ArrayNode enabledNode = root.putArray(InstancesAccessor.InstancesProperties.enabled.name());
       ArrayNode disabledNode = root.putArray(InstancesAccessor.InstancesProperties.disabled.name());
@@ -181,10 +190,103 @@ public class InstancesAccessor extends AbstractHelixResource {
         return badRequest(e.getMessage());
       }
       return JSONRepresentation(validationResultMap);
+    case getInstancesUnableToAcceptOnlineReplicas:
+      return getInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
     }
+  }
+
+  /**
+   * Reports the instances Helix itself counts against the cluster-wide offline budget that
+   * drives auto Maintenance Mode, so clients do not have to reimplement (and drift from) the
+   * controller's membership rules.
+   *
+   * <p>The population is computed by
+   * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)},
+   * the same method the controller uses on MM entry ({@code BestPossibleStateCalcStage})
+   * and MM exit ({@code MaintenanceRecoveryStage}). An instance counts when it is routable,
+   * not enabled-and-live, and not covered by a valid instance-operation maintenance marker.
+   *
+   * <p>Response (HTTP 200), shaped like the {@code getAllInstances} response on this route:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instances_unable_to_accept_online_replicas": ["h3", "h4"] }
+   * }</pre>
+   *
+   * <p>Only the population is returned. The thresholds it is compared against
+   * ({@code MAX_OFFLINE_INSTANCES_ALLOWED}, {@code NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT}) are
+   * already available from the cluster-config endpoint, and the resulting maintenance state is
+   * available from the maintenance-signal endpoint; deriving either here would hand clients a
+   * prediction where an authoritative answer already exists.
+   *
+   * <p><b>Known divergence from the controller.</b> Liveness here is the raw
+   * {@code /LIVEINSTANCES} membership read from ZooKeeper. The controller instead uses
+   * {@code BaseControllerDataProvider#getLiveInstances()}, which — while the cluster is in
+   * maintenance mode and {@code OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE} is non-negative —
+   * withholds instances that had been offline longer than that window for the remainder of the
+   * maintenance mode, even after they come back up. That exclusion is sticky state accumulated
+   * across pipeline runs, so this endpoint cannot reconstruct it from a point-in-time read and
+   * will report a strictly smaller population than the controller counts. The two agree
+   * whenever the cluster is out of maintenance mode or the timeout is unset (the default,
+   * {@code -1}).
+   */
+  private Response
+  getInstancesUnableToAcceptOnlineReplicas(String clusterId,
+      HelixDataAccessor accessor) {
+    try {
+      return computeInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
+    } catch (Exception e) {
+      _logger.error("Failed to compute instances unable to accept online replicas for cluster {}",
+          clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private Response computeInstancesUnableToAcceptOnlineReplicas(String clusterId,
+      HelixDataAccessor accessor) {
+    // An unknown cluster must not fall through to an empty population: to a client, "no instances
+    // counted" reads as "the whole offline budget is free". The caller's null check cannot catch
+    // it because HelixDataAccessor#getChildNames normalizes a missing path to an empty list.
+    //
+    // Note this deliberately differs from the other commands on this route: getAllInstances and
+    // validateWeight both answer 200 with an empty body for a cluster that does not exist. That
+    // is arguably wrong for them too, but changing it is a breaking change to a long-standing
+    // API and belongs in its own change; a new command carries no such compatibility debt, and
+    // here the empty answer is actively unsafe. ConfigAccessor is not used to resolve the
+    // cluster because it throws on an unknown cluster, which would surface as a 500.
+    if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      return notFound();
+    }
+
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    List<InstanceConfig> instanceConfigs =
+        accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+    Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
+    if (instanceConfigs != null) {
+      for (InstanceConfig instanceConfig : instanceConfigs) {
+        if (instanceConfig != null) {
+          instanceConfigMap.put(instanceConfig.getInstanceName(), instanceConfig);
+        }
+      }
+    }
+    List<String> liveInstances = accessor.getChildNames(keyBuilder.liveInstances());
+
+    Set<String> unableToAcceptOnlineReplicas =
+        InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(instanceConfigMap,
+            liveInstances == null ? Collections.emptyList() : liveInstances,
+            System.currentTimeMillis());
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    ArrayNode countedNode =
+        root.putArray(InstancesProperties.instances_unable_to_accept_online_replicas.name());
+    // Sorted so the payload is stable across calls for the same cluster state.
+    for (String instanceName : new TreeSet<>(unableToAcceptOnlineReplicas)) {
+      countedNode.add(instanceName);
+    }
+    return JSONRepresentation(root);
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
@@ -242,6 +344,8 @@ public class InstancesAccessor extends AbstractHelixResource {
         case stoppable:
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
               skipHealthCheckCategorySet, random, includeDetails);
+        case instanceOperationMaintenance:
+          return batchSetInstanceOperationMaintenance(clusterId, node);
         default:
           _logger.error("Unsupported command :" + command);
           return badRequest("Unsupported command :" + command);
@@ -255,6 +359,66 @@ public class InstancesAccessor extends AbstractHelixResource {
       return badRequest(e.getMessage());
     }
     return OK();
+  }
+
+  /**
+   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/instanceOperationMaintenance}.
+   * Sets or clears the instance-operation maintenance marker on a list of instances. Mirrors
+   * the partial-accept contract of the batch stoppable check: instances are processed in
+   * input order, those that fit the cap quota (or that exist on a clear) are listed under
+   * {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs that
+   * invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
+   * missing expiry with no cluster default) are still surfaced as 400.
+   *
+   * <p>Request body:
+   * <pre>{@code
+   * { "instances": ["h1", "h2", ...],
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   *
+   * <p>Success response (HTTP 200):
+   * <pre>{@code
+   * { "applied":  ["h1", "h2"],
+   *   "rejected": { "h3": "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=2" },
+   *   "expiresAtMillis": 1776385800000 }
+   * }</pre>
+   */
+  private Response batchSetInstanceOperationMaintenance(String clusterId, JsonNode node) {
+    try {
+      JsonNode instancesNode = node.get(InstancesProperties.instances.name());
+      if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
+        return badRequest("Field 'instances' must be a non-empty array");
+      }
+      List<String> instances = new ArrayList<>(instancesNode.size());
+      for (JsonNode element : instancesNode) {
+        instances.add(element.asText());
+      }
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
+
+      ObjectNode body = JsonNodeFactory.instance.objectNode();
+      ArrayNode appliedArr = body.putArray("applied");
+      for (String name : result.getApplied()) {
+        appliedArr.add(name);
+      }
+      ObjectNode rejectedNode = body.putObject("rejected");
+      for (Map.Entry<String, String> entry : result.getRejected().entrySet()) {
+        rejectedNode.put(entry.getKey(), entry.getValue());
+      }
+      body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+      return JSONRepresentation(body);
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      _logger.error("Failed to set instance-operation maintenance batch in cluster {}",
+          clusterId, e);
+      return serverError(e);
+    }
   }
 
   private Response batchGetStoppableInstances(String clusterId, JsonNode node, boolean skipZKRead,
@@ -422,4 +586,5 @@ public class InstancesAccessor extends AbstractHelixResource {
       throw e;
     }
   }
+
 }

@@ -19,10 +19,12 @@ package org.apache.helix.rest.metadatastore.accessor;
  * under the License.
  */
 
+import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import javax.net.ssl.SSLContext;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.TestHelper;
@@ -49,6 +51,10 @@ public class TestZkRoutingDataWriter extends AbstractTestClass {
 
     MockWriter(String namespace, String zkAddress) {
       super(namespace, zkAddress);
+    }
+
+    MockWriter(String namespace, String zkAddress, SSLContext sslContext) {
+      super(namespace, zkAddress, sslContext);
     }
 
     // This method does not call super() because the http call should not be actually made
@@ -217,5 +223,101 @@ public class TestZkRoutingDataWriter extends AbstractTestClass {
       return _gZkClientTestNS.getChildren(MetadataStoreRoutingConstants.ROUTING_DATA_PATH)
           .isEmpty();
     }, TestHelper.WAIT_DURATION), "Routing data path should be deleted after the tests.");
+  }
+
+  @Test(dependsOnMethods = "testSetRoutingDataNonLeader")
+  public void testBuildEndpointWithHttpProtocol() {
+    // Test that HTTP protocol is used when no protocol is stored (backward compatibility)
+    ZNRecord znRecord = new ZNRecord("test");
+    znRecord.setSimpleField("hostname", "localhost");
+    znRecord.setSimpleField("port", "8080");
+
+    String endpoint = ZkRoutingDataWriter.buildEndpointFromLeaderElectionNode(znRecord);
+    Assert.assertTrue(endpoint.startsWith(HttpConstants.HTTP_PROTOCOL_PREFIX),
+        "Should default to HTTP protocol when protocol field is not set");
+    Assert.assertEquals(endpoint, "http://localhost:8080");
+  }
+
+  @Test(dependsOnMethods = "testBuildEndpointWithHttpProtocol")
+  public void testBuildEndpointWithHttpsProtocol() {
+    // Test that HTTPS protocol is used when stored in ZNRecord
+    ZNRecord znRecord = new ZNRecord("test");
+    znRecord.setSimpleField("hostname", "localhost");
+    znRecord.setSimpleField("port", "8443");
+    znRecord.setSimpleField("protocol", HttpConstants.HTTPS_PROTOCOL_PREFIX);
+
+    String endpoint = ZkRoutingDataWriter.buildEndpointFromLeaderElectionNode(znRecord);
+    Assert.assertTrue(endpoint.startsWith(HttpConstants.HTTPS_PROTOCOL_PREFIX),
+        "Should use HTTPS protocol when protocol field is set to https://");
+    Assert.assertEquals(endpoint, "https://localhost:8443");
+  }
+
+  @Test(dependsOnMethods = "testBuildEndpointWithHttpsProtocol")
+  public void testBuildEndpointWithContextUrlPrefix() {
+    // Test that context URL prefix is appended correctly with HTTPS
+    ZNRecord znRecord = new ZNRecord("test");
+    znRecord.setSimpleField("hostname", "localhost");
+    znRecord.setSimpleField("port", "8443");
+    znRecord.setSimpleField("protocol", HttpConstants.HTTPS_PROTOCOL_PREFIX);
+    znRecord.setSimpleField("contextUrlPrefix", "/admin/v2");
+
+    String endpoint = ZkRoutingDataWriter.buildEndpointFromLeaderElectionNode(znRecord);
+    Assert.assertEquals(endpoint, "https://localhost:8443/admin/v2");
+  }
+
+  @Test(dependsOnMethods = "testBuildEndpointWithContextUrlPrefix")
+  public void testSslWriterRegistersWithHttpsProtocol() throws NoSuchAlgorithmException {
+    // Test that when SSL is enabled, the server registers itself with HTTPS protocol
+    // This means other servers will use HTTPS to reach this server when it becomes leader
+    SSLContext sslContext = SSLContext.getDefault();
+
+    // Create a writer with SSL - this will register with HTTPS protocol in ZK
+    ZkRoutingDataWriter sslWriter = new ZkRoutingDataWriter(TEST_NAMESPACE, _zkAddrTestNS, sslContext);
+
+    // The SSL writer is not the leader (the one from beforeClass is), but we can verify
+    // that a ZNRecord with HTTPS protocol would build an HTTPS endpoint
+    ZNRecord httpsRecord = new ZNRecord("ssl-server");
+    httpsRecord.setSimpleField("hostname", "ssl-host.example.com");
+    httpsRecord.setSimpleField("port", "8443");
+    httpsRecord.setSimpleField("protocol", HttpConstants.HTTPS_PROTOCOL_PREFIX);
+
+    String endpoint = ZkRoutingDataWriter.buildEndpointFromLeaderElectionNode(httpsRecord);
+    Assert.assertTrue(endpoint.startsWith(HttpConstants.HTTPS_PROTOCOL_PREFIX),
+        "Endpoint should use HTTPS when protocol field is set. Actual: " + endpoint);
+    Assert.assertEquals(endpoint, "https://ssl-host.example.com:8443");
+
+    sslWriter.close();
+  }
+
+  @Test(dependsOnMethods = "testSslWriterRegistersWithHttpsProtocol")
+  public void testForwardingUsesLeaderProtocol() {
+    // Test that forwarding uses the leader's protocol from ZK, not the forwarder's
+    // The existing leader (_zkRoutingDataWriter from beforeClass) uses HTTP
+
+    MockWriter mockWriter = new MockWriter(TEST_NAMESPACE, _zkAddrTestNS, null);
+
+    mockWriter.addMetadataStoreRealm(DUMMY_REALM);
+    Assert.assertEquals(mockWriter.calledRequest.getMethod(), HttpConstants.RestVerbs.PUT.name());
+
+    // The URL should start with http:// because the leader registered with HTTP
+    String requestUrl = mockWriter.calledRequest.getURI().toString();
+    Assert.assertTrue(requestUrl.startsWith(HttpConstants.HTTP_PROTOCOL_PREFIX),
+        "Request URL should use leader's protocol (HTTP). Actual URL: " + requestUrl);
+
+    mockWriter.close();
+  }
+
+  @Test(dependsOnMethods = "testForwardingUsesLeaderProtocol")
+  public void testBackwardCompatibilityNoProtocolField() {
+    // Test backward compatibility: when protocol field is missing, default to HTTP
+    ZNRecord legacyRecord = new ZNRecord("legacy-server");
+    legacyRecord.setSimpleField("hostname", "legacy-host.example.com");
+    legacyRecord.setSimpleField("port", "8080");
+    // Note: no protocol field set (simulating old servers)
+
+    String endpoint = ZkRoutingDataWriter.buildEndpointFromLeaderElectionNode(legacyRecord);
+    Assert.assertTrue(endpoint.startsWith(HttpConstants.HTTP_PROTOCOL_PREFIX),
+        "Endpoint should default to HTTP when protocol field is missing. Actual: " + endpoint);
+    Assert.assertEquals(endpoint, "http://legacy-host.example.com:8080");
   }
 }

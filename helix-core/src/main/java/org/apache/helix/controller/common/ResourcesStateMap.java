@@ -44,11 +44,8 @@ public class ResourcesStateMap {
 
   public void setState(String resourceName, Partition partition,
       Map<String, String> instanceStateMappingForPartition) {
-    if (!_resourceStateMap.containsKey(resourceName)) {
-      _resourceStateMap.put(resourceName, new PartitionStateMap(resourceName));
-    }
-    PartitionStateMap partitionStateMap = _resourceStateMap.get(resourceName);
-    partitionStateMap.setState(partition, instanceStateMappingForPartition);
+    _resourceStateMap.computeIfAbsent(resourceName, PartitionStateMap::new)
+        .setState(partition, instanceStateMappingForPartition);
   }
 
   public void setState(String resourceName,
@@ -62,10 +59,8 @@ public class ResourcesStateMap {
   }
 
   public void setState(String resourceName, Partition partition, String instance, String state) {
-    if (!_resourceStateMap.containsKey(resourceName)) {
-      _resourceStateMap.put(resourceName, new PartitionStateMap(resourceName));
-    }
-    _resourceStateMap.get(resourceName).setState(partition, instance, state);
+    _resourceStateMap.computeIfAbsent(resourceName, PartitionStateMap::new)
+        .setState(partition, instance, state);
   }
 
   public Map<String, String> getInstanceStateMap(String resourceName, Partition partition) {

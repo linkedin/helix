@@ -22,6 +22,7 @@ package org.apache.helix.controller.rebalancer.waged;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -42,7 +43,9 @@ import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
+import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
@@ -52,6 +55,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
@@ -74,10 +78,6 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       NOT_CONFIGURED_PREFERENCE = ImmutableMap
       .of(ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS, -1,
           ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT, -1);
-  // The default algorithm to use when there is no preference configured.
-  private static final RebalanceAlgorithm DEFAULT_REBALANCE_ALGORITHM =
-      ConstraintBasedAlgorithmFactory
-          .getInstance(ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE);
   // These failure types should be propagated to caller of computeNewIdealStates()
   private static final List<HelixRebalanceException.Type> FAILURE_TYPES_TO_PROPAGATE =
       ImmutableList.of(HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, HelixRebalanceException.Type.UNKNOWN_FAILURE);
@@ -102,6 +102,18 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   private RebalanceAlgorithm _rebalanceAlgorithm;
   private Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> _preference = NOT_CONFIGURED_PREFERENCE;
 
+  // Rebalancer-domain per-FailureCategory and per-HardConstraint counters. Pre-resolved at
+  // construction so the failure-reporting hot paths don't repeatedly look them up by name.
+  // ClusterStatusMonitor mirrors the same counts onto its own MBean for cluster-level dashboards.
+  private final EnumMap<HelixRebalanceException.FailureCategory, CountMetric>
+      _failureCategoryMetrics;
+  private final EnumMap<HardConstraint.Type, CountMetric> _hardConstraintFailureMetrics;
+
+  // Mirror of WAGED failure-category counters onto the ClusterStatusMonitor so cluster-level
+  // dashboards see the same signal. May be null when WagedRebalancer is used outside the
+  // pipeline (e.g. ReadOnlyWagedRebalancer for the REST partitionAssignment API).
+  private volatile ClusterStatusMonitor _clusterStatusMonitor;
+
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
     if (metadataStoreAddrs != null && clusterName != null) {
@@ -114,7 +126,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     this(helixManager == null ? null
             : constructAssignmentStore(helixManager.getMetadataStoreConnectionString(),
                 helixManager.getClusterName()),
-        DEFAULT_REBALANCE_ALGORITHM,
+        // Construct a per-instance algorithm rather than sharing a static singleton across
+        // WagedRebalancers, so the per-cluster hard-constraint failure reporter installed via
+        // setClusterStatusMonitor() does not race when multiple controllers coexist in the JVM.
+        // The shared ForkJoinPool inside the factory is still reused.
+        ConstraintBasedAlgorithmFactory.getInstance(
+            ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE),
         // Use DelayedAutoRebalancer as the mapping calculator for the final assignment output.
         // Mapping calculator will translate the best possible assignment into the applicable state
         // mapping based on the current states.
@@ -189,10 +206,225 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.StateReadLatencyGauge.name(),
         LatencyMetric.class));
 
+    _failureCategoryMetrics = new EnumMap<>(HelixRebalanceException.FailureCategory.class);
+    for (HelixRebalanceException.FailureCategory category :
+        HelixRebalanceException.FailureCategory.values()) {
+      _failureCategoryMetrics.put(category, _metricCollector.getMetric(
+          failureCategoryMetricName(category).name(), CountMetric.class));
+    }
+    _hardConstraintFailureMetrics = new EnumMap<>(HardConstraint.Type.class);
+    for (HardConstraint.Type type : HardConstraint.Type.values()) {
+      _hardConstraintFailureMetrics.put(type, _metricCollector.getMetric(
+          hardConstraintMetricName(type).name(), CountMetric.class));
+    }
+
     _partialRebalanceRunner = new PartialRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        _rebalanceFailureCount, isAsyncPartialRebalanceEnabled);
+        this::reportAsyncFailure, this::reportPartialRebalanceSuccess, isAsyncPartialRebalanceEnabled);
     _globalRebalanceRunner = new GlobalRebalanceRunner(_assignmentManager, assignmentMetadataStore, metricCollector,
-        _writeLatency, _rebalanceFailureCount, isAsyncGlobalRebalanceEnabled);
+        _writeLatency, this::reportBaselineAsyncFailure, this::reportBaselineComputeStatus,
+        isAsyncGlobalRebalanceEnabled);
+  }
+
+  /**
+   * Map a FailureCategory to its WagedRebalancerMetricNames enum value. Adding a new
+   * FailureCategory requires adding a matching WagedRebalancerMetricNames entry and the case below.
+   */
+  private static WagedRebalancerMetricCollector.WagedRebalancerMetricNames
+      failureCategoryMetricName(HelixRebalanceException.FailureCategory category) {
+    switch (category) {
+      case CAPACITY_DEFICIT:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryCapacityDeficitCounter;
+      case NO_CANDIDATE_NODE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryNoCandidateNodeCounter;
+      case INVALID_RESOURCE_CONFIG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryInvalidResourceConfigCounter;
+      case INVALID_CLUSTER_CONFIG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryInvalidClusterConfigCounter;
+      case METADATA_STORE_IO:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryMetadataStoreIoCounter;
+      case ALGORITHM_INTERNAL:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryAlgorithmInternalCounter;
+      case ASYNC_EXECUTION:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryAsyncExecutionCounter;
+      case UNKNOWN:
+      default:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryUnknownCounter;
+    }
+  }
+
+  /**
+   * Map a HardConstraint.Type to its WagedRebalancerMetricNames enum value.
+   */
+  private static WagedRebalancerMetricCollector.WagedRebalancerMetricNames
+      hardConstraintMetricName(HardConstraint.Type type) {
+    switch (type) {
+      case FAULT_ZONE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintFaultZoneFailureCounter;
+      case NODE_CAPACITY:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintNodeCapacityFailureCounter;
+      case NODE_MAX_PARTITION_LIMIT:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintNodeMaxPartitionLimitFailureCounter;
+      case REPLICA_ACTIVATE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintReplicaActivateFailureCounter;
+      case SAME_PARTITION_ON_INSTANCE:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintSamePartitionOnInstanceFailureCounter;
+      case VALID_GROUP_TAG:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintValidGroupTagFailureCounter;
+      case UNKNOWN:
+      default:
+        return WagedRebalancerMetricCollector.WagedRebalancerMetricNames.HardConstraintUnknownFailureCounter;
+    }
+  }
+
+  /**
+   * Attach the cluster-level status monitor so per-FailureCategory and per-HardConstraint counters
+   * get mirrored from the WagedRebalancerMetricCollector (Rebalancer JMX domain) onto
+   * ClusterStatusMonitor (ClusterStatus JMX domain). Also installs the per-HardConstraint reporter
+   * on the algorithm. Safe to call multiple times; subsequent calls replace the reference. May be
+   * null when WAGED is used outside the controller pipeline (e.g. ReadOnlyWagedRebalancer).
+   */
+  public void setClusterStatusMonitor(ClusterStatusMonitor clusterStatusMonitor) {
+    _clusterStatusMonitor = clusterStatusMonitor;
+    installHardConstraintFailureReporter(_rebalanceAlgorithm);
+  }
+
+  /**
+   * Install a per-HardConstraint failure reporter on the algorithm. No-op for algorithm
+   * implementations that are not ConstraintBasedAlgorithm. Called both when the monitor is
+   * attached and when the algorithm is replaced via updateRebalancePreference.
+   */
+  private void installHardConstraintFailureReporter(RebalanceAlgorithm algorithm) {
+    if (algorithm instanceof ConstraintBasedAlgorithm) {
+      ((ConstraintBasedAlgorithm) algorithm).setHardConstraintFailureReporter(
+          this::reportHardConstraintFailure);
+      ((ConstraintBasedAlgorithm) algorithm).setBlockingSnapshotReporter(
+          this::reportHardConstraintBlockingSnapshot);
+    }
+  }
+
+  /**
+   * Increment the per-FailureCategory counter on both the Rebalancer-domain
+   * WagedRebalancerMetricCollector and the ClusterStatus-domain ClusterStatusMonitor (when
+   * attached). Null-tolerant for ReadOnlyWagedRebalancer / unit-test cases.
+   */
+  protected void reportFailureCategory(HelixRebalanceException ex) {
+    HelixRebalanceException.FailureCategory category = ex.getFailureCategory();
+    _failureCategoryMetrics.get(category).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.reportWagedFailureByCategory(category);
+    }
+  }
+
+  /**
+   * Increment the per-HardConstraint counter on both MBeans. Called once per distinct constraint
+   * type that contributed to a partition's failure to find any eligible node.
+   */
+  void reportHardConstraintFailure(HardConstraint.Type type) {
+    _hardConstraintFailureMetrics.get(type).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.reportWagedHardConstraintFailure(type);
+    }
+  }
+
+  /**
+   * Publish the reversible per-run "currently blocking" snapshot onto ClusterStatusMonitor: for each
+   * HardConstraint.Type, set its blocking gauge to 1 if it blocked placement in the most recent WAGED
+   * computation, 0 otherwise. An empty set (a clean run) resets every gauge to 0, so the signal tells
+   * a transient blip apart from a persistent failure by value.
+   *
+   * <p>Scoped to the serving phases: PARTIAL and EMERGENCY. Both produce the assignment that is
+   * actually persisted and served, so both own these gauges. Crucially they do not race: within a
+   * pass emergency runs first and, when it fails, throws before partial is reached -- so partial does
+   * not run, making emergency the sole serving writer exactly when it is the phase that failed (and
+   * its per-reason attribution would otherwise be lost). GLOBAL_BASELINE and DELAYED_REBALANCE_OVERWRITES
+   * snapshots are intentionally dropped here: baseline has its own reversible gauge
+   * ({@link ClusterStatusMonitor#updateWagedBaselineComputeFailing}) and runs concurrently with partial
+   * on a separate executor (so without this gate a baseline run would clobber the serving gauges -- the
+   * masking the per-reason gauges are meant to avoid), and the delayed-overwrite branch is a temporary,
+   * non-persisted top-up that surfaces via WagedFallbackInUseGauge. Null-tolerant.
+   */
+  void reportHardConstraintBlockingSnapshot(ClusterModel.RebalanceScopeType scope,
+      Set<HardConstraint.Type> currentlyBlocking) {
+    if (scope != ClusterModel.RebalanceScopeType.PARTIAL
+        && scope != ClusterModel.RebalanceScopeType.EMERGENCY) {
+      return;
+    }
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedHardConstraintBlocking(currentlyBlocking);
+    }
+  }
+
+  /**
+   * Full failure reporting for the partial (serving) async runner: ticks RebalanceFailureCounter
+   * plus both the Rebalancer-domain and ClusterStatus-domain per-FailureCategory counters, and
+   * lights the reversible serving rollup gauge (via reportFailureCategory). Used when the async
+   * partial runner catches an exception that the synchronous catch never sees.
+   */
+  void reportAsyncFailure(HelixRebalanceException ex) {
+    _rebalanceFailureCount.increment(1L);
+    reportFailureCategory(ex);
+  }
+
+  /**
+   * Counter-only failure reporting for the Baseline (global) async runner. Ticks
+   * RebalanceFailureCounter, the per-FailureCategory counters on both MBeans, and the monotonic
+   * customer/internal rollup counters -- but does NOT light the reversible serving rollup gauges,
+   * which are owned by the partial phase (serving can be healthy while the baseline is stale). The
+   * Baseline phase's reversible signal is the separate WagedBaselineComputeFailingGauge, driven by
+   * {@link #reportBaselineComputeStatus}.
+   */
+  void reportBaselineAsyncFailure(HelixRebalanceException ex) {
+    _rebalanceFailureCount.increment(1L);
+    HelixRebalanceException.FailureCategory category = ex.getFailureCategory();
+    _failureCategoryMetrics.get(category).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.incrementWagedFailureCategoryCount(category);
+    }
+  }
+
+  /**
+   * Drive the reversible WagedBaselineComputeFailingGauge from the Baseline phase outcome: clear it
+   * when a Baseline computation succeeds, set it when one fails. Owned exclusively by the
+   * GLOBAL_BASELINE phase, so it is reversible regardless of async mode. Null-tolerant.
+   */
+  void reportBaselineComputeStatus(boolean clean) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedBaselineComputeFailing(!clean);
+    }
+  }
+
+  /**
+   * Drive the reversible WagedRebalanceOverwriteFailingGauge from the delayed-rebalance-overwrite
+   * phase outcome: clear it when the overwrite computation succeeds or is not needed, set it when one
+   * fails. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES phase -- this is the only reversible
+   * signal for that phase, which otherwise shares WagedFallbackInUseGauge with emergency.
+   * Null-tolerant.
+   */
+  void reportOverwriteComputeStatus(boolean clean) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedRebalanceOverwriteFailing(!clean);
+    }
+  }
+
+  /**
+   * Reset the reversible serving rollup gauges when the partial (serving) computation succeeds. The
+   * per-reason serving blocking gauges already reset via the empty snapshot; this clears the
+   * customer/internal rollup that {@link #reportAsyncFailure} sets on a partial failure. Driving the
+   * reset from the partial outcome -- not the synchronous fallback path -- is what makes the rollup
+   * reversible under async mode, where partial failures never reach the synchronous catch.
+   * Null-tolerant.
+   */
+  void reportPartialRebalanceSuccess() {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.resetWagedFailureRollupGauges();
+    }
   }
 
   // Update the global rebalance mode to be asynchronous or synchronous
@@ -212,6 +444,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     // 2. if the preference equals to the new preference, no need to update.
     if (!_preference.equals(NOT_CONFIGURED_PREFERENCE) && !_preference.equals(newPreference)) {
       _rebalanceAlgorithm = ConstraintBasedAlgorithmFactory.getInstance(newPreference);
+      // The previous algorithm instance is discarded; rewire the failure reporter onto the new
+      // one so per-HardConstraint counters keep flowing.
+      installHardConstraintFailureReporter(_rebalanceAlgorithm);
       _preference = ImmutableMap.copyOf(newPreference);
     }
   }
@@ -240,17 +475,28 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       Map<String, Resource> resourceMap, final CurrentStateOutput currentStateOutput)
       throws HelixRebalanceException {
     LOG.info("Start computing new ideal states for resources: {}", resourceMap.keySet().toString());
-    validateInput(clusterData, resourceMap);
+    try {
+      validateInput(clusterData, resourceMap);
+    } catch (HelixRebalanceException ex) {
+      // Record validation failures (INVALID_INPUT / INVALID_RESOURCE_CONFIG) too. We do not enter
+      // the fallback path here -- a bad input set must not silently use last-known-good.
+      _rebalanceFailureCount.increment(1L);
+      reportFailureCategory(ex);
+      throw ex;
+    }
 
     Map<String, IdealState> newIdealStates;
+    boolean usedFallback = false;
     try {
       // Calculate the target assignment based on the current cluster status.
       newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
           _rebalanceAlgorithm);
     } catch (HelixRebalanceException ex) {
-      LOG.error("Failed to calculate the new assignments.", ex);
+      LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
+          ex.getFailureCategory(), ex.isCustomerActionable(), ex);
       // Record the failure in metrics.
       _rebalanceFailureCount.increment(1L);
+      reportFailureCategory(ex);
 
       HelixRebalanceException.Type failureType = ex.getFailureType();
       if (failureTypesToPropagate().contains(failureType)) {
@@ -259,9 +505,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         throw ex;
       } else {
         // return the previously calculated assignment.
+        usedFallback = true;
         LOG.warn(
             "Returning the last known-good best possible assignment from metadata store due to "
-                + "rebalance failure of type: {}", failureType);
+                + "rebalance failure of type: {} category: {}", failureType, ex.getFailureCategory());
         // Note that don't return an assignment based on the current state if there is no previously
         // calculated result in this fallback logic.
         Map<String, ResourceAssignment> assignmentRecord =
@@ -269,6 +516,20 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
                 resourceMap.keySet());
         newIdealStates = convertResourceAssignment(clusterData, assignmentRecord);
       }
+    }
+    // Reflect whether this run produced a fresh assignment or fell back. Always update so that
+    // a previously sticky "true" resets on the next clean run. Capture the volatile once to
+    // avoid racing with a concurrent setClusterStatusMonitor() between the null check and the
+    // method call.
+    //
+    // Note: the reversible rollup failure gauges are intentionally NOT reset here. In production
+    // (async global + partial), partial failures never reach this synchronous path, so resetting on
+    // a clean synchronous compute would clear a rollup that a still-failing async partial had set --
+    // the gauge would flicker to 0 while serving is broken. The rollup reset is therefore driven by
+    // the partial (serving) computation succeeding; see reportPartialRebalanceSuccess.
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.setWagedFallbackInUseGauge(usedFallback);
     }
 
     // Construct the new best possible states according to the current state and target assignment.
@@ -368,7 +629,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       } catch (Exception ex) {
         throw new HelixRebalanceException(
             "Failed to calculate the new IdealState for resource: " + resourceName,
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
     }
     return finalIdealStateMap;
@@ -404,12 +666,16 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     final Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
 
     if (activeNodes.equals(enabledLiveInstances) || !requireRebalanceOverwrite(clusterData, currentResourceAssignment)) {
-      // no need for additional process, return the current resource assignment
+      // no need for additional process -- the overwrite phase is not failing, so clear its gauge.
+      reportOverwriteComputeStatus(true);
       return currentResourceAssignment;
     }
     _rebalanceOverwriteCounter.increment(1L);
     _rebalanceOverwriteLatency.startMeasuringLatency();
     LOG.info("Start delayed rebalance overwrites in emergency rebalance.");
+    // Drive the reversible overwrite gauge from this phase's outcome. Reported once in finally so
+    // both catch blocks are covered: false (failing) unless we reach the success point below.
+    boolean overwriteClean = false;
     try {
       // use the "real" live and enabled instances for calculation
       ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(
@@ -418,6 +684,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       // keep only the resource entries requiring changes for minActiveReplica
       assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
       DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
+      overwriteClean = true;
       return currentResourceAssignment;
     } catch (HelixRebalanceException e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
@@ -425,9 +692,11 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     } catch (Exception e) {
       LOG.error("Failed to compute for delayed rebalance overwrites in cluster {}", clusterData.getClusterName());
       throw new HelixRebalanceException("Failed to compute for delayed rebalance overwrites in cluster "
-          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, e);
+          + clusterData.getClusterConfig(), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, e);
     } finally {
       _rebalanceOverwriteLatency.endMeasuringLatency();
+      reportOverwriteComputeStatus(overwriteClean);
     }
   }
 
@@ -481,7 +750,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
                 currentBestPossibleAssignment);
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to generate cluster model for emergency rebalance.",
-            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+            HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
       newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
     } else {
@@ -549,7 +819,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (!nonCompatibleResources.isEmpty()) {
       throw new HelixRebalanceException(String.format(
           "Input contains invalid resource(s) that cannot be rebalanced by the WAGED rebalancer. %s",
-          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT);
+          nonCompatibleResources.toString()), HelixRebalanceException.Type.INVALID_INPUT,
+          HelixRebalanceException.FailureCategory.INVALID_RESOURCE_CONFIG);
     }
   }
 
@@ -582,7 +853,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         _writeLatency.endMeasuringLatency();
       } catch (Exception ex) {
         throw new HelixRebalanceException("Failed to persist the new best possible assignment.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS, ex);
+            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     } else {
       LOG.debug("Assignment Metadata Store is null. Skip persisting the best possible assignment.");

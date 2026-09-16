@@ -49,15 +49,12 @@ public class ClusterConfig extends HelixProperty {
    * ClusterConfig.
    */
   public enum ClusterConfigProperty {
-    HELIX_DISABLE_PIPELINE_TRIGGERS,
     PERSIST_BEST_POSSIBLE_ASSIGNMENT,
     PERSIST_INTERMEDIATE_ASSIGNMENT,
     TOPOLOGY, // cluster topology definition, for example, "/zone/rack/host/instance"
     FAULT_ZONE_TYPE, // the type in which isolation should be applied on when Helix places the
     // replicas from same partition.
     TOPOLOGY_AWARE_ENABLED, // whether topology aware rebalance is enabled.
-    @Deprecated
-    DELAY_REBALANCE_DISABLED, // disabled the delayed rebalaning in case node goes offline.
     DELAY_REBALANCE_ENABLED, // whether the delayed rebalaning is enabled.
     DELAY_REBALANCE_TIME, // delayed time in ms that the delay time Helix should hold until
     // rebalancing.
@@ -65,8 +62,12 @@ public class ClusterConfig extends HelixProperty {
     STATE_TRANSITION_CANCELLATION_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
     TOP_STATE_HANDOFF_DURATION_THRESHOLD,
+    PARTITION_RECOVERY_DURATION_THRESHOLD,
     RESOURCE_PRIORITY_FIELD,
     REBALANCE_TIMER_PERIOD,
+    // Time in ms after which a non-empty controller event queue that has not completed a pipeline
+    // run is treated as a wedged ("zombie leader") controller by ControllerPipelineStalledGauge.
+    CONTROLLER_PIPELINE_STALL_THRESHOLD_MS,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
 
     // The following concerns maintenance mode
@@ -81,6 +82,20 @@ public class ClusterConfig extends HelixProperty {
     MAX_OFFLINE_INSTANCES_ALLOWED,
     NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT, // For auto-exiting maintenance mode
 
+    // Instance-operation maintenance budget. Instances carrying a valid
+    // INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker on their InstanceConfig are excluded
+    // from the MAX_OFFLINE_INSTANCES_ALLOWED count while the marker has not expired.
+    //
+    // The two fields below define the cap on simultaneous markers. They are mutually
+    // exclusive: setters reject writing one while the other is already set. -1 means the
+    // cap is not configured.
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET,
+    INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE,
+    // Fallback TTL (in millis) applied by the instance-operation maintenance write path
+    // when the caller omits expiresAtMillis. When unset (-1), callers must always supply an
+    // explicit expiresAtMillis; otherwise the write is rejected.
+    DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
+
     TARGET_EXTERNALVIEW_ENABLED,
     @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
     // precedence if it is set
@@ -92,11 +107,8 @@ public class ClusterConfig extends HelixProperty {
     // partitons that need recovery or in
     // error exceeds this limitation
     @Deprecated // TODO: Remove in Helix 2.0
-    DISABLED_INSTANCES,
-    @Deprecated // TODO: Remove in Helix 2.0
     DISABLED_INSTANCES_WITH_INFO,
-    // disabled instances and disabled instances with info are for storing batch disabled instances.
-    // disabled instances will write into both 2 fields for backward compatibility.
+    // disabled instances with info is for storing batch disabled instances (cloud event handling).
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -115,6 +127,34 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_CAPACITY_MAP,
     // The default partition weights if no weight is configured in the Resource Config node.
     DEFAULT_PARTITION_WEIGHT_MAP,
+    // Opt-in toggle for the helix-rest PartitionWeightCapacityGuardrailRule, which pre-validates an
+    // addWagedResource request and rejects a resource whose partition weight exceeds the largest
+    // single instance capacity (making it permanently unplaceable). Disabled by default so enabling
+    // it is a deliberate per-cluster decision; it can be turned off again with a single ClusterConfig
+    // change (no client change or helix-rest redeploy) to back out a false positive.
+    PARTITION_WEIGHT_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceOperationRebalanceFeasibilityGuardrailRule, which
+    // pre-validates a setInstanceOperation request: if moving the target instance out of the WAGED
+    // assignable pool (e.g. EVACUATE / UNKNOWN) would leave one or more partitions unable to place
+    // all their replicas on the remaining assignable instances, the operation is rejected before it
+    // is written to ZooKeeper. Disabled by default so enabling it is a deliberate per-cluster
+    // decision; it can be turned off again with a single ClusterConfig change (no client change or
+    // helix-rest redeploy) to back out a false positive.
+    INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceCapacityHeadroomGuardrailRule, which pre-validates an
+    // updateInstanceConfig that lowers an instance's capacity and rejects it when the cluster's total
+    // remaining capacity in some dimension would fall below the capacity already committed to WAGED
+    // resources (leaving partitions unplaceable). Disabled by default so enabling it is a deliberate
+    // per-cluster decision, and it can be turned off again with a single ClusterConfig change (no
+    // client change or helix-rest redeploy) to back out a false positive.
+    INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED,
+    // Opt-in toggle for the helix-rest InstanceTagRebalanceFeasibilityGuardrailRule, which pre-validates
+    // a removeInstanceTag request: removing a tag that a WAGED resource is pinned to (via
+    // INSTANCE_GROUP_TAG) shrinks that resource's assignable pool, so if it would leave partitions
+    // unable to place all their replicas the removal is rejected before the ZooKeeper write. Disabled by
+    // default so enabling it is a deliberate per-cluster decision; it can be turned off again with a
+    // single ClusterConfig change (no client change or helix-rest redeploy) to back out a false positive.
+    INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED,
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
@@ -150,12 +190,6 @@ public class ClusterConfig extends HelixProperty {
     // The unit is milliseconds.
     OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE,
 
-    // The time out window for offline nodes to be purged; if an offline node has been
-    // offline for more than this specified time period, and users call purge participant API,
-    // then the node will be removed.
-    // The unit is milliseconds.
-    OFFLINE_DURATION_FOR_PURGE_MS,
-
     // The following 3 keywords are for metadata in batch disabled instance
     HELIX_ENABLED_DISABLE_TIMESTAMP,
     HELIX_DISABLED_REASON,
@@ -172,6 +206,20 @@ public class ClusterConfig extends HelixProperty {
 
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
+
+    // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
+    // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
+    ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION,
+
+    // Enable availability-aware cross-resource prioritization for state transitions.
+    // When enabled, messages are prioritized based on availability impact score across all resources,
+    // rather than processing resources in priority order.
+    AVAILABILITY_AWARE_PRIORITIZATION_ENABLED,
+
+    // Enable the refactored IntermediateStateCalcStage (V2) which uses a strategy pattern
+    // for message ordering and extracted throttle logic. When disabled (default), the original
+    // IntermediateStateCalcStage (V1) is used for backward compatibility.
+    INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -210,6 +258,9 @@ public class ClusterConfig extends HelixProperty {
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
   private final static long DEFAULT_LAST_ON_DEMAND_REBALANCE_TIMESTAMP = -1L;
   private final static long DEFAULT_TOP_STATE_HANDOFF_DURATION_THRESHOLD = 300000L; // 5 minutes
+  // Default for CONTROLLER_PIPELINE_STALL_THRESHOLD_MS when unset.
+  private final static long DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
+  private final static long DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD = 300000L; // 5 minutes
 
   /**
    * Instantiate for a specific cluster
@@ -402,11 +453,6 @@ public class ClusterConfig extends HelixProperty {
     }
   }
 
-  public Boolean isPipelineTriggersDisabled() {
-    return _record
-        .getBooleanField(ClusterConfigProperty.HELIX_DISABLE_PIPELINE_TRIGGERS.toString(), false);
-  }
-
   /**
    * Enable/disable topology aware rebalacning. If enabled, both {@link #setTopology(String)} and
    * {@link #setFaultZoneType(String)} should be set.
@@ -485,14 +531,7 @@ public class ClusterConfig extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalaceEnabled() {
-    boolean disabled =
-        _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_DISABLED.name(), false);
-    boolean enabled =
-        _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
-    if (disabled) {
-      return false;
-    }
-    return enabled;
+    return _record.getBooleanField(ClusterConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**
@@ -563,6 +602,88 @@ public class ClusterConfig extends HelixProperty {
    */
   public int getMaxOfflineInstancesAllowed() {
     return _record.getIntField(ClusterConfigProperty.MAX_OFFLINE_INSTANCES_ALLOWED.name(), -1);
+  }
+
+  /**
+   * Set the absolute cap on the number of instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Pass {@code -1} to clear; the field is
+   * mutually exclusive with {@link #setInstanceOperationMaintenanceBudgetPercentage(int)}
+   * and the setter throws when the other form is already set.
+   */
+  public void setInstanceOperationMaintenanceBudget(int instanceOperationMaintenanceBudget)
+      throws HelixException {
+    if (instanceOperationMaintenanceBudget >= 0
+        && getInstanceOperationMaintenanceBudgetPercentage() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE are mutually exclusive; "
+          + "clear the percentage form before setting the absolute form.");
+    }
+    _record.setIntField(ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(),
+        instanceOperationMaintenanceBudget);
+  }
+
+  /**
+   * @return the configured absolute cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
+   */
+  public int getInstanceOperationMaintenanceBudget() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET.name(), -1);
+  }
+
+  /**
+   * Set the percentage of cluster instances that may simultaneously carry an
+   * INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS marker. Valid range is {@code [0, 100]}; pass
+   * {@code -1} to clear. The field is mutually exclusive with
+   * {@link #setInstanceOperationMaintenanceBudget(int)} and the setter throws when the
+   * other form is already set or the value is outside the valid range.
+   */
+  public void setInstanceOperationMaintenanceBudgetPercentage(
+      int instanceOperationMaintenanceBudgetPercentage) throws HelixException {
+    if (instanceOperationMaintenanceBudgetPercentage < -1
+        || instanceOperationMaintenanceBudgetPercentage > 100) {
+      throw new HelixException(
+          "INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE must be in the range [0, 100] "
+              + "or -1 to clear, got " + instanceOperationMaintenanceBudgetPercentage);
+    }
+    if (instanceOperationMaintenanceBudgetPercentage >= 0
+        && getInstanceOperationMaintenanceBudget() >= 0) {
+      throw new HelixException("INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE and "
+          + "INSTANCE_OPERATION_MAINTENANCE_BUDGET are mutually exclusive; clear the "
+          + "absolute form before setting the percentage form.");
+    }
+    _record.setIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(),
+        instanceOperationMaintenanceBudgetPercentage);
+  }
+
+  /**
+   * @return the configured percentage cap on instance-operation maintenance markers, or
+   *     {@code -1} when not set.
+   */
+  public int getInstanceOperationMaintenanceBudgetPercentage() {
+    return _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_BUDGET_PERCENTAGE.name(), -1);
+  }
+
+  /**
+   * Set the fallback duration (millis) applied by the instance-operation maintenance write
+   * path when the caller omits expiresAtMillis. Pass {@code -1L} to clear; when cleared,
+   * writes that omit expiresAtMillis are rejected.
+   */
+  public void setDefaultInstanceOperationMaintenanceDurationMs(
+      long defaultInstanceOperationMaintenanceDurationMs) {
+    _record.setLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(),
+        defaultInstanceOperationMaintenanceDurationMs);
+  }
+
+  /**
+   * @return the configured fallback duration in millis, or {@code -1L} when not set.
+   */
+  public long getDefaultInstanceOperationMaintenanceDurationMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(), -1L);
   }
 
   /**
@@ -724,6 +845,56 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
+  /**
+   * Set the wedged-controller stall threshold: a non-empty controller event queue that has not
+   * completed a pipeline run within this many ms is reported as stalled by
+   * ControllerPipelineStalledGauge.
+   * @param thresholdMs threshold in milliseconds; must be positive
+   * @throws IllegalArgumentException if {@code thresholdMs <= 0}. Rejecting non-positive values at
+   *         the write path keeps the persisted config from silently diverging from live behaviour
+   *         (the monitor ignores non-positive updates and keeps its previous/default threshold).
+   */
+  public void setControllerPipelineStallThresholdMs(long thresholdMs) {
+    if (thresholdMs <= 0) {
+      throw new IllegalArgumentException(
+          "CONTROLLER_PIPELINE_STALL_THRESHOLD_MS must be positive, got " + thresholdMs);
+    }
+    _record.setLongField(ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
+        thresholdMs);
+  }
+
+  /**
+   * @return the wedged-controller stall threshold in ms, defaulting to
+   *         {@value #DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS} when unset.
+   */
+  public long getControllerPipelineStallThresholdMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
+        DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS);
+  }
+
+  /**
+   * Set the partition recovery duration threshold in milliseconds. A partition whose active replica
+   * count stays below its minActiveReplicas longer than this threshold is counted in the
+   * PartitionsRecoveryDurationBeyondThresholdCounter for alerting.
+   * @param durationThreshold the threshold in milliseconds
+   */
+  public void setPartitionRecoveryDurationThreshold(long durationThreshold) {
+    _record.setLongField(ClusterConfigProperty.PARTITION_RECOVERY_DURATION_THRESHOLD.name(),
+        durationThreshold);
+  }
+
+  /**
+   * Get the partition recovery duration threshold. If not configured, defaults to 300000ms
+   * (5 minutes).
+   * @return the threshold in milliseconds
+   */
+  public long getPartitionRecoveryDurationThreshold() {
+    return _record.getLongField(ClusterConfigProperty.PARTITION_RECOVERY_DURATION_THRESHOLD.name(),
+        DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD);
+  }
+
+  /**
    * Set cluster level state transition time out
    * @param stateTransitionTimeoutConfig
    */
@@ -828,11 +999,46 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the disabled instance list
-   * @param disabledInstances
+   * Enable or disable availability-aware cross-resource prioritization for state transitions.
+   * When enabled, messages are prioritized based on availability impact score across all resources,
+   * rather than processing resources in priority order. This ensures that partitions with fewer
+   * active replicas get prioritized over partitions that are closer to their target replica count.
+   * By default, this is DISABLED if not set.
+   * @param enabled true to enable availability-aware prioritization
    */
-  public void setDisabledInstances(Map<String, String> disabledInstances) {
-    _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES.name(), disabledInstances);
+  public void setAvailabilityAwarePrioritizationEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Check whether availability-aware cross-resource prioritization is enabled for state transitions.
+   * By default, it is DISABLED.
+   * @return true if availability-aware prioritization is enabled
+   */
+  public boolean isAvailabilityAwarePrioritizationEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.AVAILABILITY_AWARE_PRIORITIZATION_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the refactored IntermediateStateCalcStage (V2).
+   * When enabled, the controller uses IntermediateStateCalcStageV2 which features a strategy
+   * pattern for message ordering and extracted throttle logic. When disabled (default), the
+   * original IntermediateStateCalcStage (V1) is used for backward compatibility.
+   * @param enabled true to enable V2, false to use V1 (default)
+   */
+  public void setIntermediateStateCalcStageV2Enabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Check whether the refactored IntermediateStateCalcStage (V2) is enabled.
+   * By default, it is DISABLED (V1 is used).
+   * @return true if V2 is enabled
+   */
+  public boolean isIntermediateStateCalcStageV2Enabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED.name(), false);
   }
 
   /**
@@ -841,19 +1047,6 @@ public class ClusterConfig extends HelixProperty {
   public void setDisabledInstancesWithInfo(Map<String, String> disabledInstancesWithInfo) {
     _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name(),
         disabledInstancesWithInfo);
-  }
-
-  /**
-   * Get current disabled instance map of <instance, disabledTimeStamp>
-   * @deprecated We will no longer be using the clusterConfig to disable instances
-   * please use the InstanceConfig to disable instances
-   * @return a non-null map of disabled instances in cluster config
-   */
-  @Deprecated
-  public Map<String, String> getDisabledInstances() {
-    Map<String, String> disabledInstances =
-        _record.getMapField(ClusterConfigProperty.DISABLED_INSTANCES.name());
-    return disabledInstances == null ? Collections.emptyMap() : disabledInstances;
   }
 
   /**
@@ -1016,6 +1209,106 @@ public class ClusterConfig extends HelixProperty {
     setDefaultCapacityMap(ClusterConfigProperty.DEFAULT_PARTITION_WEIGHT_MAP, weightDataMap);
   }
 
+  /**
+   * Whether the helix-rest partition-weight capacity guard rail is enabled for this cluster. When
+   * enabled, an addWagedResource request is pre-validated and rejected before any ZooKeeper write if
+   * a partition weight exceeds the largest single instance capacity in any dimension (which would
+   * make the resource permanently unplaceable and stall the WAGED global rebalance cluster-wide).
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without
+   * changing any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isPartitionWeightGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest partition-weight capacity guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setPartitionWeightGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.PARTITION_WEIGHT_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-operation rebalance-feasibility guard rail is enabled for this
+   * cluster. When enabled, a {@code setInstanceOperation} that would drain the target out of the WAGED
+   * assignable pool is pre-validated with a read-only what-if and rejected before the ZooKeeper write
+   * if it would leave partitions unable to place all their replicas (rather than only surfacing later
+   * as a WAGED rebalance failure). Disabled by default: an opt-in, per-cluster decision that can be
+   * turned off again with a single ClusterConfig change to back out a false positive.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceOperationRebalanceGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-operation rebalance-feasibility guard rail for this
+   * cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceOperationRebalanceGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_OPERATION_REBALANCE_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-capacity headroom guard rail is enabled for this cluster. The
+   * rule pre-validates an updateInstanceConfig that reduces capacity and rejects reductions that would
+   * drop the cluster's total remaining capacity in some dimension below the demand already committed
+   * to WAGED resources.
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without changing
+   * any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceCapacityHeadroomGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-capacity headroom guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceCapacityHeadroomGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_CAPACITY_HEADROOM_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Whether the helix-rest instance-tag rebalance-feasibility guard rail is enabled for this cluster.
+   * When enabled, a {@code removeInstanceTag} that would shrink the assignable pool of a WAGED resource
+   * pinned to that tag (via {@code INSTANCE_GROUP_TAG}) is pre-validated with a read-only what-if and
+   * rejected before the ZooKeeper write if it would leave partitions unable to place all their replicas
+   * (rather than only surfacing later as a WAGED rebalance failure).
+   * <p>
+   * Disabled by default: enabling the guard rail is an opt-in, per-cluster decision, and it can be
+   * turned off again with a single ClusterConfig change to back out a false positive without changing
+   * any client or redeploying helix-rest.
+   * @return true if the guard rail is enabled; false (the default) otherwise.
+   */
+  public boolean isInstanceTagRebalanceGuardrailEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable or disable the helix-rest instance-tag rebalance-feasibility guard rail for this cluster.
+   * @param enabled true to enable the guard rail, false to disable it.
+   */
+  public void setInstanceTagRebalanceGuardrailEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.INSTANCE_TAG_REBALANCE_GUARDRAIL_ENABLED.name(), enabled);
+  }
+
   private Map<String, Integer> getDefaultCapacityMap(ClusterConfigProperty capacityPropertyType) {
     Map<String, String> capacityData = _record.getMapField(capacityPropertyType.name());
     if (capacityData != null) {
@@ -1138,27 +1431,6 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the default duration for offline nodes to be purged. If an offline node has been
-   * offline for more than this specified time period, when users call purge participants API,
-   * the node will be dropped.
-   * @param offlineDuration offline duration in milliseconds.
-   */
-  public void setOfflineDurationForPurge(long offlineDuration) {
-    _record.setLongField(ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-        offlineDuration);
-  }
-
-  /**
-   * Get the default offline duration for offline nodes to be purged.
-   * @return offline duration in milliseconds
-   */
-  public long getOfflineDurationForPurge() {
-    return _record
-        .getLongField(ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-            OFFLINE_DURATION_FOR_PURGE_NOT_SET);
-  }
-
-  /**
    * Set the abnormal state resolver class map.
    * @param resolverMap - the resolver map
    *                    If null, the resolver map item will be removed from the config.
@@ -1228,8 +1500,7 @@ public class ClusterConfig extends HelixProperty {
   }
 
   public String getInstanceHelixDisabledType(String instanceName) {
-    if (!getDisabledInstancesWithInfo().containsKey(instanceName) &&
-        !getDisabledInstances().containsKey(instanceName)) {
+    if (!getDisabledInstancesWithInfo().containsKey(instanceName)) {
       return InstanceConstants.INSTANCE_NOT_DISABLED;
     }
     return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
@@ -1257,7 +1528,7 @@ public class ClusterConfig extends HelixProperty {
           .parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
           .get(ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString());
     }
-    return getDisabledInstances().get(instanceName);
+    return null;
   }
 
   /**
@@ -1328,5 +1599,26 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  /**
+   * @return true if top state downward transitions (e.g., MASTER->SLAVE, LEADER->STANDBY)
+   *         should be classified as RECOVERY_REBALANCE instead of LOAD_BALANCE
+   */
+  public boolean isRecoveryRebalanceForTopStateDownwardTransitionEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        false);
+  }
+
+  /**
+   * Enable or disable classifying top state downward transitions as RECOVERY_REBALANCE.
+   *
+   * @param enabled true to classify top state downward transitions as RECOVERY_REBALANCE
+   */
+  public void setRecoveryRebalanceForTopStateDownwardTransitionEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION.name(),
+        enabled);
   }
 }

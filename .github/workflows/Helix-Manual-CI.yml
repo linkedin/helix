@@ -15,7 +15,9 @@ on:
         required: true
         default: -fae test
 
-permissions: write-all
+permissions:
+  contents: read
+  checks: write
 
 jobs:
   MANUAL_CI:
@@ -23,9 +25,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Validate workflow inputs
+        id: validate-inputs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const buildRef = context.payload.inputs?.buildRef || '';
+            const mvnOpts = context.payload.inputs?.mvnOpts || '';
+            const goals = context.payload.inputs?.goals || '';
+            const buildRefPattern = /^[A-Za-z0-9._/@:-]+$/;
+            const argsPattern = /^[A-Za-z0-9._/@:=,+-]+(?:\s+[A-Za-z0-9._/@:=,+-]+)*$/;
+            if (!buildRefPattern.test(buildRef)) {
+              throw new Error('Invalid buildRef. Allowed characters are letters, digits, ., _, /, @, :, and -');
+            }
+            if (!argsPattern.test(mvnOpts)) {
+              throw new Error('Invalid mvnOpts input. Input must be a whitespace-separated list of safe Maven arguments.');
+            }
+            if (!argsPattern.test(goals)) {
+              throw new Error('Invalid goals input. Input must be a whitespace-separated list of safe Maven goals.');
+            }
+            core.setOutput('build-ref', buildRef);
+            core.setOutput('mvn-opts', mvnOpts);
+            core.setOutput('goals', goals);
+
       - uses: actions/checkout@v2
         with:
-          ref: ${{ github.event.inputs.buildRef }}
+          ref: ${{ steps.validate-inputs.outputs.build-ref }}
       - name: Set up JDK 11
         uses: actions/setup-java@v1
         with:
@@ -35,7 +60,13 @@ jobs:
       - name: Build with Maven
         run: mvn clean install -Dmaven.test.skip.exec=true -DretryFailedDeploymentCount=5
       - name: Run All Tests
-        run: mvn -B -V -e -ntp "-Dstyle.color=always" ${{ github.event.inputs.mvnOpts }} ${{ github.event.inputs.goals }}
+        env:
+          MVN_OPTS_INPUT: ${{ steps.validate-inputs.outputs.mvn-opts }}
+          GOALS_INPUT: ${{ steps.validate-inputs.outputs.goals }}
+        run: |
+          read -r -a mvn_opts <<< "$MVN_OPTS_INPUT"
+          read -r -a goals <<< "$GOALS_INPUT"
+          mvn -B -V -e -ntp "-Dstyle.color=always" "${mvn_opts[@]}" "${goals[@]}"
       - name: Test Report
         uses: dorny/test-reporter@v1
         if: always()

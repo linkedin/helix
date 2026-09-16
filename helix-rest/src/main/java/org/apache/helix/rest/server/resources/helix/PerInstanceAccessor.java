@@ -20,10 +20,12 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
@@ -51,6 +53,13 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -62,14 +71,19 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.rest.server.filters.HelixAdminAuth;
 import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
+import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.eclipse.jetty.util.StringUtil;
@@ -316,6 +330,75 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
   }
 
+  /**
+   * Set or clear the instance-operation maintenance marker on a single instance. While the
+   * marker is unexpired, the instance is excluded from the cluster-wide offline budget
+   * (MAX_OFFLINE_INSTANCES_ALLOWED) that drives auto Maintenance Mode.
+   *
+   * <p>Request body: {@code { "expiresAtMillis": 1776385800000 }}.
+   *
+   * <p>A negative {@code expiresAtMillis} (the {@code -1} sentinel) clears the marker. An
+   * omitted or zero {@code expiresAtMillis} falls back to the cluster-level
+   * {@code DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS}; if neither is set, the call
+   * is rejected with 400. Per-instance failures (instance not found, cap exhausted) are
+   * surfaced as 400 with the reason in the body so the single-endpoint contract stays
+   * binary; the batch endpoint at
+   * {@code POST /clusters/{c}/instances?command=instanceOperationMaintenance} reports
+   * per-instance results in a 200 response instead.
+   */
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @POST
+  @Path("instanceOperationMaintenance")
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Response setInstanceOperationMaintenance(String jsonContent,
+      @PathParam("clusterId") String clusterId,
+      @PathParam("instanceName") String instanceName) {
+    try {
+      JsonNode node = parseJsonOrEmpty(jsonContent);
+      long expiresAtMillis = node.path("expiresAtMillis")
+          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
+
+      InstanceOperationMaintenanceWriteHandler handler =
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
+          handler.apply(clusterId, Collections.singletonList(instanceName), expiresAtMillis,
+              System.currentTimeMillis());
+
+      if (result.getApplied().contains(instanceName)) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("instance", instanceName);
+        body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
+        return JSONRepresentation(body);
+      }
+      String rejectReason = result.getRejected().get(instanceName);
+      if (rejectReason != null) {
+        // Single-instance call cannot be partial; surface the per-instance reason as 400.
+        return badRequest(rejectReason);
+      }
+      // The handler is supposed to return every input instance in exactly one of applied or
+      // rejected. Reaching here means the handler returned an inconsistent result; surface
+      // this as 500 instead of silently translating to a generic 400, since the latter
+      // would mask a real server-side bug as a client error.
+      return serverError(new IllegalStateException(
+          "Handler returned no outcome for instance " + instanceName));
+    } catch (BadRequestException e) {
+      return badRequest(e.getMessage());
+    } catch (Exception e) {
+      LOG.error("Failed to set instance-operation maintenance for {} in cluster {}",
+          instanceName, clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private static JsonNode parseJsonOrEmpty(String jsonContent) throws IOException {
+    if (jsonContent == null || jsonContent.isEmpty()) {
+      return JsonNodeFactory.instance.objectNode();
+    }
+    JsonNode parsed = OBJECT_MAPPER.readTree(jsonContent);
+    return parsed == null ? JsonNodeFactory.instance.objectNode() : parsed;
+  }
+
   private MaintenanceOpInputFields readMaintenanceInputFromJson(String jsonContent) throws IOException {
     JsonNode node = null;
     if (jsonContent.length() != 0) {
@@ -391,6 +474,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @POST
   public Response updateInstance(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String command,
@@ -401,6 +485,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
       String content) {
     Command cmd;
     try {
@@ -455,6 +540,46 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       .getTypeFactory().constructCollectionType(List.class, String.class)));
           break;
         case setInstanceOperation:
+          // Guard rail: when the cluster opts in, block (or simulate) a setInstanceOperation that
+          // would move this instance out of the WAGED assignable pool (e.g. EVACUATE / UNKNOWN) and
+          // leave one or more partitions unable to place all their replicas. The rule self-selects
+          // the capacity-reducing operations from isAssignable(); ENABLE/DISABLE/SWAP_IN are no-ops
+          // for it. force=true overrides the verdict (draining a failing node is often mandatory);
+          // dryRun=true reports the verdict without writing. The provider keeps the ZK-accessor
+          // plumbing for the read-only WAGED what-if here in the REST layer.
+          //
+          // Skip the (relatively expensive) double WAGED what-if entirely for a real force write:
+          // force overrides any verdict anyway, so an operator force-draining a failing node must
+          // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
+          // dryRun still computes the verdict (even together with force) so it can be previewed.
+          if (dryRun || !force) {
+            WagedAssignmentProvider wagedAssignmentProvider =
+                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                        liveInstances, idealStates, resourceConfigs);
+            GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(getDataAccssor(clusterId))
+                .instanceName(instanceName)
+                .proposedInstanceOperation(instanceOperation)
+                .wagedAssignmentProvider(wagedAssignmentProvider)
+                .build();
+            GuardrailPipeline setInstanceOperationPipeline =
+                new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+            Optional<Response> setInstanceOperationPreflight =
+                preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
+            if (setInstanceOperationPreflight.isPresent()) {
+              return setInstanceOperationPreflight.get();
+            }
+          } else {
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
+            // auditable (an operator can still see the override happened without a dryRun preflight).
+            LOG.info(
+                "Bypassing the instance-operation rebalance-feasibility guard rail for a force "
+                    + "setInstanceOperation {} on instance {} in cluster {} (reason: {}); force "
+                    + "overrides the verdict, so the WAGED what-if is skipped.",
+                instanceOperation, instanceName, clusterId, reason);
+          }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
               new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,
               new InstanceConfig.InstanceOperation.Builder().setOperation(instanceOperation)
@@ -463,11 +588,16 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                   .build());
           break;
         case canCompleteSwap:
-          return OK(OBJECT_MAPPER.writeValueAsString(
-              ImmutableMap.of("successful", admin.canCompleteSwap(clusterId, instanceName))));
+          OperationCheckResult swapCheckResult = admin.canCompleteSwapWithDetails(clusterId, instanceName);
+          return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
+              "successful", swapCheckResult.isSuccessful(),
+              "blockers", swapCheckResult.getBlockers())));
         case completeSwapIfPossible:
-          return OK(OBJECT_MAPPER.writeValueAsString(
-              ImmutableMap.of("successful", admin.completeSwapIfPossible(clusterId, instanceName, force))));
+          OperationCheckResult completeSwapResult =
+              admin.completeSwapIfPossibleWithDetails(clusterId, instanceName, force);
+          return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
+              "successful", completeSwapResult.isSuccessful(),
+              "blockers", completeSwapResult.getBlockers())));
         case addInstanceTag:
           if (!validInstance(node, instanceName)) {
             return badRequest("Instance names are not match!");
@@ -478,16 +608,53 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             admin.addInstanceTag(clusterId, instanceName, tag);
           }
           break;
-        case removeInstanceTag:
+        case removeInstanceTag: {
           if (!validInstance(node, instanceName)) {
             return badRequest("Instance names are not match!");
           }
-          for (String tag : (List<String>) OBJECT_MAPPER.readValue(
+          List<String> tagsToRemove = (List<String>) OBJECT_MAPPER.readValue(
               node.get(PerInstanceProperties.instanceTags.name()).toString(),
-              OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class))) {
+              OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class));
+          // Guard rail (opt-in per cluster via the ClusterConfig flag, disabled by default): block (or
+          // simulate) a tag removal that would move this instance out of the assignable pool for a
+          // WAGED resource pinned to that tag (INSTANCE_GROUP_TAG) and leave one or more partitions
+          // unable to place all their replicas.
+          // Same failure class as setInstanceOperation, so it reuses the same WAGED what-if. force
+          // overrides the verdict; dryRun reports it without writing. Skip the (expensive) what-if
+          // for a real force write, whose result would be discarded anyway.
+          if (dryRun || !force) {
+            WagedAssignmentProvider wagedAssignmentProvider =
+                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                        liveInstances, idealStates, resourceConfigs);
+            GuardrailContext removeTagContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(getDataAccssor(clusterId))
+                .instanceName(instanceName)
+                .proposedRemovedInstanceTags(tagsToRemove)
+                .wagedAssignmentProvider(wagedAssignmentProvider)
+                .build();
+            GuardrailPipeline removeTagPipeline =
+                new GuardrailPipeline(new InstanceTagRebalanceFeasibilityGuardrailRule());
+            Optional<Response> removeTagPreflight =
+                preflight(removeTagPipeline, removeTagContext, force, dryRun);
+            if (removeTagPreflight.isPresent()) {
+              return removeTagPreflight.get();
+            }
+          } else {
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
+            // auditable (an operator can still see the override happened without a dryRun preflight).
+            LOG.info(
+                "Bypassing the instance-tag rebalance-feasibility guard rail for a force "
+                    + "removeInstanceTag {} on instance {} in cluster {}; force overrides the "
+                    + "verdict, so the WAGED what-if is skipped.", tagsToRemove, instanceName,
+                clusterId);
+          }
+          for (String tag : tagsToRemove) {
             admin.removeInstanceTag(clusterId, instanceName, tag);
           }
           break;
+        }
         case enablePartitions:
           admin.enablePartition(true, clusterId, instanceName,
               node.get(PerInstanceProperties.resource.name()).textValue(),
@@ -562,9 +729,26 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
+  @HelixAdminAuth
   @DELETE
   public Response deleteInstance(@PathParam("clusterId") String clusterId,
-      @PathParam("instanceName") String instanceName) {
+      @PathParam("instanceName") String instanceName,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+    // Guard rail: block (or simulate) dropping an instance that is still live -- its participant is
+    // connected, so its LIVEINSTANCES znode is present. force=true overrides this verdict, though
+    // the admin layer (ZKHelixAdmin.dropInstance) still rejects dropping a live instance;
+    // dryRun=true only reports the verdict without dropping.
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .instanceName(instanceName)
+        .build();
+    GuardrailPipeline pipeline = new GuardrailPipeline(new LiveInstanceGuardrailRule());
+    Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+    if (preflightResponse.isPresent()) {
+      return preflightResponse.get();
+    }
+
     HelixAdmin admin = getHelixAdmin();
     try {
       InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
@@ -599,7 +783,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
   @Path("configs")
   public Response updateInstanceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("instanceName") String instanceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -624,6 +809,24 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
         case update:
+          /*
+           * Guard rail: block (or simulate) a capacity reduction that would drop total cluster
+           * capacity below the demand already committed to WAGED resources, which would leave
+           * partitions unassigned. force=true overrides; dryRun=true only reports the verdict.
+           * Runs before the write so nothing touches ZooKeeper when the reduction is unsafe.
+           */
+          GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+              .dataAccessor(getDataAccssor(clusterId))
+              .instanceName(instanceName)
+              .proposedInstanceConfig(instanceConfig)
+              .build();
+          GuardrailPipeline guardrailPipeline =
+              new GuardrailPipeline(new InstanceCapacityHeadroomGuardrailRule());
+          Optional<Response> preflightResponse =
+              preflight(guardrailPipeline, guardrailContext, force, dryRun);
+          if (preflightResponse.isPresent()) {
+            return preflightResponse.get();
+          }
           /*
            * The new instanceConfig will be merged with existing one.
            * Even if the instance is disabled, non-valid instance topology config will cause rebalance
@@ -675,12 +878,22 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    // The liveInstances check above is a separate read, so the instance can drop in between and
+    // leave this null. Treat that as not live instead of throwing an NPE, which would surface as
+    // another HTTP 500.
+    if (liveInstance == null) {
+      return null;
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
 
-    List<String> resources =
-        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId));
+    // getChildNames() returns an immutable Collections.emptyList() when the znode is absent, so the
+    // result must be copied into a mutable list before addAll() below. Without the copy, an instance
+    // whose CURRENTSTATES/{sessionId} znode does not exist while TASKCURRENTSTATES/{sessionId} is
+    // non-empty throws UnsupportedOperationException, which surfaces as an HTTP 500.
+    List<String> resources = new ArrayList<>(
+        accessor.getChildNames(accessor.keyBuilder().currentStates(instanceName, currentSessionId)));
     resources.addAll(accessor
         .getChildNames(accessor.keyBuilder().taskCurrentStates(instanceName, currentSessionId)));
     if (resources.size() > 0) {
@@ -703,6 +916,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     LiveInstance liveInstance =
         accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+    if (liveInstance == null) {
+      return notFound();
+    }
 
     // get the current session id
     String currentSessionId = liveInstance.getEphemeralOwner();
@@ -901,15 +1117,25 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       Command command) {
     InstanceConfig originalInstanceConfigCopy =
         configAccessor.getInstanceConfig(clusterName, instanceName);
-    InstanceConstants.InstanceOperation currentOperation = originalInstanceConfigCopy.getInstanceOperation().getOperation();
-    InstanceConstants.InstanceOperation targetOperation = newInstanceConfig.getInstanceOperation().getOperation();
-    try {
-      InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName, originalInstanceConfigCopy,
-          currentOperation, targetOperation);
-    } catch (HelixException e) {
-      throw new IllegalArgumentException(String.format(
-          "Failed topology setting update in instance %s, got exception %s", instanceName, e));
-    }
+    // Only validate instance operation transition if the update payload actually contains
+    // operation-related fields. Partial updates from the UI (e.g., editing a single mapField)
+    // do not include HELIX_INSTANCE_OPERATIONS or HELIX_ENABLED, and getInstanceOperation()
+    // would return the default ENABLE, causing a false validation failure.
+    boolean payloadChangesOperation =
+        newInstanceConfig.getRecord().getListFields().containsKey(
+            InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name())
+        || newInstanceConfig.getRecord().getSimpleFields().containsKey(
+            InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name());
+
+    // Capture current operation before merging, since the merge will overwrite it.
+    InstanceConstants.InstanceOperation currentOperation = payloadChangesOperation
+        ? originalInstanceConfigCopy.getInstanceOperation().getOperation() : null;
+    InstanceConstants.InstanceOperation targetOperation = payloadChangesOperation
+        ? newInstanceConfig.getInstanceOperation().getOperation() : null;
+
+    // Merge first so that DOMAIN and other fields are up-to-date before validating the
+    // operation transition. This is critical for swap-in where the caller updates the DOMAIN
+    // (to match the swap-out instance's logical ID) and sets SWAP_IN in a single request.
     if (command == Command.delete) {
       for (Map.Entry<String, String> entry : newInstanceConfig.getRecord().getSimpleFields()
           .entrySet()) {
@@ -917,6 +1143,16 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       }
     } else {
       originalInstanceConfigCopy.getRecord().update(newInstanceConfig.getRecord());
+    }
+
+    if (payloadChangesOperation) {
+      try {
+        InstanceUtil.validateInstanceOperationTransition(configAccessor, clusterName,
+            originalInstanceConfigCopy, currentOperation, targetOperation);
+      } catch (HelixException e) {
+        throw new IllegalArgumentException(String.format(
+            "Failed topology setting update in instance %s, got exception %s", instanceName, e));
+      }
     }
     return originalInstanceConfigCopy
         .validateTopologySettingInInstanceConfig(configAccessor.getClusterConfig(clusterName),

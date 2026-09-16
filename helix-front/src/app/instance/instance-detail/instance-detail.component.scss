@@ -1,7 +1,42 @@
+@use '@angular/material' as mat;
+
 .information {
   font-size: 14px;
 
   .mat-spinner {
     margin: 0 20px;
   }
+}
+
+::ng-deep .label-unknown .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$amber-palette),
+    700
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$amber-palette),
+    700
+  );
+}
+
+::ng-deep .label-evacuate .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$orange-palette),
+    700
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$orange-palette),
+    700
+  );
+}
+
+::ng-deep .label-swap-in .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$purple-palette),
+    500
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$purple-palette),
+    500
+  );
 }

@@ -64,8 +64,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
 import org.apache.helix.util.HelixUtil;
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.zookeeper.zkclient.DataUpdater;
+import org.apache.helix.util.InstanceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -281,54 +280,12 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     if (_propertyDataChangedMap.get(HelixConstants.ChangeType.CLUSTER_CONFIG).getAndSet(false)) {
       _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
       refreshedType.add(HelixConstants.ChangeType.CLUSTER_CONFIG);
-      // TODO: This is a temp function to clean up incompatible batched disabled instances format.
-      // Remove in later version.
-      if (_clusterConfig!=null && needCleanUpBatchedDisabledInstance(_clusterConfig.getRecord())
-          && cleanBatchDisableMapField(accessor)) {
-        LogUtil.logInfo(logger, getClusterEventId(), String
-            .format("Clean ClusterConfig mapField for cluster %s, pipeline %s", _clusterName,
-                getPipelineName()));
-      }
       refreshAbnormalStateResolverMap(_clusterConfig);
     } else {
       LogUtil.logDebug(logger, getClusterEventId(), String
           .format("No ClusterConfig change for cluster %s, pipeline %s", _clusterName,
               getPipelineName()));
     }
-  }
-
-  // TODO: This function is used to clean up batched disabled instances for
-  // "DISABLED_INSTANCES" introduced in 1.0.3.0. This temp change should be reverted after 1.0.5.0 \
-  // or later version.
-  private boolean cleanBatchDisableMapField(final HelixDataAccessor accessor) {
-    boolean successful =
-        accessor.updateProperty(accessor.keyBuilder().clusterConfig(), new DataUpdater<ZNRecord>() {
-          @Override
-          public ZNRecord update(ZNRecord currentData) {
-            if (currentData == null) {
-              throw new HelixException(
-                  "Cluster: " + _clusterConfig.getClusterName() + ": cluster config is null");
-            }
-            ZNRecord newRecord = new ZNRecord(currentData);
-            String batchDisabledInstanceMapFieldKey =
-                ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name();
-            if (needCleanUpBatchedDisabledInstance(currentData)) {
-              newRecord.getMapFields().remove(batchDisabledInstanceMapFieldKey);
-            }
-            return newRecord;
-          }
-        }, null);
-    if (!successful) {
-      LogUtil.logError(logger, getClusterEventId(), String
-          .format("Failed to clean ClusterConfig change for cluster %s, pipeline %s", _clusterName,
-              getPipelineName()));
-    }
-    return successful;
-  }
-
-  private boolean needCleanUpBatchedDisabledInstance(ZNRecord record) {
-    return record!=null && record.getMapFields()!=null && record.getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name());
   }
 
   private void refreshIdealState(final HelixDataAccessor accessor,
@@ -715,6 +672,20 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
+   * Return a set of all instances that have the EVACUATE InstanceOperation.
+   * Per InstanceOperation.EVACUATE semantics, replicas are moved off the node only after
+   * the (N+1) replacement replica has been bootstrapped, so existing replica states
+   * (e.g., MASTER) may still be hosted on these instances during the swap-out window.
+   *
+   * @return An unmodifiable set of instance names with EVACUATE operation
+   */
+  public Set<String> getEvacuatingInstances() {
+    return Collections.unmodifiableSet(
+        _derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
+            InstanceConstants.InstanceOperation.EVACUATE).keySet());
+  }
+
+  /**
    * Return all the live nodes that are enabled. If a node is enabled, it is assignable.
    * @return An unmodifiable set contains live instance name and that are marked enabled
    */
@@ -738,6 +709,27 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   public Set<String> getEnabledInstances() {
     return Collections.unmodifiableSet(_derivedInstanceCache.getInstanceConfigMapByInstanceOperation(
         InstanceConstants.InstanceOperation.ENABLE).keySet());
+  }
+
+  /**
+   * Returns the set of instances that count toward the cluster-wide offline budget driving
+   * auto Maintenance Mode (MAX_OFFLINE_INSTANCES_ALLOWED at entry,
+   * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT at exit).
+   *
+   * <p>Membership rules live in
+   * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)}
+   * so that the controller and the read-only helix-rest endpoint that reports this number to
+   * clients share one implementation.
+   *
+   * <p>Used by both BestPossibleStateCalcStage (MM entry) and MaintenanceRecoveryStage
+   * (MM exit) so that the same population is measured against each threshold.
+   *
+   * @param nowMs current wall-clock millis used for marker-expiry comparison.
+   * @return a fresh modifiable set of instance names.
+   */
+  public Set<String> getInstancesUnableToAcceptOnlineReplicas(long nowMs) {
+    return InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(getInstanceConfigMap(),
+        getLiveInstances().keySet(), nowMs);
   }
 
   /**

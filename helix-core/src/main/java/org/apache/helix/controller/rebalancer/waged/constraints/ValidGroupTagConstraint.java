@@ -50,4 +50,9 @@ class ValidGroupTagConstraint extends HardConstraint {
   String getDescription() {
     return "Instance doesn't have the tag of the replica";
   }
+
+  @Override
+  Type getType() {
+    return Type.VALID_GROUP_TAG;
+  }
 }

@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -37,18 +38,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
+import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
@@ -612,11 +623,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
 
-    // We should see no instance disable related field in to clusterConfig
-    ClusterConfig cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
-
     // disable instance with no reason input
     new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
@@ -628,11 +634,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-
-    // Disable instance should see no field write to clusterConfig
-    cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
 
     // AddTags
     List<String> tagList = ImmutableList.of("tag3", "tag1", "tag2");
@@ -820,6 +821,117 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   /**
+   * Verifies the opt-in instance-operation rebalance-feasibility guard rail on
+   * {@code setInstanceOperation}. Uses a self-contained WAGED cluster whose replica count equals
+   * the assignable-instance count, so moving any one instance out of the assignable pool (EVACUATE)
+   * leaves too few instances to place every replica -> a deterministic placement deficit the guard
+   * rail must catch before writing to ZooKeeper.
+   */
+  @Test(dependsOnMethods = "updateInstance")
+  public void setInstanceOperationRebalanceFeasibilityGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterInstanceOpGuardrail";
+    try {
+      verifyInstanceOperationRebalanceFeasibilityGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyInstanceOperationRebalanceFeasibilityGuardrail(String cluster) throws Exception {
+    String capacityKey = "CU";
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+
+    _gSetupTool.addCluster(cluster, true);
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceCapacityKeys(Collections.singletonList(capacityKey));
+    clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(capacityKey, 100));
+    clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(capacityKey, 1));
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13100 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    String resource = "TestDB_WAGED";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+        IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(1);
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before enabling the guard rail");
+    }
+
+    // Enable the opt-in guard rail.
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(true);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. Enabled: EVACUATE would leave a partition under-placed -> 400 and nothing written.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "EVACUATE must not be written when the guard rail blocks it");
+
+    // 2. dryRun: returns a 200 verdict naming the rule, still writes nothing.
+    Response dryRunResponse = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    String verdictBody = dryRunResponse.readEntity(String.class);
+    Assert.assertTrue(
+        verdictBody.contains(InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID),
+        "dry-run verdict should carry the rule id, but was: " + verdictBody);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the verdict and writes EVACUATE.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&force=true")
+        .format(cluster, target).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, target).getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.EVACUATE, "force=true should write EVACUATE");
+
+    // 4. Disabled flag: the same otherwise-blocked operation is allowed (guard rail short-circuits).
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(false);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+    String secondTarget = instances.get(1);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .format(cluster, secondTarget).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, secondTarget).getInstanceOperation()
+            .getOperation(), InstanceConstants.InstanceOperation.EVACUATE,
+        "with the guard rail disabled, EVACUATE should be written");
+
+  }
+
+  /**
    * Test "update" command for updateInstanceConfig endpoint.
    * @throws IOException
    */
@@ -945,6 +1057,201 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
         .format(CLUSTER_NAME, instanceName).post(this, entity);
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the DELETE instance endpoint. Every participant in STOPPABLE_CLUSTER is
+   * started and connected, so its LIVEINSTANCES znode is present and the live-instance guard rail
+   * must block (or, for dryRun, report) the drop. None of these tests actually drop the instance, so
+   * they are non-destructive.
+   */
+  @Test
+  public void testDeleteInstanceGuardrailBlocks() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete).request()
+            .delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    // The instance must not have been dropped by a blocked request.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailDryRun() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // dryRun only simulates: it always returns 200 with the verdict and never drops the instance.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("dryRun", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+
+    JsonNode verdict = OBJECT_MAPPER.readTree(response.readEntity(String.class));
+    Assert.assertFalse(verdict.get("feasible").asBoolean());
+    Assert.assertTrue(verdict.toString().contains(LiveInstanceGuardrailRule.RULE_ID));
+
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDeleteInstanceGuardrailForceBypass() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceToDelete = "instance0";
+
+    // force=true bypasses the guard rail and lets the request reach the actual drop. The drop then
+    // fails specifically because the participant is still live -- asserting on that error (rather
+    // than merely "some 400") directly confirms the request got past the guard rail into
+    // dropInstance, instead of being blocked by the guard rail verdict.
+    Response response =
+        target("clusters/" + STOPPABLE_CLUSTER + "/instances/" + instanceToDelete)
+            .queryParam("force", true).request().delete();
+    Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+
+    String body = response.readEntity(String.class);
+    Assert.assertFalse(body.contains(LiveInstanceGuardrailRule.RULE_ID),
+        "force=true should bypass the guard rail, not return its verdict: " + body);
+    Assert.assertTrue(body.contains("is still alive"),
+        "force=true should reach dropInstance, which fails on the live participant: " + body);
+
+    // The live participant was not dropped, so its config must still be present.
+    Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the updateInstanceConfig "update" endpoint's capacity-reduction path.
+   * Declares a single WAGED capacity dimension, gives all instances capacity 100 (supply 1000), and
+   * plants a WAGED resource committing demand 950 (10 partitions * 1 replica * weight 95), leaving
+   * only 50 units of headroom. It then verifies: (1) an over-cut reduction is blocked (400 + verdict,
+   * nothing written); (2) the same reduction under dryRun always returns 200 with the verdict and is
+   * still not written; (3) force=true bypasses the guard rail and the unsafe reduction is written;
+   * (4) a within-headroom reduction passes and is written. Cluster/instance capacity config and the
+   * demand resource are saved and torn down so the shared cluster is left unperturbed.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityHeadroomGuardrail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String targetInstance = CLUSTER_NAME + "localhost_12919";
+    String demandResource = "guardrailHeadroomDemandResource";
+
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances = admin.getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    try {
+      // supply = (# instances) * 100 in dimension FOO. With 10 instances that is 1000.
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList("FOO"));
+      // The guard rail is opt-in (disabled by default); enable it for this cluster so the endpoint
+      // actually enforces the capacity-reduction check below.
+      clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // Committed demand = 10 partitions * 1 replica * weight 95 = 950, leaving 50 of headroom.
+      admin.addResource(CLUSTER_NAME, demandResource, 10, "OnlineOffline", "FULL_AUTO");
+      IdealState idealState = admin.getResourceIdealState(CLUSTER_NAME, demandResource);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      idealState.setReplicas("1");
+      admin.setResourceIdealState(CLUSTER_NAME, demandResource, idealState);
+      ResourceConfig resourceConfig = new ResourceConfig(demandResource);
+      resourceConfig.setPartitionCapacityMap(
+          ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 95)));
+      _configAccessor.setResourceConfig(CLUSTER_NAME, demandResource, resourceConfig);
+
+      // 1. Enforcement: reducing to 30 drops supply to 930 < 950, so the freed load has no home.
+      Response blocked = postCapacityDelta(targetInstance, 30, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 2. Dry-run: always 200 with the same infeasible verdict, still nothing written.
+      Response dryRun = postCapacityDelta(targetInstance, 30, ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 3. force=true bypasses the guard rail: the unsafe reduction is actually written.
+      Response forced = postCapacityDelta(targetInstance, 30, ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 30);
+
+      // Restore the target to 100 before exercising the happy path.
+      InstanceConfig restoreTarget =
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance);
+      restoreTarget.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, targetInstance, restoreTarget);
+
+      // 4. A within-headroom reduction (100 -> 60 leaves supply 960 >= 950) passes and is written.
+      Response allowed = postCapacityDelta(targetInstance, 60, Collections.emptyMap());
+      Assert.assertEquals(allowed.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 60);
+    } finally {
+      try {
+        admin.dropResource(CLUSTER_NAME, demandResource);
+      } catch (Exception ignored) {
+        // best-effort teardown
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(
+          originalCapacityKeys == null ? new ArrayList<>() : originalCapacityKeys);
+      restore.setInstanceCapacityHeadroomGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * POST an InstanceConfig capacity delta ({@code {"FOO": fooCapacity}}) to the updateInstanceConfig
+   * "update" endpoint, threading through any guard-rail query flags (e.g. {@code dryRun},
+   * {@code force}), and return the raw {@link Response} so the caller can assert on status and body.
+   */
+  private Response postCapacityDelta(String instance, int fooCapacity, Map<String, Object> flags)
+      throws IOException {
+    InstanceConfig delta = new InstanceConfig(instance);
+    delta.setInstanceCapacityMap(ImmutableMap.of("FOO", fooCapacity));
+    Entity<String> entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/instances/" + instance + "/configs")
+        .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
   }
 
   /**
@@ -1129,6 +1436,273 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
 
   }
 
+  /**
+   * Test that updating DOMAIN and SWAP_IN operation in a single request succeeds.
+   * This verifies that the merge of the new config happens before validation so that
+   * the updated DOMAIN (with a matching logical ID) is used for the transition check.
+   */
+  @Test
+  public void testSwapInWithDomainUpdateInSingleRequest() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out instance with ENABLE and a specific logical ID in the DOMAIN
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in instance with UNKNOWN and a DIFFERENT logical ID in the DOMAIN
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=DifferentId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that updates BOTH the DOMAIN (to match swap-out) AND sets SWAP_IN.
+    // This simulates what ACM does in setSwapInOperationAndEditConfigIfNeeded.
+    InstanceConfig updatedSwapInConfig = new InstanceConfig(swapInConfig.getRecord());
+    updatedSwapInConfig.setDomain("zone=zone_A,instance=LogicalId_A,host=" + swapInInstance);
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    updatedSwapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(updatedSwapInConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should succeed because the merged config has the correct DOMAIN for matching
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Verify the config was updated in ZK
+    InstanceConfig resultConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    Assert.assertEquals(resultConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.SWAP_IN);
+    Assert.assertTrue(resultConfig.getDomainAsString().contains("instance=LogicalId_A"));
+
+    // Clean up: reset both instances to ENABLE with original domains
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    // Reset topology
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that SWAP_IN without updating DOMAIN to match fails when logical IDs differ.
+   */
+  @Test
+  public void testSwapInWithoutMatchingDomainFails() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out with ENABLE and a specific logical ID
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_B,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in with UNKNOWN and a DIFFERENT logical ID
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=MismatchedId,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a request that sets SWAP_IN but does NOT update the DOMAIN to match.
+    InstanceConfig badConfig = new InstanceConfig(swapInConfig.getRecord());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    badConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(badConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // This should fail because even after merging, the DOMAIN still doesn't match
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=update")
+        .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Clean up
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Test that a delete command removing the DOMAIN field causes the operation transition
+   * validation to fail when the transition depends on logical ID matching.
+   * Before the merge-before-validate fix, the validation would have passed because it ran
+   * against the original config (which still had the DOMAIN). Now the DOMAIN is removed
+   * before validation, so the logical ID matching correctly fails.
+   */
+  @Test
+  public void testDeleteDomainFailsWhenTransitionDependsOnLogicalId() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Set up topology on the cluster
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(true);
+    clusterConfig.setTopology("/zone/instance");
+    clusterConfig.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    String swapOutInstance = CLUSTER_NAME + "localhost_12918";
+    String swapInInstance = CLUSTER_NAME + "localhost_12919";
+
+    // Set up swap-out instance with ENABLE and a specific logical ID
+    InstanceConfig swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    // Set up swap-in instance with UNKNOWN and a MATCHING logical ID
+    InstanceConfig swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.UNKNOWN)
+            .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+
+    // Build a DELETE request that removes the DOMAIN field and sets SWAP_IN.
+    // The DOMAIN deletion happens before validation, so logical ID matching
+    // will fail because the config no longer has the DOMAIN field.
+    InstanceConfig deleteConfig = new InstanceConfig(swapInInstance);
+    deleteConfig.setDomain("zone=zone_A,instance=LogicalId_C,host=" + swapInInstance);
+    deleteConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    deleteConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.SWAP_IN)
+            .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+
+    Entity entity = Entity.entity(
+        OBJECT_MAPPER.writeValueAsString(deleteConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+
+    // Should fail because the delete removes the DOMAIN before validation,
+    // so no matching logical ID is found for the UNKNOWN->SWAP_IN transition.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}/configs?command=delete")
+        .expectedReturnStatusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode())
+        .format(CLUSTER_NAME, swapInInstance)
+        .post(this, entity);
+
+    // Verify the original config is unchanged in ZK
+    InstanceConfig resultConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    Assert.assertEquals(resultConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.UNKNOWN);
+    Assert.assertTrue(resultConfig.getDomainAsString().contains("instance=LogicalId_C"));
+
+    // Clean up
+    swapOutConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapOutInstance);
+    swapOutConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapOutInstance, swapOutConfig);
+
+    swapInConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, swapInInstance);
+    swapInConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+            .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    _configAccessor.setInstanceConfig(CLUSTER_NAME, swapInInstance, swapInConfig);
+
+    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    clusterConfig.setTopologyAwareEnabled(false);
+    _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+
+    Assert.assertTrue(_bestPossibleClusterVerifier.verifyByPolling());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testValidateDeltaInstanceConfigForUpdate")
   public void testGetResourcesOnInstance() throws JsonProcessingException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -1143,6 +1717,58 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     // The below calls should successfully return
     body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources/{}")
         .isBodyReturnExpected(true).format(CLUSTER_NAME, INSTANCE_NAME, dbName).get(this);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * When the CURRENTSTATES/{sessionId} znode is absent, getChildNames() returns an immutable
+   * Collections.emptyList(), and the subsequent addAll() of a non-empty task current state list
+   * used to throw UnsupportedOperationException, which surfaced as an HTTP 500.
+   */
+  @Test(dependsOnMethods = "testGetResourcesOnInstance")
+  public void testGetResourcesOnInstanceWithOnlyTaskCurrentStates() throws JsonProcessingException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = "localhost_" + TestHelper.getTestMethodName();
+    addParticipant(CLUSTER_NAME, instanceName);
+
+    try {
+      HelixDataAccessor accessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
+      LiveInstance liveInstance =
+          accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+      Assert.assertNotNull(liveInstance);
+      String sessionId = liveInstance.getEphemeralOwner();
+
+      // Remove CURRENTSTATES/{sessionId} so that getChildNames() hits ZkNoNodeException and
+      // returns the immutable Collections.emptyList(). Note that a znode which merely exists
+      // with zero children yields a mutable list and would not reproduce this.
+      String currentStatesPath =
+          accessor.keyBuilder().currentStates(instanceName, sessionId).getPath();
+      _baseAccessor.remove(currentStatesPath, 0);
+      // Assert the znode is absent rather than merely childless: getChildNames() returns an
+      // immutable list only for an absent znode, so an existing-but-empty znode would not
+      // reproduce the failure even though it is also empty.
+      Assert.assertFalse(_baseAccessor.exists(currentStatesPath, 0));
+
+      // Give the instance a task current state so that addAll()'s argument is non-empty.
+      String taskResource = "TaskResource_" + TestHelper.getTestMethodName();
+      CurrentState taskCurrentState = new CurrentState(taskResource);
+      taskCurrentState.setSessionId(sessionId);
+      taskCurrentState.setStateModelDefRef("Task");
+      taskCurrentState.setState("0", "COMPLETED");
+      Assert.assertTrue(accessor.setProperty(
+          accessor.keyBuilder().taskCurrentState(instanceName, sessionId, taskResource),
+          taskCurrentState));
+
+      String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
+          .isBodyReturnExpected(true).format(CLUSTER_NAME, instanceName).get(this);
+      JsonNode node = OBJECT_MAPPER.readTree(body);
+      ArrayNode resources =
+          (ArrayNode) node.get(PerInstanceAccessor.PerInstanceProperties.resources.name());
+      Assert.assertEquals(resources.size(), 1);
+      Assert.assertEquals(resources.get(0).asText(), taskResource);
+    } finally {
+      dropParticipant(CLUSTER_NAME, instanceName);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

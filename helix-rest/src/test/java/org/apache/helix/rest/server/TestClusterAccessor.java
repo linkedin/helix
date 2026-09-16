@@ -110,7 +110,8 @@ public class TestClusterAccessor extends AbstractTestClass {
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
+      Assert.assertEquals(auditLog.getRequestPath(),
+          "clusters/" + TEST_CLUSTER + "/configs?command=" + Command.update.name());
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
@@ -147,7 +148,8 @@ public class TestClusterAccessor extends AbstractTestClass {
       validateAuditLogSize(1);
       AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
       Assert.assertEquals(auditLog.getHttpMethod(), HTTPMethods.POST.name());
-      Assert.assertEquals(auditLog.getRequestPath(), "clusters/" + TEST_CLUSTER + "/configs");
+      Assert.assertEquals(auditLog.getRequestPath(),
+          "clusters/" + TEST_CLUSTER + "/configs?command=" + Command.update.name());
       Assert.assertEquals(auditLog.getExceptions().size(), 1);
     }
 
@@ -169,7 +171,8 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     Set<String> clusters = OBJECT_MAPPER.readValue(clustersStr,
         OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
-    Assert.assertTrue(isSame(clusters, _clusters));
+    Assert.assertTrue(clusters.equals(_clusters),
+        "Expected clusters " + _clusters + " but found " + clusters);
 
     validateAuditLogSize(1);
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
@@ -333,6 +336,11 @@ public class TestClusterAccessor extends AbstractTestClass {
         Response.Status.OK.getStatusCode());
 
     Assert.assertTrue(isMaintenanceModeEnabled(VG_CLUSTER));
+    post("clusters/" + VG_CLUSTER,
+        ImmutableMap.of("command", "disableMaintenanceMode"),
+        Entity.entity("virtual group", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode());
+    Assert.assertFalse(isMaintenanceModeEnabled(VG_CLUSTER));
   }
 
   @Test(dataProvider = "prepareVirtualTopologyTests", dependsOnMethods = "testVirtualTopologyGroupMaintenanceMode")
@@ -373,7 +381,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
   @DataProvider
   public Object[][] prepareVirtualTopologyTests() {
-    setupClusterForVirtualTopology(VG_CLUSTER);
     String test1 = "{\"virtualTopologyGroupNumber\":\"7\",\"virtualTopologyGroupName\":\"vgTest\"}";
     String test2 = "{\"virtualTopologyGroupNumber\":\"9\",\"virtualTopologyGroupName\":\"vgTest\"}";
     // Split 5 zones into 2 virtual groups, expect 0-2-4 in virtual group 0, 1-3 in virtual group 1
@@ -453,6 +460,15 @@ public class TestClusterAccessor extends AbstractTestClass {
     // Write a test to verify the logics of virtual topology imbalance detection
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String clusterName = "TestImbalanceDetectionCluster";
+    try {
+      verifyImbalanceAlgorithmThrottling(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyImbalanceAlgorithmThrottling(String clusterName) {
     setupClusterForVirtualTopology(clusterName);
     // Verify that the imbalance detection algorithm is working as expected
     HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
@@ -511,7 +527,40 @@ public class TestClusterAccessor extends AbstractTestClass {
       Assert.assertTrue(virtualZoneMap.get(virtualZoneOfZone1).size() > 2,
           "Zone 1 should have more than 2 instances now and it shouldn't be recomputed due to throttling");
     }
+  }
+
+  @Test
+  public void testAddVirtualTopologyGroupSurfacesValidationReason() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "VgErrorReasonCluster";
+    try {
+      verifyVirtualTopologyGroupValidationReason(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyVirtualTopologyGroupValidationReason(String clusterName) {
+    setupClusterForVirtualTopology(clusterName);
+
+    // The cluster has 5 fault zones; requesting 6 ZONE_BASED virtual groups must fail the
+    // "numGroups <= zones" validation and return a 400.
+    String requestParam = "{\"virtualTopologyGroupNumber\":\"6\",\"virtualTopologyGroupName\":\"vgTest\","
+        + "\"assignmentAlgorithmType\":\"ZONE_BASED\"}";
+
+    Response response = post("clusters/" + clusterName,
+        ImmutableMap.of("command", "addVirtualTopologyGroup"),
+        Entity.entity(requestParam, MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode(), true);
+
+    // The validation reason must be surfaced in the response body, not only in the server log, so
+    // callers (for example ACM) can report the actual cause instead of an opaque "Illegal input"
+    // message.
+    String body = response.readEntity(String.class);
+    Assert.assertTrue(
+        body.contains("Number of virtual groups cannot be greater than the number of zones"),
+        "Expected the validation reason in the response body but got: " + body);
   }
 
   @Test(dependsOnMethods = "testGetClusterTopologyAndFaultZoneMap")
@@ -844,26 +893,16 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
 
-    ClusterConfig configDelta = new ClusterConfig(cluster);
-    configDelta.getRecord()
-        .setSimpleField(ClusterConfig.ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-            "100");
-    updateClusterConfigFromRest(cluster, configDelta, Command.update);
-
-    //Purge again without customized timeout, and the action will use default timeout value.
+    // Purge again without a customized timeout. With no cluster-level default configured,
+    // nothing is purged and the instances remain.
     post("clusters/" + cluster, ImmutableMap.of("command", "purgeOfflineParticipants"), null,
         Response.Status.OK.getStatusCode());
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance1).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance2).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
-
-    // reset cluster status to previous one
-    _gSetupTool.addInstanceToCluster(cluster, instance1);
-    _gSetupTool.addInstanceToCluster(cluster, instance2);
-    _gSetupTool.addInstanceToCluster(cluster, instance3);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -1715,13 +1754,9 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     validateAuditLogSize(1);
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
-    validateAuditLog(auditLog, HTTPMethods.POST.name(), "clusters/" + cluster + "/configs",
+    validateAuditLog(auditLog, HTTPMethods.POST.name(),
+        "clusters/" + cluster + "/configs?command=" + command.name(),
         Response.Status.OK.getStatusCode(), null);
-  }
-
-  private boolean isSame(Set<String> result, Set<String> expected) {
-    return result.size() == expected.size() && result.containsAll(expected) && expected.containsAll(
-        result);
   }
 
   private void validateAuditLogSize(int expected) {

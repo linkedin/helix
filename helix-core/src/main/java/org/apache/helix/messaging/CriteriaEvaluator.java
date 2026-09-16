@@ -21,6 +21,7 @@ package org.apache.helix.messaging;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -143,7 +144,7 @@ public class CriteriaEvaluator {
     // TODO: For backward compatibility, allow partial read for now. This may reduce the
     // TODO: match result eventually.
     Set<String> liveParticipants =
-        accessor.getChildValuesMap(keyBuilder.liveInstances(), false).keySet();
+        new HashSet<>(accessor.getChildNames(keyBuilder.liveInstances()));
     List<ZNRecordRow> result = Lists.newArrayList();
     for (ZNRecordRow row : allRows) {
       // The participant instance name is stored in the return value of either getRecordId() or

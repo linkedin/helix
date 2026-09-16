@@ -19,6 +19,10 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.Set;
+
 public enum ClusterEventType {
   IdealStateChange,
   CurrentStateChange,
@@ -40,5 +44,32 @@ public enum ClusterEventType {
   ControllerChange,
   RetryRebalance,
   StateVerifier,
-  Unknown
+  Unknown;
+
+  // Subset of event types that change the cluster's logical topology -- the inputs
+  // that the rebalancer's placement decisions actually depend on. Kept in lockstep
+  // with the HelixConstants.ChangeType values recognized by
+  // ResourceChangeDetector.determinePropertyMapByType, so the metric counts the same
+  // events the rebalancer treats as topology-affecting.
+  private static final Set<ClusterEventType> TOPOLOGY_CHANGE_EVENT_TYPES =
+      Collections.unmodifiableSet(EnumSet.of(
+          IdealStateChange,
+          InstanceConfigChange,
+          ResourceConfigChange,
+          LiveInstanceChange,
+          ClusterConfigChange));
+
+  /**
+   * @return true iff this event type represents a topology change (config / instance / resource).
+   */
+  public boolean isTopologyChange() {
+    return TOPOLOGY_CHANGE_EVENT_TYPES.contains(this);
+  }
+
+  /**
+   * @return the set of event types classified as topology changes.
+   */
+  public static Set<ClusterEventType> topologyChangeEventTypes() {
+    return TOPOLOGY_CHANGE_EVENT_TYPES;
+  }
 }

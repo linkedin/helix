@@ -15,3 +15,5 @@ out/
 #this directory will be part of release process
 helix-dev-release/
 .shelf/
+.flattened-pom.xml
+pom.xml.versionsBackup

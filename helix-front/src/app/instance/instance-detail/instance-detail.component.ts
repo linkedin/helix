@@ -1,7 +1,7 @@
 import { Component, OnInit } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 
-import { Instance } from '../shared/instance.model';
+import { Instance, InstanceOperationState } from '../shared/instance.model';
 import { HelperService } from '../../shared/helper.service';
 import { InstanceService } from '../shared/instance.service';
 
@@ -58,19 +58,60 @@ export class InstanceDetailComponent implements OnInit {
   }
 
   enableInstance() {
-    this.service.enable(this.clusterName, this.instance.name).subscribe(
-      /* happy path */ () => this.loadInstance(),
-      /* error path */ (error) => this.helperService.showError(error),
-      /* onComplete */ () => (this.isLoading = false)
-    );
+    this.setInstanceState('ENABLE');
   }
 
   disableInstance() {
-    this.service.disable(this.clusterName, this.instance.name).subscribe(
-      /* happy path */ () => this.loadInstance(),
-      /* error path */ (error) => this.helperService.showError(error),
-      /* onComplete */ () => (this.isLoading = false)
-    );
+    this.setInstanceState('DISABLE');
+  }
+
+  evacuateInstance() {
+    this.setInstanceState('EVACUATE');
+  }
+
+  setInstanceState(targetState: InstanceOperationState) {
+    const stateLabel =
+      targetState === 'ENABLE'
+        ? 'Enable'
+        : targetState === 'DISABLE'
+        ? 'Disable'
+        : targetState === 'EVACUATE'
+        ? 'Evacuate'
+        : targetState;
+
+    this.helperService
+      .showInput(
+        `${stateLabel} Instance`,
+        `Please provide a reason for changing the state of ${this.instance.name} to ${targetState}:`,
+        {
+          reason: {
+            label: 'Reason',
+            type: 'input',
+          },
+        }
+      )
+      .then((result) => {
+        if (result && result.reason && result.reason.value) {
+          this.isLoading = true;
+          this.service
+            .setInstanceOperation(
+              this.clusterName,
+              this.instance.name,
+              targetState,
+              result.reason.value
+            )
+            .subscribe(
+              () => {
+                this.helperService.showSnackBar(
+                  `Instance ${this.instance.name} state changed to ${targetState}`
+                );
+                this.loadInstance();
+              },
+              (error) => this.helperService.showError(error),
+              () => (this.isLoading = false)
+            );
+        }
+      });
   }
 
   protected loadInstance() {

@@ -608,4 +608,77 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig2.getRecord().getSimpleField(
         InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_STATE.name()), "EVACUATE");
   }
+
+  @Test
+  public void testInstanceOperationMaintenanceUnsetByDefault() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceSetAndGet() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long expiresAt = System.currentTimeMillis() + 60_000L;
+    cfg.setInstanceOperationMaintenanceUntilMs(expiresAt);
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(), expiresAt);
+  }
+
+  @Test
+  public void testIsUnderInstanceOperationMaintenanceWindow() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    long now = 1_000_000L;
+    cfg.setInstanceOperationMaintenanceUntilMs(now + 5_000L);
+
+    Assert.assertTrue(cfg.isUnderInstanceOperationMaintenance(now));
+    Assert.assertTrue(cfg.isUnderInstanceOperationMaintenance(now + 4_999L));
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(now + 5_000L),
+        "Boundary: nowMs == untilMs is no longer under maintenance");
+    Assert.assertFalse(cfg.isUnderInstanceOperationMaintenance(now + 5_001L));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceClearViaNegativeValue() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+
+    cfg.setInstanceOperationMaintenanceUntilMs(
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertFalse(cfg.getRecord().getSimpleFields().containsKey(
+        InstanceConfig.InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS.name()));
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceClearViaZero() {
+    InstanceConfig cfg = new InstanceConfig("node_0");
+    cfg.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+    cfg.setInstanceOperationMaintenanceUntilMs(0L);
+    Assert.assertEquals(cfg.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET,
+        "Zero is treated as a clear sentinel alongside -1");
+  }
+
+  @Test
+  public void testInstanceOperationMaintenanceNotTransferredByOverwrite() {
+    InstanceConfig source = new InstanceConfig("source");
+    source.setHostName("source-host");
+    source.setPort("1234");
+    source.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() + 60_000L);
+
+    InstanceConfig target = new InstanceConfig("target");
+    target.setHostName("target-host");
+    target.setPort("5678");
+
+    target.overwriteInstanceConfig(source);
+
+    Assert.assertEquals(target.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET,
+        "Instance-operation maintenance marker is tied to the source instance's operation "
+            + "window and must not transfer via overwriteInstanceConfig (e.g., during "
+            + "swap-in)");
+  }
 }
