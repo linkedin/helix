@@ -21,7 +21,11 @@ package org.apache.helix.rest.server.resources.helix;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
 import javax.ws.rs.PUT;
@@ -35,8 +39,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConstraints;
+import org.apache.helix.model.ClusterConstraints.ConstraintAttribute;
 import org.apache.helix.model.ClusterConstraints.ConstraintType;
+import org.apache.helix.model.ClusterConstraints.ConstraintValue;
 import org.apache.helix.model.ConstraintItem;
+import org.apache.helix.model.Message.MessageType;
 import org.apache.helix.model.builder.ConstraintItemBuilder;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -136,8 +143,11 @@ public class ConstraintAccessor extends AbstractHelixResource {
    * </pre>
    *
    * Attribute keys must be members of {@link ClusterConstraints.ConstraintAttribute}. A valid
-   * {@code CONSTRAINT_VALUE} (an integer or {@code ANY}) is required. If a constraint
-   * with the same {@code constraintId} already exists it is overwritten.
+   * {@code CONSTRAINT_VALUE} (a non-negative integer or {@code ANY}) is required, along with at
+   * least one other attribute. The body is fully validated before anything is written, so an
+   * invalid attribute name, an invalid value, or a missing value is rejected with 400 rather than
+   * being silently dropped. If a constraint with the same {@code constraintId} already exists it
+   * is overwritten.
    *
    * @param clusterId cluster name
    * @param constraintTypeStr one of {@link ConstraintType}
@@ -175,27 +185,118 @@ public class ConstraintAccessor extends AbstractHelixResource {
       LOG.warn(errMsg, e);
       return badRequest(errMsg + " Exception: " + e.getMessage());
     }
-    if (attributes == null || attributes.isEmpty()) {
-      return badRequest("Constraint attributes cannot be empty");
+
+    String error = validateConstraintAttributes(attributes);
+    if (error != null) {
+      return badRequest("Invalid constraint " + constraintId + ". " + error);
     }
 
-    ConstraintItemBuilder builder = new ConstraintItemBuilder();
-    builder.addConstraintAttributes(attributes);
-    ConstraintItem item = builder.build();
-    // Mirror the validation ClusterConstraints applies when loading from ZK: an item must carry at
-    // least one recognized attribute and a valid constraint value. Unrecognized attribute keys or
-    // an invalid CONSTRAINT_VALUE are dropped by the builder, so an empty result means bad input.
-    if (item.getAttributes().isEmpty() || item.getConstraintValue() == null) {
-      return badRequest("Invalid constraint. Requires at least one valid constraint attribute from "
-          + Arrays.toString(ClusterConstraints.ConstraintAttribute.values())
-          + " and a valid CONSTRAINT_VALUE (an integer or ANY). Parsed input: "
-          + attributes);
+    ConstraintItem item;
+    try {
+      item = buildConstraintItem(attributes);
+    } catch (RuntimeException e) {
+      LOG.warn("Failed to build constraint {} of type {} for cluster {}.", constraintId,
+          constraintType, clusterId, e);
+      return badRequest("Invalid constraint " + constraintId + ": " + attributes + ". " + e);
     }
 
     try {
       getHelixAdmin().setConstraint(clusterId, constraintType, constraintId, item);
     } catch (Exception e) {
       LOG.error("Failed to set constraint {} of type {} for cluster {}.", constraintId,
+          constraintType, clusterId, e);
+      return serverError(e);
+    }
+    return OK();
+  }
+
+  /**
+   * Create or overwrite several constraint items of the same type in a single atomic write. The
+   * request body maps each constraint id to its attribute map, for example:
+   *
+   * <pre>
+   * {
+   *   "limitBootstrapPerInstance": {
+   *     "MESSAGE_TYPE": "STATE_TRANSITION",
+   *     "TRANSITION": "OFFLINE-BOOTSTRAP",
+   *     "INSTANCE": ".*",
+   *     "CONSTRAINT_VALUE": "1"
+   *   },
+   *   "limitBootstrapPerResource": {
+   *     "MESSAGE_TYPE": "STATE_TRANSITION",
+   *     "TRANSITION": "OFFLINE-BOOTSTRAP",
+   *     "RESOURCE": "myDB",
+   *     "CONSTRAINT_VALUE": "5"
+   *   }
+   * }
+   * </pre>
+   *
+   * Every item is validated before any of them is written, and the batch is applied as one update
+   * to the constraint ZNode. Either all items land or none do, so a caller cannot end up with a
+   * partially applied set of throttles.
+   *
+   * @param clusterId cluster name
+   * @param constraintTypeStr one of {@link ConstraintType}
+   * @param content JSON object mapping constraint id to its attribute map
+   * @return 200 OK on success
+   */
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
+  @Timed(name = HttpConstants.WRITE_REQUEST)
+  @PUT
+  @Path("{constraintType}")
+  @ApiOperation(value = "Create or overwrite multiple constraint items atomically",
+      notes = "Helix REST Constraints Batch Put API")
+  public Response setConstraints(@PathParam("clusterId") String clusterId,
+      @PathParam("constraintType") String constraintTypeStr, String content) {
+    if (!doesClusterExist(clusterId)) {
+      return notFound("Cluster " + clusterId + " does not exist");
+    }
+    ConstraintType constraintType = parseConstraintType(constraintTypeStr);
+    if (constraintType == null) {
+      return badRequest(invalidConstraintTypeMessage(constraintTypeStr));
+    }
+
+    Map<String, Map<String, String>> constraints;
+    try {
+      constraints =
+          OBJECT_MAPPER.readValue(content, new TypeReference<Map<String, Map<String, String>>>() {
+          });
+    } catch (IOException e) {
+      String errMsg = "Failed to parse constraints from request body: " + content;
+      LOG.warn(errMsg, e);
+      return badRequest(errMsg + " Exception: " + e.getMessage());
+    }
+    if (constraints == null || constraints.isEmpty()) {
+      return badRequest("Request body must contain at least one constraint");
+    }
+
+    // Validate and build everything up front. Nothing is handed to the admin until the whole batch
+    // is known to be good, so a single bad item cannot leave half a batch behind.
+    Map<String, ConstraintItem> items = new LinkedHashMap<>();
+    for (Map.Entry<String, Map<String, String>> entry : constraints.entrySet()) {
+      String constraintId = entry.getKey();
+      if (StringUtils.isBlank(constraintId)) {
+        return badRequest("constraintId cannot be empty");
+      }
+      String error = validateConstraintAttributes(entry.getValue());
+      if (error != null) {
+        return badRequest("Invalid constraint " + constraintId + ". " + error);
+      }
+      try {
+        items.put(constraintId, buildConstraintItem(entry.getValue()));
+      } catch (RuntimeException e) {
+        LOG.warn("Failed to build constraint {} of type {} for cluster {}.", constraintId,
+            constraintType, clusterId, e);
+        return badRequest(
+            "Invalid constraint " + constraintId + ": " + entry.getValue() + ". " + e);
+      }
+    }
+
+    try {
+      getHelixAdmin().setConstraints(clusterId, constraintType, items);
+    } catch (Exception e) {
+      LOG.error("Failed to set constraints {} of type {} for cluster {}.", items.keySet(),
           constraintType, clusterId, e);
       return serverError(e);
     }
@@ -234,6 +335,112 @@ public class ConstraintAccessor extends AbstractHelixResource {
       return serverError(e);
     }
     return OK();
+  }
+
+  /**
+   * Validate a constraint attribute map before anything is written to ZooKeeper.
+   * <p>
+   * {@link ConstraintItemBuilder} logs and then silently drops any attribute it does not
+   * understand, so relying on it alone persists a constraint that is not the one the caller asked
+   * for. It also calls {@code ConstraintValue.valueOf} on the raw value, which throws a
+   * {@link NullPointerException} for a null {@code CONSTRAINT_VALUE}. That is not an
+   * {@link IllegalArgumentException}, so the builder's own catch misses it and the caller gets a
+   * 500 for what is plainly bad input. Everything is therefore checked up front here.
+   *
+   * @param attributes constraint attribute name to value, as sent by the caller
+   * @return a message describing the first problem found, or null when the input is valid
+   */
+  private static String validateConstraintAttributes(Map<String, String> attributes) {
+    if (attributes == null || attributes.isEmpty()) {
+      return "Constraint attributes cannot be empty";
+    }
+
+    // Keys are upper cased but never trimmed, matching what ConstraintItemBuilder does, so a key
+    // that validates here is guaranteed to be the key the builder stores.
+    Map<ConstraintAttribute, String> parsed = new EnumMap<>(ConstraintAttribute.class);
+    for (Map.Entry<String, String> entry : attributes.entrySet()) {
+      String key = entry.getKey();
+      String value = entry.getValue();
+      if (StringUtils.isBlank(key)) {
+        return "Constraint attribute name cannot be empty";
+      }
+      ConstraintAttribute attribute;
+      try {
+        attribute = ConstraintAttribute.valueOf(key.toUpperCase());
+      } catch (IllegalArgumentException e) {
+        return "Unknown constraint attribute: " + key + ". Valid attributes are "
+            + Arrays.toString(ConstraintAttribute.values());
+      }
+      if (StringUtils.isBlank(value)) {
+        return "Constraint attribute " + attribute.name() + " requires a non-empty value";
+      }
+      if (parsed.put(attribute, value) != null) {
+        return "Duplicate constraint attribute: " + attribute.name();
+      }
+    }
+
+    String constraintValue = parsed.remove(ConstraintAttribute.CONSTRAINT_VALUE);
+    if (constraintValue == null) {
+      return "CONSTRAINT_VALUE is required. Use a non-negative integer or "
+          + ConstraintValue.ANY.name();
+    }
+    if (!ConstraintValue.ANY.name().equals(constraintValue)) {
+      int value;
+      try {
+        value = Integer.parseInt(constraintValue);
+      } catch (NumberFormatException e) {
+        return "Invalid CONSTRAINT_VALUE: " + constraintValue
+            + ". Expected a non-negative integer or " + ConstraintValue.ANY.name();
+      }
+      if (value < 0) {
+        return "Invalid CONSTRAINT_VALUE: " + constraintValue
+            + ". A constraint value cannot be negative";
+      }
+    }
+    if (parsed.isEmpty()) {
+      return "Requires at least one constraint attribute besides CONSTRAINT_VALUE. Valid "
+          + "attributes are " + Arrays.toString(ConstraintAttribute.values());
+    }
+
+    for (Map.Entry<ConstraintAttribute, String> entry : parsed.entrySet()) {
+      // Attribute values are matched as regular expressions against an outgoing message, so an
+      // uncompilable pattern blows up inside the controller pipeline instead of here.
+      try {
+        Pattern.compile(entry.getValue());
+      } catch (PatternSyntaxException e) {
+        return "Constraint attribute " + entry.getKey().name() + " value " + entry.getValue()
+            + " is not a valid regular expression: " + e.getDescription();
+      }
+    }
+
+    String messageType = parsed.get(ConstraintAttribute.MESSAGE_TYPE);
+    if (messageType != null && !matchesAnyMessageType(messageType)) {
+      return "Invalid MESSAGE_TYPE: " + messageType
+          + ". It matches none of the known message types "
+          + Arrays.toString(MessageType.values());
+    }
+    return null;
+  }
+
+  /**
+   * MESSAGE_TYPE is matched as a regular expression against the message type of an outgoing
+   * message, so a pattern such as {@code STATE_TRANSITION.*} is legal and must keep working. A
+   * value that matches no known message type can never throttle anything, which is a typo rather
+   * than a deliberately inert constraint.
+   */
+  private static boolean matchesAnyMessageType(String messageTypePattern) {
+    for (MessageType messageType : MessageType.values()) {
+      if (messageType.name().matches(messageTypePattern)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static ConstraintItem buildConstraintItem(Map<String, String> attributes) {
+    ConstraintItemBuilder builder = new ConstraintItemBuilder();
+    builder.addConstraintAttributes(attributes);
+    return builder.build();
   }
 
   private static ConstraintType parseConstraintType(String constraintTypeStr) {

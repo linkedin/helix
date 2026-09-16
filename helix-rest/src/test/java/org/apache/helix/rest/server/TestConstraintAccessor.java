@@ -57,6 +57,18 @@ public class TestConstraintAccessor extends AbstractTestClass {
         MediaType.APPLICATION_JSON_TYPE);
   }
 
+  private static Entity<String> batchEntity(Map<String, Map<String, String>> constraints)
+      throws IOException {
+    return Entity.entity(OBJECT_MAPPER.writeValueAsString(constraints),
+        MediaType.APPLICATION_JSON_TYPE);
+  }
+
+  private static ConstraintItem getConstraintItem(String constraintId) {
+    ClusterConstraints constraints = _gSetupTool.getClusterManagementTool()
+        .getConstraints(CLUSTER, ConstraintType.MESSAGE_CONSTRAINT);
+    return constraints == null ? null : constraints.getConstraintItem(constraintId);
+  }
+
   @Test
   public void testCreateGetAndDeleteMessageConstraint() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -171,6 +183,176 @@ public class TestConstraintAccessor extends AbstractTestClass {
     // Empty body -> rejected.
     put(messageConstraintUri("empty"), null,
         Entity.entity("{}", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testNullAttributeValueIsBadRequest() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    // A null CONSTRAINT_VALUE used to reach ConstraintValue.valueOf(null) inside the builder. The
+    // resulting NullPointerException is not an IllegalArgumentException, so the builder's own
+    // catch missed it and Jersey turned it into a 500 for what is plainly bad input.
+    put(messageConstraintUri("nullValue"), null,
+        Entity.entity("{\"MESSAGE_TYPE\":\"STATE_TRANSITION\",\"CONSTRAINT_VALUE\":null}",
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("nullValue"));
+
+    // Same for any other attribute.
+    put(messageConstraintUri("nullInstance"), null,
+        Entity.entity("{\"INSTANCE\":null,\"CONSTRAINT_VALUE\":\"1\"}",
+            MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("nullInstance"));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testInvalidAttributeValuesAreRejected() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    // A negative throttle makes no sense and would silently block every message.
+    put(messageConstraintUri("negative"), null,
+        constraintEntity(ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSITION",
+            "CONSTRAINT_VALUE", "-1")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("negative"));
+
+    // Not a number and not ANY.
+    put(messageConstraintUri("notANumber"), null,
+        constraintEntity(ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSITION",
+            "CONSTRAINT_VALUE", "lots")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("notANumber"));
+
+    // A message type that matches nothing can never throttle anything, so it is a typo.
+    put(messageConstraintUri("badMessageType"), null,
+        constraintEntity(ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSTION",
+            "CONSTRAINT_VALUE", "1")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("badMessageType"));
+
+    // Attribute values are matched as regexes, so an uncompilable one would throw inside the
+    // controller pipeline rather than at write time.
+    put(messageConstraintUri("badRegex"), null,
+        constraintEntity(ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSITION", "INSTANCE", "local[",
+            "CONSTRAINT_VALUE", "1")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("badRegex"));
+
+    // A CONSTRAINT_VALUE on its own constrains nothing.
+    put(messageConstraintUri("valueOnly"), null,
+        constraintEntity(ImmutableMap.of("CONSTRAINT_VALUE", "1")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("valueOnly"));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testUnknownAttributeIsRejectedRatherThanDropped() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    // The builder logs and then drops keys it does not recognize. Accepting this body would
+    // return 200 while persisting a constraint that ignores the WRONG_KEY the caller asked for.
+    put(messageConstraintUri("partlyBogus"), null,
+        constraintEntity(ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSITION", "WRONG_KEY", "x",
+            "CONSTRAINT_VALUE", "1")),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    Assert.assertNull(getConstraintItem("partlyBogus"));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testRegexAttributeValuesAreAccepted() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    // Wildcards are the documented way to write a cluster wide throttle, so validation must not
+    // reject them.
+    Map<String, String> attributes = ImmutableMap.of(
+        "MESSAGE_TYPE", "STATE_TRANSITION",
+        "TRANSITION", "OFFLINE-BOOTSTRAP",
+        "INSTANCE", ".*",
+        "RESOURCE", ".*",
+        "CONSTRAINT_VALUE", "ANY");
+    put(messageConstraintUri("wildcard"), null, constraintEntity(attributes),
+        Response.Status.OK.getStatusCode());
+    ConstraintItem item = getConstraintItem("wildcard");
+    Assert.assertNotNull(item);
+    Assert.assertEquals(item.getConstraintValue(), "ANY");
+    Assert.assertEquals(item.getAttributeValue(ConstraintAttribute.INSTANCE), ".*");
+
+    delete(messageConstraintUri("wildcard"), Response.Status.OK.getStatusCode());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testBatchSetConstraints() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, Map<String, String>> batch = ImmutableMap.of(
+        "batchPerInstance", ImmutableMap.of(
+            "MESSAGE_TYPE", "STATE_TRANSITION",
+            "TRANSITION", "OFFLINE-BOOTSTRAP",
+            "INSTANCE", ".*",
+            "CONSTRAINT_VALUE", "1"),
+        "batchPerResource", ImmutableMap.of(
+            "MESSAGE_TYPE", "STATE_TRANSITION",
+            "TRANSITION", "OFFLINE-BOOTSTRAP",
+            "RESOURCE", "myDB",
+            "CONSTRAINT_VALUE", "5"));
+
+    put(CONSTRAINTS_URI + "/" + MESSAGE_CONSTRAINT, null, batchEntity(batch),
+        Response.Status.OK.getStatusCode());
+
+    ConstraintItem perInstance = getConstraintItem("batchPerInstance");
+    Assert.assertNotNull(perInstance);
+    Assert.assertEquals(perInstance.getConstraintValue(), "1");
+    Assert.assertEquals(perInstance.getAttributeValue(ConstraintAttribute.INSTANCE), ".*");
+
+    ConstraintItem perResource = getConstraintItem("batchPerResource");
+    Assert.assertNotNull(perResource);
+    Assert.assertEquals(perResource.getConstraintValue(), "5");
+    Assert.assertEquals(perResource.getAttributeValue(ConstraintAttribute.RESOURCE), "myDB");
+
+    for (String id : batch.keySet()) {
+      delete(messageConstraintUri(id), Response.Status.OK.getStatusCode());
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testBatchIsAllOrNothing() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, Map<String, String>> batch = ImmutableMap.of(
+        "batchGood", ImmutableMap.of(
+            "MESSAGE_TYPE", "STATE_TRANSITION",
+            "INSTANCE", ".*",
+            "CONSTRAINT_VALUE", "1"),
+        "batchBad", ImmutableMap.of(
+            "MESSAGE_TYPE", "STATE_TRANSITION",
+            "INSTANCE", ".*",
+            "CONSTRAINT_VALUE", "-3"));
+
+    put(CONSTRAINTS_URI + "/" + MESSAGE_CONSTRAINT, null, batchEntity(batch),
+        Response.Status.BAD_REQUEST.getStatusCode());
+
+    // The valid half of the batch must not have been written either.
+    Assert.assertNull(getConstraintItem("batchGood"));
+    Assert.assertNull(getConstraintItem("batchBad"));
+
+    // An empty batch is rejected rather than treated as a no-op success.
+    put(CONSTRAINTS_URI + "/" + MESSAGE_CONSTRAINT, null,
+        Entity.entity("{}", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode());
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testBatchOnInvalidClusterAndType() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    Map<String, Map<String, String>> batch = ImmutableMap.of("someId",
+        ImmutableMap.of("MESSAGE_TYPE", "STATE_TRANSITION", "CONSTRAINT_VALUE", "1"));
+
+    put("clusters/NonExistentCluster/constraints/" + MESSAGE_CONSTRAINT, null, batchEntity(batch),
+        Response.Status.NOT_FOUND.getStatusCode());
+    put(CONSTRAINTS_URI + "/NOT_A_TYPE", null, batchEntity(batch),
         Response.Status.BAD_REQUEST.getStatusCode());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
