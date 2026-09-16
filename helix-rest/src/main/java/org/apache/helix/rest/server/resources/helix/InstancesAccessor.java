@@ -27,6 +27,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 import javax.ws.rs.DefaultValue;
@@ -35,6 +36,7 @@ import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 
 import com.codahale.metrics.annotation.ResponseMetered;
@@ -46,12 +48,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixProperty;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
@@ -67,6 +72,7 @@ import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,6 +82,9 @@ import static org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagem
 @Path("/clusters/{clusterId}/instances")
 public class InstancesAccessor extends AbstractHelixResource {
   private final static Logger _logger = LoggerFactory.getLogger(InstancesAccessor.class);
+
+  private static final String DELAYED_REBALANCE_CLUSTER_DEFAULT_SCOPE = "CLUSTER_DEFAULT";
+  private static final String DELAYED_REBALANCE_RAW_LIVE_VIEW = "RAW";
 
   public enum InstancesProperties {
     instances,
@@ -94,6 +103,21 @@ public class InstancesAccessor extends AbstractHelixResource {
     instance_stoppable_parallel,
     instance_not_stoppable_with_reasons,
     instances_unable_to_accept_online_replicas
+  }
+
+  /**
+   * Response field names of the {@code getDelayedRebalanceStatus} command. The constant names are
+   * the wire names, so a rename is visibly a change to the response schema.
+   */
+  public enum DelayedRebalanceProperties {
+    scope,
+    liveView,
+    observedAtMillis,
+    delayEnabled,
+    delayedInstances,
+    expiresAtMillis,
+    live,
+    enabled
   }
 
   public enum InstanceHealthSelectionBase {
@@ -116,6 +140,9 @@ public class InstancesAccessor extends AbstractHelixResource {
     }
 
     HelixDataAccessor accessor = getDataAccssor(clusterId);
+    if (cmd == Command.getDelayedRebalanceStatus) {
+      return getDelayedRebalanceStatus(clusterId, accessor);
+    }
     List<String> instances = accessor.getChildNames(accessor.keyBuilder().instanceConfigs());
     if (instances == null) {
       return notFound();
@@ -287,6 +314,167 @@ public class InstancesAccessor extends AbstractHelixResource {
       countedNode.add(instanceName);
     }
     return JSONRepresentation(root);
+  }
+
+  /**
+   * Reports delay-retained instances from recorded metadata using
+   * {@link DelayedRebalanceUtil#getDelayedRebalanceRetainedInstances(Set, Set, Map, Set, Map,
+   * ClusterConfig, long)}, the calculation shared with the rebalancers.
+   *
+   * <p>Response (HTTP 200):
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "scope": "CLUSTER_DEFAULT",
+   *   "liveView": "RAW",
+   *   "observedAtMillis": 1750000000000,
+   *   "delayEnabled": true,
+   *   "delayedInstances": {
+   *     "host1": { "expiresAtMillis": 1750000060000, "live": false, "enabled": true } } }
+   * }</pre>
+   *
+   * <p>Every returned expiry is strictly after {@code observedAtMillis}, the single timestamp used
+   * for comparison. Ordinary enabled/live and non-assignable instances are excluded. Cluster delay
+   * being disabled produces an empty map. Resource-specific overrides are outside this scope.
+   *
+   * <p>{@code RAW} uses ZooKeeper liveness and recorded participant history. It cannot reproduce
+   * the controller's maintenance-timeout history or an offline timestamp the controller has not
+   * recorded yet. Missing history contributes no offline window; this read never initializes it.
+   * The collected inputs are not a globally atomic snapshot.
+   */
+  private Response getDelayedRebalanceStatus(String clusterId, HelixDataAccessor accessor) {
+    try {
+      return computeDelayedRebalanceStatus(clusterId, accessor);
+    } catch (HelixException | ZkException | IllegalArgumentException e) {
+      // An empty population is indistinguishable from "nothing is being retained", which is the
+      // answer a caller acts on, so a partial read must fail loudly rather than return 200.
+      _logger.warn("Failed to compute delayed rebalance status for cluster {}", clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private Response computeDelayedRebalanceStatus(String clusterId, HelixDataAccessor accessor) {
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    ClusterConfig clusterConfig = readSingleProperty(accessor, keyBuilder.clusterConfig());
+    if (clusterConfig == null) {
+      return notFound();
+    }
+    // Child-name reads normalize missing paths to empty lists. Check the required roots without
+    // ZKUtil.isClusterSetup, which also normalizes connection failures to a missing cluster.
+    if (!getRealmAwareZkClient().exists(keyBuilder.instanceConfigs().getPath())
+        || !getRealmAwareZkClient().exists(keyBuilder.liveInstances().getPath())) {
+      throw new HelixException("Incomplete cluster metadata for " + clusterId);
+    }
+
+    List<InstanceConfig> instanceConfigs =
+        accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+    if (instanceConfigs == null || instanceConfigs.contains(null)) {
+      throw new HelixException("Incomplete instance configs for cluster " + clusterId);
+    }
+    Map<String, InstanceConfig> assignableInstanceConfigMap = new HashMap<>();
+    Set<String> enabledInstances = new HashSet<>();
+    for (InstanceConfig instanceConfig : instanceConfigs) {
+      if (instanceConfig.isAssignable()) {
+        assignableInstanceConfigMap.put(instanceConfig.getInstanceName(), instanceConfig);
+        if (instanceConfig.getInstanceEnabled()) {
+          enabledInstances.add(instanceConfig.getInstanceName());
+        }
+      }
+    }
+
+    List<String> liveInstanceNames = accessor.getChildNames(keyBuilder.liveInstances());
+    if (liveInstanceNames == null) {
+      throw new HelixException("Unable to read live instances for cluster " + clusterId);
+    }
+    Set<String> rawLiveInstances = new HashSet<>(liveInstanceNames);
+    Set<String> assignableLiveInstances = new HashSet<>(assignableInstanceConfigMap.keySet());
+    assignableLiveInstances.retainAll(rawLiveInstances);
+    Set<String> liveEnabledInstances = new HashSet<>(assignableLiveInstances);
+    liveEnabledInstances.retainAll(enabledInstances);
+
+    Map<String, Long> instanceOfflineTimeMap =
+        readInstanceOfflineTimes(accessor, assignableInstanceConfigMap.keySet(),
+            assignableLiveInstances);
+
+    long observedAtMillis = System.currentTimeMillis();
+    boolean delayEnabled = DelayedRebalanceUtil.isDelayRebalanceEnabled(clusterConfig);
+    Map<String, Long> delayedInstances =
+        DelayedRebalanceUtil.getDelayedRebalanceRetainedInstances(
+            assignableInstanceConfigMap.keySet(), liveEnabledInstances, instanceOfflineTimeMap,
+            assignableLiveInstances, assignableInstanceConfigMap, clusterConfig, observedAtMillis);
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    root.put(DelayedRebalanceProperties.scope.name(), DELAYED_REBALANCE_CLUSTER_DEFAULT_SCOPE);
+    root.put(DelayedRebalanceProperties.liveView.name(), DELAYED_REBALANCE_RAW_LIVE_VIEW);
+    root.put(DelayedRebalanceProperties.observedAtMillis.name(), observedAtMillis);
+    root.put(DelayedRebalanceProperties.delayEnabled.name(), delayEnabled);
+    ObjectNode delayedInstancesNode =
+        root.putObject(DelayedRebalanceProperties.delayedInstances.name());
+    // Sorted so the payload is stable across calls for the same cluster state.
+    for (Map.Entry<String, Long> entry : new TreeMap<>(delayedInstances).entrySet()) {
+      InstanceConfig instanceConfig = assignableInstanceConfigMap.get(entry.getKey());
+      ObjectNode instanceNode = delayedInstancesNode.putObject(entry.getKey());
+      instanceNode.put(DelayedRebalanceProperties.expiresAtMillis.name(), entry.getValue());
+      instanceNode.put(DelayedRebalanceProperties.live.name(),
+          assignableLiveInstances.contains(entry.getKey()));
+      instanceNode.put(DelayedRebalanceProperties.enabled.name(),
+          instanceConfig.getInstanceEnabled());
+    }
+    return Response.fromResponse(JSONRepresentation(root))
+        .header(HttpHeaders.CACHE_CONTROL, "no-store").build();
+  }
+
+  /**
+   * Reads the recorded offline timestamp of every assignable instance that is not live, the same
+   * input {@code BaseControllerDataProvider#getInstanceOfflineTimeMap()} carries. Unlike the
+   * controller's refresh, this never writes participant history back: an instance whose offline
+   * time has not been recorded yet is left out of the map, exactly as an instance with no history
+   * at all is.
+   */
+  private static Map<String, Long> readInstanceOfflineTimes(HelixDataAccessor accessor,
+      Set<String> assignableInstances, Set<String> assignableLiveInstances) {
+    List<String> offlineInstances = assignableInstances.stream()
+        .filter(instance -> !assignableLiveInstances.contains(instance))
+        .collect(Collectors.toList());
+    if (offlineInstances.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    List<PropertyKey> historyKeys = offlineInstances.stream()
+        .map(instance -> accessor.keyBuilder().participantHistory(instance))
+        .collect(Collectors.toList());
+    // The list form throws on a failed read and returns a null element for a node that is absent,
+    // so a participant that never joined is not confused with metadata this call could not read.
+    List<ParticipantHistory> histories = accessor.getProperty(historyKeys, true);
+    if (histories == null || histories.size() != offlineInstances.size()) {
+      throw new HelixException("Incomplete participant history response");
+    }
+
+    Map<String, Long> instanceOfflineTimeMap = new HashMap<>();
+    for (int i = 0; i < offlineInstances.size(); i++) {
+      ParticipantHistory history = histories.get(i);
+      if (history == null) {
+        continue;
+      }
+      long lastOfflineTime = history.getLastOfflineTime();
+      if (lastOfflineTime == ParticipantHistory.ONLINE) {
+        continue;
+      }
+      instanceOfflineTimeMap.put(offlineInstances.get(i), lastOfflineTime);
+    }
+    return instanceOfflineTimeMap;
+  }
+
+  /**
+   * Reads one property, distinguishing an absent node from a read that failed. The single-key
+   * read swallows both into null; the list form throws on a failed read.
+   */
+  private static <T extends HelixProperty> T readSingleProperty(HelixDataAccessor accessor,
+      PropertyKey key) {
+    List<T> values = accessor.getProperty(Collections.singletonList(key), true);
+    if (values == null || values.size() != 1) {
+      throw new HelixException("Incomplete property response for " + key.getPath());
+    }
+    return values.get(0);
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)

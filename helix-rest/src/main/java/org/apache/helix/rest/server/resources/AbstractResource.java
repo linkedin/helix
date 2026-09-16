@@ -87,6 +87,7 @@ public class AbstractResource {
     purgeOfflineParticipants,
     getInstance,
     getAllInstances,
+    getDelayedRebalanceStatus,
     setInstanceOperation, // TODO: Name is just a place holder, may change in future
     canCompleteSwap,
     completeSwapIfPossible,
