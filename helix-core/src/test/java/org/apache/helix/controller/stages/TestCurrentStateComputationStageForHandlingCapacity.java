@@ -257,6 +257,60 @@ public class TestCurrentStateComputationStageForHandlingCapacity {
         CurrentStateComputationStage.computeClusterCapacityUsage(overSubscribedContext), 1.2d, 1e-6d);
   }
 
+  @Test
+  public void testComputeUsageStats() {
+    // Empty / null input: an all-zero summary with an undefined (0.0) ratio.
+    for (ClusterStatusMonitor.WeightedUsageStats empty : ImmutableList.of(
+        CurrentStateComputationStage.computeUsageStats(null),
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of()))) {
+      Assert.assertEquals(empty.getMax(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMean(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMin(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMaxMeanRatio(), 0.0d, 0.0d);
+    }
+
+    // Single instance: max == mean == min, ratio 1.0 (perfectly even by definition).
+    ClusterStatusMonitor.WeightedUsageStats single =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.7d));
+    Assert.assertEquals(single.getMax(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMean(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMin(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // Perfectly even load across instances: max == mean, ratio 1.0 (the WAGED goal).
+    ClusterStatusMonitor.WeightedUsageStats even =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.5d, 0.5d, 0.5d));
+    Assert.assertEquals(even.getMax(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMin(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // Skewed load: max 0.8, mean 0.5, so the max-to-mean ratio is 1.6 (min 0.2 is still reported).
+    ClusterStatusMonitor.WeightedUsageStats skewed =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.2d, 0.8d, 0.5d));
+    Assert.assertEquals(skewed.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(skewed.getMin(), 0.2d, 1e-9d);
+    Assert.assertEquals(skewed.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(skewed.getMaxMeanRatio(), 1.6d, 1e-9d);
+
+    // An idle instance (min == 0): the max-to-mean ratio stays defined (unlike max-to-min).
+    // max 0.8, mean 0.4 -> ratio 2.0.
+    ClusterStatusMonitor.WeightedUsageStats withIdle =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.0d, 0.8d));
+    Assert.assertEquals(withIdle.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(withIdle.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(withIdle.getMean(), 0.4d, 1e-9d);
+    Assert.assertEquals(withIdle.getMaxMeanRatio(), 2.0d, 1e-9d);
+
+    // All-zero usage (mean == 0): the ratio is the 0.0 undefined sentinel rather than NaN.
+    ClusterStatusMonitor.WeightedUsageStats allZero =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.0d, 0.0d));
+    Assert.assertEquals(allZero.getMax(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMean(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMaxMeanRatio(), 0.0d, 0.0d);
+  }
+
   // -- static helpers
   private Map<String, InstanceConfig> generateInstanceCapacityConfigs() {
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();

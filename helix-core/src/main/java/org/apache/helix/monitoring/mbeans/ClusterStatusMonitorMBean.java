@@ -279,6 +279,80 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   double getEstimatedMaxClusterCapacityUsageGauge();
 
+  // ---- WAGED weighted capacity-usage distribution across live instances ----
+  // Cluster-level summary (max / mean / min / max-to-mean ratio) of each live instance's highest
+  // per-capacity-key WEIGHTED utilization -- the quantity WAGED's capacity-usage soft constraints
+  // balance. Two dimensions are exposed: "partition" counts all replicas (mirrors the per-instance
+  // MaxCapacityUsageGauge) and "top-state" counts top-state replicas only (otherwise unmeasured).
+  // The max-to-mean ratio is the evenness indicator (peak-to-average): 1.0 is perfectly even
+  // (WAGED's goal), larger is more skewed. Individual utilizations are >= 0.0 and may exceed 1.0
+  // when a node is oversubscribed.
+
+  /**
+   * @return highest per-instance general (all-replica) weighted capacity utilization across live
+   *         instances, or {@code 0.0} when there are no instances / no configured capacity
+   */
+  double getWeightedPartitionUsageMaxGauge();
+
+  /**
+   * @return arithmetic mean across live instances of the per-instance general (all-replica) weighted
+   *         capacity utilization. This is the mean of the per-instance highest-key utilizations and
+   *         is distinct from {@link #getEstimatedMaxClusterCapacityUsageGauge()}, which is the
+   *         aggregate {@code sum(usage)/sum(capacity)}. {@code 0.0} when there is no signal
+   */
+  double getWeightedPartitionUsageMeanGauge();
+
+  /**
+   * @return lowest per-instance general (all-replica) weighted capacity utilization across live
+   *         instances, or {@code 0.0} when there are no instances / no configured capacity
+   */
+  double getWeightedPartitionUsageMinGauge();
+
+  /**
+   * Ratio of {@link #getWeightedPartitionUsageMaxGauge()} to the mean per-instance general weighted
+   * utilization (peak-to-average) -- an evenness indicator for the all-replica weighted load.
+   * <ul>
+   *   <li>{@code 1.0} - perfectly even (max == mean), the WAGED goal.</li>
+   *   <li>larger values - the busiest instance is progressively further above the cluster average.</li>
+   *   <li>{@code 0.0} - undefined: no instances, or all-zero usage (mean is {@code 0}). Valid ratios
+   *       are {@code >= 1.0}, so {@code 0.0} is an unambiguous sentinel. Unlike a max-to-min ratio,
+   *       this stays defined when a single instance is idle.</li>
+   * </ul>
+   * @return max-to-mean ratio of per-instance general weighted utilization ({@code >= 1.0}, or
+   *         {@code 0.0} when undefined)
+   */
+  double getWeightedPartitionUsageMaxMeanRatioGauge();
+
+  /**
+   * @return highest per-instance top-state-only weighted capacity utilization across live instances,
+   *         or {@code 0.0} when there are no instances / no configured top-state capacity
+   */
+  double getWeightedTopStateUsageMaxGauge();
+
+  /**
+   * @return arithmetic mean across live instances of the per-instance top-state-only weighted
+   *         capacity utilization, or {@code 0.0} when there is no signal
+   */
+  double getWeightedTopStateUsageMeanGauge();
+
+  /**
+   * @return lowest per-instance top-state-only weighted capacity utilization across live instances,
+   *         or {@code 0.0} when there are no instances / no configured top-state capacity
+   */
+  double getWeightedTopStateUsageMinGauge();
+
+  /**
+   * Ratio of {@link #getWeightedTopStateUsageMaxGauge()} to the mean per-instance top-state weighted
+   * utilization (peak-to-average) -- the evenness indicator for top-state weighted load, which
+   * WAGED's {@code TopStateMaxCapacityUsageInstanceConstraint} balances and which is otherwise
+   * unmeasured. {@code 1.0} is perfectly even (max == mean); larger means the busiest instance is
+   * further above the average; {@code 0.0} is undefined (no instances, or all-zero usage). Valid
+   * ratios are {@code >= 1.0}.
+   * @return max-to-mean ratio of per-instance top-state weighted utilization ({@code >= 1.0}, or
+   *         {@code 0.0} when undefined)
+   */
+  double getWeightedTopStateUsageMaxMeanRatioGauge();
+
   /**
    * @return number of all resources in this cluster
    */
