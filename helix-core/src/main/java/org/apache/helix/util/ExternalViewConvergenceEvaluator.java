@@ -158,7 +158,8 @@ public class ExternalViewConvergenceEvaluator {
    * @param accessor the accessor the external views are read through
    * @param cache cluster metadata already refreshed from the same cluster
    * @param resources the resources to evaluate, or null/empty to evaluate every resource in the
-   *        cluster. Resources using the task state model are always skipped.
+   *        cluster. Task-state resources without an external view are skipped; a leftover
+   *        external view is compared against an empty ideal state.
    * @param expectLiveInstances if not null and not empty, the evaluation reports the cluster as
    *        pending unless exactly these instances are live
    * @return the outcome; it is never null

@@ -27,6 +27,10 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * Outcome of one {@link ExternalViewConvergenceEvaluator} evaluation.
  *
@@ -43,6 +47,7 @@ import java.util.TreeSet;
  * inputs are read with several requests, so the result is not an atomic snapshot of the cluster
  * and is not a claim about what the controller has processed by the time a caller reads it.
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ExternalViewConvergenceResult {
   public enum Status {
     CONVERGED, PENDING, FAILED
@@ -79,6 +84,24 @@ public class ExternalViewConvergenceResult {
   ExternalViewConvergenceResult(long observedAtMillis, int evaluatedResourceCount,
       Map<String, Reason> pendingResources, Map<String, Reason> failedResources,
       Set<String> unknownResources, Set<String> skippedResources, Reason clusterReason) {
+    this(null, observedAtMillis, evaluatedResourceCount, pendingResources, failedResources,
+        unknownResources, skippedResources, clusterReason);
+  }
+
+  @JsonCreator
+  public ExternalViewConvergenceResult(@JsonProperty("status") Status status,
+      @JsonProperty("observedAtMillis") Long observedAtMillis,
+      @JsonProperty("evaluatedResourceCount") Integer evaluatedResourceCount,
+      @JsonProperty("pendingResources") Map<String, Reason> pendingResources,
+      @JsonProperty("failedResources") Map<String, Reason> failedResources,
+      @JsonProperty("unknownResources") Set<String> unknownResources,
+      @JsonProperty("skippedResources") Set<String> skippedResources,
+      @JsonProperty("clusterReason") Reason clusterReason) {
+    if (observedAtMillis == null || observedAtMillis < 0 || evaluatedResourceCount == null
+        || evaluatedResourceCount < 0 || pendingResources == null || failedResources == null
+        || unknownResources == null || skippedResources == null) {
+      throw new IllegalArgumentException("Invalid convergence result");
+    }
     _observedAtMillis = observedAtMillis;
     _evaluatedResourceCount = evaluatedResourceCount;
     _pendingResources = Collections.unmodifiableSortedMap(new TreeMap<>(pendingResources));
@@ -86,12 +109,37 @@ public class ExternalViewConvergenceResult {
     _unknownResources = Collections.unmodifiableSortedSet(new TreeSet<>(unknownResources));
     _skippedResources = Collections.unmodifiableSortedSet(new TreeSet<>(skippedResources));
     _clusterReason = clusterReason;
+    validateResourceNames(_pendingResources.keySet(), new TreeSet<>());
+    validateResourceNames(_failedResources.keySet(), new TreeSet<>(_pendingResources.keySet()));
+    Set<String> reportedResources = new TreeSet<>(_pendingResources.keySet());
+    reportedResources.addAll(_failedResources.keySet());
+    validateResourceNames(_unknownResources, reportedResources);
+    reportedResources.addAll(_unknownResources);
+    validateResourceNames(_skippedResources, reportedResources);
+    if ((long) _pendingResources.size() + _failedResources.size() > _evaluatedResourceCount
+        || (_clusterReason != null
+        && (_evaluatedResourceCount != 0 || !_pendingResources.isEmpty()
+        || !_failedResources.isEmpty() || !_unknownResources.isEmpty()
+        || !_skippedResources.isEmpty()))) {
+      throw new IllegalArgumentException("Invalid convergence result");
+    }
     if (!_failedResources.isEmpty() || !_unknownResources.isEmpty()) {
       _status = Status.FAILED;
     } else if (!_pendingResources.isEmpty() || _clusterReason != null) {
       _status = Status.PENDING;
     } else {
       _status = Status.CONVERGED;
+    }
+    if (status != null && status != _status) {
+      throw new IllegalArgumentException("Invalid convergence status");
+    }
+  }
+
+  private static void validateResourceNames(Set<String> names, Set<String> existingNames) {
+    for (String name : names) {
+      if (name == null || name.trim().isEmpty() || !existingNames.add(name)) {
+        throw new IllegalArgumentException("Invalid convergence resource");
+      }
     }
   }
 
@@ -116,8 +164,8 @@ public class ExternalViewConvergenceResult {
   }
 
   /**
-   * @return how many resources were compared. Resources using the task state model, resources
-   *         excluded by a resource filter and unknown resources are not counted.
+   * @return how many resources were compared. Skipped, filtered-out, and unknown resources are
+   *         not counted. A leftover task external view is compared and counted.
    */
   public int getEvaluatedResourceCount() {
     return _evaluatedResourceCount;
@@ -142,8 +190,9 @@ public class ExternalViewConvergenceResult {
   }
 
   /**
-   * @return resources that exist but were not compared, because they use the task state model or
-   *         publish no external view by configuration. They are not evidence of convergence.
+   * @return resources that exist but were not compared: task-state resources without an external
+   *         view, or resources whose external view is disabled by configuration. They are not
+   *         evidence of convergence; leftover task external views are compared instead.
    */
   public SortedSet<String> getSkippedResources() {
     return _skippedResources;

@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
@@ -84,6 +85,37 @@ public class TestExternalViewConvergenceEvaluator {
         Collections.singletonMap(BuiltInStateModelDefinitions.MasterSlave.name(),
             BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition()));
     setInstances(Arrays.asList(NODE_0, NODE_1), Arrays.asList(NODE_0, NODE_1));
+  }
+
+
+  @Test
+  public void testExternalViewConvergenceResultBindsFromJson() throws Exception {
+    String json = "{\"status\":\"PENDING\",\"observedAtMillis\":1,"
+        + "\"evaluatedResourceCount\":1,\"pendingResources\":{\"db0\":\"MAPPING_MISMATCH\"},"
+        + "\"failedResources\":{},\"unknownResources\":[],\"skippedResources\":[],"
+        + "\"futureField\":\"ignored\"}";
+
+    ExternalViewConvergenceResult result =
+        new ObjectMapper().readValue(json, ExternalViewConvergenceResult.class);
+
+    Assert.assertEquals(result.getStatus(), ExternalViewConvergenceResult.Status.PENDING);
+    Assert.assertFalse(result.isConverged());
+    Assert.assertEquals(result.getPendingResources().get("db0"),
+        ExternalViewConvergenceResult.Reason.MAPPING_MISMATCH);
+  }
+
+  @Test
+  public void testExternalViewConvergenceResultRejectsContradictingStatus() throws Exception {
+    String json = "{\"status\":\"CONVERGED\",\"observedAtMillis\":1,"
+        + "\"evaluatedResourceCount\":1,\"pendingResources\":{\"db0\":\"MAPPING_MISMATCH\"},"
+        + "\"failedResources\":{},\"unknownResources\":[],\"skippedResources\":[]}";
+
+    try {
+      new ObjectMapper().readValue(json, ExternalViewConvergenceResult.class);
+      Assert.fail("Expected contradicting convergence status to be rejected");
+    } catch (Exception e) {
+      Assert.assertTrue(e.getMessage().contains("Invalid convergence status"));
+    }
   }
 
   @Test
