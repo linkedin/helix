@@ -2459,6 +2459,34 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   @Override
+  public void setConstraints(String clusterName, final ConstraintType constraintType,
+      final Map<String, ConstraintItem> constraintItems) {
+    if (constraintItems == null || constraintItems.isEmpty()) {
+      return;
+    }
+    logger.info("Set constraint type {} with constraint ids {} for cluster {}.", constraintType,
+        constraintItems.keySet(), clusterName);
+    BaseDataAccessor<ZNRecord> baseAccessor = _baseDataAccessor;
+
+    PropertyKey.Builder keyBuilder = new PropertyKey.Builder(clusterName);
+    String path = keyBuilder.constraint(constraintType.toString()).getPath();
+
+    // A single update call so the whole batch lands in one ZNode write. Callers never observe a
+    // partially applied batch, and a concurrent writer cannot interleave between items.
+    baseAccessor.update(path, new DataUpdater<ZNRecord>() {
+      @Override
+      public ZNRecord update(ZNRecord currentData) {
+        ClusterConstraints constraints =
+            currentData == null ? new ClusterConstraints(constraintType)
+                : new ClusterConstraints(currentData);
+
+        constraints.addConstraintItems(constraintItems);
+        return constraints.getRecord();
+      }
+    }, AccessOption.PERSISTENT);
+  }
+
+  @Override
   public void removeConstraint(String clusterName, final ConstraintType constraintType,
       final String constraintId) {
     logger.info("Remove constraint type {} with constraint id {} for cluster {}.", constraintType,
