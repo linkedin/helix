@@ -511,6 +511,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
     _missingMinActiveReplicaMap.clear();
+    _capacityRejectionMapRef.set(new ConcurrentHashMap<>());
   }
 
   /**

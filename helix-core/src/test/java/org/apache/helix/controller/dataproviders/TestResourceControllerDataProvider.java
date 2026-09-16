@@ -109,7 +109,8 @@ public class TestResourceControllerDataProvider {
     dataProvider.recordCapacityRejection("ResourceA", "Instance1");
     Assert.assertEquals(snapshot.get("ResourceA").get("Instance1").get(), 2L);
 
-    Map<String, Map<String, AtomicLong>> nextSnapshot = dataProvider.getAndClearCapacityRejections();
+    Map<String, Map<String, AtomicLong>> nextSnapshot =
+        dataProvider.getAndClearCapacityRejections();
     Assert.assertEquals(nextSnapshot.get("ResourceA").get("Instance1").get(), 1L);
   }
 

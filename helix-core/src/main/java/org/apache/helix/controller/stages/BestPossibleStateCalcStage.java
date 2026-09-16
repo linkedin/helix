@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -75,6 +76,9 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   private static final Logger logger =
       LoggerFactory.getLogger(BestPossibleStateCalcStage.class.getName());
   private static final String STAGE_NAME = "BestPossibleStateCalcStage";
+  // Upper bound on how many (resource, instance) pairs the aggregated capacity-rejection line
+  // names. A cluster-wide shortage can produce thousands of distinct pairs.
+  private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -134,22 +138,87 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
                 externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
           }
 
-          // Increment capacity rejection counters for each resource
-          for (Map.Entry<String, Map<String, AtomicLong>> entry
-              : capacityRejectionSnapshot.entrySet()) {
-            String resourceName = entry.getKey();
-            if (resourceConfigMap.containsKey(resourceName) && resourceConfigMap.get(resourceName)
-                .isMonitoringDisabled()) {
-              continue;
-            }
-            clusterStatusMonitor.incrementMappingCapacityRejectionCounters(resourceName, entry.getValue());
-          }
+          // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing
+          // goes to a single aggregated log line rather than to JMX attributes, so the metric
+          // cardinality stays at R + I and does not explode when the whole cluster is short on
+          // capacity.
+          reportCapacityRejections(clusterStatusMonitor, capacityRejectionSnapshot,
+              resourceConfigMap);
         }
       } catch (Exception e) {
         LogUtil.logError(logger, _eventId, "Could not update cluster status metrics!", e);
       }
       return null;
     });
+  }
+
+  /**
+   * Records the capacity rejections collected during one mapping-calculation pass: fixed
+   * cardinality counters on the resource and instance MBeans, plus one aggregated log line
+   * carrying the exact (resource, instance) pairing.
+   * <p>
+   * Resources with monitoring disabled are excluded from both halves, which keeps the invariant
+   * that the sum of the resource counters equals the sum of the instance counters.
+   */
+  private void reportCapacityRejections(ClusterStatusMonitor clusterStatusMonitor,
+      Map<String, Map<String, AtomicLong>> rejectionSnapshot,
+      Map<String, ResourceConfig> resourceConfigMap) {
+    if (rejectionSnapshot.isEmpty()) {
+      return;
+    }
+
+    Map<String, Map<String, Long>> monitoredRejections = new HashMap<>();
+    for (Map.Entry<String, Map<String, AtomicLong>> entry : rejectionSnapshot.entrySet()) {
+      String resourceName = entry.getKey();
+      ResourceConfig resourceConfig = resourceConfigMap.get(resourceName);
+      if (resourceConfig != null && resourceConfig.isMonitoringDisabled()) {
+        continue;
+      }
+      Map<String, Long> perInstanceCounts = new HashMap<>();
+      for (Map.Entry<String, AtomicLong> instanceEntry : entry.getValue().entrySet()) {
+        perInstanceCounts.put(instanceEntry.getKey(), instanceEntry.getValue().get());
+      }
+      monitoredRejections.put(resourceName, perInstanceCounts);
+    }
+
+    if (monitoredRejections.isEmpty()) {
+      return;
+    }
+
+    clusterStatusMonitor.recordMappingCapacityRejections(monitoredRejections);
+    logCapacityRejections(monitoredRejections);
+  }
+
+  /**
+   * Logs one aggregated line per pipeline pass naming which instances refused which resources.
+   * A cluster-wide capacity shortage can produce a very large number of distinct pairs, so only the
+   * heaviest {@link #MAX_LOGGED_REJECTION_PAIRS} are named and the rest are summarized by count.
+   */
+  private void logCapacityRejections(Map<String, Map<String, Long>> rejections) {
+    List<Map.Entry<String, Long>> pairs = new ArrayList<>();
+    long totalRejections = 0L;
+    for (Map.Entry<String, Map<String, Long>> resourceEntry : rejections.entrySet()) {
+      for (Map.Entry<String, Long> instanceEntry : resourceEntry.getValue().entrySet()) {
+        pairs.add(new AbstractMap.SimpleEntry<>(
+            resourceEntry.getKey() + "/" + instanceEntry.getKey(), instanceEntry.getValue()));
+        totalRejections += instanceEntry.getValue();
+      }
+    }
+    // Sort by count so truncation keeps the worst offenders rather than an arbitrary sample.
+    pairs.sort(Comparator.comparingLong((Map.Entry<String, Long> e) -> e.getValue()).reversed()
+        .thenComparing(Map.Entry::getKey));
+
+    String detail = pairs.stream().limit(MAX_LOGGED_REJECTION_PAIRS)
+        .map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(", "));
+    String truncated = pairs.size() > MAX_LOGGED_REJECTION_PAIRS
+        ? String.format(" (showing top %d of %d resource/instance pairs)",
+            MAX_LOGGED_REJECTION_PAIRS, pairs.size()) : "";
+
+    LogUtil.logWarn(logger, _eventId, String.format(
+        "Mapping calculation dropped %d replica placement(s) for lack of instance capacity across "
+            + "%d resource(s) and %d instance(s)%s: %s", totalRejections, rejections.size(),
+        rejections.values().stream().flatMap(m -> m.keySet().stream()).distinct().count(),
+        truncated, detail));
   }
 
   private String selectSwapInState(StateModelDefinition stateModelDef, Map<String, String> stateMap,

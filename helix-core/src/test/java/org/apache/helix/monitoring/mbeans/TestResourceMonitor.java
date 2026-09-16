@@ -254,13 +254,21 @@ public class TestResourceMonitor {
     monitor.register();
 
     try {
-      monitor.incrementCapacityRejectionCounter("Instance_1", 2);
-      monitor.incrementCapacityRejectionCounter("Instance_1", 3);
-      monitor.incrementCapacityRejectionCounter("Instance_2", 1);
+      int attributeCountBefore = monitor.getMBeanInfo().getAttributes().length;
 
-      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_1"), 5L);
-      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_2"), 1L);
-      Assert.assertEquals(monitor.getCapacityRejectionCount("Instance_3"), 0L);
+      monitor.incrementMappingCapacityRejectionCounter(2);
+      monitor.incrementMappingCapacityRejectionCounter(3);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 5L);
+
+      // Non-positive increments are ignored.
+      monitor.incrementMappingCapacityRejectionCounter(0);
+      monitor.incrementMappingCapacityRejectionCounter(-4);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 5L);
+
+      // The counter is a single fixed attribute, so recording rejections must never grow the
+      // MBean's attribute set no matter how many instances were involved.
+      Assert.assertEquals(monitor.getMBeanInfo().getAttributes().length, attributeCountBefore);
+      Assert.assertEquals(monitor.getAttribute("MappingCapacityRejectionCounter"), 5L);
     } finally {
       monitor.unregister();
     }

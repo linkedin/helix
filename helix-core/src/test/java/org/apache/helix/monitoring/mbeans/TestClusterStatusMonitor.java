@@ -634,6 +634,50 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testRecordMappingCapacityRejections() throws Exception {
+    String clusterName = "TestCluster_MappingCapacityRejection";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    Set<String> instanceSet = new HashSet<>(ImmutableList.of("instance_0", "instance_1"));
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    // Create and register the resource monitors the way the pipeline does.
+    List<String> resources = ImmutableList.of("ResourceA", "ResourceB");
+    monitor.setResourceRebalanceStates(resources, ResourceMonitor.RebalanceStatus.NORMAL);
+    monitor.retainResourceMonitor(new HashSet<>(resources));
+
+    Map<String, Map<String, Long>> rejections = new HashMap<>();
+    rejections.put("ResourceA", ImmutableMap.of("instance_0", 2L, "instance_1", 3L));
+    // "instance_missing" has no monitor: it must be skipped rather than blowing up the pass.
+    rejections.put("ResourceB", ImmutableMap.of("instance_0", 4L, "instance_missing", 7L));
+
+    monitor.recordMappingCapacityRejections(rejections);
+
+    ObjectName resourceA = monitor.getObjectName(monitor.getResourceBeanName("ResourceA"));
+    ObjectName resourceB = monitor.getObjectName(monitor.getResourceBeanName("ResourceB"));
+    // Each resource gets a single fixed attribute holding its total, not one per instance.
+    Assert.assertEquals(_server.getAttribute(resourceA, "MappingCapacityRejectionCounter"), 5L);
+    Assert.assertEquals(_server.getAttribute(resourceB, "MappingCapacityRejectionCounter"), 11L);
+
+    // Instance counters aggregate that instance's rejections across all resources.
+    ObjectName instance0 = monitor.getObjectName(monitor.getInstanceBeanName("instance_0"));
+    ObjectName instance1 = monitor.getObjectName(monitor.getInstanceBeanName("instance_1"));
+    Assert.assertEquals(_server.getAttribute(instance0, "MappingCapacityRejectionCounter"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance1, "MappingCapacityRejectionCounter"), 3L);
+
+    // Counters are cumulative across passes.
+    monitor.recordMappingCapacityRejections(
+        Collections.singletonMap("ResourceA", ImmutableMap.of("instance_1", 1L)));
+    Assert.assertEquals(_server.getAttribute(resourceA, "MappingCapacityRejectionCounter"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance1, "MappingCapacityRejectionCounter"), 4L);
+
+    monitor.reset();
+  }
+
+  @Test
   public void testSetClusterInstanceStatusActualPartitionGauges() throws Exception {
     String clusterName = "TestCluster_ActualPartitionStatus";
     ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);

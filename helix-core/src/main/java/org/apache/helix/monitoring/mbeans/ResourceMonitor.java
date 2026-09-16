@@ -51,7 +51,6 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   }
 
   private static final String GAUGE_METRIC_SUFFIX = "Gauge";
-  private static final String CAPACITY_REJECTION_METRIC_SUFFIX = "_MappingCapacityRejectionCounter";
 
   // Gauges
   private SimpleDynamicMetric<Long> _numOfPartitions;
@@ -74,6 +73,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   // Counters
   private SimpleDynamicMetric<Long> _successfulTopStateHandoffDurationCounter;
   private SimpleDynamicMetric<Long> _successTopStateHandoffCounter;
+  private SimpleDynamicMetric<Long> _mappingCapacityRejectionCounter;
 
   // A new Gauge _missingTopStatePartitionsBeyondThresholdGauge for reporting number of partitions with missing top
   // state has been added. Reason of deprecating this two metrics is because they are similar and doesn't tell about
@@ -110,10 +110,6 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   // A map of dynamic capacity Gauges. The map's keys could change.
   private final Map<String, SimpleDynamicMetric<Long>> _dynamicCapacityMetricsMap;
 
-  // A map of instance-level capacity rejection Gauges for this resource.
-  // Key: instance name, Value: rejection count gauge
-  private final Map<String, SimpleDynamicMetric<Long>> _instanceCapacityRejectionMap;
-
   @Override
   public DynamicMBeanProvider register() throws JMException {
     doRegister(buildAttributeList(), _initObjectName);
@@ -132,7 +128,6 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _resourceName = resourceName;
     _initObjectName = objectName;
     _dynamicCapacityMetricsMap = new ConcurrentHashMap<>();
-    _instanceCapacityRejectionMap = new ConcurrentHashMap<>();
 
     _externalViewIdealStateDiff = new SimpleDynamicMetric("DifferenceWithIdealStateGauge", 0L);
     _numPendingRecoveryRebalanceReplicas =
@@ -178,6 +173,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         new SimpleDynamicMetric("MaxSinglePartitionTopStateHandoffDurationGauge", 0L);
     _failedTopStateHandoffCounter = new SimpleDynamicMetric("FailedTopStateHandoffCounter", 0L);
     _successTopStateHandoffCounter = new SimpleDynamicMetric("SucceededTopStateHandoffCounter", 0L);
+    _mappingCapacityRejectionCounter =
+        new SimpleDynamicMetric<>("MappingCapacityRejectionCounter", 0L);
     _successfulTopStateHandoffDurationCounter =
         new SimpleDynamicMetric("SuccessfulTopStateHandoffDurationCounter", 0L);
 
@@ -506,41 +503,31 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   }
 
   /**
-   * Increments the capacity rejection counter for a specific instance.
-   * This tracks how many times partitions of this resource were rejected
-   * by the specified instance due to insufficient capacity during mapping calculation.
-   * This is a cumulative counter that always increases.
+   * Increments this resource's mapping capacity rejection counter.
+   * It tracks how many of this resource's replica placements were dropped from a preference list
+   * during mapping calculation because the target instance had no capacity left.
+   * <p>
+   * This is a single fixed attribute rather than one attribute per rejecting instance: instance
+   * names are unbounded, and a cluster-wide capacity shortage would otherwise spray a permanent,
+   * never-decaying attribute onto this MBean for every instance involved, at exactly the moment
+   * the cluster is least healthy. The matching per-instance view lives on {@code InstanceMonitor},
+   * and the exact (resource, instance) pairing is logged once per pipeline pass.
    *
-   * @param instanceName The instance that rejected the partition
-   * @param rejectionCount The number of rejections to add to the counter
+   * @param rejectionCount The number of rejections to add. Non-positive values are ignored.
    */
-  public void incrementCapacityRejectionCounter(String instanceName, long rejectionCount) {
+  public void incrementMappingCapacityRejectionCounter(long rejectionCount) {
     if (rejectionCount <= 0) {
       return;
     }
-    synchronized (_instanceCapacityRejectionMap) {
-      SimpleDynamicMetric<Long> metric = _instanceCapacityRejectionMap.get(instanceName);
-      if (metric == null) {
-        metric = new SimpleDynamicMetric<>(instanceName + CAPACITY_REJECTION_METRIC_SUFFIX, rejectionCount);
-        _instanceCapacityRejectionMap.put(instanceName, metric);
-        // Update MBean attributes since we added a new metric
-        updateAttributesInfo(buildAttributeList(),
-            "Resource monitor for resource: " + getResourceName());
-      } else {
-        metric.updateValue(metric.getValue() + rejectionCount);
-      }
-    }
+    _mappingCapacityRejectionCounter
+        .updateValue(_mappingCapacityRejectionCounter.getValue() + rejectionCount);
   }
 
   /**
-   * Gets the capacity rejection count for a specific instance.
-   *
-   * @param instanceName The instance name
-   * @return The rejection count, or 0 if no rejections recorded
+   * @return The cumulative number of capacity rejections recorded for this resource.
    */
-  public long getCapacityRejectionCount(String instanceName) {
-    SimpleDynamicMetric<Long> metric = _instanceCapacityRejectionMap.get(instanceName);
-    return metric != null ? metric.getValue() : 0L;
+  public long getMappingCapacityRejectionCounter() {
+    return _mappingCapacityRejectionCounter.getValue();
   }
 
   public long getExternalViewPartitionGauge() {
@@ -662,10 +649,10 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _totalMessageReceivedCounter,
         _numPendingStateTransitions,
         _rebalanceState,
-        _rebalanceThrottledByErrorPartitionGauge);
+        _rebalanceThrottledByErrorPartitionGauge,
+        _mappingCapacityRejectionCounter);
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
-    attributeList.addAll(_instanceCapacityRejectionMap.values());
 
     return attributeList;
   }
