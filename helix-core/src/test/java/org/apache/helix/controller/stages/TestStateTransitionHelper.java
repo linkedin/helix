@@ -19,11 +19,16 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.Collections;
+import java.util.Set;
+
 import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
@@ -78,6 +83,30 @@ public class TestStateTransitionHelper {
     Assert.assertFalse(StateTransitionHelper.isDownwardTransition("OFFLINE", "SLAVE", _masterSlaveSMD));
     Assert.assertFalse(StateTransitionHelper.isDownwardTransition("SLAVE", "SLAVE", _masterSlaveSMD));
     Assert.assertFalse(StateTransitionHelper.isDownwardTransition("MASTER", "SLAVE", null));
+  }
+
+  @DataProvider
+  public Object[][] evacuateErrorDrops() {
+    Set<String> evacuating = Collections.singleton("old");
+    return new Object[][] {
+        {true, "ERROR", "DROPPED", "old", evacuating, true},
+        {false, "ERROR", "DROPPED", "old", evacuating, false},
+        {true, "ERROR", "DROPPED", "other", evacuating, false},
+        {true, "ERROR", "DROPPED", "old", Collections.emptySet(), false},
+        {true, "ERROR", "OFFLINE", "old", evacuating, false},
+        {true, "STANDBY", "DROPPED", "old", evacuating, false}
+    };
+  }
+
+  @Test(dataProvider = "evacuateErrorDrops")
+  public void testIsEvacuateErrorPartitionDrop(boolean enabled, String from, String to,
+      String target, Set<String> evacuating, boolean expected) {
+    Message message = new Message(Message.MessageType.STATE_TRANSITION, "drop");
+    message.setFromState(from);
+    message.setToState(to);
+    message.setTgtName(target);
+    Assert.assertEquals(
+        StateTransitionHelper.isEvacuateErrorPartitionDrop(enabled, message, evacuating), expected);
   }
 
   // ========================================

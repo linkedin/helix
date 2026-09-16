@@ -604,7 +604,9 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     //                           2) any downward ST messages will respect the throttling.
     // If not only downward allowed, all ST messages should respect the throttling.
     if (onlyDownwardLoadBalance && !isLoadBalanceDownwardStateTransition(messageToThrottle,
-        stateModelDefinition)) {
+        stateModelDefinition) && !StateTransitionHelper.isEvacuateErrorPartitionDrop(
+        cache.getClusterConfig().isEvacuateErrorPartitionDropEnabled(), messageToThrottle,
+        cache.getEvacuatingInstances())) {
       resourceMessageMap.get(partition).remove(messageToThrottle);
       messagesThrottled.add(messageToThrottle.getId());
       return;

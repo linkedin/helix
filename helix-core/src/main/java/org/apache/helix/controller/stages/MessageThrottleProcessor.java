@@ -189,7 +189,10 @@ public class MessageThrottleProcessor {
     // Block non-downward load balance when too many error partitions
     if (type == RebalanceType.LOAD_BALANCE && numErrorPartitions > errorThreshold) {
       if (!StateTransitionHelper.isDownwardTransition(
-          message.getFromState(), message.getToState(), stateModelDef)) {
+          message.getFromState(), message.getToState(), stateModelDef)
+          && !StateTransitionHelper.isEvacuateErrorPartitionDrop(
+              cache.getClusterConfig().isEvacuateErrorPartitionDropEnabled(), message,
+              cache.getEvacuatingInstances())) {
         return true;
       }
     }
@@ -390,4 +393,3 @@ public class MessageThrottleProcessor {
     }
   }
 }
-

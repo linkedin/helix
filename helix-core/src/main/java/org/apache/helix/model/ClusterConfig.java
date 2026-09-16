@@ -60,6 +60,7 @@ public class ClusterConfig extends HelixProperty {
     // rebalancing.
     STATE_TRANSITION_THROTTLE_CONFIGS,
     STATE_TRANSITION_CANCELLATION_ENABLED,
+    EVACUATE_ERROR_PARTITION_DROP_ENABLED,
     MISS_TOP_STATE_DURATION_THRESHOLD,
     TOP_STATE_HANDOFF_DURATION_THRESHOLD,
     PARTITION_RECOVERY_DURATION_THRESHOLD,
@@ -748,6 +749,29 @@ public class ClusterConfig extends HelixProperty {
   public boolean isStateTransitionCancelEnabled() {
     return _record
         .getBooleanField(ClusterConfigProperty.STATE_TRANSITION_CANCELLATION_ENABLED.name(), false);
+  }
+
+  /**
+   * Whether graceful evacuation may drop an ERROR replica outside the target assignment after
+   * the full replica target has converged. Disabled by default.
+   *
+   * @return true if dropping fully replaced ERROR replicas on evacuating instances is enabled
+   */
+  public boolean isEvacuateErrorPartitionDropEnabled() {
+    return _record.getBooleanField(
+        ClusterConfigProperty.EVACUATE_ERROR_PARTITION_DROP_ENABLED.name(), false);
+  }
+
+  /**
+   * Enable dropping fully replaced ERROR replicas during graceful evacuation. Enable this only
+   * when the application's target-state transitions guarantee the required data replication.
+   * ERROR replicas still in the target assignment or on non-evacuating instances are preserved.
+   *
+   * @param enabled true to enable this behavior, false to preserve the default ERROR handling
+   */
+  public void setEvacuateErrorPartitionDropEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.EVACUATE_ERROR_PARTITION_DROP_ENABLED.name(), enabled);
   }
 
   @Override

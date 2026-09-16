@@ -57,6 +57,21 @@ public class TestClusterConfig {
     Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 30000L);
   }
 
+  @Test
+  public void testEvacuateErrorPartitionDropDefaultAndRoundTrip() {
+    ClusterConfig config = new ClusterConfig("testId");
+    Assert.assertFalse(config.isEvacuateErrorPartitionDropEnabled());
+
+    config.setEvacuateErrorPartitionDropEnabled(true);
+    Assert.assertEquals(config.getRecord().getSimpleField(
+        ClusterConfig.ClusterConfigProperty.EVACUATE_ERROR_PARTITION_DROP_ENABLED.name()), "true");
+    ClusterConfig restored = new ClusterConfig(new ZNRecord(config.getRecord()));
+    Assert.assertTrue(restored.isEvacuateErrorPartitionDropEnabled());
+
+    restored.setEvacuateErrorPartitionDropEnabled(false);
+    Assert.assertFalse(restored.isEvacuateErrorPartitionDropEnabled());
+  }
+
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testControllerPipelineStallThresholdMsRejectsZero() {
     new ClusterConfig("testId").setControllerPipelineStallThresholdMs(0L);
