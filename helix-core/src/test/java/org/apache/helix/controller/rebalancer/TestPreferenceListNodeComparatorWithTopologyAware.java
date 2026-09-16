@@ -59,7 +59,6 @@ public class TestPreferenceListNodeComparatorWithTopologyAware extends ZkTestBas
             .build(participantName);
 
         _gSetupTool.getClusterManagementTool().addInstance(CLUSTER_NAME, instanceConfig);
-        _gSetupTool.getClusterManagementTool().setInstanceZoneId(CLUSTER_NAME, participantName, zoneId);
         // start dummy participants
         MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, participantName);
         participant.syncStart();

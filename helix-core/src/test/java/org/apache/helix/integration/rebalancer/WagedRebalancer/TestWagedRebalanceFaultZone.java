@@ -93,14 +93,18 @@ public class TestWagedRebalanceFaultZone extends ZkTestBase {
     _controller.syncStart();
 
     enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
-    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true);
+    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true, "/zone/instance", "zone");
   }
 
   protected void addInstanceConfig(String storageNodeName, int seqNo, int zoneCount, int tagCount) {
     _gSetupTool.addInstanceToCluster(CLUSTER_NAME, storageNodeName);
     String zone = "zone-" + seqNo % zoneCount;
     String tag = "tag-" + seqNo % tagCount;
-    _gSetupTool.getClusterManagementTool().setInstanceZoneId(CLUSTER_NAME, storageNodeName, zone);
+    InstanceConfig instanceConfig =
+        _gSetupTool.getClusterManagementTool().getInstanceConfig(CLUSTER_NAME, storageNodeName);
+    instanceConfig.setDomain("zone=" + zone + ",instance=" + storageNodeName);
+    _gSetupTool.getClusterManagementTool().setInstanceConfig(CLUSTER_NAME, storageNodeName,
+        instanceConfig);
     _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, storageNodeName, tag);
     _nodeToZoneMap.put(storageNodeName, zone);
     _nodeToTagMap.put(storageNodeName, tag);

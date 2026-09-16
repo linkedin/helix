@@ -417,7 +417,8 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
 
     // Adjust instance fault zone, so they have different fault zones.
     testCache.getAssignableInstanceConfigMap().values().stream()
-        .forEach(config -> config.setZoneId(config.getInstanceName()));
+        .forEach(config -> config.setDomain(
+            "zone=" + config.getInstanceName() + ",instance=" + config.getInstanceName()));
     clusterModel = ClusterModelProvider.generateClusterModelForBaseline(testCache,
         _resourceNames.stream()
             .collect(Collectors.toMap(resource -> resource, resource -> new Resource(resource))),
@@ -580,7 +581,8 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
 
     // Adjust instance fault zone, so they have different fault zones.
     testCache.getAssignableInstanceConfigMap().values().stream()
-        .forEach(config -> config.setZoneId(config.getInstanceName()));
+        .forEach(config -> config.setDomain(
+            "zone=" + config.getInstanceName() + ",instance=" + config.getInstanceName()));
 
     // 2. test with a pair of identical best possible assignment and baseline assignment
     // Mock a best possible assignment based on the current states.

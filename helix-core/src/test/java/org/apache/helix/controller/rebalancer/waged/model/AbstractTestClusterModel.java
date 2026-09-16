@@ -86,7 +86,7 @@ public abstract class AbstractTestClusterModel {
     testInstanceConfig.setInstanceCapacityMap(_capacityDataMap);
     testInstanceConfig.addTag(_testInstanceTags.get(0));
     testInstanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    testInstanceConfig.setZoneId(_testFaultZoneId);
+    testInstanceConfig.setDomain("zone=" + _testFaultZoneId + ",instance=" + instanceId);
     return testInstanceConfig;
   }
 
@@ -114,6 +114,8 @@ public abstract class AbstractTestClusterModel {
     testClusterConfig.setDefaultPartitionWeightMap(
         _capacityDataMap.keySet().stream().collect(Collectors.toMap(key -> key, key -> 0)));
     testClusterConfig.setTopologyAwareEnabled(true);
+    testClusterConfig.setTopology("/zone/instance");
+    testClusterConfig.setFaultZoneType("zone");
     when(testCache.getClusterConfig()).thenReturn(testClusterConfig);
     when(testCache.getAbnormalStateResolver(any()))
         .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);

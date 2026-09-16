@@ -48,7 +48,6 @@ public class InstanceConfigTrimmer extends HelixPropertyTrimmer<InstanceConfig> 
       .of(FieldType.SIMPLE_FIELD, ImmutableSet
               .of(InstanceConfigProperty.HELIX_HOST.name(),
                   InstanceConfigProperty.HELIX_PORT.name(),
-                  InstanceConfigProperty.HELIX_ZONE_ID.name(),
                   InstanceConfigProperty.INSTANCE_WEIGHT.name(),
                   InstanceConfigProperty.DOMAIN.name()),
           FieldType.LIST_FIELD, ImmutableSet
