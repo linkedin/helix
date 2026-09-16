@@ -22,6 +22,7 @@ package org.apache.helix.controller.stages;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.DoubleSummaryStatistics;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -421,20 +422,27 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
    * <p>
    * The ratio is {@code >= 1.0} when defined; it is reported as {@code 0.0} (undefined) when there
    * are no values or the mean is {@code 0} (all-zero usage), which also avoids a divide-by-zero.
-   * Unlike a max-to-min ratio it stays defined when a single instance is idle. An empty input yields
-   * an all-zero summary.
+   * Unlike a max-to-min ratio it stays defined when a single instance is idle.
+   * <p>
+   * Non-finite inputs ({@code NaN}/{@code Infinity} -- for example a node whose capacity for a key
+   * is {@code 0}, which makes its projected utilization {@code 0/0}) are dropped before aggregating,
+   * so a single misconfigured node cannot poison the summary or publish {@code NaN} on the gauges.
+   * An empty input, or one with no finite values, yields an all-zero summary.
    *
    * @param utilizations per-instance highest weighted utilization values ({@code >= 0.0})
-   * @return the {max, mean, min, maxMeanRatio} summary of the utilizations
+   * @return the {max, mean, min, maxMeanRatio} summary of the finite utilizations
    */
   static ClusterStatusMonitor.WeightedUsageStats computeUsageStats(
       Collection<Double> utilizations) {
-    if (utilizations == null || utilizations.isEmpty()) {
+    DoubleSummaryStatistics stats = (utilizations == null ? Collections.<Double>emptyList()
+        : utilizations).stream().filter(Objects::nonNull).mapToDouble(Double::doubleValue)
+        .filter(Double::isFinite).summaryStatistics();
+    if (stats.getCount() == 0) {
       return new ClusterStatusMonitor.WeightedUsageStats(0.0d, 0.0d, 0.0d, 0.0d);
     }
-    double max = utilizations.stream().mapToDouble(Double::doubleValue).max().orElse(0.0d);
-    double min = utilizations.stream().mapToDouble(Double::doubleValue).min().orElse(0.0d);
-    double mean = utilizations.stream().mapToDouble(Double::doubleValue).average().orElse(0.0d);
+    double max = stats.getMax();
+    double min = stats.getMin();
+    double mean = stats.getAverage();
     double maxMeanRatio = (mean > 0.0d) ? (max / mean) : 0.0d;
     return new ClusterStatusMonitor.WeightedUsageStats(max, mean, min, maxMeanRatio);
   }

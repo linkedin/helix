@@ -309,6 +309,32 @@ public class TestCurrentStateComputationStageForHandlingCapacity {
     Assert.assertEquals(allZero.getMean(), 0.0d, 0.0d);
     Assert.assertEquals(allZero.getMin(), 0.0d, 0.0d);
     Assert.assertEquals(allZero.getMaxMeanRatio(), 0.0d, 0.0d);
+
+    // Non-finite values (NaN from a 0/0 capacity key, or Infinity) are dropped so a single broken
+    // node cannot poison the summary. Here NaN is filtered, leaving max 0.8, min 0.2, mean 0.5.
+    ClusterStatusMonitor.WeightedUsageStats withNaN = CurrentStateComputationStage
+        .computeUsageStats(ImmutableList.of(0.2d, 0.8d, Double.NaN));
+    Assert.assertEquals(withNaN.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(withNaN.getMin(), 0.2d, 1e-9d);
+    Assert.assertEquals(withNaN.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(withNaN.getMaxMeanRatio(), 1.6d, 1e-9d);
+
+    // Infinity is likewise dropped, leaving the single finite value 0.5 (ratio 1.0).
+    ClusterStatusMonitor.WeightedUsageStats withInf = CurrentStateComputationStage
+        .computeUsageStats(ImmutableList.of(0.5d, Double.POSITIVE_INFINITY));
+    Assert.assertEquals(withInf.getMax(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMin(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // All-non-finite input yields an all-zero summary (no NaN published), same as empty.
+    ClusterStatusMonitor.WeightedUsageStats allNonFinite =
+        CurrentStateComputationStage.computeUsageStats(
+            ImmutableList.of(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY));
+    Assert.assertEquals(allNonFinite.getMax(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMean(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMaxMeanRatio(), 0.0d, 0.0d);
   }
 
   // -- static helpers
