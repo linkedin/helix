@@ -1327,4 +1327,57 @@ public class TestClusterStatusMonitor {
 
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
+
+  @Test
+  public void testWeightedUsageStatsGauges() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    // All eight distribution gauges start at 0.0 and are exposed over JMX as Double attributes.
+    String[] attributes = new String[] {
+        "WeightedPartitionUsageMaxGauge", "WeightedPartitionUsageMeanGauge",
+        "WeightedPartitionUsageMinGauge", "WeightedPartitionUsageMaxMeanRatioGauge",
+        "WeightedTopStateUsageMaxGauge", "WeightedTopStateUsageMeanGauge",
+        "WeightedTopStateUsageMinGauge", "WeightedTopStateUsageMaxMeanRatioGauge"};
+    for (String attribute : attributes) {
+      Object value = _server.getAttribute(clusterMonitorObjName, attribute);
+      Assert.assertTrue(value instanceof Double, attribute + " should be a Double");
+      Assert.assertEquals((double) value, 0.0d, 0.0d, attribute + " should start at 0.0");
+    }
+
+    // Partition and top-state distributions are updated together and read back independently.
+    monitor.updateWeightedCapacityUsageStats(
+        new ClusterStatusMonitor.WeightedUsageStats(0.9d, 0.6d, 0.3d, 1.5d),
+        new ClusterStatusMonitor.WeightedUsageStats(0.8d, 0.5d, 0.0d, 1.6d));
+
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMaxGauge(), 0.9d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMeanGauge(), 0.6d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMinGauge(), 0.3d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMaxMeanRatioGauge(), 1.5d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxGauge(), 0.8d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMeanGauge(), 0.5d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMinGauge(), 0.0d, 0.0d);
+    // Max-to-mean ratio stays defined even when an instance is idle (min == 0).
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxMeanRatioGauge(), 1.6d, 0.0d);
+
+    // The updated values also round-trip through the JMX attributes.
+    Assert.assertEquals((double) _server
+        .getAttribute(clusterMonitorObjName, "WeightedPartitionUsageMaxMeanRatioGauge"), 1.5d, 0.0d);
+    Assert.assertEquals((double) _server
+        .getAttribute(clusterMonitorObjName, "WeightedTopStateUsageMaxGauge"), 0.8d, 0.0d);
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName),
+        "Cluster monitor should be unregistered after reset");
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
 }

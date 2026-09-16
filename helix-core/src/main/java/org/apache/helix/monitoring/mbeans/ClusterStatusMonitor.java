@@ -151,6 +151,21 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // run from the current assignment; stays 0.0 when no WAGED capacity is configured.
   private volatile double _estimatedMaxClusterCapacityUsage = 0.0d;
 
+  // Cluster-level distribution (max / mean / min / max-to-mean ratio) of per-instance WAGED weighted
+  // capacity utilization, computed from the OBSERVED current-state assignment -- the live
+  // capacity-weighted load that WAGED's capacity-usage soft constraints balance (which converges to,
+  // but is not, WAGED's computed ideal/best-possible target). "Partition" counts all replicas;
+  // "topState" counts replicas currently in the top state only. Refreshed every pipeline run.
+  // Ratios are >= 1.0 when defined, or 0.0 (undefined) when there is no instance or usage (mean 0).
+  private volatile double _weightedPartitionUsageMax = 0.0d;
+  private volatile double _weightedPartitionUsageMean = 0.0d;
+  private volatile double _weightedPartitionUsageMin = 0.0d;
+  private volatile double _weightedPartitionUsageMaxMeanRatio = 0.0d;
+  private volatile double _weightedTopStateUsageMax = 0.0d;
+  private volatile double _weightedTopStateUsageMean = 0.0d;
+  private volatile double _weightedTopStateUsageMin = 0.0d;
+  private volatile double _weightedTopStateUsageMaxMeanRatio = 0.0d;
+
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
   private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
@@ -680,6 +695,63 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    */
   public void updateClusterCapacityUsage(double estimatedMaxClusterCapacityUsage) {
     _estimatedMaxClusterCapacityUsage = estimatedMaxClusterCapacityUsage;
+  }
+
+  /**
+   * Immutable holder for the cluster-level distribution summary of per-instance weighted capacity
+   * utilization: the maximum, arithmetic mean, minimum, and max-to-mean ratio across live instances.
+   * The ratio is {@code >= 1.0} when defined, or {@code 0.0} when undefined (no instances, or a
+   * mean of {@code 0}).
+   */
+  public static final class WeightedUsageStats {
+    private final double _max;
+    private final double _mean;
+    private final double _min;
+    private final double _maxMeanRatio;
+
+    public WeightedUsageStats(double max, double mean, double min, double maxMeanRatio) {
+      _max = max;
+      _mean = mean;
+      _min = min;
+      _maxMeanRatio = maxMeanRatio;
+    }
+
+    public double getMax() {
+      return _max;
+    }
+
+    public double getMean() {
+      return _mean;
+    }
+
+    public double getMin() {
+      return _min;
+    }
+
+    public double getMaxMeanRatio() {
+      return _maxMeanRatio;
+    }
+  }
+
+  /**
+   * Updates the cluster-level WAGED weighted capacity-usage distribution gauges for both the
+   * all-replica ("partition") and top-state dimensions. See the {@code getWeightedPartitionUsage*}
+   * and {@code getWeightedTopStateUsage*} methods on {@link ClusterStatusMonitorMBean} for the value
+   * semantics and range.
+   *
+   * @param partitionStats distribution of per-instance general (all-replica) weighted utilization
+   * @param topStateStats  distribution of per-instance top-state-only weighted utilization
+   */
+  public void updateWeightedCapacityUsageStats(WeightedUsageStats partitionStats,
+      WeightedUsageStats topStateStats) {
+    _weightedPartitionUsageMax = partitionStats.getMax();
+    _weightedPartitionUsageMean = partitionStats.getMean();
+    _weightedPartitionUsageMin = partitionStats.getMin();
+    _weightedPartitionUsageMaxMeanRatio = partitionStats.getMaxMeanRatio();
+    _weightedTopStateUsageMax = topStateStats.getMax();
+    _weightedTopStateUsageMean = topStateStats.getMean();
+    _weightedTopStateUsageMin = topStateStats.getMin();
+    _weightedTopStateUsageMaxMeanRatio = topStateStats.getMaxMeanRatio();
   }
 
   /**
@@ -1807,6 +1879,46 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public double getEstimatedMaxClusterCapacityUsageGauge() {
     return _estimatedMaxClusterCapacityUsage;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMaxGauge() {
+    return _weightedPartitionUsageMax;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMeanGauge() {
+    return _weightedPartitionUsageMean;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMinGauge() {
+    return _weightedPartitionUsageMin;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMaxMeanRatioGauge() {
+    return _weightedPartitionUsageMaxMeanRatio;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMaxGauge() {
+    return _weightedTopStateUsageMax;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMeanGauge() {
+    return _weightedTopStateUsageMean;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMinGauge() {
+    return _weightedTopStateUsageMin;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMaxMeanRatioGauge() {
+    return _weightedTopStateUsageMaxMeanRatio;
   }
 
   @Override
