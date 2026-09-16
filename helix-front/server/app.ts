@@ -50,7 +50,7 @@ if (httpsProxyAgent && isProd) {
 const app = express();
 const server = http.createServer(app);
 
-dotenv.load({ path: '.env' });
+dotenv.config({ path: '.env' });
 app.set('port', process.env.PORT || 4200);
 
 const secretToken = process.env.SECRET_TOKEN;

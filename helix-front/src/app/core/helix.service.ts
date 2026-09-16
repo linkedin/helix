@@ -2,7 +2,7 @@ import { throwError as observableThrowError, Observable } from 'rxjs';
 
 import { catchError } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
-import { HttpHeaders, HttpClient, HttpResponse } from '@angular/common/http';
+import { HttpHeaders, HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Router } from '@angular/router';
 
 import { Settings } from './settings';
@@ -29,10 +29,11 @@ export class HelixService {
       .pipe(catchError(this.errorHandler));
   }
 
-  protected post(path: string, data: any): Observable<any> {
+  protected post(path: string, data: any, params?: HttpParams): Observable<any> {
     return this.http
       .post(`${Settings.helixAPI}${this.getHelixKey()}${path}`, data, {
         headers: this.getHeaders(),
+        params,
       })
       .pipe(catchError(this.errorHandler));
   }

@@ -51,7 +51,8 @@ public class TestWorkflowMonitor {
         null);
     HashSet<String> expectedAttr = new HashSet<>(Arrays
         .asList("SuccessfulWorkflowCount", "FailedWorkflowCount", "FailedWorkflowGauge",
-            "ExistingWorkflowGauge", "QueuedWorkflowGauge", "RunningWorkflowGauge"));
+            "StoppedWorkflowGauge", "ExistingWorkflowGauge", "QueuedWorkflowGauge",
+            "RunningWorkflowGauge"));
     for (ObjectInstance i : existingInstances) {
       for (MBeanAttributeInfo info : beanServer.getMBeanInfo(i.getObjectName()).getAttributes()) {
         expectedAttr.remove(info.getName());
@@ -63,6 +64,7 @@ public class TestWorkflowMonitor {
     int failedWfCnt = 10;
     int queuedWfCnt = 10;
     int runningWfCnt = 10;
+    int stoppedWfCnt = 10;
 
     for (int i = 0; i < successfulWfCnt; i++) {
       wm.updateWorkflowCounters(TaskState.COMPLETED);
@@ -82,12 +84,17 @@ public class TestWorkflowMonitor {
       wm.updateWorkflowGauges(TaskState.IN_PROGRESS);
     }
 
+    for (int i = 0; i < stoppedWfCnt; i++) {
+      wm.updateWorkflowGauges(TaskState.STOPPED);
+    }
+
     // Test gauges
     Assert.assertEquals(wm.getExistingWorkflowGauge(),
-        successfulWfCnt + failedWfCnt + queuedWfCnt + runningWfCnt);
+        successfulWfCnt + failedWfCnt + queuedWfCnt + runningWfCnt + stoppedWfCnt);
     Assert.assertEquals(wm.getFailedWorkflowGauge(), failedWfCnt);
     Assert.assertEquals(wm.getQueuedWorkflowGauge(), queuedWfCnt);
     Assert.assertEquals(wm.getRunningWorkflowGauge(), runningWfCnt);
+    Assert.assertEquals(wm.getStoppedWorkflowGauge(), stoppedWfCnt);
 
     // Test counts
     Assert.assertEquals(wm.getFailedWorkflowCount(), failedWfCnt);
@@ -113,12 +120,17 @@ public class TestWorkflowMonitor {
       wm.updateWorkflowGauges(TaskState.IN_PROGRESS);
     }
 
+    for (int i = 0; i < stoppedWfCnt; i++) {
+      wm.updateWorkflowGauges(TaskState.STOPPED);
+    }
+
     // After reset, counters should be accumulative, but gauges should be reset
     Assert.assertEquals(wm.getExistingWorkflowGauge(),
-        successfulWfCnt + failedWfCnt + queuedWfCnt + runningWfCnt);
+        successfulWfCnt + failedWfCnt + queuedWfCnt + runningWfCnt + stoppedWfCnt);
     Assert.assertEquals(wm.getFailedWorkflowGauge(), failedWfCnt);
     Assert.assertEquals(wm.getQueuedWorkflowGauge(), queuedWfCnt);
     Assert.assertEquals(wm.getRunningWorkflowGauge(), runningWfCnt);
+    Assert.assertEquals(wm.getStoppedWorkflowGauge(), stoppedWfCnt);
     Assert.assertEquals(wm.getFailedWorkflowCount(), failedWfCnt * 2);
     Assert.assertEquals(wm.getSuccessfulWorkflowCount(), successfulWfCnt * 2);
 

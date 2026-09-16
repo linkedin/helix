@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.net.ssl.SSLContext;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.helix.msdcommon.callback.RoutingDataListener;
@@ -79,7 +80,23 @@ public class ZkMetadataStoreDirectory implements MetadataStoreDirectory, Routing
 
   public static ZkMetadataStoreDirectory getInstance(String namespace, String zkAddress)
       throws InvalidRoutingDataException {
-    getInstance().init(namespace, zkAddress);
+    getInstance().init(namespace, zkAddress, null);
+    return _zkMetadataStoreDirectoryInstance;
+  }
+
+  /**
+   * Gets the singleton instance and initializes it with the given namespace, ZK address, and SSL context.
+   * When sslContext is provided, HTTPS will be used for forwarding requests to the leader.
+   *
+   * @param namespace the namespace
+   * @param zkAddress the ZooKeeper address
+   * @param sslContext the SSL context for HTTPS communication, or null for HTTP
+   * @return the singleton instance
+   * @throws InvalidRoutingDataException if routing data is invalid
+   */
+  public static ZkMetadataStoreDirectory getInstance(String namespace, String zkAddress,
+      SSLContext sslContext) throws InvalidRoutingDataException {
+    getInstance().init(namespace, zkAddress, sslContext);
     return _zkMetadataStoreDirectoryInstance;
   }
 
@@ -95,7 +112,8 @@ public class ZkMetadataStoreDirectory implements MetadataStoreDirectory, Routing
     _routingDataMap = new ConcurrentHashMap<>();
   }
 
-  private void init(String namespace, String zkAddress) throws InvalidRoutingDataException {
+  private void init(String namespace, String zkAddress, SSLContext sslContext)
+      throws InvalidRoutingDataException {
     if (!_routingZkAddressMap.containsKey(namespace)) {
       synchronized (_routingZkAddressMap) {
         if (!_routingZkAddressMap.containsKey(namespace)) {
@@ -115,7 +133,8 @@ public class ZkMetadataStoreDirectory implements MetadataStoreDirectory, Routing
             _routingZkAddressMap.put(namespace, zkAddress);
             _routingDataReaderMap
                 .put(namespace, new ZkRoutingDataReader(namespace, zkAddress, this));
-            _routingDataWriterMap.put(namespace, new ZkRoutingDataWriter(namespace, zkAddress));
+            _routingDataWriterMap.put(namespace,
+                new ZkRoutingDataWriter(namespace, zkAddress, sslContext));
           } catch (IllegalArgumentException | IllegalStateException e) {
             LOG.error("ZkMetadataStoreDirectory: initializing ZkRoutingDataReader/Writer failed!",
                 e);

@@ -26,11 +26,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
+import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.ResourceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,12 +62,22 @@ public class ClusterContext {
   private final Map<String, ResourceAssignment> _baselineAssignment;
   // <ResourceName, ResourceAssignment contains the best possible assignment>
   private final Map<String, ResourceAssignment> _bestPossibleAssignment;
+  // Memoized per-(resource, partition) instance->state views derived from the immutable
+  // _baselineAssignment and _bestPossibleAssignment fields. These lookups are invariant for the
+  // whole rebalance run, so caching them avoids recomputing the same map (and allocating a throwaway
+  // Partition key) for every candidate node while scoring a replica. Keyed: resource -> partition -> map.
+  private final Map<String, Map<String, Map<String, String>>> _baselineAssignmentStateMapCache =
+      new ConcurrentHashMap<>();
+  private final Map<String, Map<String, Map<String, String>>> _bestPossibleAssignmentStateMapCache =
+      new ConcurrentHashMap<>();
   // Estimate remaining capacity after assignment. Used to compute score when sorting replicas.
-  private final Map<String, Integer> _estimateUtilizationMap;
+  private final Map<String, Long> _estimateUtilizationMap;
   // Cluster total capacity. Used to compute score when sorting replicas.
-  private final Map<String, Integer> _clusterCapacityMap;
+  private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
   private final String _clusterName;
+  // Reference to the data provider for accessing resource configurations
+  private final ResourceControllerDataProvider _dataProvider;
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -71,20 +85,27 @@ public class ClusterContext {
    */
   ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
                  Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment) {
-    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, null);
+    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, null, null);
   }
 
   ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
                  Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment,
                  ClusterConfig clusterConfig) {
+    this(replicaSet, nodeSet, baselineAssignment, bestPossibleAssignment, clusterConfig, null);
+  }
+
+  ClusterContext(Set<AssignableReplica> replicaSet, Set<AssignableNode> nodeSet,
+                 Map<String, ResourceAssignment> baselineAssignment, Map<String, ResourceAssignment> bestPossibleAssignment,
+                 ClusterConfig clusterConfig, ResourceControllerDataProvider dataProvider) {
     int instanceCount = nodeSet.size();
     int totalReplicas = 0;
     int totalTopStateReplicas = 0;
-    Map<String, Integer> totalUsage = new HashMap<>();
-    Map<String, Integer> totalTopStateUsage = new HashMap<>();
-    Map<String, Integer> totalCapacity = new HashMap<>();
+    Map<String, Long> totalUsage = new HashMap<>();
+    Map<String, Long> totalTopStateUsage = new HashMap<>();
+    Map<String, Long> totalCapacity = new HashMap<>();
     _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
+    _dataProvider = dataProvider;
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
         .collect(Collectors.groupingBy(AssignableReplica::getResourceName))
@@ -99,14 +120,14 @@ public class ClusterContext {
         if (replica.isReplicaTopState()) {
           totalTopStateReplicas += 1;
           replica.getCapacity().forEach(
-              (key, value) -> totalTopStateUsage.compute(key, (k, v) -> (v == null) ? value : (v + value)));
+              (key, value) -> totalTopStateUsage.compute(key, (k, v) -> (v == null) ? (long) value : (v + value)));
         }
         replica.getCapacity().forEach(
-            (key, value) -> totalUsage.compute(key, (k, v) -> (v == null) ? value : (v + value)));
+            (key, value) -> totalUsage.compute(key, (k, v) -> (v == null) ? (long) value : (v + value)));
       }
     }
     nodeSet.forEach(node -> node.getMaxCapacity().forEach(
-        (key, value) -> totalCapacity.compute(key, (k, v) -> (v == null) ? value : (v + value))));
+        (key, value) -> totalCapacity.compute(key, (k, v) -> (v == null) ? (long) value : (v + value))));
 
     // TODO: these variables correspond to one constraint each, and may become unnecessary if the
     // constraints are not used. A better design is to make them pluggable.
@@ -151,6 +172,47 @@ public class ClusterContext {
         : _bestPossibleAssignment;
   }
 
+  /**
+   * Returns the (instanceName -> state) map for the given partition from the baseline assignment.
+   * The result is memoized for the lifetime of this {@link ClusterContext} because the baseline
+   * assignment does not change during a rebalance run. This lets partition-movement soft
+   * constraints avoid recomputing the same lookup once per candidate node.
+   * @return an unmodifiable instance-to-state map, or {@link Collections#emptyMap()} if the resource
+   *         or partition is absent from the baseline assignment.
+   */
+  public Map<String, String> getBaselineAssignmentStateMap(String resourceName,
+      String partitionName) {
+    return getCachedAssignmentStateMap(_baselineAssignmentStateMapCache, getBaselineAssignment(),
+        resourceName, partitionName);
+  }
+
+  /**
+   * Returns the (instanceName -> state) map for the given partition from the best possible
+   * assignment. The result is memoized for the lifetime of this {@link ClusterContext} because the
+   * best possible assignment does not change during a rebalance run. This lets partition-movement
+   * soft constraints avoid recomputing the same lookup once per candidate node.
+   * @return an unmodifiable instance-to-state map, or {@link Collections#emptyMap()} if the resource
+   *         or partition is absent from the best possible assignment.
+   */
+  public Map<String, String> getBestPossibleAssignmentStateMap(String resourceName,
+      String partitionName) {
+    return getCachedAssignmentStateMap(_bestPossibleAssignmentStateMapCache,
+        getBestPossibleAssignment(), resourceName, partitionName);
+  }
+
+  private static Map<String, String> getCachedAssignmentStateMap(
+      Map<String, Map<String, Map<String, String>>> cache,
+      Map<String, ResourceAssignment> assignment, String resourceName, String partitionName) {
+    ResourceAssignment resourceAssignment = assignment.get(resourceName);
+    if (resourceAssignment == null) {
+      return Collections.emptyMap();
+    }
+    return Collections.unmodifiableMap(
+        cache.computeIfAbsent(resourceName, key -> new ConcurrentHashMap<>())
+            .computeIfAbsent(partitionName,
+                key -> resourceAssignment.getReplicaMap(new Partition(key))));
+  }
+
   public Map<String, Map<String, Set<String>>> getAssignmentForFaultZoneMap() {
     return _assignmentForFaultZoneMap;
   }
@@ -175,11 +237,11 @@ public class ClusterContext {
     return _estimatedTopStateMaxUtilization;
   }
 
-  public Map<String, Integer> getEstimateUtilizationMap() {
+  public Map<String, Long> getEstimateUtilizationMap() {
     return _estimateUtilizationMap;
   }
 
-  public Map<String, Integer> getClusterCapacityMap() {
+  public Map<String, Long> getClusterCapacityMap() {
     return _clusterCapacityMap;
   }
 
@@ -238,8 +300,8 @@ public class ClusterContext {
    * @return The max utilization number from the specified capacity categories.
    */
 
-  private static float estimateMaxUtilization(Map<String, Integer> totalCapacity,
-                                              Map<String, Integer> totalUsage,
+  private static float estimateMaxUtilization(Map<String, Long> totalCapacity,
+                                              Map<String, Long> totalUsage,
                                               List<String> preferredScoringKeys) {
     float estimatedMaxUsage = 0;
     Set<String> capacityKeySet = totalCapacity.keySet();
@@ -247,8 +309,8 @@ public class ClusterContext {
       capacityKeySet = preferredScoringKeys.stream().collect(Collectors.toSet());
     }
     for (String capacityKey : capacityKeySet) {
-      int maxCapacity = totalCapacity.get(capacityKey);
-      int usage = totalUsage.getOrDefault(capacityKey, 0);
+      long maxCapacity = totalCapacity.get(capacityKey);
+      long usage = totalUsage.getOrDefault(capacityKey, 0L);
       float utilization = (maxCapacity == 0) ? 1 : (float) usage / maxCapacity;
       estimatedMaxUsage = Math.max(estimatedMaxUsage, utilization);
     }
@@ -256,15 +318,40 @@ public class ClusterContext {
     return estimatedMaxUsage;
   }
 
-  private static Map<String, Integer> estimateUtilization(Map<String, Integer> totalCapacity,
-      Map<String, Integer> totalUsage) {
-    Map<String, Integer> estimateUtilization = new HashMap<>();
+  private static Map<String, Long> estimateUtilization(Map<String, Long> totalCapacity,
+      Map<String, Long> totalUsage) {
+    Map<String, Long> estimateUtilization = new HashMap<>();
     for (String capacityKey : totalCapacity.keySet()) {
-      int maxCapacity = totalCapacity.get(capacityKey);
-      int usage = totalUsage.getOrDefault(capacityKey, 0);
+      long maxCapacity = totalCapacity.get(capacityKey);
+      long usage = totalUsage.getOrDefault(capacityKey, 0L);
       estimateUtilization.put(capacityKey, maxCapacity - usage);
     }
 
     return Collections.unmodifiableMap(estimateUtilization);
+  }
+
+  /**
+   * Helper method to determine if relaxed disabled partition constraint is enabled.
+   * Checks resource-level configuration first, then falls back to cluster-level configuration.
+   *
+   * @param resourceName the name of the resource
+   * @return true if relaxed disabled partition constraint is enabled for the resource
+   */
+  public boolean isRelaxedDisabledPartitionConstraintEnabled(String resourceName) {
+    if (_dataProvider == null) {
+      return false; // Default to false if no data provider available
+    }
+
+    // Check resource-level configuration first
+    ResourceConfig resourceConfig = _dataProvider.getResourceConfig(resourceName);
+    if (resourceConfig != null) {
+      Boolean resourceLevel = resourceConfig.isRelaxedDisabledPartitionConstraintEnabled();
+      if (resourceLevel != null) {
+        return resourceLevel; // Resource-level override takes precedence
+      }
+    }
+
+    // Fall back to cluster-level configuration
+    return _dataProvider.getClusterConfig().isRelaxedDisabledPartitionConstraintEnabled();
   }
 }

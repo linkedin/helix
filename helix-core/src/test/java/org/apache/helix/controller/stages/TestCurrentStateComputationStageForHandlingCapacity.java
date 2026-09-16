@@ -39,6 +39,7 @@ import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
@@ -223,6 +224,37 @@ public class TestCurrentStateComputationStageForHandlingCapacity {
         dataProvider, _resourceMap, new ClusterEvent(ClusterEventType.MessageChange)));
     Assert.assertFalse(CurrentStateComputationStage.skipCapacityCalculation(
         dataProvider, _resourceMap, new ClusterEvent(ClusterEventType.PeriodicalRebalance)));
+  }
+
+  @Test
+  public void testComputeClusterCapacityUsage() {
+    // No capacity configured: ClusterContext reports a 1.0 "treat as full" sentinel, but the gauge
+    // must report 0.0 so it does not raise a false near-capacity alert.
+    ClusterContext noCapacityContext = Mockito.mock(ClusterContext.class);
+    Mockito.when(noCapacityContext.getEstimateUtilizationMap()).thenReturn(ImmutableMap.of());
+    Mockito.when(noCapacityContext.getEstimatedMaxUtilization()).thenReturn(1.0f);
+    Assert.assertEquals(
+        CurrentStateComputationStage.computeClusterCapacityUsage(noCapacityContext), 0.0d, 0.0d);
+
+    // A null context (no model built) is treated the same way: no signal.
+    Assert.assertEquals(
+        CurrentStateComputationStage.computeClusterCapacityUsage(null), 0.0d, 0.0d);
+
+    // Capacity configured: the aggregate estimated max utilization is surfaced as-is.
+    ClusterContext nearCapacityContext = Mockito.mock(ClusterContext.class);
+    Mockito.when(nearCapacityContext.getEstimateUtilizationMap())
+        .thenReturn(ImmutableMap.of("CU", 15L));
+    Mockito.when(nearCapacityContext.getEstimatedMaxUtilization()).thenReturn(0.85f);
+    Assert.assertEquals(
+        CurrentStateComputationStage.computeClusterCapacityUsage(nearCapacityContext), 0.85d, 1e-6d);
+
+    // Over-subscription (> 1.0) is passed through unclamped.
+    ClusterContext overSubscribedContext = Mockito.mock(ClusterContext.class);
+    Mockito.when(overSubscribedContext.getEstimateUtilizationMap())
+        .thenReturn(ImmutableMap.of("CU", -5L));
+    Mockito.when(overSubscribedContext.getEstimatedMaxUtilization()).thenReturn(1.2f);
+    Assert.assertEquals(
+        CurrentStateComputationStage.computeClusterCapacityUsage(overSubscribedContext), 1.2d, 1e-6d);
   }
 
   // -- static helpers

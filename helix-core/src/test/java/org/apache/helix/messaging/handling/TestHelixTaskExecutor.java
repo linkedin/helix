@@ -26,15 +26,20 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 
 import com.google.common.collect.ImmutableList;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
@@ -227,6 +232,79 @@ public class TestHelixTaskExecutor {
       _handlersCreated = 0;
       _processedMsgIds.clear();
       _processingMsgIds.clear();
+      _timedOutMsgIds.clear();
+    }
+  }
+
+  private static class ControlledHandlerFactory implements MultiTypeMessageHandlerFactory {
+    final ConcurrentHashMap<String, ControlledHandler> _handlers = new ConcurrentHashMap<>();
+    final AtomicInteger _handlersCreated = new AtomicInteger();
+    final Set<String> _processedMsgIds = ConcurrentHashMap.newKeySet();
+    final Set<String> _timedOutMsgIds = ConcurrentHashMap.newKeySet();
+
+    class ControlledHandler extends MessageHandler {
+      final LinkedBlockingQueue<MessageTask> _scheduledTasks = new LinkedBlockingQueue<>();
+      final Semaphore _started = new Semaphore(0);
+      final CountDownLatch _complete = new CountDownLatch(1);
+      final AtomicInteger _attemptCount = new AtomicInteger();
+      final AtomicInteger _cancelCount = new AtomicInteger();
+      final ConcurrentLinkedQueue<ErrorCode> _errors = new ConcurrentLinkedQueue<>();
+
+      ControlledHandler(Message message, NotificationContext context) {
+        super(message, context);
+      }
+
+      @Override
+      public HelixTaskResult handleMessage() throws InterruptedException {
+        _attemptCount.incrementAndGet();
+        _started.release();
+        try {
+          _complete.await();
+        } catch (InterruptedException e) {
+          _cancelCount.incrementAndGet();
+          _timedOutMsgIds.add(_message.getMsgId());
+          throw e;
+        }
+        _processedMsgIds.add(_message.getMsgId());
+        HelixTaskResult result = new HelixTaskResult();
+        result.setSuccess(true);
+        return result;
+      }
+
+      MessageTask awaitTask() throws InterruptedException {
+        MessageTask task =
+            _scheduledTasks.poll(TestHelper.WAIT_DURATION, TimeUnit.MILLISECONDS);
+        Assert.assertNotNull(task, "Task was not scheduled for " + _message.getMsgId());
+        Assert.assertTrue(_started.tryAcquire(TestHelper.WAIT_DURATION, TimeUnit.MILLISECONDS),
+            "Handler did not start for " + _message.getMsgId());
+        return task;
+      }
+
+      @Override
+      public void onError(Exception e, ErrorCode code, ErrorType type) {
+        // A timed-out attempt's onError can overlap the next attempt on the same handler.
+        _errors.add(code);
+      }
+    }
+
+    @Override
+    public MessageHandler createHandler(Message message, NotificationContext context) {
+      ControlledHandler handler = new ControlledHandler(message, context);
+      _handlersCreated.incrementAndGet();
+      _handlers.put(message.getMsgId(), handler);
+      return handler;
+    }
+
+    @Override
+    public List<String> getMessageTypes() {
+      return Collections.singletonList("ControlledCancellable");
+    }
+
+    @Override
+    public void reset() {
+      _handlers.clear();
+      _handlersCreated.set(0);
+      _processedMsgIds.clear();
       _timedOutMsgIds.clear();
     }
   }
@@ -852,81 +930,144 @@ public class TestHelixTaskExecutor {
     Assert.assertTrue(factoryMulti._resetDone, "TestMessageHandlerFactory3 should be reset");
   }
 
+  @Test
+  public void testResetWhileTasksFinish() {
+    HelixTaskExecutor executor = new HelixTaskExecutor();
+    try {
+      NotificationContext context = new NotificationContext(new MockClusterManager());
+      context.setChangeType(HelixConstants.ChangeType.MESSAGE);
+      executor.onMessage("someInstance", Collections.emptyList(), context);
+
+      Message message = new Message("Test", "task");
+      MessageTask task = mock(MessageTask.class);
+      AtomicInteger descriptions = new AtomicInteger();
+      when(task.getMessage()).thenAnswer(invocation -> {
+        descriptions.incrementAndGet();
+        // Complete tasks after reset's iterator has selected an entry to report.
+        executor._taskMap.clear();
+        return message;
+      });
+      executor._taskMap.put("task-1", new MessageTaskInfo(task, null, null));
+      executor._taskMap.put("task-2", new MessageTaskInfo(task, null, null));
+
+      executor.reset();
+
+      Assert.assertTrue(descriptions.get() > 0, "Reset must inspect the pending tasks");
+      Assert.assertTrue(executor._taskMap.isEmpty());
+    } finally {
+      executor._taskMap.clear();
+      executor.shutdown();
+    }
+  }
+
   @Test()
   public void testNoRetry() throws InterruptedException {
-    System.out.println("START " + TestHelper.getTestMethodName());
-    HelixTaskExecutor executor = new HelixTaskExecutor();
-    HelixManager manager = new MockClusterManager();
-
-    CancellableHandlerFactory factory = new CancellableHandlerFactory();
-    for (String type : factory.getMessageTypes()) {
-      executor.registerMessageHandlerFactory(type, factory);
-    }
-    NotificationContext changeContext = new NotificationContext(manager);
-
-    List<Message> msgList = new ArrayList<Message>();
-    int nMsgs2 = 4;
-    // Test the case in which retry = 0
-    for (int i = 0; i < nMsgs2; i++) {
-      Message msg = new Message(factory.getMessageTypes().get(0), UUID.randomUUID().toString());
-      msg.setTgtSessionId("*");
-      msg.setTgtName("Localhost_1123");
-      msg.setSrcName("127.101.1.23_2234");
-      msg.setExecutionTimeout((i + 1) * 600);
-      msgList.add(msg);
-    }
-    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
-    executor.onMessage("someInstance", msgList, changeContext);
-
-    Thread.sleep(4000);
-
-    AssertJUnit.assertTrue(factory._handlersCreated == nMsgs2);
-    AssertJUnit.assertEquals(factory._timedOutMsgIds.size(), 2);
-    // AssertJUnit.assertFalse(msgList.get(0).getRecord().getSimpleFields().containsKey("TimeOut"));
-    for (int i = 0; i < nMsgs2 - 2; i++) {
-      if (factory.getMessageTypes().contains(msgList.get(i).getMsgType())) {
-        AssertJUnit.assertTrue(msgList.get(i).getRecord().getSimpleFields()
-            .containsKey("Cancelcount"));
-        AssertJUnit.assertTrue(factory._timedOutMsgIds.containsKey(msgList.get(i).getId()));
-      }
-    }
-    System.out.println("END " + TestHelper.getTestMethodName());
+    verifyTimeoutRetries(0);
   }
 
   @Test()
   public void testRetryOnce() throws InterruptedException {
-    System.out.println("START " + TestHelper.getTestMethodName());
-    HelixTaskExecutor executor = new HelixTaskExecutor();
-    HelixManager manager = new MockClusterManager();
+    verifyTimeoutRetries(1);
+  }
 
-    CancellableHandlerFactory factory = new CancellableHandlerFactory();
-    for (String type : factory.getMessageTypes()) {
-      executor.registerMessageHandlerFactory(type, factory);
+  private void verifyTimeoutRetries(int retryCount) throws InterruptedException {
+    ControlledHandlerFactory factory = new ControlledHandlerFactory();
+    HelixTaskExecutor executor = new HelixTaskExecutor() {
+      @Override
+      public boolean scheduleTask(MessageTask task) {
+        boolean scheduled = super.scheduleTask(task);
+        if (scheduled) {
+          // Handler entry alone does not guarantee scheduleTask has populated _taskMap.
+          factory._handlers.get(task.getTaskId())._scheduledTasks.add(task);
+        }
+        return scheduled;
+      }
+    };
+    try {
+      // MockBaseDataAccessor uses an unsynchronized HashMap for concurrent status/cleanup writes.
+      HelixManager manager = spy(new MockClusterManager());
+      HelixDataAccessor accessor = mock(HelixDataAccessor.class);
+      PropertyKey.Builder keyBuilder = new PropertyKey.Builder(manager.getClusterName());
+      when(manager.getHelixDataAccessor()).thenReturn(accessor);
+      when(accessor.keyBuilder()).thenReturn(keyBuilder);
+      when(accessor.getChildNames(any(PropertyKey.class))).thenReturn(Collections.emptyList());
+      when(accessor.updateChildren(anyList(), anyList(), anyInt()))
+          .thenReturn(new boolean[] {true, true, true, true});
+      when(accessor.removeProperty(any(PropertyKey.class))).thenReturn(true);
+
+      String messageType = factory.getMessageTypes().get(0);
+      executor.registerMessageHandlerFactory(messageType, factory, 4);
+      NotificationContext changeContext = new NotificationContext(manager);
+      changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
+      List<Message> messages = new ArrayList<>();
+      for (int i = 0; i < 4; i++) {
+        Message message = new Message(messageType, UUID.randomUUID().toString());
+        // Retry startup can overlap the preceding task's final status logging.
+        message.getRecord().setSimpleFields(
+            new ConcurrentHashMap<>(message.getRecord().getSimpleFields()));
+        message.setTgtSessionId("*");
+        message.setTgtName("Localhost_1123");
+        message.setSrcName("127.101.1.23_2234");
+        message.setRetryCount(retryCount);
+        // Invoke the real timeout callback ourselves, without a competing wall-clock timer.
+        message.setExecutionTimeout(0);
+        messages.add(message);
+      }
+      executor.onMessage("someInstance", messages, changeContext);
+      Assert.assertEquals(factory._handlers.size(), messages.size());
+
+      List<MessageTask> initialTasks = new ArrayList<>();
+      for (Message message : messages) {
+        initialTasks.add(factory._handlers.get(message.getMsgId()).awaitTask());
+      }
+      for (int i = 0; i < 2; i++) {
+        ControlledHandlerFactory.ControlledHandler handler =
+            factory._handlers.get(messages.get(i).getMsgId());
+        new MessageTimeoutTask(executor, initialTasks.get(i)).run();
+        if (retryCount > 0) {
+          MessageTask retry = handler.awaitTask();
+          Assert.assertNotSame(retry, initialTasks.get(i), "Retry must create a new task");
+          Assert.assertEquals(retry.getMessage().getRetryCount(), 0);
+          if (i == 0) {
+            new MessageTimeoutTask(executor, retry).run();
+          } else {
+            handler._complete.countDown();
+          }
+        }
+      }
+      for (int i = 2; i < messages.size(); i++) {
+        factory._handlers.get(messages.get(i).getMsgId())._complete.countDown();
+      }
+
+      // A cancelled Future is done before HelixTask finishes cleanup and onError.
+      ExecutorService pool = executor._executorMap.get(messageType);
+      pool.shutdown();
+      Assert.assertTrue(pool.awaitTermination(TestHelper.WAIT_DURATION, TimeUnit.MILLISECONDS),
+          "Message tasks did not finish");
+
+      Assert.assertEquals(factory._handlersCreated.get(), messages.size());
+      Assert.assertEquals(factory._processedMsgIds.size(), 2 + retryCount);
+      Assert.assertEquals(factory._timedOutMsgIds.size(), 2);
+      for (int i = 0; i < messages.size(); i++) {
+        String messageId = messages.get(i).getMsgId();
+        ControlledHandlerFactory.ControlledHandler handler = factory._handlers.get(messageId);
+        int cancellations = i == 0 ? 1 + retryCount : i == 1 ? 1 : 0;
+        Assert.assertEquals(handler._cancelCount.get(), cancellations, messageId);
+        Assert.assertEquals(handler._attemptCount.get(), i < 2 ? 1 + retryCount : 1, messageId);
+        Assert.assertEquals(new ArrayList<>(handler._errors),
+            Collections.nCopies(cancellations, MessageHandler.ErrorCode.TIMEOUT), messageId);
+        Assert.assertEquals(factory._timedOutMsgIds.contains(messageId), i < 2, messageId);
+        Assert.assertEquals(factory._processedMsgIds.contains(messageId),
+            i >= 2 || (i == 1 && retryCount > 0), messageId);
+        Assert.assertTrue(handler._scheduledTasks.isEmpty(), "Unexpected retry for " + messageId);
+      }
+      Assert.assertTrue(executor._taskMap.isEmpty(), "All tasks must be cleaned up");
+      Assert.assertTrue(executor._messageTaskMap.isEmpty(), "All message tasks must be cleaned up");
+      Assert.assertTrue(executor._knownMessageIds.isEmpty(), "All messages must be cleaned up");
+    } finally {
+      factory._handlers.values().forEach(handler -> handler._complete.countDown());
+      executor.shutdown();
     }
-    NotificationContext changeContext = new NotificationContext(manager);
-
-    List<Message> msgList = new ArrayList<Message>();
-
-    // Test the case that the message are executed for the second time
-    int nMsgs2 = 4;
-    for (int i = 0; i < nMsgs2; i++) {
-      Message msg = new Message(factory.getMessageTypes().get(0), UUID.randomUUID().toString());
-      msg.setTgtSessionId("*");
-      msg.setTgtName("Localhost_1123");
-      msg.setSrcName("127.101.1.23_2234");
-      msg.setExecutionTimeout((i + 1) * 600);
-      msg.setRetryCount(1);
-      msgList.add(msg);
-    }
-    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
-    executor.onMessage("someInstance", msgList, changeContext);
-    Thread.sleep(3500);
-    AssertJUnit.assertEquals(factory._processedMsgIds.size(), 3);
-    AssertJUnit.assertTrue(msgList.get(0).getRecord().getSimpleField("Cancelcount").equals("2"));
-    AssertJUnit.assertTrue(msgList.get(1).getRecord().getSimpleField("Cancelcount").equals("1"));
-    AssertJUnit.assertEquals(factory._timedOutMsgIds.size(), 2);
-    AssertJUnit.assertTrue(executor._taskMap.size() == 0);
-    System.out.println("END " + TestHelper.getTestMethodName());
   }
 
   @Test

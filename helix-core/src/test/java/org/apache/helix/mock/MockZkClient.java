@@ -27,6 +27,7 @@ import org.apache.helix.manager.zk.ZNRecordSerializer;
 import org.apache.helix.manager.zk.ZkAsyncCallbacks;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
+import org.apache.zookeeper.KeeperException;
 
 public class MockZkClient extends ZkClient implements HelixZkClient {
   Map<String, byte[]> _dataMap;
@@ -42,7 +43,11 @@ public class MockZkClient extends ZkClient implements HelixZkClient {
       final ZkAsyncCallbacks.GetDataCallbackHandler cb) {
     if (_dataMap.containsKey(path)) {
       if (_dataMap.get(path) == null) {
-        cb.processResult(4, path, null, _dataMap.get(path), null);
+        // Simulate a read failure for a null-data node with a valid ZK error code
+        // (non-OK / non-NONODE). ZooKeeper 3.7+ makes KeeperException.Code.get() throw on
+        // unrecognized codes, whereas 3.6 returned null for the previous literal 4.
+        cb.processResult(KeeperException.Code.MARSHALLINGERROR.intValue(), path, null,
+            _dataMap.get(path), null);
       } else {
         cb.processResult(0, path, null, _dataMap.get(path), null);
       }

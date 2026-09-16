@@ -340,7 +340,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertEquals(_metadataStore.getBestPossibleAssignment(), testResourceAssignmentMap);
   }
 
-  @Test(dependsOnMethods = "testRebalance", expectedExceptions = HelixRebalanceException.class, expectedExceptionsMessageRegExp = "Input contains invalid resource\\(s\\) that cannot be rebalanced by the WAGED rebalancer. \\[Resource1\\] Failure Type: INVALID_INPUT")
+  @Test(dependsOnMethods = "testRebalance", expectedExceptions = HelixRebalanceException.class, expectedExceptionsMessageRegExp = "Input contains invalid resource\\(s\\) that cannot be rebalanced by the WAGED rebalancer. \\[Resource1\\] Failure Type: INVALID_INPUT Category: INVALID_RESOURCE_CONFIG")
   public void testNonCompatibleConfiguration()
       throws IOException, HelixRebalanceException {
     _metadataStore.reset();
@@ -380,7 +380,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     } catch (HelixRebalanceException ex) {
       Assert.assertEquals(ex.getFailureType(), HelixRebalanceException.Type.FAILED_TO_CALCULATE);
       Assert.assertEquals(ex.getMessage(),
-          "Failed to calculate for the new best possible. Failure Type: FAILED_TO_CALCULATE");
+          "Failed to calculate for the new best possible. Failure Type: FAILED_TO_CALCULATE Category: INVALID_CLUSTER_CONFIG");
     }
 
     // The rebalance will be done with empty mapping result since there is no previously calculated
@@ -409,7 +409,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
       Assert.assertEquals(ex.getFailureType(),
           HelixRebalanceException.Type.INVALID_REBALANCER_STATUS);
       Assert.assertEquals(ex.getMessage(),
-          "Failed to get the current best possible assignment because of unexpected error. Failure Type: INVALID_REBALANCER_STATUS");
+          "Failed to get the current best possible assignment because of unexpected error. Failure Type: INVALID_REBALANCER_STATUS Category: METADATA_STORE_IO");
     }
   }
 
@@ -450,9 +450,17 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Map<String, IdealState> newResult =
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
     Assert.assertEquals(newResult, result);
-    // Ensure failure has been recorded
+    // Ensure failure has been recorded on both the aggregate and per-FailureCategory counters.
+    // The mock algorithm throws via the legacy two-arg HelixRebalanceException constructor which
+    // defaults the category to UNKNOWN, so the FailureCategoryUnknownCounter is the one that
+    // should tick. This locks in that the Rebalancer-domain per-category counters are wired
+    // (without this assertion, a regression that registers but does not increment them would go
+    // undetected).
     Assert.assertEquals(rebalancer.getMetricCollector().getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.RebalanceFailureCounter.name(),
+        CountMetric.class).getValue().longValue(), 1L);
+    Assert.assertEquals(rebalancer.getMetricCollector().getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryUnknownCounter.name(),
         CountMetric.class).getValue().longValue(), 1L);
   }
 

@@ -155,6 +155,12 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
   public CallbackHandler(HelixManager manager, RealmAwareZkClient client, PropertyKey propertyKey,
       Object listener, EventType[] eventTypes, ChangeType changeType,
       HelixCallbackMonitor monitor) {
+    this(manager, client, propertyKey, listener, eventTypes, changeType, monitor, false);
+  }
+
+  CallbackHandler(HelixManager manager, RealmAwareZkClient client, PropertyKey propertyKey,
+      Object listener, EventType[] eventTypes, ChangeType changeType,
+      HelixCallbackMonitor monitor, boolean deferInit) {
     if (listener == null) {
       throw new HelixException("listener could not be null");
     }
@@ -165,7 +171,6 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
     }
 
     _uid = CALLBACK_HANDLER_UID.getAndIncrement();
-
 
     _manager = manager;
     _accessor = manager.getHelixDataAccessor();
@@ -186,7 +191,9 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
 
     parseListenerProperties();
 
-    init();
+    if (!deferInit) {
+      init();
+    }
   }
 
   private void parseListenerProperties() {

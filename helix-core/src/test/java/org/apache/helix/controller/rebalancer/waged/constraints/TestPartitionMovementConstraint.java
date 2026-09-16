@@ -20,14 +20,11 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  */
 
 import java.util.Collections;
-import java.util.Map;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
-import org.apache.helix.model.Partition;
-import org.apache.helix.model.ResourceAssignment;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -58,8 +55,10 @@ public class TestPartitionMovementConstraint {
 
   @Test
   public void testGetAssignmentScoreWhenBestPossibleBaselineMissing() {
-    when(_clusterContext.getBaselineAssignment()).thenReturn(Collections.emptyMap());
-    when(_clusterContext.getBestPossibleAssignment()).thenReturn(Collections.emptyMap());
+    when(_clusterContext.getBaselineAssignmentStateMap(RESOURCE, PARTITION))
+        .thenReturn(Collections.emptyMap());
+    when(_clusterContext.getBestPossibleAssignmentStateMap(RESOURCE, PARTITION))
+        .thenReturn(Collections.emptyMap());
 
     verifyScore(_baselineInfluenceConstraint, _testNode, _testReplica, _clusterContext, 0.0, 0.0);
     verifyScore(_partitionMovementConstraint, _testNode, _testReplica, _clusterContext, 0.0, 0.0);
@@ -67,13 +66,10 @@ public class TestPartitionMovementConstraint {
 
   @Test
   public void testGetAssignmentScoreWhenBestPossibleMissing() {
-    ResourceAssignment mockResourceAssignment = mock(ResourceAssignment.class);
-    when(mockResourceAssignment.getReplicaMap(new Partition(PARTITION)))
+    when(_clusterContext.getBaselineAssignmentStateMap(RESOURCE, PARTITION))
         .thenReturn(ImmutableMap.of(INSTANCE, "Master"));
-    Map<String, ResourceAssignment> assignmentMap =
-        ImmutableMap.of(RESOURCE, mockResourceAssignment);
-    when(_clusterContext.getBaselineAssignment()).thenReturn(assignmentMap);
-    when(_clusterContext.getBestPossibleAssignment()).thenReturn(Collections.emptyMap());
+    when(_clusterContext.getBestPossibleAssignmentStateMap(RESOURCE, PARTITION))
+        .thenReturn(Collections.emptyMap());
     // when the calculated states are both equal to the replica's current state
     when(_testReplica.getReplicaState()).thenReturn("Master");
     verifyScore(_baselineInfluenceConstraint, _testNode, _testReplica, _clusterContext, 0.0, 0.0);
@@ -92,16 +88,10 @@ public class TestPartitionMovementConstraint {
     String instanceNameC = INSTANCE + "C";
     AssignableNode testAssignableNode = mock(AssignableNode.class);
 
-    ResourceAssignment bestPossibleResourceAssignment = mock(ResourceAssignment.class);
-    when(bestPossibleResourceAssignment.getReplicaMap(new Partition(PARTITION)))
+    when(_clusterContext.getBestPossibleAssignmentStateMap(RESOURCE, PARTITION))
         .thenReturn(ImmutableMap.of(instanceNameA, "Master", instanceNameB, "Slave"));
-    when(_clusterContext.getBestPossibleAssignment())
-        .thenReturn(ImmutableMap.of(RESOURCE, bestPossibleResourceAssignment));
-    ResourceAssignment baselineResourceAssignment = mock(ResourceAssignment.class);
-    when(baselineResourceAssignment.getReplicaMap(new Partition(PARTITION)))
+    when(_clusterContext.getBaselineAssignmentStateMap(RESOURCE, PARTITION))
         .thenReturn(ImmutableMap.of(instanceNameA, "Slave", instanceNameC, "Master"));
-    when(_clusterContext.getBaselineAssignment())
-        .thenReturn(ImmutableMap.of(RESOURCE, baselineResourceAssignment));
 
     // when the replica's state matches with best possible, allocation matches with baseline
     when(testAssignableNode.getInstanceName()).thenReturn(instanceNameA);

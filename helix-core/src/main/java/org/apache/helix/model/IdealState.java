@@ -57,8 +57,6 @@ public class IdealState extends HelixProperty {
     MIN_ACTIVE_REPLICAS,
     REBALANCE_DELAY,
     @Deprecated
-    DELAY_REBALANCE_DISABLED,
-    @Deprecated
     IDEAL_STATE_MODE,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
@@ -260,14 +258,7 @@ public class IdealState extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalanceEnabled() {
-    boolean disabled =
-        _record.getBooleanField(IdealStateProperty.DELAY_REBALANCE_DISABLED.name(), false);
-    boolean enabled =
-        _record.getBooleanField(ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
-    if (disabled) {
-      return false;
-    }
-    return enabled;
+    return _record.getBooleanField(ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**

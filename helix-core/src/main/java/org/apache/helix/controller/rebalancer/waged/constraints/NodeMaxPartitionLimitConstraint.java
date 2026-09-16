@@ -61,4 +61,9 @@ class NodeMaxPartitionLimitConstraint extends HardConstraint {
   String getDescription() {
     return "Cannot exceed the maximum number of partitions limitation on node";
   }
+
+  @Override
+  Type getType() {
+    return Type.NODE_MAX_PARTITION_LIMIT;
+  }
 }

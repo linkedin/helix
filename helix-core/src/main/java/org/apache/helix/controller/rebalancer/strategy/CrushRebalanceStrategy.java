@@ -30,6 +30,7 @@ import java.util.Set;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import org.apache.helix.HelixException;
+import org.apache.helix.controller.rebalancer.strategy.crushMapping.Selector;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -52,6 +53,21 @@ public class CrushRebalanceStrategy implements RebalanceStrategy<ResourceControl
   private List<String> _partitions;
   private Topology _clusterTopo;
   private int _replicas;
+
+  /**
+   * Number of retries for finding an appropriate instance for a replica.
+   */
+  private static final int MAX_RETRY = 10;
+  private final JenkinsHash hashFun = new JenkinsHash();
+  private CRUSHPlacementAlgorithm placementAlgorithm;
+
+  public CrushRebalanceStrategy() {
+    this(Selector.StrawBucket.STRAW);
+  }
+
+  public CrushRebalanceStrategy(Selector.StrawBucket strawBucket) {
+    placementAlgorithm = new CRUSHPlacementAlgorithm(strawBucket);
+  }
 
   @Override
   public void init(String resourceName, final List<String> partitions,
@@ -94,8 +110,8 @@ public class CrushRebalanceStrategy implements RebalanceStrategy<ResourceControl
         selected = select(topNode, data, _replicas, eventId);
       } catch (IllegalStateException e) {
         String errorMessage = String
-            .format("Could not select enough number of nodes. %s partition %s, required %d",
-                _resourceName, partitionName, _replicas);
+            .format("Could not select enough number of nodes. Resource=%s, partition=%s, hash=%d, required=%d. %s",
+                _resourceName, partitionName, data, _replicas, e.getMessage());
         throw new HelixException(errorMessage, e);
       }
 
@@ -124,13 +140,6 @@ public class CrushRebalanceStrategy implements RebalanceStrategy<ResourceControl
 
     return result;
   }
-
-  /**
-   * Number of retries for finding an appropriate instance for a replica.
-   */
-  private static final int MAX_RETRY = 10;
-  private final JenkinsHash hashFun = new JenkinsHash();
-  private CRUSHPlacementAlgorithm placementAlgorithm = new CRUSHPlacementAlgorithm();
 
   /**
    * Enforce isolation on the specified fault zone.

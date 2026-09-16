@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.helix.controller.rebalancer.TestAutoRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.topology.InstanceNode;
 import org.apache.helix.controller.rebalancer.topology.Node;
 import org.apache.helix.controller.rebalancer.topology.Topology;
 import org.apache.helix.model.ClusterConfig;
@@ -13,6 +14,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /*
@@ -169,5 +171,73 @@ public class TestTopology {
     for (Node rack : root.getChildren()) {
       Assert.assertEquals(rack.getWeight(), (long) nodeToWeightMap.get(rack.getName()));
     }
+  }
+
+  @DataProvider
+  public Object[][] booleanData() {
+    return new Object[][] {
+      { true },
+      { false },
+    };
+  }
+
+  @Test(dataProvider = "booleanData")
+  public void testInstanceToClusterConfigMismatch(boolean isTopologyAwareEnabled) {
+    ClusterConfig clusterConfig = new ClusterConfig("Test_Cluster");
+
+    // Set up a specific topology with required keys
+    String topology = "/DataCenter/Rack/Host/Instance";
+    clusterConfig.setTopology(topology);
+    clusterConfig.setFaultZoneType("DataCenter");
+    clusterConfig.setTopologyAwareEnabled(isTopologyAwareEnabled);
+
+    List<String> allNodes = new ArrayList<>();
+    List<String> liveNodes = new ArrayList<>();
+    Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
+
+    // Add instances with all configurations other than domain
+    for (int i = 0; i < 10; i++) {
+      String instance = "localhost_" + i;
+      InstanceConfig config = new InstanceConfig(instance);
+      config.setHostName(instance);
+      config.setPort("9000");
+      allNodes.add(instance);
+      liveNodes.add(instance);
+      instanceConfigMap.put(instance, config);
+    }
+    // Add instances with correct domain configuration
+    for (int i = 0; i < 5; i++) {
+      String instance = "localhost_" + i;
+      instanceConfigMap.get(instance).setDomain(String.format("DataCenter=dc1, Rack=rack%d, Host=%s", i, instance));
+    }
+
+    // Add instances with mismatched domain configuration (missing DataCenter key)
+    for (int i = 5; i < 10; i++) {
+      String instance = "localhost_" + i;
+      instanceConfigMap.get(instance).setDomain(String.format("Rack=rack%d, Host=%s", i, instance));
+    }
+
+    // Create topology - instances with mismatched config should be ignored
+    Topology topo = new Topology(allNodes, liveNodes, instanceConfigMap, clusterConfig);
+
+    // Verify that only instances with correct configuration are in the topology
+    Node root = topo.getRootNode();
+    List<Node> allLeafNodes = Topology.getAllLeafNodes(root);
+
+    int expectedInstancesCount = isTopologyAwareEnabled ? 5 : 10;
+    // Should only have 5 instances (the ones with correct domain configuration)
+    Assert.assertEquals(allLeafNodes.size(), expectedInstancesCount);
+
+    // Verify that all included instances have the correct naming pattern
+    for (Node leafNode : allLeafNodes) {
+      String instanceName = ((InstanceNode) leafNode).getInstanceName();
+      int instanceId = Integer.parseInt(instanceName.split("_")[1]);
+      Assert.assertTrue(instanceId < expectedInstancesCount, "Only instances 0-4 should be included");
+    }
+
+    // Verify topology structure for included instances
+    Assert.assertEquals(root.getChildrenCount("DataCenter"), isTopologyAwareEnabled ? 1 : 0);
+    Assert.assertEquals(root.getChildrenCount("Rack"), isTopologyAwareEnabled ? 5 : 0);
+    Assert.assertEquals(root.getChildrenCount("Instance"), expectedInstancesCount);
   }
 }

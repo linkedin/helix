@@ -4,6 +4,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 
 import { AlertDialogComponent } from './dialog/alert-dialog/alert-dialog.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
+import { InputDialogComponent } from './dialog/input-dialog/input-dialog.component';
 
 @Injectable()
 export class HelperService {
@@ -42,6 +43,15 @@ export class HelperService {
           title,
           confirmButtonText,
         },
+      })
+      .afterClosed()
+      .toPromise();
+  }
+
+  showInput(title: string, message: string, values: any) {
+    return this.dialog
+      .open(InputDialogComponent, {
+        data: { title, message, values },
       })
       .afterClosed()
       .toPromise();

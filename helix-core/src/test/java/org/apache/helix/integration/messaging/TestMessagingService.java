@@ -30,6 +30,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.messaging.AsyncCallback;
+import org.apache.helix.messaging.ParticipantMessageOptions;
 import org.apache.helix.messaging.handling.HelixTaskResult;
 import org.apache.helix.messaging.handling.MessageHandler;
 import org.apache.helix.messaging.handling.MultiTypeMessageHandlerFactory;
@@ -40,6 +41,8 @@ import org.testng.AssertJUnit;
 import org.testng.annotations.Test;
 
 public class TestMessagingService extends ZkStandAloneCMTestBase {
+  // Nanoseconds to milliseconds conversion factor
+  private static final long NANOS_TO_MILLIS = 1_000_000;
   public static class TestMessagingHandlerFactory implements MultiTypeMessageHandlerFactory {
     public static HashSet<String> _processedMsgIds = new HashSet<String>();
 
@@ -70,7 +73,6 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
         HelixTaskResult result = new HelixTaskResult();
         result.setSuccess(true);
         Thread.sleep(1000);
-        System.out.println("TestMessagingHandler " + _message.getMsgId());
         _processedMsgIds.add(_message.getRecord().getSimpleField("TestMessagingPara"));
         result.getTaskResultMap().put("ReplyMessage", "TestReplyMessage");
         return result;
@@ -127,6 +129,128 @@ public class TestMessagingService extends ZkStandAloneCMTestBase {
     // Thread.currentThread().join();
     AssertJUnit.assertTrue(TestMessagingHandlerFactory._processedMsgIds.contains(para));
 
+  }
+
+  @Test()
+  public void TestSendToParticipantInstanceAndAllLiveInstances() throws Exception {
+    String hostSrc = "localhost_" + START_PORT;
+    String hostDest = "localhost_" + (START_PORT + 1);
+
+    TestMessagingHandlerFactory factory = new TestMessagingHandlerFactory();
+    for (int i = 0; i < NODE_NR; i++) {
+      _participants[i].getMessagingService().registerMessageHandlerFactory(factory.getMessageTypes(),
+          factory);
+    }
+
+    // Single-target optimized send
+    String paraSingle = "SendToParticipantInstancePara";
+    Message msgInstance = createMessage(factory, hostSrc, paraSingle);
+    ParticipantMessageOptions singleInstanceOptions =
+        ParticipantMessageOptions.builder().sessionSpecific(false).selfExcluded(false).build();
+    int sent =
+        _participants[0].getMessagingService()
+            .sendToParticipantInstance(CLUSTER_NAME, hostDest, msgInstance, singleInstanceOptions);
+    AssertJUnit.assertEquals(1, sent);
+    Thread.sleep(2000);
+    AssertJUnit.assertTrue(TestMessagingHandlerFactory._processedMsgIds.contains(paraSingle));
+
+    // Broadcast to all live instances
+    String paraAll = "SendToAllParticipantInstancesPara";
+    Message msgAll = createMessage(factory, hostSrc, paraAll);
+    TestAsyncCallback callback = new TestAsyncCallback(60000);
+    ParticipantMessageOptions broadcastOptions = ParticipantMessageOptions.builder()
+        .sessionSpecific(false)
+        .selfExcluded(false)
+        .callbackOnReply(callback)
+        .timeoutMs(60000)
+        .build();
+    int sentAll =
+        _participants[0].getMessagingService()
+            .sendToAllParticipantInstances(CLUSTER_NAME, msgAll, broadcastOptions);
+    AssertJUnit.assertEquals(NODE_NR, sentAll);
+    Thread.sleep(3000);
+    AssertJUnit.assertEquals(NODE_NR, callback.getMessageReplied().size());
+    AssertJUnit.assertTrue(TestMessagingHandlerFactory._processedMsgIds.contains(paraAll));
+  }
+
+  // Performance test - excluded from CI to reduce test execution time
+  // Enable test in local to fetch performance numbers before and after your change
+  @Test(enabled = false)
+  public void TestMessageSendPerformance() throws Exception {
+    String hostSrc = "localhost_" + START_PORT;
+    String hostDest = "localhost_" + (START_PORT + 1);
+
+    TestMessagingHandlerFactory factory = new TestMessagingHandlerFactory();
+    for (int i = 0; i < NODE_NR; i++) {
+      _participants[i].getMessagingService().registerMessageHandlerFactory(factory.getMessageTypes(),
+          factory);
+    }
+
+    System.out.println("\n========== Message Send Performance Test (1000 iterations) ==========");
+
+    DataSource[] dataSources = {DataSource.INSTANCES, DataSource.EXTERNALVIEW, DataSource.IDEALSTATES, DataSource.LIVEINSTANCES};
+    int iterations = 1000;
+
+    for (DataSource dataSource : dataSources) {
+      long totalTime = 0;
+
+      for (int i = 0; i < iterations; i++) {
+        Message msg = createMessage(factory, hostSrc, "Iteration " + i);
+        Criteria cr = createCriteria(hostDest, dataSource);
+
+        long startTime = System.nanoTime();
+        _participants[0].getMessagingService().send(cr, msg);
+        long endTime = System.nanoTime();
+        totalTime += (endTime - startTime);
+      }
+
+      long avgTimeMs = (totalTime / iterations) / NANOS_TO_MILLIS;
+      long totalTimeMs = totalTime / NANOS_TO_MILLIS;
+      System.out.println("DataSource: " + dataSource);
+      System.out.println("  Total time for " + iterations + " sends: " + totalTimeMs + " ms");
+      System.out.println("  Average time per send: " + avgTimeMs + " ms\n");
+    }
+
+    // Measure optimized single-instance API
+    long optimizedTotalTime = 0;
+    ParticipantMessageOptions optimizedOptions = ParticipantMessageOptions.defaults();
+    for (int i = 0; i < iterations; i++) {
+      Message msg = createMessage(factory, hostSrc, "Optimized Iteration " + i);
+      long startTime = System.nanoTime();
+      _participants[0].getMessagingService()
+          .sendToParticipantInstance(CLUSTER_NAME, hostDest, msg, optimizedOptions);
+      long endTime = System.nanoTime();
+      optimizedTotalTime += (endTime - startTime);
+    }
+    long optimizedAvgMs = (optimizedTotalTime / iterations) / NANOS_TO_MILLIS;
+    long optimizedTotalMs = optimizedTotalTime / NANOS_TO_MILLIS;
+    System.out.println("Optimized sendToParticipantInstance:");
+    System.out.println("  Total time for " + iterations + " sends: " + optimizedTotalMs + " ms");
+    System.out.println("  Average time per send: " + optimizedAvgMs + " ms\n");
+
+    System.out.println("========== Performance Test Complete ==========\n");
+  }
+
+  private Message createMessage(TestMessagingHandlerFactory factory, String hostSrc, String para) {
+    String msgId = UUID.randomUUID().toString();
+    Message msg = new Message(factory.getMessageTypes().get(0), msgId);
+    msg.setMsgId(msgId);
+    msg.setSrcName(hostSrc);
+    msg.setTgtSessionId("*");
+    msg.setMsgState(MessageState.NEW);
+    msg.getRecord().setSimpleField("TestMessagingPara", para);
+    return msg;
+  }
+
+  private Criteria createCriteria(String hostDest, DataSource dataSource) {
+    Criteria cr = new Criteria();
+    cr.setInstanceName(hostDest);
+    cr.setRecipientInstanceType(InstanceType.PARTICIPANT);
+    cr.setSessionSpecific(false);
+    if (dataSource != null && dataSource != DataSource.EXTERNALVIEW) {
+      cr.setDataSource(dataSource);
+    }
+    return cr;
   }
 
   public static class MockAsyncCallback extends AsyncCallback {

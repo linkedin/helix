@@ -53,16 +53,18 @@ public class StoppableInstancesSelector {
   private final MaintenanceManagementService _maintenanceService;
   private final ClusterTopology _clusterTopology;
   private final ZKHelixDataAccessor _dataAccessor;
+  private final boolean _includeDetails;
 
   private StoppableInstancesSelector(String clusterId, List<String> orderOfZone,
       String customizedInput, MaintenanceManagementService maintenanceService,
-      ClusterTopology clusterTopology, ZKHelixDataAccessor dataAccessor) {
+      ClusterTopology clusterTopology, ZKHelixDataAccessor dataAccessor, boolean includeDetails) {
     _clusterId = clusterId;
     _orderOfZone = orderOfZone;
     _customizedInput = customizedInput;
     _maintenanceService = maintenanceService;
     _clusterTopology = clusterTopology;
     _dataAccessor = dataAccessor;
+    _includeDetails = includeDetails;
   }
 
   /**
@@ -171,7 +173,7 @@ public class StoppableInstancesSelector {
       ArrayNode stoppableInstances, ObjectNode failedStoppableInstances) throws IOException {
     Map<String, StoppableCheck> instancesStoppableChecks =
         _maintenanceService.batchGetInstancesStoppableChecks(_clusterId, instances,
-            _customizedInput, toBeStoppedInstances);
+            _customizedInput, toBeStoppedInstances, _includeDetails);
 
     for (Map.Entry<String, StoppableCheck> instanceStoppableCheck : instancesStoppableChecks.entrySet()) {
       String instance = instanceStoppableCheck.getKey();
@@ -290,22 +292,32 @@ public class StoppableInstancesSelector {
   }
 
   /**
-   * Collect instances within the cluster where the instance operation is set to EVACUATE, SWAP_IN, or UNKNOWN.
-   * And return them as a set.
+   * Collect the instances that the stoppable check should presume to be already stopped, i.e. the
+   * instances passed in by the caller plus the instances whose InstanceOperation is one of
+   * {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}. Replicas hosted on these instances
+   * are not counted as active replicas of their siblings.
+   * <p>
+   * SWAP_IN and UNKNOWN are unroutable, so those instances stop serving traffic as soon as the
+   * operation is set and their replicas really are gone. EVACUATE is deliberately not included: an
+   * evacuating instance stays in the RoutingTableProvider and keeps serving its replicas until a
+   * replacement has been bootstrapped elsewhere, so counting it as stopped fails the min active
+   * replica check for its siblings even though every replica is still active. A caller that does
+   * want an evacuating instance treated as stopped can pass it in toBeStoppedInstances.
    *
    * @param toBeStoppedInstances A list of instances we presume to be stopped.
    */
   private Set<String> findToBeStoppedInstances(List<String> toBeStoppedInstances) {
     Set<String> toBeStoppedInstancesSet = new HashSet<>(toBeStoppedInstances);
+    PropertyKey.Builder propertyKeyBuilder = _dataAccessor.keyBuilder();
     Set<String> allInstances = _clusterTopology.getAllInstances();
     for (String instance : allInstances) {
-      PropertyKey.Builder propertyKeyBuilder = _dataAccessor.keyBuilder();
       InstanceConfig instanceConfig =
           _dataAccessor.getProperty(propertyKeyBuilder.instanceConfig(instance));
-      InstanceConstants.InstanceOperation operation = instanceConfig.getInstanceOperation().getOperation();
-      if (operation == InstanceConstants.InstanceOperation.EVACUATE
-          || operation == InstanceConstants.InstanceOperation.SWAP_IN
-          || operation == InstanceConstants.InstanceOperation.UNKNOWN) {
+      if (instanceConfig == null) {
+        continue;
+      }
+      if (InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+          instanceConfig.getInstanceOperation().getOperation())) {
         toBeStoppedInstancesSet.add(instance);
       }
     }
@@ -319,6 +331,7 @@ public class StoppableInstancesSelector {
     private MaintenanceManagementService _maintenanceService;
     private ClusterTopology _clusterTopology;
     private ZKHelixDataAccessor _dataAccessor;
+    private boolean _includeDetails = false;
 
     public StoppableInstancesSelectorBuilder setClusterId(String clusterId) {
       _clusterId = clusterId;
@@ -351,9 +364,14 @@ public class StoppableInstancesSelector {
       return this;
     }
 
+    public StoppableInstancesSelectorBuilder setIncludeDetails(boolean includeDetails) {
+      _includeDetails = includeDetails;
+      return this;
+    }
+
     public StoppableInstancesSelector build() {
       return new StoppableInstancesSelector(_clusterId, _orderOfZone, _customizedInput,
-          _maintenanceService, _clusterTopology, _dataAccessor);
+          _maintenanceService, _clusterTopology, _dataAccessor, _includeDetails);
     }
   }
 }

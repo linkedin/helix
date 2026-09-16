@@ -202,6 +202,12 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
     }
 
     Map<String, Integer> instanceCapacity = _instanceCapacityMap.get(instance);
+    // If instance config was deleted, skip capacity check
+    // The rebalancer will handle removing assignments in a later stage
+    if (instanceCapacity == null) {
+      LOG.debug("Instance: " + instance + " has no config (may have been deleted), skipping capacity check.");
+      return false;
+    }
     Map<String, Integer> processedCapacity = new HashMap<>();
     for (String key : instanceCapacity.keySet()) {
       if (partitionCapacity.containsKey(key)) {

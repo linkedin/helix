@@ -36,10 +36,10 @@ public class PartitionMovementConstraint extends AbstractPartitionMovementConstr
   @Override
   protected double getAssignmentScore(AssignableNode node, AssignableReplica replica,
       ClusterContext clusterContext) {
-    Map<String, String> bestPossibleAssignment =
-        getStateMap(replica, clusterContext.getBestPossibleAssignment());
-    Map<String, String> baselineAssignment =
-        getStateMap(replica, clusterContext.getBaselineAssignment());
+    Map<String, String> bestPossibleAssignment = clusterContext
+        .getBestPossibleAssignmentStateMap(replica.getResourceName(), replica.getPartitionName());
+    Map<String, String> baselineAssignment = clusterContext
+        .getBaselineAssignmentStateMap(replica.getResourceName(), replica.getPartitionName());
     String logicalId = node.getLogicalId();
     String state = replica.getReplicaState();
 

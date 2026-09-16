@@ -53,6 +53,7 @@ import org.apache.helix.rest.common.HelixRestUtils;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.metadatastore.MetadataStoreDirectory;
 import org.apache.helix.rest.metadatastore.ZkMetadataStoreDirectory;
+import org.apache.helix.rest.server.HelixRestServer;
 import org.apache.helix.rest.metadatastore.datamodel.MetadataStoreShardingKey;
 import org.apache.helix.rest.metadatastore.datamodel.MetadataStoreShardingKeysByRealm;
 import org.apache.helix.rest.server.filters.NamespaceAuth;
@@ -369,7 +370,16 @@ public class MetadataStoreDirectoryAccessor extends AbstractResource {
 
   protected void buildMetadataStoreDirectory(String namespace, String address) {
     try {
-      _metadataStoreDirectory = ZkMetadataStoreDirectory.getInstance(namespace, address);
+      // Use the SSL context registered with HelixRestServer for secure internal communication
+      // When SSL context is set, HTTPS will be used for forwarding requests to the leader
+      if (HelixRestServer.REST_SERVER_SSL_CONTEXT == null) {
+        LOG.warn(
+            "SSL context is not set on HelixRestServer; leader forwarding will use HTTP (not HTTPS). "
+                + "Ensure registerServerSSLContext() is called before buildMetadataStoreDirectory() "
+                + "if secure forwarding is required. Namespace: {}", namespace);
+      }
+      _metadataStoreDirectory = ZkMetadataStoreDirectory.getInstance(namespace, address,
+          HelixRestServer.REST_SERVER_SSL_CONTEXT);
     } catch (InvalidRoutingDataException ex) {
       LOG.warn("Unable to create metadata store directory for namespace: {}, ZK address: {}",
           namespace, address, ex);

@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -61,6 +62,13 @@ public class DefaultMessagingService implements ClusterMessagingService {
   private final int _taskThreadpoolResetTimeout;
 
   private static Logger _logger = LoggerFactory.getLogger(DefaultMessagingService.class);
+
+  // Constants for map keys and default values
+  private static final String INSTANCE_NAME_KEY = "instanceName";
+  private static final String RESOURCE_NAME_KEY = "resourceName";
+  private static final String PARTITION_NAME_KEY = "partitionName";
+  private static final String EMPTY_STRING = "";
+
   ConcurrentHashMap<String, MessageHandlerFactory> _messageHandlerFactoriestobeAdded =
       new ConcurrentHashMap<>();
 
@@ -100,62 +108,24 @@ public class DefaultMessagingService implements ClusterMessagingService {
   public int send(final Criteria recipientCriteria, final Message message,
       AsyncCallback callbackOnReply, int timeOut, int retryCount) {
     Map<InstanceType, List<Message>> generateMessage = generateMessage(recipientCriteria, message);
-    int totalMessageCount = 0;
-    for (List<Message> messages : generateMessage.values()) {
-      totalMessageCount += messages.size();
-    }
-    _logger.info("Send " + totalMessageCount + " messages with criteria " + recipientCriteria);
-    if (totalMessageCount == 0) {
-      return 0;
-    }
-    String correlationId = null;
-    if (callbackOnReply != null) {
-      int totalTimeout = timeOut * (retryCount + 1);
-      if (totalTimeout < 0) {
-        totalTimeout = -1;
-      }
-      callbackOnReply.setTimeout(totalTimeout);
-      correlationId = UUID.randomUUID().toString();
-      for (List<Message> messages : generateMessage.values()) {
-        callbackOnReply.setMessagesSent(messages);
-      }
-      _asyncCallbackService.registerAsyncCallback(correlationId, callbackOnReply);
-    }
 
     HelixDataAccessor targetDataAccessor = getRecipientDataAccessor(recipientCriteria);
-    for (InstanceType receiverType : generateMessage.keySet()) {
-      List<Message> list = generateMessage.get(receiverType);
-      for (Message tempMessage : list) {
-        tempMessage.setRetryCount(retryCount);
-        tempMessage.setExecutionTimeout(timeOut);
-        tempMessage.setSrcInstanceType(_manager.getInstanceType());
-        if (correlationId != null) {
-          tempMessage.setCorrelationId(correlationId);
-        }
-        tempMessage.setSrcClusterName(_manager.getClusterName());
 
-        Builder keyBuilder = targetDataAccessor.keyBuilder();
-        if (receiverType == InstanceType.CONTROLLER) {
-          targetDataAccessor
-              .setProperty(keyBuilder.controllerMessage(tempMessage.getId()), tempMessage);
-        } else if (receiverType == InstanceType.PARTICIPANT) {
-          targetDataAccessor
-              .setProperty(keyBuilder.message(tempMessage.getTgtName(), tempMessage.getId()),
-                  tempMessage);
-        }
-      }
-    }
+    ParticipantMessageOptions opts = ParticipantMessageOptions.builder()
+        .callbackOnReply(callbackOnReply)
+        .timeoutMs(timeOut)
+        .retryCount(retryCount)
+        .build();
 
-      if (callbackOnReply != null) {
-        // start timer if timeout is set
-        callbackOnReply.startTimer();
-      }
-      return totalMessageCount;
+    return sendMessagesInternalWithInstanceType(generateMessage, opts, targetDataAccessor);
   }
 
   private HelixDataAccessor getRecipientDataAccessor(final Criteria recipientCriteria) {
+    return getRecipientDataAccessor(recipientCriteria.getClusterName());
+  }
+
+  private HelixDataAccessor getRecipientDataAccessor(String clusterName) {
     HelixDataAccessor dataAccessor = _manager.getHelixDataAccessor();
-    String clusterName = recipientCriteria.getClusterName();
     if (clusterName != null && !clusterName.equals(_manager.getClusterName())) {
       // for cross cluster message, create new DataAccessor for sending message.
       /*
@@ -205,21 +175,14 @@ public class DefaultMessagingService implements ClusterMessagingService {
         }
       }
       for (Map<String, String> map : matchedList) {
-        String id = UUID.randomUUID().toString();
-        Message newMessage = new Message(message.getRecord(), id);
-        String srcInstanceName = _manager.getInstanceName();
-        String tgtInstanceName = map.get("instanceName");
+        String tgtInstanceName = map.get(INSTANCE_NAME_KEY);
         // Don't send message to self
-        if (recipientCriteria.isSelfExcluded() && srcInstanceName.equalsIgnoreCase(tgtInstanceName)) {
+        if (recipientCriteria.isSelfExcluded() && _manager.getInstanceName().equalsIgnoreCase(tgtInstanceName)) {
           continue;
         }
-        newMessage.setSrcName(srcInstanceName);
-        newMessage.setTgtName(tgtInstanceName);
-        newMessage.setResourceName(map.get("resourceName"));
-        newMessage.setPartitionName(map.get("partitionName"));
-        if (recipientCriteria.isSessionSpecific()) {
-          newMessage.setTgtSessionId(sessionIdMap.get(tgtInstanceName));
-        }
+        String sessionId = recipientCriteria.isSessionSpecific() ? sessionIdMap.get(tgtInstanceName) : null;
+        Message newMessage = createMessage(tgtInstanceName, message, map.get(RESOURCE_NAME_KEY),
+            map.get(PARTITION_NAME_KEY), sessionId);
         messages.add(newMessage);
       }
     }
@@ -376,5 +339,232 @@ public class DefaultMessagingService implements ClusterMessagingService {
   public int sendAndWait(Criteria recipientCriteria, Message message, AsyncCallback asyncCallback,
       int timeOut) {
     return sendAndWait(recipientCriteria, message, asyncCallback, timeOut, 0);
+  }
+
+  @Override
+  public int sendToParticipantInstance(String clusterName, String instanceName, Message message,
+      ParticipantMessageOptions options) {
+    if (instanceName == null || instanceName.isEmpty()) {
+      _logger.warn("Instance name is null or empty. No message sent.");
+      return 0;
+    }
+
+    HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
+    Builder keyBuilder = dataAccessor.keyBuilder();
+    boolean isLive = dataAccessor.getBaseDataAccessor().exists(keyBuilder.liveInstance(instanceName).getPath(), 0);
+    if (!isLive) {
+      _logger.info("Instance " + instanceName + " is not live. No message sent.");
+      return 0;
+    }
+
+    return sendToParticipantInstances(clusterName, message, options, Collections.singletonList(instanceName));
+  }
+
+  @Override
+  public int sendToAllParticipantInstances(String clusterName, Message message,
+      ParticipantMessageOptions options) {
+    HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
+    Builder keyBuilder = dataAccessor.keyBuilder();
+    List<String> liveInstanceNames = dataAccessor.getChildNames(keyBuilder.liveInstances());
+    if (liveInstanceNames == null || liveInstanceNames.isEmpty()) {
+      _logger.info("No live participant instances found in cluster: " + clusterName);
+      return 0;
+    }
+    return sendToParticipantInstances(clusterName, message, options, liveInstanceNames);
+  }
+
+  /**
+   * Shared helper to send messages to participant instances.
+   *
+   * @param clusterName the target cluster name
+   * @param message message template
+   * @param options participant message options (defaults applied when null)
+   * @param liveInstanceNames list of live instance names
+   * @return number of messages sent
+   */
+  private int sendToParticipantInstances(String clusterName, Message message,
+      ParticipantMessageOptions options, List<String> liveInstanceNames) {
+    ParticipantMessageOptions opts = options == null ? ParticipantMessageOptions.defaults() : options;
+
+    HelixDataAccessor dataAccessor = getRecipientDataAccessor(clusterName);
+    Builder keyBuilder = dataAccessor.keyBuilder();
+
+    List<Message> participantMessages = new ArrayList<>();
+    for (String instanceName : liveInstanceNames) {
+      if (opts.isSelfExcluded() && instanceName.equalsIgnoreCase(_manager.getInstanceName())) {
+        _logger.info("Message to self excluded for instance: " + instanceName);
+        continue;
+      }
+
+      Optional<Message> msg = generateMessageForSingleInstance(instanceName, message, opts, dataAccessor, keyBuilder);
+      if (msg.isPresent()) {
+        participantMessages.add(msg.get());
+      } else {
+        _logger.warn("Failed to generate message for instance: " + instanceName);
+      }
+    }
+
+    if (participantMessages.isEmpty()) {
+      _logger.info("No participant messages generated for cluster: " + clusterName);
+      return 0;
+    }
+
+    Map<InstanceType, List<Message>> messagesByType = new HashMap<>();
+    messagesByType.put(InstanceType.PARTICIPANT, participantMessages);
+
+    return sendMessagesInternalWithInstanceType(messagesByType, opts, dataAccessor);
+  }
+
+  /**
+   * Common helper to create a message with standard fields.
+   *
+   * @param instanceName target instance name
+   * @param message message template
+   * @param resourceName resource name
+   * @param partitionName partition name
+   * @param sessionId target session ID (can be null)
+   * @return new message with fields set
+   */
+  private Message createMessage(String instanceName, Message message, String resourceName,
+      String partitionName, String sessionId) {
+    String id = UUID.randomUUID().toString();
+    Message newMessage = new Message(message.getRecord(), id);
+    newMessage.setSrcName(_manager.getInstanceName());
+    newMessage.setTgtName(instanceName);
+    newMessage.setResourceName(resourceName);
+    newMessage.setPartitionName(partitionName);
+    if (sessionId != null) {
+      newMessage.setTgtSessionId(sessionId);
+    }
+    return newMessage;
+  }
+
+  /**
+   * Optimized helper to generate a single message for a specific instance.
+   * Bypasses the criteria evaluator and directly creates message.
+   *
+   *
+   * @param instanceName target instance name
+   * @param message message template
+   * @param opts participant message options
+   * @param dataAccessor data accessor to use
+   * @param keyBuilder key builder for ZK paths
+   * @return Optional containing the message, or empty if failed
+   */
+  private Optional<Message> generateMessageForSingleInstance(String instanceName, Message message,
+      ParticipantMessageOptions opts, HelixDataAccessor dataAccessor, Builder keyBuilder) {
+    String sessionId = null;
+    if (opts.isSessionSpecific()) {
+      LiveInstance liveInstance = dataAccessor.getProperty(keyBuilder.liveInstance(instanceName));
+      if (liveInstance != null) {
+        sessionId = liveInstance.getEphemeralOwner();
+      } else {
+        _logger.warn("Failed to fetch session ID for instance: " + instanceName);
+        return Optional.empty();
+      }
+    }
+
+    return Optional.of(createMessage(instanceName, message, EMPTY_STRING, EMPTY_STRING, sessionId));
+  }
+
+
+  /**
+   * Internal helper method to send messages grouped by InstanceType.
+   * This handles both CONTROLLER and PARTICIPANT message types.
+   *
+   * @param messagesByType messages grouped by instance type
+   * @param opts participant message options
+   * @param targetDataAccessor data accessor to use
+   * @return number of messages sent
+   */
+  private int sendMessagesInternalWithInstanceType(
+      Map<InstanceType, List<Message>> messagesByType, ParticipantMessageOptions opts,
+      HelixDataAccessor targetDataAccessor) {
+    int totalMessageCount = 0;
+    for (List<Message> messages : messagesByType.values()) {
+      totalMessageCount += messages.size();
+    }
+    if (totalMessageCount == 0) {
+      return 0;
+    }
+
+    // Setup callback
+    String correlationId = setupCallback(messagesByType, opts);
+
+    // Send messages for each instance type
+    for (InstanceType receiverType : messagesByType.keySet()) {
+      List<Message> messages = messagesByType.get(receiverType);
+      sendMessagesToRecipients(messages, receiverType, correlationId, opts, targetDataAccessor);
+    }
+
+    // Start timer after sending
+    if (opts.getCallbackOnReply() != null) {
+      opts.getCallbackOnReply().startTimer();
+    }
+
+    return totalMessageCount;
+  }
+
+  /**
+   * Shared helper to setup callback for message sending.
+   *
+   * @param messagesByType messages that will be sent
+   * @param opts participant message options
+   * @return correlation ID if callback is registered, null otherwise
+   */
+  private String setupCallback(Map<InstanceType, List<Message>> messagesByType,
+      ParticipantMessageOptions opts) {
+    AsyncCallback callbackOnReply = opts.getCallbackOnReply();
+    if (callbackOnReply == null) {
+      return null;
+    }
+
+    int totalTimeout = opts.getTimeoutMs() * (opts.getRetryCount() + 1);
+    if (totalTimeout < 0) {
+      totalTimeout = -1;
+    }
+    callbackOnReply.setTimeout(totalTimeout);
+    String correlationId = UUID.randomUUID().toString();
+
+    // Collect all messages from all instance types
+    List<Message> allMessages = new ArrayList<>();
+    for (List<Message> messages : messagesByType.values()) {
+      allMessages.addAll(messages);
+    }
+    callbackOnReply.setMessagesSent(allMessages);
+
+    _asyncCallbackService.registerAsyncCallback(correlationId, callbackOnReply);
+    return correlationId;
+  }
+
+  /**
+   * Shared helper to send messages to recipients based on instance type.
+   *
+   * @param messages list of messages to send
+   * @param receiverType type of receiver (CONTROLLER or PARTICIPANT)
+   * @param correlationId correlation ID for callbacks (can be null)
+   * @param opts participant message options
+   * @param targetDataAccessor data accessor for ZK operations
+   */
+  private void sendMessagesToRecipients(List<Message> messages, InstanceType receiverType,
+      String correlationId, ParticipantMessageOptions opts, HelixDataAccessor targetDataAccessor) {
+    Builder keyBuilder = targetDataAccessor.keyBuilder();
+
+    for (Message tempMessage : messages) {
+      tempMessage.setRetryCount(opts.getRetryCount());
+      tempMessage.setExecutionTimeout(opts.getTimeoutMs());
+      tempMessage.setSrcInstanceType(_manager.getInstanceType());
+      if (correlationId != null) {
+        tempMessage.setCorrelationId(correlationId);
+      }
+      tempMessage.setSrcClusterName(_manager.getClusterName());
+
+      // Send to appropriate ZK path based on receiver type
+      if (receiverType == InstanceType.CONTROLLER) {
+        targetDataAccessor.setProperty(keyBuilder.controllerMessage(tempMessage.getId()), tempMessage);
+      } else if (receiverType == InstanceType.PARTICIPANT) {
+        targetDataAccessor.setProperty(keyBuilder.message(tempMessage.getTgtName(), tempMessage.getId()), tempMessage);
+      }
+    }
   }
 }

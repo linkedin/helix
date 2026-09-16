@@ -20,6 +20,7 @@ package org.apache.helix.model;
  */
 
 import java.util.LinkedHashMap;
+
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.rebalancer.topology.Topology;
 

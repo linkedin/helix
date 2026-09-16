@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -97,13 +98,13 @@ public class InstanceMessagesCache {
 
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
     Map<String, Map<String, Message>> msgMap = new HashMap<>();
-    List<PropertyKey> newMessageKeys = Lists.newLinkedList();
+    List<PropertyKey> messagesToFetchFromZk = Lists.newLinkedList();
     long purgeSum = 0;
     for (String instanceName : liveInstanceMap.keySet()) {
       // get the cache
       Map<String, Message> cachedMap = _messageCache.get(instanceName);
       if (cachedMap == null) {
-        cachedMap = Maps.newHashMap();
+        cachedMap = new ConcurrentHashMap<>();
         _messageCache.put(instanceName, cachedMap);
       }
       msgMap.put(instanceName, cachedMap);
@@ -124,18 +125,22 @@ public class InstanceMessagesCache {
       long purgeEnd = System.currentTimeMillis();
       purgeSum += purgeEnd - purgeStart;
 
-      // get the keys for the new messages
+      // Determine which messages need to be fetched/refreshed from ZK
       for (String messageName : messageNames) {
-        if (!cachedMap.containsKey(messageName)) {
-          newMessageKeys.add(keyBuilder.message(instanceName, messageName));
+        Message cachedMessage = cachedMap.get(messageName);
+        
+        // Fetch from ZK if:
+        // 1. Message is not cached yet (new message)
+        // 2. Message is in NEW state (participant may have updated it to READ)
+        if (cachedMessage == null || Message.MessageState.NEW.equals(cachedMessage.getMsgState())) {
+          messagesToFetchFromZk.add(keyBuilder.message(instanceName, messageName));
         }
       }
     }
 
-    // get the new messages
-    if (newMessageKeys.size() > 0) {
-      List<Message> newMessages = accessor.getProperty(newMessageKeys, true);
-      for (Message message : newMessages) {
+    if (messagesToFetchFromZk.size() > 0) {
+      List<Message> fetchedMessages = accessor.getProperty(messagesToFetchFromZk, true);
+      for (Message message : fetchedMessages) {
         if (message != null) {
           Map<String, Message> cachedMap = _messageCache.get(message.getTgtName());
           cachedMap.put(message.getId(), message);
@@ -152,7 +157,7 @@ public class InstanceMessagesCache {
 
     LOG.info(
         "END: InstanceMessagesCache.refresh(), {} of Messages read from ZooKeeper. took {} ms. ",
-        newMessageKeys.size(), (System.currentTimeMillis() - startTime));
+        messagesToFetchFromZk.size(), (System.currentTimeMillis() - startTime));
 
     refreshStaleMessageCache();
     return true;
@@ -172,7 +177,7 @@ public class InstanceMessagesCache {
   }
 
   public void addStaleMessage(String instanceName, Message staleMessage) {
-    _staleMessageCache.putIfAbsent(instanceName, new HashMap<>());
+    _staleMessageCache.putIfAbsent(instanceName, new ConcurrentHashMap<>());
     _staleMessageCache.get(instanceName).putIfAbsent(staleMessage.getMsgId(), staleMessage);
   }
 
@@ -273,7 +278,7 @@ public class InstanceMessagesCache {
         }
 
         if (!relayMessageMap.containsKey(targetInstance)) {
-          relayMessageMap.put(targetInstance, Maps.<String, Message>newHashMap());
+          relayMessageMap.put(targetInstance, new ConcurrentHashMap<>());
         }
         relayMessageMap.get(targetInstance).put(relayMessage.getMsgId(), relayMessage);
 
@@ -304,7 +309,7 @@ public class InstanceMessagesCache {
     for (String instance : _relayMessageMap.keySet()) {
       Map<String, Message> relayMessages = _relayMessageMap.get(instance);
       if (!_messageMap.containsKey(instance)) {
-        _messageMap.put(instance, Maps.<String, Message>newHashMap());
+        _messageMap.put(instance, new ConcurrentHashMap<>());
       }
       _messageMap.get(instance).putAll(relayMessages);
       relayMessageCount += relayMessages.size();
@@ -515,7 +520,7 @@ public class InstanceMessagesCache {
     for (Message message : messages) {
       String instanceName = message.getTgtName();
       if (!_messageCache.containsKey(instanceName)) {
-        _messageCache.put(instanceName, Maps.<String, Message>newHashMap());
+        _messageCache.put(instanceName, new ConcurrentHashMap<>());
       }
       _messageCache.get(instanceName).put(message.getId(), message);
 
@@ -530,7 +535,7 @@ public class InstanceMessagesCache {
   private void cacheRelayMessage(Message relayMessage, Message hostMessage) {
     String instanceName = relayMessage.getTgtName();
     if (!_relayMessageCache.containsKey(instanceName)) {
-      _relayMessageCache.put(instanceName, Maps.<String, Message> newHashMap());
+      _relayMessageCache.put(instanceName, new ConcurrentHashMap<>());
     }
     if (!_relayMessageCache.get(instanceName).containsKey(relayMessage.getId())) {
       // Only log if the message doesn't already exist in the cache

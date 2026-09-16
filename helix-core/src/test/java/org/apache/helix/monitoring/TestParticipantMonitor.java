@@ -41,6 +41,7 @@ import org.apache.helix.monitoring.mbeans.ClusterMBeanObserver;
 import org.apache.helix.monitoring.mbeans.MonitorDomainNames;
 import org.apache.helix.monitoring.mbeans.ParticipantMessageMonitor;
 import org.apache.helix.monitoring.mbeans.ParticipantStatusMonitor;
+import org.apache.helix.monitoring.mbeans.StateTransitionStatMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
@@ -174,6 +175,31 @@ public class TestParticipantMonitor {
     monitorListener.disconnect();
 
     System.out.println("END TestParticipantStateTransitionMonitor");
+  }
+
+  @Test()
+  public void testStateTransitionStatMonitorSensorNameOmitsResource() throws Exception {
+    // The MBean aggregates data across all resources for a given (cluster, transition),
+    // so the sensor name must not include resource. Two contexts differing only by
+    // resource must produce identical sensor names that exclude both resource values.
+    String cluster = TestHelper.getTestClassName() + "_sensorName";
+    String transition = "OFFLINE-ONLINE";
+
+    StateTransitionContext cxt1 = new StateTransitionContext(cluster, "instance", "db_1", transition);
+    StateTransitionContext cxt2 = new StateTransitionContext(cluster, "instance", "db_2", transition);
+
+    StateTransitionStatMonitor m1 =
+        new StateTransitionStatMonitor(cxt1, new ObjectName("dom:k=v1"));
+    StateTransitionStatMonitor m2 =
+        new StateTransitionStatMonitor(cxt2, new ObjectName("dom:k=v2"));
+
+    String expected = String.format("StateTransitionStat.%s.%s", cluster, transition);
+    Assert.assertEquals(m1.getSensorName(), expected);
+    Assert.assertEquals(m2.getSensorName(), expected);
+    Assert.assertFalse(m1.getSensorName().contains("db_1"),
+        "sensor name must not include resource name");
+    Assert.assertFalse(m2.getSensorName().contains("db_2"),
+        "sensor name must not include resource name");
   }
 
   @Test()

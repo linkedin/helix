@@ -1,3 +1,13 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+
 ignore:
-  - "helix-core/**/examples" # ignore code examples
-  - "recipes" # ignore recipes code
+  - "helix-core/**/examples"
+  - "recipes"

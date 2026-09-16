@@ -32,6 +32,25 @@ import org.apache.helix.HelixException;
  * This class wraps the required input for the rebalance algorithm.
  */
 public class ClusterModel {
+  /**
+   * The rebalance scope (phase) that produced this cluster model. It lets downstream consumers --
+   * e.g. the rebalance algorithm's blocking-snapshot reporter -- attribute a computation to the
+   * phase it belongs to, so a reversible metric can be scoped to a single writer instead of being
+   * clobbered by a different phase's concurrent computation (baseline and partial run on separate
+   * executors).
+   */
+  public enum RebalanceScopeType {
+    // Cover the difference between the current assignment and the Baseline assignment only.
+    PARTIAL,
+    // Cover all replicas that need relocation based on the cluster changes.
+    GLOBAL_BASELINE,
+    // Cover only replicas that are assigned to downed instances.
+    EMERGENCY,
+    // A temporary overwrite for partition replicas on a downed instance still within the delayed
+    // window but missing minActiveReplicas.
+    DELAYED_REBALANCE_OVERWRITES
+  }
+
   private final ClusterContext _clusterContext;
   // Map to track all the assignable replications. <Resource Name, Set<Replicas>>
   private final Map<String, Set<AssignableReplica>> _assignableReplicaMap;
@@ -41,16 +60,21 @@ public class ClusterModel {
   private final Map<String, AssignableNode> _assignableNodeMap;
   private final Set<String> _assignableNodeLogicalIds;
   private final Map<String, Set<String>> _assignableLogicalIdsByInstanceTag;
+  // The rebalance scope that produced this model. Used to route per-run reversible metrics to a
+  // single owning phase. Never null.
+  private final RebalanceScopeType _rebalanceScopeType;
 
   /**
    * @param clusterContext         The initialized cluster context.
    * @param assignableReplicas     The replicas to be assigned.
    *                               Note that the replicas in this list shall not be included while initializing the context and assignable nodes.
    * @param assignableNodes        The active instances.
+   * @param rebalanceScopeType     The rebalance scope (phase) that produced this model.
    */
   ClusterModel(ClusterContext clusterContext, Set<AssignableReplica> assignableReplicas,
-      Set<AssignableNode> assignableNodes) {
+      Set<AssignableNode> assignableNodes, RebalanceScopeType rebalanceScopeType) {
     _clusterContext = clusterContext;
+    _rebalanceScopeType = rebalanceScopeType;
 
     // Save all the to be assigned replication
     _assignableReplicaMap = assignableReplicas.stream()
@@ -80,6 +104,13 @@ public class ClusterModel {
 
   public ClusterContext getContext() {
     return _clusterContext;
+  }
+
+  /**
+   * @return the rebalance scope (phase) that produced this cluster model. Never null.
+   */
+  public RebalanceScopeType getRebalanceScopeType() {
+    return _rebalanceScopeType;
   }
 
   public Map<String, AssignableNode> getAssignableNodes() {

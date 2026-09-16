@@ -5,7 +5,10 @@ on:
   schedule:
     - cron: '0 */12 * * *'
 
-permissions: write-all
+permissions:
+  contents: read
+  checks: write
+  issues: write
 
 jobs:
   Merge_PR_CI:
@@ -25,7 +28,7 @@ jobs:
     - name: Run All Tests
       run: mvn -q -fae test
     - name: Upload to Codecov
-      run: bash <(curl -s https://codecov.io/bash)
+      uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe
       if: ${{ github.repository == 'apache/helix' && github.event_name == 'push' && (success() || failure()) }}
     - name: Generate Test Report
       uses: dorny/test-reporter@v1

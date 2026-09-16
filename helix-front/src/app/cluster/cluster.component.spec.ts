@@ -19,13 +19,13 @@ window.matchMedia =
   function () {
     return {
       matches: false,
-      addListener: function () {},
-      removeListener: function () {},
-      addEventListener: function () {},
-      removeEventListener: function () {},
+      addListener () {},
+      removeListener () {},
+      addEventListener () {},
+      removeEventListener () {},
       media: '',
-      onchange: function () {},
-      dispatchEvent: function () {
+      onchange () {},
+      dispatchEvent () {
         return true;
       },
     };

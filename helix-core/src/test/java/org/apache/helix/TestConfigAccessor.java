@@ -117,7 +117,7 @@ public class TestConfigAccessor extends ZkUnitTestBase {
     keys = configAccessor.getKeys(ConfigScopeProperty.PARTICIPANT, clusterName, "localhost_12918");
     System.out.println((keys));
     Assert.assertEquals(keys.size(), 3, "should be [HELIX_HOST, HELIX_PORT, participantConfigKey]");
-    Assert.assertEquals(keys.get(2), "participantConfigKey");
+    Assert.assertTrue(keys.contains("participantConfigKey"));
 
     keys = configAccessor.getKeys(ConfigScopeProperty.PARTITION, clusterName, "testResource",
         "testPartition");

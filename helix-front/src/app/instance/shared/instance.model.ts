@@ -1,3 +1,10 @@
+export type InstanceOperationState =
+  | 'ENABLE'
+  | 'DISABLE'
+  | 'EVACUATE'
+  | 'SWAP_IN'
+  | 'UNKNOWN';
+
 export class Instance {
   readonly name: string;
   readonly clusterName: string;
@@ -5,9 +12,14 @@ export class Instance {
   readonly liveInstance: boolean | string;
   readonly sessionId: string;
   readonly helixVersion: string;
+  readonly operationState: InstanceOperationState;
 
   get healthy(): boolean {
-    return this.liveInstance && this.enabled;
+    return this.liveInstance && this.operationState === 'ENABLE';
+  }
+
+  get online(): boolean {
+    return !!this.liveInstance;
   }
 
   constructor(
@@ -16,7 +28,8 @@ export class Instance {
     enabled: boolean,
     liveInstance: boolean | string,
     sessionId?: string,
-    helixVersion?: string
+    helixVersion?: string,
+    operationState?: InstanceOperationState
   ) {
     this.name = name;
     this.clusterName = clusterName;
@@ -24,5 +37,6 @@ export class Instance {
     this.liveInstance = liveInstance;
     this.sessionId = sessionId;
     this.helixVersion = helixVersion;
+    this.operationState = operationState || (enabled ? 'ENABLE' : 'DISABLE');
   }
 }

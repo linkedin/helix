@@ -44,6 +44,8 @@ import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
+import org.apache.helix.controller.stages.InProgressHandoffRecord;
+import org.apache.helix.controller.stages.MissingMinActiveReplicaRecord;
 import org.apache.helix.controller.stages.MissingTopStateRecord;
 import org.apache.helix.model.CustomizedState;
 import org.apache.helix.model.CustomizedStateConfig;
@@ -75,14 +77,27 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
 
   // maintain a cache of bestPossible assignment across pipeline runs
   // TODO: this is only for customRebalancer, remove it and merge it with _idealMappingCache.
+  // IMPORTANT: Must be ConcurrentHashMap — written by parallel rebalancer threads in
+  // BestPossibleStateCalcStage via setCachedResourceAssignment(). A plain HashMap is unsafe
+  // for concurrent puts and can corrupt internal state, causing clear() to silently fail.
   private Map<String, ResourceAssignment> _resourceAssignmentCache;
 
   // maintain a cache of idealmapping (preference list) for full-auto resource across pipeline runs
+  // IMPORTANT: Must be ConcurrentHashMap — written by parallel rebalancer threads in
+  // BestPossibleStateCalcStage via setCachedIdealMapping(). A plain HashMap is unsafe
+  // for concurrent puts and can corrupt internal state, causing clear() to silently fail.
   private Map<String, ZNRecord> _idealMappingCache;
 
   // records for top state handoff
   private Map<String, Map<String, MissingTopStateRecord>> _missingTopStateMap;
+  private Map<String, Map<String, InProgressHandoffRecord>> _inProgressHandoffMap;
+  private Map<String, Map<String, InProgressHandoffRecord>> _postDispatchHandoffMap;
   private Map<String, Map<String, String>> _lastTopStateLocationMap;
+
+  // records for partitions currently below their minActiveReplicas count, used to compute how long
+  // a partition stays degraded (its recovery duration). Persists across pipeline runs so a start
+  // recorded in one run resolves to a duration in a later run, mirroring _missingTopStateMap.
+  private Map<String, Map<String, MissingMinActiveReplicaRecord>> _missingMinActiveReplicaMap;
 
   // Maintain a set of all ChangeTypes for change detection
   private Set<HelixConstants.ChangeType> _refreshedChangeTypes;
@@ -142,10 +157,13 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
         return obj.getResourceName();
       }
     }, true);
-    _resourceAssignmentCache = new HashMap<>();
-    _idealMappingCache = new HashMap<>();
+    _resourceAssignmentCache = new ConcurrentHashMap<>();
+    _idealMappingCache = new ConcurrentHashMap<>();
     _missingTopStateMap = new HashMap<>();
+    _inProgressHandoffMap = new HashMap<>();
+    _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
+    _missingMinActiveReplicaMap = new HashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
     _customizedViewCacheMap = new HashMap<>();
@@ -384,6 +402,18 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     return _missingTopStateMap;
   }
 
+  public Map<String, Map<String, MissingMinActiveReplicaRecord>> getMissingMinActiveReplicaMap() {
+    return _missingMinActiveReplicaMap;
+  }
+
+  public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
+    return _inProgressHandoffMap;
+  }
+
+  public Map<String, Map<String, InProgressHandoffRecord>> getPostDispatchHandoffMap() {
+    return _postDispatchHandoffMap;
+  }
+
   public Map<String, Map<String, String>> getLastTopStateLocationMap() {
     return _lastTopStateLocationMap;
   }
@@ -473,6 +503,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   public void clearMonitoringRecords() {
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
+    _missingMinActiveReplicaMap.clear();
   }
 
   /**

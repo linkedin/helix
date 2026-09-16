@@ -120,6 +120,13 @@ public class TestMaintenanceManagementService {
         List<HealthCheck> healthChecks, Set<String> toBeStoppedInstances) {
       return Collections.emptyMap();
     }
+
+    @Override
+    protected Map<String, Boolean> getInstanceHealthStatus(String clusterId, String instanceName,
+        List<HealthCheck> healthChecks, Set<String> toBeStoppedInstances,
+        boolean includeDetails) {
+      return Collections.emptyMap();
+    }
   }
 
   @Test

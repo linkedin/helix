@@ -8,8 +8,65 @@
   color: mat.get-color-from-palette(mat.define-palette(mat.$blue-palette));
 }
 
-.status-not-healthy {
+.status-offline {
   color: mat.get-color-from-palette(
     mat.define-palette(mat.$grey-palette, 900, 900, 900)
+  );
+}
+
+.status-disabled-icon {
+  color: mat.get-color-from-palette(
+    mat.define-palette(mat.$red-palette, 700, 700, 700)
+  );
+}
+
+.status-unknown {
+  color: mat.get-color-from-palette(
+    mat.define-palette(mat.$amber-palette, 700, 700, 700)
+  );
+}
+
+.status-evacuate {
+  color: mat.get-color-from-palette(
+    mat.define-palette(mat.$orange-palette, 700, 700, 700)
+  );
+}
+
+.status-swap-in {
+  color: mat.get-color-from-palette(
+    mat.define-palette(mat.$purple-palette, 500, 500, 500)
+  );
+}
+
+::ng-deep .label-unknown .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$amber-palette),
+    700
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$amber-palette),
+    700
+  );
+}
+
+::ng-deep .label-evacuate .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$orange-palette),
+    700
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$orange-palette),
+    700
+  );
+}
+
+::ng-deep .label-swap-in .status-disabled {
+  border-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$purple-palette),
+    500
+  );
+  background-color: mat.get-color-from-palette(
+    mat.define-palette(mat.$purple-palette),
+    500
   );
 }

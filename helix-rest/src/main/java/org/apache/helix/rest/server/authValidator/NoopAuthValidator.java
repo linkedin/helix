@@ -26,4 +26,10 @@ public class NoopAuthValidator implements AuthValidator {
   public boolean validate(ContainerRequestContext request) {
     return true;
   }
+
+  @Override
+  public boolean validate(ContainerRequestContext request, String role) {
+    // No-op validator: authorizes every request, including role-restricted ones.
+    return true;
+  }
 }

@@ -24,7 +24,6 @@ import java.util.Map;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
-import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -83,6 +82,10 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
     boolean shouldExitMaintenance;
     String reason;
     switch (internalReason) {
+    // MAX_OFFLINE_INSTANCES_EXCEEDED is the deprecated alias for
+    // MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS; no current code path writes it, but
+    // long-lived MM signals persisted before the rename can still carry it on disk. The
+    // two arms must stay collapsed for backward compatibility.
     case MAX_OFFLINE_INSTANCES_EXCEEDED:
     case MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS:
       // Check on the number of offline/disabled instances
@@ -94,25 +97,25 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
         return; // Neither config is set, no auto-exit
       }
 
-      // Compute routable instance count for percentage resolution (same filter as entry logic)
-      int routableInstanceCount = (int) cache.getInstanceConfigMap().entrySet().stream()
-          .filter(instanceEntry -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-              instanceEntry.getValue().getInstanceOperation().getOperation()))
-          .count();
-
-      // Get the count of all instances that are either offline or disabled
-      int offlineDisabledCount =
-          cache.getAssignableInstances().size() - cache.getEnabledLiveInstances().size();
+      // Use the shared offline-budget accessor so MM exit measures against the same
+      // population MM entry uses in BestPossibleStateCalcStage. See
+      // BaseControllerDataProvider#getInstancesUnableToAcceptOnlineReplicas for the
+      // membership rules (routable, not enabled-live, no valid maintenance marker).
+      int instancesUnableToAcceptOnlineReplicas =
+          cache.getInstancesUnableToAcceptOnlineReplicas(System.currentTimeMillis()).size();
+      // Percentages resolve against the routable population, the same denominator MM entry uses.
+      int routableInstanceCount = cache.getRoutableInstanceCount();
 
       int effectiveExitThreshold = ClusterConfig.resolveEffectiveThreshold(
           absoluteExitThreshold, percentageExitThreshold, routableInstanceCount);
 
-      shouldExitMaintenance =
-          effectiveExitThreshold >= 0 && offlineDisabledCount <= effectiveExitThreshold;
+      shouldExitMaintenance = effectiveExitThreshold >= 0
+          && instancesUnableToAcceptOnlineReplicas <= effectiveExitThreshold;
       reason = String.format(
-          "Auto-exiting maintenance mode for cluster %s; Num. of offline/disabled instances is %d, "
-              + "less than or equal to effective exit threshold %d (absolute=%d, percentage=%d%% of %d routable)",
-          event.getClusterName(), offlineDisabledCount, effectiveExitThreshold,
+          "Auto-exiting maintenance mode for cluster %s; instances unable to take ONLINE "
+              + "replicas count %d is less than or equal to effective exit threshold %d "
+              + "(absolute=%d, percentage=%d%% of %d routable)",
+          event.getClusterName(), instancesUnableToAcceptOnlineReplicas, effectiveExitThreshold,
           absoluteExitThreshold, percentageExitThreshold, routableInstanceCount);
       break;
     case MAX_PARTITION_PER_INSTANCE_EXCEEDED:

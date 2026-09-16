@@ -248,6 +248,147 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testNoMetricsRecordedForNullOrDisabledIdealState() throws JMException {
+    final int n = 5;
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=nullOrDisabledTest"));
+    monitor.register();
+
+    try {
+      List<String> instances = new ArrayList<>();
+      for (int i = 0; i < n; i++) {
+        String instance = "localhost_" + (12918 + i);
+        instances.add(instance);
+      }
+
+      ZNRecord idealStateRecord = DefaultIdealStateCalculator
+          .calculateIdealState(instances, _partitions, _replicas - 1, _dbName, "MASTER", "SLAVE");
+      IdealState idealState = new IdealState(deepCopyZNRecord(idealStateRecord));
+      idealState.setMinActiveReplicas(_replicas - 1);
+      ExternalView externalView = new ExternalView(deepCopyZNRecord(idealStateRecord));
+      StateModelDefinition stateModelDef =
+          BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
+
+      // Create a scenario where some partitions are missing top state
+      int missTopState = 10;
+      Random r = new Random();
+      int start = r.nextInt(_partitions - missTopState - 1);
+      for (int i = start; i < start + missTopState; i++) {
+        String partition = _dbName + "_" + i;
+        Map<String, String> map = externalView.getStateMap(partition);
+        for (String key : map.keySet()) {
+          if (map.get(key).equalsIgnoreCase("MASTER")) {
+            map.put(key, "SLAVE");
+            break;
+          }
+        }
+        externalView.setStateMap(partition, map);
+      }
+
+      // Update with null ideal state - should not record any metrics
+      monitor.updateResourceState(externalView, null, stateModelDef);
+
+      Assert.assertEquals(monitor.getPartitionGauge(), 0,
+          "PartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), 0,
+          "MissingTopStatePartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getErrorPartitionGauge(), 0,
+          "ErrorPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getDifferenceWithIdealStateGauge(), 0,
+          "DifferenceWithIdealStateGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getExternalViewPartitionGauge(), 0,
+          "ExternalViewPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getMissingMinActiveReplicaPartitionGauge(), 0,
+          "MissingMinActiveReplicaPartitionGauge should be 0 when ideal state is null");
+      Assert.assertEquals(monitor.getMissingReplicaPartitionGauge(), 0,
+          "MissingReplicaPartitionGauge should be 0 when ideal state is null");
+
+      // Update with disabled ideal state - should not record any metrics
+      idealState.enable(false);
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      
+      Assert.assertEquals(monitor.getPartitionGauge(), 0,
+          "PartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), 0,
+          "MissingTopStatePartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getErrorPartitionGauge(), 0,
+          "ErrorPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getDifferenceWithIdealStateGauge(), 0,
+          "DifferenceWithIdealStateGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getExternalViewPartitionGauge(), 0,
+          "ExternalViewPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingMinActiveReplicaPartitionGauge(), 0,
+          "MissingMinActiveReplicaPartitionGauge should be 0 when ideal state is disabled");
+      Assert.assertEquals(monitor.getMissingReplicaPartitionGauge(), 0,
+          "MissingReplicaPartitionGauge should be 0 when ideal state is disabled");
+
+      // Enable the resource and verify metrics are now recorded
+      idealState.enable(true);
+      monitor.updateResourceState(externalView, idealState, stateModelDef);
+      
+      Assert.assertEquals(monitor.getPartitionGauge(), _partitions,
+          "PartitionGauge should be recorded when ideal state is enabled");
+      Assert.assertEquals(monitor.getMissingTopStatePartitionGauge(), missTopState,
+          "MissingTopStatePartitionGauge should be recorded when ideal state is enabled");
+      Assert.assertTrue(monitor.getExternalViewPartitionGauge() > 0,
+          "ExternalViewPartitionGauge should be recorded when ideal state is enabled");
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
+  public void testUpdatePartitionRecoveryStats() throws JMException {
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=recoveryTest"));
+    monitor.register();
+    try {
+      // A successful recovery records the total duration and increments the counter.
+      monitor.updatePartitionRecoveryStats(4000L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 4000L);
+      // helixLatency < 0 is skipped (v1), so the helixLatency histogram stays empty.
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 0L);
+
+      // A second successful recovery increments the counter and records the larger max, and a
+      // non-negative helixLatency is now recorded.
+      monitor.updatePartitionRecoveryStats(9000L, 2000L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+          .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+          .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 2000L);
+
+      // A non-successful update records nothing.
+      monitor.updatePartitionRecoveryStats(1000L, 500L, false);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+
+      // A negative totalDuration (possible if the wall clock steps backward between the start and
+      // end samples) must NOT be recorded into the histogram -- it would corrupt min/p99/max. The
+      // recovery is still counted; only the invalid duration sample is skipped.
+      monitor.updatePartitionRecoveryStats(-500L, -1L, true);
+      Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 3L,
+          "A negative-duration recovery is still counted");
+      Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+              .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L,
+          "A negative duration must not be recorded into the histogram");
+
+      // The beyond-threshold counter is monotonic: it only ever increments and is never decremented,
+      // so scrape-robust increase() queries can count breaches even when they heal between scrapes.
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 2L);
+      monitor.incrementPartitionRecoveryBeyondThresholdCounter();
+      Assert.assertEquals(monitor.getPartitionsRecoveryDurationBeyondThresholdCounter(), 3L,
+          "Beyond-threshold counter must be monotonically increasing");
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testUpdatePartitionWeightStats() throws JMException, IOException {
     final MBeanServerConnection mBeanServer = ManagementFactory.getPlatformMBeanServer();
     final String clusterName = TestHelper.getTestMethodName();

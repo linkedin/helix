@@ -20,8 +20,11 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -30,6 +33,8 @@ import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
@@ -88,16 +93,34 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       long lastPipelineFinishTimestamp) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
+    // getCurrentState() rebuilds a participant's entire current state map on every call, and that
+    // map is invariant for the duration of a run, so resolve each participant at most once here
+    // instead of once per partition.
+    Map<String, Map<String, CurrentState>> currentStateMemo = new HashMap<>();
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
+        cache.getInProgressHandoffMap();
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
+        cache.getPostDispatchHandoffMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
 
     long durationThreshold = Long.MAX_VALUE;
+    long handoffDurationThreshold = Long.MAX_VALUE;
+    long recoveryDurationThreshold = Long.MAX_VALUE;
     if (cache.getClusterConfig() != null) {
       durationThreshold = cache.getClusterConfig().getMissTopStateDurationThreshold();
+      handoffDurationThreshold = cache.getClusterConfig().getTopStateHandoffDurationThreshold();
+      recoveryDurationThreshold =
+          cache.getClusterConfig().getPartitionRecoveryDurationThreshold();
     }
 
     // Remove any resource records that no longer exists
     missingTopStateMap.keySet().retainAll(resourceMap.keySet());
+    controllerObservedHandoffMap.keySet().retainAll(resourceMap.keySet());
+    participantExecutionHandoffMap.keySet().retainAll(resourceMap.keySet());
     lastTopStateMap.keySet().retainAll(resourceMap.keySet());
+    missingMinActiveReplicaMap.keySet().retainAll(resourceMap.keySet());
 
     for (Resource resource : resourceMap.values()) {
       StateModelDefinition stateModelDef = cache.getStateModelDef(resource.getStateModelDefRef());
@@ -113,19 +136,38 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       for (Partition partition : resource.getPartitions()) {
         String currentTopStateInstance =
             findCurrentTopStateLocation(currentStateOutput, resourceName, partition, stateModelDef);
+        String expectedTopStateInstance =
+            findExpectedTopStateLocation(cache, resourceName, partition, stateModelDef);
         String lastTopStateInstance = findCachedTopStateLocation(cache, resourceName, partition);
 
         if (currentTopStateInstance != null) {
           reportTopStateExistence(cache, currentStateOutput, stateModelDef, resourceName, partition,
               lastTopStateInstance, currentTopStateInstance, clusterStatusMonitor,
-              durationThreshold, lastPipelineFinishTimestamp);
+              durationThreshold, lastPipelineFinishTimestamp, currentStateMemo);
           updateCachedTopStateLocation(cache, resourceName, partition, currentTopStateInstance);
+
+          // Check for in-progress handoff: IdealState expects different instance than current
+          if (expectedTopStateInstance != null && !expectedTopStateInstance.equals(currentTopStateInstance)) {
+            trackControllerObservedHandoff(cache, resourceName, partition, handoffDurationThreshold,
+                clusterStatusMonitor);
+            trackParticipantExecutionHandoff(cache, resourceName, partition, handoffDurationThreshold,
+                clusterStatusMonitor);
+          } else {
+            // Handoff completed or no handoff in progress, clear tracking if exists
+            clearControllerObservedHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
+            clearParticipantExecutionHandoffTracking(cache, resourceName, partition, clusterStatusMonitor);
+          }
         } else {
           reportTopStateMissing(cache, resourceName,
-              partition, stateModelDef.getTopState(), currentStateOutput);
+              partition, stateModelDef.getTopState(), currentStateOutput, currentStateMemo);
           reportTopStateHandoffFailIfNecessary(cache, resourceName, partition, durationThreshold,
               clusterStatusMonitor);
         }
+
+        // Track how long the partition stays below its minActiveReplicas count, independent of
+        // top state presence.
+        updatePartitionRecoveryStatus(cache, clusterStatusMonitor, resourceName, partition,
+            currentStateOutput, stateModelDef, recoveryDurationThreshold);
       }
 
       if (!_failingPartitionsInfoMap.isEmpty()) {
@@ -136,6 +178,187 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (clusterStatusMonitor != null) {
       clusterStatusMonitor.resetMaxMissingTopStateGauge();
     }
+  }
+
+  /**
+   * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
+   * duration"). An edge detector runs once per pipeline execution per partition:
+   * <ul>
+   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B). The
+   *       transition is confirmed against the previously published ExternalView so that a partition
+   *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
+   *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
+   *   <li>degraded -&gt; degraded: mark it once for alerting if it exceeds the threshold.</li>
+   *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
+   * </ul>
+   * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
+   * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. helixLatency
+   * attribution is a follow-up, so the end-to-end duration is emitted with a negative helixLatency.
+   *
+   * @param cache cluster data cache
+   * @param clusterStatusMonitor monitor object
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param currentStateOutput current state output
+   * @param stateModelDef state model def object
+   * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold counter
+   */
+  private void updatePartitionRecoveryStatus(ResourceControllerDataProvider cache,
+      ClusterStatusMonitor clusterStatusMonitor, String resourceName, Partition partition,
+      CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
+      long recoveryDurationThreshold) {
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null || !idealState.isEnabled() || cache.isMaintenanceModeEnabled()) {
+      // Skip resources with no IdealState or that are disabled. A disabled resource is not
+      // expected to maintain its replicas, so a drop below min while disabled is not a real
+      // recovery -- mirrors ResourceMonitor#updateResourceState.
+      // Also skip while the cluster is in maintenance mode: the controller intentionally holds off
+      // restoring or moving replicas (node swaps, take-downs, the maintenance-timeout window), so a
+      // partition below min is expected behavior, not an availability regression. Counting it would
+      // inflate the recovery-duration histogram by the length of the maintenance window and fire
+      // false beyond-threshold breaches.
+      return;
+    }
+    int minActiveReplica = getMinActiveReplica(idealState);
+    if (minActiveReplica <= 0) {
+      // No min-active-replica requirement to track for this resource.
+      return;
+    }
+
+    int activeReplicaCount =
+        countActiveReplicas(currentStateOutput, resourceName, partition, stateModelDef);
+    boolean belowMin = activeReplicaCount < minActiveReplica;
+
+    Map<String, Map<String, MissingMinActiveReplicaRecord>> missingMinActiveReplicaMap =
+        cache.getMissingMinActiveReplicaMap();
+    String partitionName = partition.getPartitionName();
+    MissingMinActiveReplicaRecord record = missingMinActiveReplicaMap.containsKey(resourceName)
+        ? missingMinActiveReplicaMap.get(resourceName).get(partitionName) : null;
+
+    if (belowMin) {
+      if (record == null && wasPreviouslyAtOrAboveMin(cache, resourceName, partition, stateModelDef,
+          minActiveReplica)) {
+        // Edge: healthy -> degraded. A missing record is ambiguous -- it also means we have never
+        // observed this partition (brand-new resource, partition expansion, or the first run after
+        // clearMonitoringRecords() on a leadership change). Only open a recovery window when the
+        // previously published ExternalView confirms the partition was at or above min, so bring-up
+        // time is not mis-counted as a recovery. Stamp the detection time as the recovery start.
+        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
+            .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
+      }
+      // Still degraded: keep waiting. The breach is counted once at recovery (below), not while in
+      // flight, so the monotonic counter reliably captures it even across scrape gaps.
+    } else if (record != null) {
+      // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
+      missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
+      long totalDuration = System.currentTimeMillis() - record.getStartTimeStamp();
+      if (clusterStatusMonitor != null) {
+        // helixLatency attribution is a follow-up; pass a negative value to skip that gauge.
+        clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration, -1L,
+            true);
+        if (totalDuration > recoveryDurationThreshold) {
+          LogUtil.logDebug(LOG, _eventId, String.format(
+              "Partition %s of resource %s stayed below minActiveReplicas for %s ms, beyond "
+                  + "threshold %s ms", partitionName, resourceName, totalDuration,
+              recoveryDurationThreshold));
+          clusterStatusMonitor.incrementPartitionRecoveryBeyondThresholdCounter(resourceName);
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolve the effective minActiveReplicas for a resource. Falls back to the resource replica
+   * count when minActiveReplicas is not explicitly set, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param idealState ideal state of the resource
+   * @return effective minActiveReplicas, or a non-positive value when there is nothing to track
+   */
+  private int getMinActiveReplica(IdealState idealState) {
+    int minActiveReplica = idealState.getMinActiveReplicas();
+    if (minActiveReplica < 0) {
+      minActiveReplica = idealState.getReplicaCount(-1);
+    }
+    return minActiveReplica;
+  }
+
+  /**
+   * Count the replicas of a partition currently in an active state. Active states are all states
+   * in the state model's priority list except the initial state, DROPPED, and ERROR, mirroring
+   * {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param currentStateOutput current state output
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(CurrentStateOutput currentStateOutput, String resourceName,
+      Partition partition, StateModelDefinition stateModelDef) {
+    return countActiveReplicas(currentStateOutput.getCurrentStateMap(resourceName, partition),
+        stateModelDef);
+  }
+
+  /**
+   * Count the replicas in an active state from a raw instance -&gt; state map. Active states are all
+   * states in the state model's priority list except the initial state, DROPPED, and ERROR,
+   * mirroring {@code ResourceMonitor#updateResourceState}.
+   *
+   * @param stateMap instance -&gt; state map for a partition (may be null)
+   * @param stateModelDef state model def object
+   * @return number of replicas in an active state
+   */
+  private int countActiveReplicas(Map<String, String> stateMap,
+      StateModelDefinition stateModelDef) {
+    if (stateMap == null) {
+      return 0;
+    }
+    Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
+    activeStates.remove(stateModelDef.getInitialState());
+    activeStates.remove(HelixDefinedState.DROPPED.name());
+    activeStates.remove(HelixDefinedState.ERROR.name());
+
+    int activeReplicaCount = 0;
+    for (String state : stateMap.values()) {
+      if (activeStates.contains(state)) {
+        activeReplicaCount++;
+      }
+    }
+    return activeReplicaCount;
+  }
+
+  /**
+   * Determine whether a partition was at or above {@code minActiveReplicas} in the previously
+   * published ExternalView. Used to confirm a genuine healthy -&gt; below-min transition before
+   * opening a recovery window, so that a partition coming up from nothing is not mistaken for a
+   * drop. The ExternalView is refreshed from ZooKeeper at the start of every pipeline run (and is
+   * durable across a leadership change, unlike the in-memory recovery records), so it reflects the
+   * partition's state as of the previous observation.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model def object
+   * @param minActiveReplica effective minActiveReplicas for the resource
+   * @return {@code true} if the previous ExternalView had at least minActiveReplicas active
+   *         replicas; {@code false} if there is no previous ExternalView (e.g. a brand-new resource)
+   *         or it was below min
+   */
+  private boolean wasPreviouslyAtOrAboveMin(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, StateModelDefinition stateModelDef,
+      int minActiveReplica) {
+    Map<String, ExternalView> externalViews = cache.getExternalViews();
+    ExternalView previousExternalView =
+        externalViews == null ? null : externalViews.get(resourceName);
+    if (previousExternalView == null) {
+      // No previously published ExternalView (e.g. a brand-new resource or partition). Treat as a
+      // bring-up, not a drop, so we do not open a recovery window.
+      return false;
+    }
+    Map<String, String> previousStateMap =
+        previousExternalView.getStateMap(partition.getPartitionName());
+    return countActiveReplicas(previousStateMap, stateModelDef) >= minActiveReplica;
   }
 
   /**
@@ -172,6 +395,36 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     return lastTopStateMap.containsKey(resourceName) && lastTopStateMap.get(resourceName)
         .containsKey(partition.getPartitionName()) ? lastTopStateMap.get(resourceName)
         .get(partition.getPartitionName()) : null;
+  }
+
+  /**
+   * Find expected top state location from IdealState for the given resource and partition
+   *
+   * @param cache cluster data cache object
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param stateModelDef state model definition
+   * @return expected instance name that should have top state according to IdealState, null if not defined
+   */
+  private String findExpectedTopStateLocation(ResourceControllerDataProvider cache, String resourceName,
+      Partition partition, StateModelDefinition stateModelDef) {
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return null;
+    }
+
+    Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition.getPartitionName());
+    if (instanceStateMap == null || instanceStateMap.isEmpty()) {
+      return null;
+    }
+
+    String topState = stateModelDef.getTopState();
+    for (Map.Entry<String, String> entry : instanceStateMap.entrySet()) {
+      if (topState.equals(entry.getValue())) {
+        return entry.getKey();
+      }
+    }
+    return null;
   }
 
   /**
@@ -213,7 +466,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       StateModelDefinition stateModelDef, String resourceName, Partition partition,
       String lastTopStateInstance, String currentTopStateInstance,
       ClusterStatusMonitor clusterStatusMonitor, long durationThreshold,
-      long lastPipelineFinishTimestamp) {
+      long lastPipelineFinishTimestamp, Map<String, Map<String, CurrentState>> currentStateMemo) {
 
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
@@ -225,18 +478,39 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       //        only if we were able to record it in the first place.
       reportTopStateComesBack(cache, currentStateOutput.getCurrentStateMap(resourceName, partition),
           resourceName, partition, clusterStatusMonitor, durationThreshold,
-          stateModelDef.getTopState());
+          stateModelDef.getTopState(), currentStateMemo);
     } else if (lastTopStateInstance != null) {
       // With no missing top state record, but top state instance changed,
       // we observed an entire top state handoff process
       reportSingleTopStateHandoff(cache, lastTopStateInstance, currentTopStateInstance,
-          resourceName, partition, clusterStatusMonitor, lastPipelineFinishTimestamp);
+          resourceName, partition, clusterStatusMonitor, lastPipelineFinishTimestamp,
+          currentStateMemo);
     } else {
       // else, there is not top state change, or top state first came up, do nothing
       LogUtil.logDebug(LOG, _eventId, String.format(
           "No top state hand off or first-seen top state for %s. CurNode: %s, LastNode: %s.",
           partition.getPartitionName(), currentTopStateInstance, lastTopStateInstance));
     }
+  }
+
+  /**
+   * Resolves a participant's current state map, reusing the result for the rest of the run.
+   * <p>
+   * {@code BaseControllerDataProvider#getCurrentState} is not an accessor: it streams, filters and
+   * collects the participant's entire current state map on every call. The result depends only on
+   * the participant and its session, both of which are fixed for the duration of a pipeline run,
+   * so memoising it collapses O(partitions) rebuilds into O(live instances).
+   *
+   * @param cache cluster data cache
+   * @param currentStateMemo per-run memo, keyed by instance name
+   * @param instanceName participant whose current states are needed
+   * @param session ephemeral owner of that participant, fixed for the run
+   */
+  private static Map<String, CurrentState> resolveCurrentStates(
+      ResourceControllerDataProvider cache, Map<String, Map<String, CurrentState>> currentStateMemo,
+      String instanceName, String session) {
+    return currentStateMemo
+        .computeIfAbsent(instanceName, instance -> cache.getCurrentState(instance, session));
   }
 
   /**
@@ -254,17 +528,18 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void reportSingleTopStateHandoff(ResourceControllerDataProvider cache, String lastTopStateInstance,
       String curTopStateInstance, String resourceName, Partition partition,
-      ClusterStatusMonitor clusterStatusMonitor, long lastPipelineFinishTimestamp) {
+      ClusterStatusMonitor clusterStatusMonitor, long lastPipelineFinishTimestamp,
+      Map<String, Map<String, CurrentState>> currentStateMemo) {
 
     // Current state output generation logic guarantees that current top state instance
     // must be a live instance
     String curTopStateSession = cache.getLiveInstances().get(curTopStateInstance).getEphemeralOwner();
-    long endTime =
-        cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName)
-            .getEndTime(partition.getPartitionName());
+    CurrentState curTopStateCurrentState =
+        resolveCurrentStates(cache, currentStateMemo, curTopStateInstance, curTopStateSession)
+            .get(resourceName);
+    long endTime = curTopStateCurrentState.getEndTime(partition.getPartitionName());
     long toTopStateuserLatency =
-        endTime - cache.getCurrentState(curTopStateInstance, curTopStateSession).get(resourceName)
-            .getStartTime(partition.getPartitionName());
+        endTime - curTopStateCurrentState.getStartTime(partition.getPartitionName());
 
     long startTime = TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED;
     long fromTopStateUserLatency = DEFAULT_HANDOFF_USER_LATENCY;
@@ -273,15 +548,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (!curTopStateInstance.equals(lastTopStateInstance) && cache.getLiveInstances().containsKey(lastTopStateInstance)) {
       String lastTopStateSession =
           cache.getLiveInstances().get(lastTopStateInstance).getEphemeralOwner();
+      CurrentState lastTopStateCurrentState =
+          resolveCurrentStates(cache, currentStateMemo, lastTopStateInstance, lastTopStateSession)
+              .get(resourceName);
       // We need this null check as there are test cases creating incomplete current state
-      if (cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-          != null) {
-        startTime =
-            cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-                .getStartTime(partition.getPartitionName());
+      if (lastTopStateCurrentState != null) {
+        startTime = lastTopStateCurrentState.getStartTime(partition.getPartitionName());
         fromTopStateUserLatency =
-            cache.getCurrentState(lastTopStateInstance, lastTopStateSession).get(resourceName)
-                .getEndTime(partition.getPartitionName()) - startTime;
+            lastTopStateCurrentState.getEndTime(partition.getPartitionName()) - startTime;
       }
     }
     if (startTime == TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED) {
@@ -361,7 +635,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * @param currentStateOutput current state output
    */
   private void reportTopStateMissing(ResourceControllerDataProvider cache, String resourceName, Partition partition,
-      String topState, CurrentStateOutput currentStateOutput) {
+      String topState, CurrentStateOutput currentStateOutput,
+      Map<String, Map<String, CurrentState>> currentStateMemo) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap = cache.getMissingTopStateMap();
     Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
     if (missingTopStateMap.containsKey(resourceName) && missingTopStateMap.get(resourceName)
@@ -383,8 +658,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (missingStateInstance != null) {
       Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
       if (liveInstances.containsKey(missingStateInstance)) {
-        CurrentState currentState = cache.getCurrentState(missingStateInstance,
-            liveInstances.get(missingStateInstance).getEphemeralOwner()).get(resourceName);
+        CurrentState currentState = resolveCurrentStates(cache, currentStateMemo,
+            missingStateInstance, liveInstances.get(missingStateInstance).getEphemeralOwner())
+            .get(resourceName);
 
         if (currentState != null
             && currentState.getPreviousState(partition.getPartitionName()) != null && currentState
@@ -467,7 +743,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    */
   private void reportTopStateComesBack(ResourceControllerDataProvider cache, Map<String, String> stateMap, String resourceName,
       Partition partition, ClusterStatusMonitor clusterStatusMonitor, long threshold,
-      String topState) {
+      String topState, Map<String, Map<String, CurrentState>> currentStateMemo) {
     Map<String, Map<String, MissingTopStateRecord>> missingTopStateMap =
         cache.getMissingTopStateMap();
     MissingTopStateRecord record =
@@ -480,9 +756,15 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     long toTopStateUserLatency = DEFAULT_HANDOFF_USER_LATENCY;
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
     for (String instanceName : stateMap.keySet()) {
-      CurrentState currentState =
-          cache.getCurrentState(instanceName, liveInstances.get(instanceName).getEphemeralOwner())
-              .get(resourceName);
+      if (!liveInstances.containsKey(instanceName)) {
+        continue;
+      }
+      CurrentState currentState = resolveCurrentStates(cache, currentStateMemo, instanceName,
+          liveInstances.get(instanceName).getEphemeralOwner()).get(resourceName);
+      if (currentState == null || currentState.getState(partition.getPartitionName()) == null) {
+        // Current state may be transiently unavailable (e.g., transition in-flight), skip instance
+        continue;
+      }
       if (currentState.getState(partition.getPartitionName()).equalsIgnoreCase(topState)) {
         if (currentState.getEndTime(partition.getPartitionName()) <= handOffEndTime) {
           handOffEndTime = currentState.getEndTime(partition.getPartitionName());
@@ -536,5 +818,261 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     LogUtil.logInfo(LOG, _eventId, String.format(
         "Missing top state duration is %s/%s (helix latency / end to end latency) for partition %s. Graceful: %s",
         helixLatency, totalDuration, partitionName, isGraceful));
+  }
+
+  /**
+   * Track controller-observed top state handoff and increment gauge if beyond threshold.
+   * Starts tracking from when the controller first detects IdealState/CurrentState divergence.
+   * Includes controller-side throttling and dispatch time in the handoff duration.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param durationThreshold top state handoff duration threshold
+   * @param clusterStatusMonitor monitor object
+   */
+  private void trackControllerObservedHandoff(ResourceControllerDataProvider cache, String resourceName,
+      Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
+        cache.getInProgressHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    // Initialize resource map if not exists
+    if (!controllerObservedHandoffMap.containsKey(resourceName)) {
+      controllerObservedHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
+    }
+
+    InProgressHandoffRecord controllerHandoffRecord = controllerObservedHandoffMap.get(resourceName).get(partitionName);
+
+    if (controllerHandoffRecord == null) {
+      controllerHandoffRecord = new InProgressHandoffRecord(System.currentTimeMillis());
+      controllerObservedHandoffMap.get(resourceName).put(partitionName, controllerHandoffRecord);
+      LogUtil.logDebug(LOG, _eventId, String.format(
+          "Tracking controller-observed handoff for partition %s of resource %s starting at %d",
+          partitionName, resourceName, controllerHandoffRecord.getStartTimeStamp()));
+    }
+
+    if (controllerHandoffRecord.isBeyondThreshold()) {
+      return;
+    }
+
+    long startTime = controllerHandoffRecord.getStartTimeStamp();
+    long handoffDuration = System.currentTimeMillis() - startTime;
+
+    if (startTime > 0 && handoffDuration > durationThreshold) {
+      controllerHandoffRecord.setBeyondThreshold();
+
+      LogUtil.logWarn(LOG, _eventId, String.format(
+          "Controller-observed handoff for partition %s of resource %s exceeded threshold. Duration: %s ms",
+          partitionName, resourceName, handoffDuration));
+
+      if (clusterStatusMonitor != null) {
+        clusterStatusMonitor.incrementControllerHandoffBeyondThresholdGauge(resourceName);
+      }
+    }
+  }
+
+  /**
+   * Track participant-execution handoff and increment gauge if beyond threshold.
+   * Only starts tracking after the participant has picked up the message (marked as READ).
+   * Excludes controller-side throttling time from the handoff duration.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param durationThreshold top state handoff duration threshold
+   * @param clusterStatusMonitor monitor object
+   */
+  private void trackParticipantExecutionHandoff(ResourceControllerDataProvider cache, String resourceName,
+      Partition partition, long durationThreshold, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
+        cache.getPostDispatchHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    if (!participantExecutionHandoffMap.containsKey(resourceName)) {
+      participantExecutionHandoffMap.put(resourceName, new HashMap<String, InProgressHandoffRecord>());
+    }
+
+    InProgressHandoffRecord participantHandoffRecord =
+        participantExecutionHandoffMap.get(resourceName).get(partitionName);
+
+    if (participantHandoffRecord == null) {
+      Long participantStartTime =
+          getParticipantTransitionStartTime(cache, resourceName, partitionName);
+
+      if (participantStartTime == null || participantStartTime == 0) {
+        LogUtil.logDebug(LOG, _eventId, String.format(
+            "Participant-execution metric: participant has not started transition for partition %s of resource %s",
+            partitionName, resourceName));
+        return;
+      }
+
+      participantHandoffRecord = new InProgressHandoffRecord(participantStartTime);
+      participantExecutionHandoffMap.get(resourceName).put(partitionName, participantHandoffRecord);
+      LogUtil.logDebug(LOG, _eventId, String.format(
+          "Tracking participant-execution handoff for partition %s of resource %s from participant start time: %d",
+          partitionName, resourceName, participantStartTime));
+    }
+
+    if (participantHandoffRecord.isBeyondThreshold()) {
+      return;
+    }
+
+    long startTime = participantHandoffRecord.getStartTimeStamp();
+    long handoffDuration = System.currentTimeMillis() - startTime;
+
+    if (startTime > 0 && handoffDuration > durationThreshold) {
+      participantHandoffRecord.setBeyondThreshold();
+
+      LogUtil.logWarn(LOG, _eventId, String.format(
+          "Participant-execution handoff for partition %s of resource %s has exceeded threshold. Duration: %s ms",
+          partitionName, resourceName, handoffDuration));
+
+      if (clusterStatusMonitor != null) {
+        clusterStatusMonitor.incrementParticipantHandoffBeyondThresholdGauge(resourceName);
+      }
+    }
+  }
+
+  /**
+   * Clear controller-observed handoff tracking and decrement gauge if it was beyond threshold
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param clusterStatusMonitor monitor object
+   */
+  private void clearControllerObservedHandoffTracking(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> controllerObservedHandoffMap =
+        cache.getInProgressHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    if (!controllerObservedHandoffMap.containsKey(resourceName)) {
+      return;
+    }
+
+    InProgressHandoffRecord controllerHandoffRecord = controllerObservedHandoffMap.get(resourceName).get(partitionName);
+    if (controllerHandoffRecord == null) {
+      return;
+    }
+
+    // If the record was beyond threshold, decrement the gauge
+    if (controllerHandoffRecord.isBeyondThreshold() && clusterStatusMonitor != null) {
+      LogUtil.logInfo(LOG, _eventId, String.format(
+          "Controller-observed handoff completed for partition %s of resource %s. Decrementing gauge.",
+          partitionName, resourceName));
+      clusterStatusMonitor.decrementControllerHandoffBeyondThresholdGauge(resourceName);
+    }
+
+    // Remove the tracking record
+    controllerObservedHandoffMap.get(resourceName).remove(partitionName);
+    if (controllerObservedHandoffMap.get(resourceName).isEmpty()) {
+      controllerObservedHandoffMap.remove(resourceName);
+    }
+  }
+
+  /**
+   * Clear participant-execution handoff tracking and decrement gauge if it was beyond threshold
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partition partition of the given resource
+   * @param clusterStatusMonitor monitor object
+   */
+  private void clearParticipantExecutionHandoffTracking(ResourceControllerDataProvider cache,
+      String resourceName, Partition partition, ClusterStatusMonitor clusterStatusMonitor) {
+    Map<String, Map<String, InProgressHandoffRecord>> participantExecutionHandoffMap =
+        cache.getPostDispatchHandoffMap();
+    String partitionName = partition.getPartitionName();
+
+    if (!participantExecutionHandoffMap.containsKey(resourceName)) {
+      return;
+    }
+
+    InProgressHandoffRecord participantHandoffRecord =
+        participantExecutionHandoffMap.get(resourceName).get(partitionName);
+    if (participantHandoffRecord == null) {
+      return;
+    }
+
+    if (participantHandoffRecord.isBeyondThreshold() && clusterStatusMonitor != null) {
+      LogUtil.logInfo(LOG, _eventId, String.format(
+          "Participant-execution handoff completed for partition %s of resource %s. Decrementing gauge.",
+          partitionName, resourceName));
+      clusterStatusMonitor.decrementParticipantHandoffBeyondThresholdGauge(resourceName);
+    }
+
+    participantExecutionHandoffMap.get(resourceName).remove(partitionName);
+    if (participantExecutionHandoffMap.get(resourceName).isEmpty()) {
+      participantExecutionHandoffMap.remove(resourceName);
+    }
+  }
+
+  /**
+   * Get the timestamp when the participant started executing the top-state transition.
+   * Uses message.getReadTimeStamp() which is set when participant marks the message as READ,
+   * right before scheduling the task. This is the best proxy for execution start time available in ZK.
+   *
+   * @param cache cluster data cache
+   * @param resourceName resource name
+   * @param partitionName partition name
+   * @return participant's execution start time if transition has started, null otherwise
+   */
+  private Long getParticipantTransitionStartTime(ResourceControllerDataProvider cache,
+      String resourceName, String partitionName) {
+    // Get the state model definition for this resource
+    IdealState idealState = cache.getIdealState(resourceName);
+    if (idealState == null) {
+      return null;
+    }
+
+    StateModelDefinition stateModelDef = cache.getStateModelDef(idealState.getStateModelDefRef());
+    if (stateModelDef == null) {
+      return null;
+    }
+
+    String topState = stateModelDef.getTopState();
+    Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
+
+    // Get the instance that currently/previously had top state
+    Map<String, Map<String, String>> lastTopStateMap = cache.getLastTopStateLocationMap();
+    String topStateInstance = null;
+    if (lastTopStateMap.containsKey(resourceName)) {
+      topStateInstance = lastTopStateMap.get(resourceName).get(partitionName);
+    }
+
+    if (topStateInstance == null || !liveInstances.containsKey(topStateInstance)) {
+      return null;
+    }
+
+    // Check for message being executed on this instance for this partition
+    for (Message message : cache.getMessages(topStateInstance).values()) {
+      if (!resourceName.equals(message.getResourceName())) {
+        continue;
+      }
+
+      // Check if this message is for our partition
+      boolean isForPartition = partitionName.equals(message.getPartitionName())
+          || (message.getPartitionNames() != null && message.getPartitionNames().contains(partitionName));
+
+      if (!isForPartition) {
+        continue;
+      }
+
+      // Check if this is a top-state transition (FROM top state)
+      if (topState.equals(message.getFromState())) {
+        // Found the top-state transition message
+        // Use readTimeStamp (set when message marked as READ) as the start time.
+        // This is the most accurate timestamp available in ZK that indicates the participant
+        // has picked up the message and is about to execute it.
+        long startTime = message.getReadTimeStamp();
+
+        if (startTime > 0) {
+          return startTime;
+        }
+      }
+    }
+    return null;
   }
 }

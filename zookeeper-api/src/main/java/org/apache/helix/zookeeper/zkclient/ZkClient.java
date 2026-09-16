@@ -119,6 +119,11 @@ public class ZkClient implements Watcher {
       Integer.getInteger(ZkSystemPropertyKeys.JUTE_MAXBUFFER, ZNRecord.SIZE_LIMIT);
 
   private final IZkConnection _connection;
+
+  // The operation retry timeout can be configured via:
+  // 1. Constructor parameter operationRetryTimeout
+  // 2. System property "zk.operation.retry.timeout.ms" (used as default if not explicitly set)
+  // 3. Respective ZKClientConfig (eg: RealmAwareZkClientConfig.setOperationRetryTimeout()) for higher-level clients
   private final long _operationRetryTimeoutInMillis;
   private final Map<String, Set<IZkChildListener>> _childListener = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Set<IZkDataListenerEntry>> _dataListener =
@@ -266,6 +271,10 @@ public class ZkClient implements Watcher {
     }
     _usePersistWatcher = usePersistWatcher;
     _persistListenerMutex = new ReentrantLock();
+  }
+
+  public long getOperationRetryTimeout() {
+    return _operationRetryTimeoutInMillis;
   }
 
   protected ZkClient(IZkConnection zkConnection, int connectionTimeout, long operationRetryTimeout,
@@ -436,40 +445,10 @@ public class ZkClient implements Watcher {
     }
   }
 
-  /**
-   * Subscribes state changes for a {@link IZkStateListener} listener.
-   *
-   * @deprecated
-   * This is deprecated. It is kept for backwards compatibility. Please use
-   * {@link #subscribeStateChanges(IZkStateListener)}.
-   *
-   * @param listener {@link IZkStateListener} listener
-   */
-  @Deprecated
-  public void subscribeStateChanges(
-      final org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener listener) {
-    subscribeStateChanges(new IZkStateListenerI0ItecImpl(listener));
-  }
-
   public void unsubscribeStateChanges(IZkStateListener stateListener) {
     synchronized (_stateListener) {
       _stateListener.remove(stateListener);
     }
-  }
-
-  /**
-   * Unsubscribes state changes for a {@link IZkStateListener} listener.
-   *
-   * @deprecated
-   * This is deprecated. It is kept for backwards compatibility. Please use
-   * {@link #unsubscribeStateChanges(IZkStateListener)}.
-   *
-   * @param stateListener {@link IZkStateListener} listener
-   */
-  @Deprecated
-  public void unsubscribeStateChanges(
-      org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener stateListener) {
-    unsubscribeStateChanges(new IZkStateListenerI0ItecImpl(stateListener));
   }
 
   public void unsubscribeAll() {
@@ -1698,7 +1677,7 @@ public class ZkClient implements Watcher {
 
     KeeperException.Code code = KeeperException.Code.get(callbackHandler.getRc());
     if (code == KeeperException.Code.OK) {
-      LOG.info("zkclient {}, sycnOnNewSession with sessionID {} async return code: {} and proceeds",
+      LOG.info("zkclient {}, syncOnNewSession with sessionID {} async return code: {} and proceeds",
           _uid, sessionId, code);
       return true;
     }
@@ -2205,6 +2184,7 @@ public class ZkClient implements Watcher {
   private void waitForRetry(long maxSleep) {
     if (waitUntilConnected(_operationRetryTimeoutInMillis, TimeUnit.MILLISECONDS)) {
       try {
+        LOG.debug("zkclient {} Wait for {} ms before retrying operation", _uid, maxSleep);
         Thread.sleep(maxSleep);
       } catch (InterruptedException ex) {
         // we don't need to re-throw.
@@ -3034,66 +3014,7 @@ public class ZkClient implements Watcher {
     }
   }
 
-  /**
-   * Creates a {@link IZkStateListener} that wraps a default
-   * implementation of {@link org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener}, which means the returned
-   * listener runs the methods of {@link org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener}.
-   * This is for backward compatibility with {@link org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener}.
-   */
-  private static class IZkStateListenerI0ItecImpl implements IZkStateListener {
-    private org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener _listener;
 
-    IZkStateListenerI0ItecImpl(
-        org.apache.helix.zookeeper.zkclient.deprecated.IZkStateListener listener) {
-      _listener = listener;
-    }
-
-    @Override
-    public void handleStateChanged(KeeperState keeperState) throws Exception {
-      _listener.handleStateChanged(keeperState);
-    }
-
-    @Override
-    public void handleNewSession(final String sessionId) throws Exception {
-      /*
-       * org.I0Itec.zkclient.IZkStateListener does not have handleNewSession(sessionId),
-       * so just call handleNewSession() by default.
-       */
-      _listener.handleNewSession();
-    }
-
-    @Override
-    public void handleSessionEstablishmentError(Throwable error) throws Exception {
-      _listener.handleSessionEstablishmentError(error);
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-      if (obj == this) {
-        return true;
-      }
-      if (!(obj instanceof IZkStateListenerI0ItecImpl)) {
-        return false;
-      }
-      if (_listener == null) {
-        return false;
-      }
-
-      IZkStateListenerI0ItecImpl defaultListener = (IZkStateListenerI0ItecImpl) obj;
-
-      return _listener.equals(defaultListener._listener);
-    }
-
-    @Override
-    public int hashCode() {
-      /*
-       * The original listener's hashcode helps find the wrapped listener with the same original
-       * listener. This is helpful in unsubscribeStateChanges(listener) when finding the listener
-       * to remove.
-       */
-      return _listener.hashCode();
-    }
-  }
 
   private void validateCurrentThread() {
     if (_zookeeperEventThread != null && Thread.currentThread() == _zookeeperEventThread) {

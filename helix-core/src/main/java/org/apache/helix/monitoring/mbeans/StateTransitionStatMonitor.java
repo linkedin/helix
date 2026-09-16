@@ -89,8 +89,13 @@ public class StateTransitionStatMonitor extends DynamicMBeanProvider {
   }
 
   public String getSensorName() {
-    return String.format("StateTransitionStat.%s.%s.%s", _context.getClusterName(),
-        _context.getResourceName(), _context.getTransition());
+    // The underlying MBean is keyed by (cluster, transition) only and aggregates data
+    // points across all resources, so the sensor name must reflect that granularity.
+    // Including the resource name here would be misleading: it would surface whichever
+    // resource happened to trigger MBean creation first, while the counters/gauges
+    // actually reflect every resource going through this transition on this cluster.
+    return String.format("StateTransitionStat.%s.%s", _context.getClusterName(),
+        _context.getTransition());
   }
 
   public void addDataPoint(StateTransitionDataPoint data) {

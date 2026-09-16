@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -34,16 +35,19 @@ import org.apache.helix.rest.acl.NoopAclRegister;
 import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.authValidator.AuthValidator;
+import org.apache.helix.rest.server.filters.HelixAdminAuthFilter;
 import org.apache.helix.rest.server.resources.helix.ClusterAccessor;
-import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -59,11 +63,13 @@ public class TestAuthValidator extends AbstractTestClass {
 
   private static String CLASSNAME_TEST_DEFAULT_AUTH = "testDefaultAuthValidator";
   private static String CLASSNAME_TEST_CST_AUTH = "testCustomAuthValidator";
+  private static String CLASSNAME_TEST_ADMIN_AUTH = "testHelixAdminAuthValidator";
 
   @AfterClass
   public void afterClass() {
     TestHelper.dropCluster(CLASSNAME_TEST_DEFAULT_AUTH, _gZkClient);
     TestHelper.dropCluster(CLASSNAME_TEST_CST_AUTH, _gZkClient);
+    TestHelper.dropCluster(CLASSNAME_TEST_ADMIN_AUTH, _gZkClient);
   }
 
   @Test
@@ -126,6 +132,142 @@ public class TestAuthValidator extends AbstractTestClass {
     _httpClient.close();
   }
 
+  /*
+   * Verifies the @HelixAdminAuth gate on deleteInstance end-to-end against a real HelixRestServer:
+   *  - a real validator that implements validate(request, role) enforces the role: reject -> 403,
+   *    accept -> 200 (a real delete), and the filter forwards exactly HELIX_ADMIN_ROLE;
+   *  - the sibling GET getInstanceById (not annotated) is never gated, proving @HelixAdminAuth is
+   *    scoped to the method and not the whole resource;
+   *  - a decorator that wraps a role-aware validator (mimicking a quota/metrics wrapper) and
+   *    forwards validate(request, role) keeps the gate intact: reject-through-wrapper -> 403,
+   *    accept-through-wrapper -> 200. Because validate(request, role) is abstract, a decorator
+   *    cannot silently skip the role check by forwarding only validate(request).
+   * Real clusters/instances are created so DELETE/GET reach the actual handlers and return real
+   * status codes (deleting a non-existent instance would 400 regardless of the auth outcome).
+   */
+  @Test(dependsOnMethods = "testCustomAuthValidator")
+  public void testHelixAdminAuthValidator() throws IOException, InterruptedException {
+    int newPort = getBaseUri().getPort() + 2;
+    _mockBaseUri = HttpConstants.HTTP_PROTOCOL_PREFIX + getBaseUri().getHost() + ":" + newPort;
+
+    List<HelixRestNamespace> namespaces = new ArrayList<>();
+    namespaces.add(new HelixRestNamespace(HelixRestNamespace.DEFAULT_NAMESPACE_NAME,
+        HelixRestNamespace.HelixMetadataStoreType.ZOOKEEPER, ZK_ADDR, true));
+
+    String cluster = CLASSNAME_TEST_ADMIN_AUTH;
+    _gSetupTool.addCluster(cluster, true);
+    String probeInstance = "probeInstance_12000";           // survives; used for the sibling GET
+    String adminDeleteInstance = "adminDelInstance_12001";   // deleted by the role-granting validator
+    String wrappedDeleteInstance = "wrappedDelInstance_12002"; // deleted through a granting decorator
+    _gSetupTool.addInstanceToCluster(cluster, probeInstance);
+    _gSetupTool.addInstanceToCluster(cluster, adminDeleteInstance);
+    _gSetupTool.addInstanceToCluster(cluster, wrappedDeleteInstance);
+
+    // (1) Override REJECTS the admin role: base auth passes but the role check denies -> 403.
+    RoleAwareAuthValidator roleReject = new RoleAwareAuthValidator(false);
+    HelixRestServer server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), roleReject, roleReject, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      // deleteInstance is @HelixAdminAuth -> forbidden even though the instance exists.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      // A stray "command" query param must NOT let deleteInstance skip the gate: deleteInstance does
+      // not bind @QueryParam("command"), so JAX-RS ignores it, but the filter must still gate the
+      // DELETE. This aborts at the filter (403) and never reaches the handler, so probeInstance is
+      // NOT deleted (the sibling GET below still returns 200).
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance + "?command=enable",
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      // The sibling instance-removal COMMANDS on the multi-command POST handlers are gated too:
+      // purgeOfflineParticipants (updateCluster) and forceKillInstance (updateInstance). With the
+      // role denied these abort at the filter (403) and never reach the destructive handler, so no
+      // cluster state is mutated (probeInstance still exists for the GET below). This proves the
+      // @HelixAdminAuth wiring on updateCluster/updateInstance end-to-end, not just in the unit test.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "?command=purgeOfflineParticipants&duration=0",
+              HttpConstants.RestVerbs.POST, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      sendRequestAndValidate(
+          buildRequest(
+              "/clusters/" + cluster + "/instances/" + probeInstance + "?command=forceKillInstance",
+              HttpConstants.RestVerbs.POST, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      // The filter must forward exactly HELIX_ADMIN_ROLE (not just some arbitrary string).
+      Assert.assertEquals(roleReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+      // getInstanceById on the SAME resource is not @HelixAdminAuth -> not gated -> 200, not 403.
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.GET, ""),
+          Response.Status.OK.getStatusCode());
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
+
+    // (2) Override GRANTS the admin role: deleteInstance succeeds with a real 200 OK.
+    RoleAwareAuthValidator roleAccept = new RoleAwareAuthValidator(true);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), roleAccept, roleAccept, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + adminDeleteInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(roleAccept.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
+
+    // (3) A decorator that wraps a role-aware validator must forward validate(request, role). This
+    // mimics an internal quota/metrics wrapper. Reject-through-wrapper still denies the delete
+    // (403), directly refuting the "200 through a wrapper" bypass; the wrapper cannot skip the role
+    // check because validate(request, role) is abstract (forwarding only validate(request) would
+    // not compile as a complete AuthValidator).
+    RoleAwareAuthValidator innerReject = new RoleAwareAuthValidator(false);
+    ForwardingDecorator decoratedReject = new ForwardingDecorator(innerReject);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), decoratedReject, decoratedReject, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + probeInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.FORBIDDEN.getStatusCode());
+      // The role reached the delegate through the wrapper (not swallowed by the decorator).
+      Assert.assertEquals(innerReject.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
+
+    // Accept-through-wrapper: the same decorator over a granting validator allows the delete (200).
+    RoleAwareAuthValidator innerAccept = new RoleAwareAuthValidator(true);
+    ForwardingDecorator decoratedAccept = new ForwardingDecorator(innerAccept);
+    server = new HelixRestServer(namespaces, newPort, getBaseUri().getPath(),
+        Collections.emptyList(), decoratedAccept, decoratedAccept, new NoopAclRegister());
+    server.start();
+    _httpClient = HttpClients.createDefault();
+    try {
+      sendRequestAndValidate(
+          buildRequest("/clusters/" + cluster + "/instances/" + wrappedDeleteInstance,
+              HttpConstants.RestVerbs.DELETE, ""),
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(innerAccept.getLastRole(), HelixAdminAuthFilter.HELIX_ADMIN_ROLE);
+    } finally {
+      server.shutdown();
+      _httpClient.close();
+    }
+  }
+
   private HttpUriRequest buildRequest(String urlSuffix, HttpConstants.RestVerbs requestMethod,
       String jsonEntity) {
     String url = _mockBaseUri + urlSuffix;
@@ -134,6 +276,14 @@ public class TestAuthValidator extends AbstractTestClass {
         HttpPut httpPut = new HttpPut(url);
         httpPut.setEntity(new StringEntity(jsonEntity, ContentType.APPLICATION_JSON));
         return httpPut;
+      case POST:
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setEntity(new StringEntity(jsonEntity, ContentType.APPLICATION_JSON));
+        // When the auth filter aborts a POST with 403, the request entity is left undrained. With
+        // HTTP/1.1 keep-alive the pooled connection cannot be safely reused and the next request on
+        // it would deadlock, so force the server to close the connection after responding.
+        httpPost.setHeader("Connection", "close");
+        return httpPost;
       case DELETE:
         return new HttpDelete(url);
       case GET:
@@ -145,9 +295,67 @@ public class TestAuthValidator extends AbstractTestClass {
 
   private void sendRequestAndValidate(HttpUriRequest request, int expectedResponseCode)
       throws IllegalArgumentException, IOException {
-    HttpResponse response = _httpClient.execute(request);
-    Assert.assertEquals(response.getStatusLine().getStatusCode(), expectedResponseCode);
+    // Use try-with-resources so the response (and its underlying connection) is always released
+    // back to the pool. Otherwise every call leaks a leased connection and, once the default
+    // per-route pool (2) is exhausted, the next request blocks forever waiting to lease one.
+    try (CloseableHttpResponse response = _httpClient.execute(request)) {
+      Assert.assertEquals(response.getStatusLine().getStatusCode(), expectedResponseCode);
+      EntityUtils.consumeQuietly(response.getEntity());
+    }
   }
 
+  /**
+   * A decorator that wraps another {@link AuthValidator}, mimicking an internal quota/metrics
+   * wrapper. It forwards BOTH overloads to its delegate. Because {@code validate(request, role)} is
+   * abstract, the compiler forces this class to implement it; forwarding it to the delegate is what
+   * keeps a wrapped role check from being silently skipped.
+   */
+  private static class ForwardingDecorator implements AuthValidator {
+    private final AuthValidator _delegate;
+
+    ForwardingDecorator(AuthValidator delegate) {
+      _delegate = delegate;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request) {
+      return _delegate.validate(request);
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request, String role) {
+      return _delegate.validate(request, role);
+    }
+  }
+
+  /**
+   * A real {@link AuthValidator} whose base check always passes but which overrides the role-aware
+   * overload to grant access only for the exact {@link HelixAdminAuthFilter#HELIX_ADMIN_ROLE}
+   * string (when {@code grantRole} is true). It records the last role it was asked about so tests
+   * can assert the filter forwards the expected role.
+   */
+  private static class RoleAwareAuthValidator implements AuthValidator {
+    private final boolean _grantRole;
+    private volatile String _lastRole;
+
+    RoleAwareAuthValidator(boolean grantRole) {
+      _grantRole = grantRole;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request) {
+      return true;
+    }
+
+    @Override
+    public boolean validate(ContainerRequestContext request, String role) {
+      _lastRole = role;
+      return _grantRole && HelixAdminAuthFilter.HELIX_ADMIN_ROLE.equals(role);
+    }
+
+    String getLastRole() {
+      return _lastRole;
+    }
+  }
 
 }
