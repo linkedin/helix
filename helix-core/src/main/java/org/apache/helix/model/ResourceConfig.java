@@ -51,8 +51,6 @@ public class ResourceConfig extends HelixProperty {
     MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
-    HELIX_ENABLED,
-    EXTERNAL_VIEW_DISABLED,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
     RELAXED_DISABLED_PARTITION_CONSTRAINT, // Resource-level override for relaxed disabled partition constraint
@@ -99,20 +97,20 @@ public class ResourceConfig extends HelixProperty {
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-      Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
+      RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled, stateModelFactoryName,
-        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
-        externalViewDisabled, rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
+        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag,
+        rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-      Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
+      RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled, Map<String, Map<String, Integer>> partitionCapacityMap) {
@@ -140,15 +138,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (instanceGroupTag != null) {
       _record.setSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), instanceGroupTag);
-    }
-
-    if (helixEnabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), helixEnabled);
-    }
-
-    if (externalViewDisabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(),
-          externalViewDisabled);
     }
 
     if (rebalanceConfig != null) {
@@ -281,24 +270,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public String getInstanceGroupTag() {
     return _record.getSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.toString());
-  }
-
-  /**
-   * Get if the resource is enabled or not
-   * By default, it's enabled
-   * @return true if enabled; false otherwise
-   */
-  public Boolean isEnabled() {
-    return _record.getBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), true);
-  }
-
-  /**
-   * If the external view for this resource is disabled. by default, it is false.
-   *
-   * @return true if the external view should be disabled for this resource.
-   */
-  public Boolean isExternalViewDisabled() {
-    return _record.getBooleanField(ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(), false);
   }
 
   /**
@@ -563,8 +534,6 @@ public class ResourceConfig extends HelixProperty {
     private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
-    private Boolean _helixEnabled;
-    private Boolean _externalViewDisabled;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
     private StateTransitionTimeoutConfig _stateTransitionTimeoutConfig;
@@ -633,24 +602,6 @@ public class ResourceConfig extends HelixProperty {
 
     public Builder setInstanceGroupTag(String instanceGroupTag) {
       _instanceGroupTag = instanceGroupTag;
-      return this;
-    }
-
-    public Boolean isHelixEnabled() {
-      return _helixEnabled;
-    }
-
-    public Builder setHelixEnabled(boolean helixEnabled) {
-      _helixEnabled = helixEnabled;
-      return this;
-    }
-
-    public Boolean isExternalViewDisabled() {
-      return _externalViewDisabled;
-    }
-
-    public Builder setExternalViewDisabled(boolean externalViewDisabled) {
-      _externalViewDisabled = externalViewDisabled;
       return this;
     }
 
@@ -763,7 +714,7 @@ public class ResourceConfig extends HelixProperty {
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
           _stateModelFactoryName, _minActiveReplica, _maxPartitionsPerInstance,
-          _instanceGroupTag, _helixEnabled, _externalViewDisabled, _rebalanceConfig,
+          _instanceGroupTag, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
     }
@@ -811,12 +762,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord
         .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
             idealState.getMinActiveReplicas());
-    mergedZNRecord
-        .setBooleanFieldIfAbsent(ResourceConfig.ResourceConfigProperty.HELIX_ENABLED.name(),
-            idealState.isEnabled());
-    mergedZNRecord.setBooleanFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(),
-        idealState.isExternalViewDisabled());
     mergedZNRecord.setBooleanFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
         idealState.isDelayRebalanceEnabled());
