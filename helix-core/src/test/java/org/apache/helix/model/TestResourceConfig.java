@@ -186,12 +186,10 @@ public class TestResourceConfig {
 
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
-    ResourceConfig resourceConfig = new ResourceConfig("resource", false, 2, "OnlineOffline",
-        "DEFAULT", "2", 1, 10, "placementTag", true, false, null, null, null, null, true);
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false, 2, "DEFAULT",
+        1, 10, "placementTag", true, false, null, null, null, null, true);
     Assert.assertEquals(resourceConfig.getNumPartitions(), 2);
-    Assert.assertEquals(resourceConfig.getStateModelDefRef(), "OnlineOffline");
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
-    Assert.assertEquals(resourceConfig.getNumReplica(), "2");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
     Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
     Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
@@ -200,7 +198,8 @@ public class TestResourceConfig {
     Assert.assertFalse(resourceConfig.isExternalViewDisabled());
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
-        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
+        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
+            "STATE_MODEL_DEF_REF", "REPLICAS"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -238,11 +237,8 @@ public class TestResourceConfig {
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testIdealState.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testIdealState.getNumPartitions());
-    Assert.assertEquals(mergedResourceConfig.getStateModelDefRef(),
-        testIdealState.getStateModelDefRef());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testIdealState.getStateModelFactoryName());
-    Assert.assertEquals(mergedResourceConfig.getNumReplica(), testIdealState.getReplicas());
     Assert.assertEquals(mergedResourceConfig.getMinActiveReplica(),
         testIdealState.getMinActiveReplicas());
     Assert
@@ -261,9 +257,7 @@ public class TestResourceConfig {
     configBuilder.setInstanceGroupTag("testRCGroup");
     configBuilder.setMaxPartitionsPerInstance(2);
     configBuilder.setNumPartitions(2);
-    configBuilder.setStateModelDefRef("testRCDef");
     configBuilder.setStateModelFactoryName("testRCFactory");
-    configBuilder.setNumReplica("4");
     configBuilder.setMinActiveReplica(2);
     configBuilder.setHelixEnabled(false);
     configBuilder.setExternalViewDisabled(true);
@@ -278,11 +272,8 @@ public class TestResourceConfig {
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testConfig.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testConfig.getNumPartitions());
-    Assert
-        .assertEquals(mergedResourceConfig.getStateModelDefRef(), testConfig.getStateModelDefRef());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testConfig.getStateModelFactoryName());
-    Assert.assertEquals(mergedResourceConfig.getNumReplica(), testConfig.getNumReplica());
     Assert
         .assertEquals(mergedResourceConfig.getMinActiveReplica(), testConfig.getMinActiveReplica());
     Assert.assertEquals(mergedResourceConfig.isEnabled(), testConfig.isEnabled());
