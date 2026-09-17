@@ -292,7 +292,9 @@ public class InstancesAccessor extends AbstractHelixResource {
       @QueryParam("skipZKRead") boolean skipZKRead,
       @QueryParam("skipHealthCheckCategories") String skipHealthCheckCategories,
       @DefaultValue("false") @QueryParam("random") boolean random,
-      @DefaultValue("false") @QueryParam("includeDetails") boolean includeDetails, String content) {
+      @DefaultValue("false") @QueryParam("includeDetails") boolean includeDetails,
+      @DefaultValue("false") @QueryParam("rebalanceIfMinActiveReplicaNotMet")
+      boolean rebalanceIfMinActiveReplicaNotMet, String content) {
     Command cmd;
     try {
       cmd = Command.valueOf(command);
@@ -337,7 +339,8 @@ public class InstancesAccessor extends AbstractHelixResource {
           break;
         case stoppable:
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
-              skipHealthCheckCategorySet, random, includeDetails);
+              skipHealthCheckCategorySet, random, includeDetails,
+              rebalanceIfMinActiveReplicaNotMet);
         case instanceOperationMaintenance:
           return batchSetInstanceOperationMaintenance(clusterId, node);
         default:
@@ -417,7 +420,8 @@ public class InstancesAccessor extends AbstractHelixResource {
 
   private Response batchGetStoppableInstances(String clusterId, JsonNode node, boolean skipZKRead,
       boolean continueOnFailures, Set<StoppableCheck.Category> skipHealthCheckCategories,
-      boolean random, boolean includeDetails) throws IOException {
+      boolean random, boolean includeDetails, boolean rebalanceIfMinActiveReplicaNotMet)
+      throws IOException {
     try {
       // TODO: Process input data from the content
       // TODO: Implement the logic to automatically detect the selection base. https://github.com/apache/helix/issues/2968#issue-2691677799
@@ -567,6 +571,9 @@ public class InstancesAccessor extends AbstractHelixResource {
           break;
         default:
           throw new UnsupportedOperationException("instance_based selection is not supported yet!");
+      }
+      if (rebalanceIfMinActiveReplicaNotMet && maintenanceService.isMinActiveReplicaCheckFailed()) {
+        rebalanceOnMinActiveReplicaFailure(clusterId);
       }
       return JSONRepresentation(result);
     } catch (HelixException e) {

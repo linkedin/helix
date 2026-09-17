@@ -102,6 +102,9 @@ public class MaintenanceManagementService {
   private List<HealthCheck> _skipStoppableHealthCheckList = Collections.emptyList();
   // default value false to maintain backward compatibility
   private boolean _skipCustomChecksIfNoLiveness = false;
+  // Recorded where the check runs, so callers do not have to read it back out of the rendered
+  // failure text. Only written from the single thread that runs the min active replica checks.
+  private boolean _minActiveReplicaCheckFailed = false;
 
   public MaintenanceManagementService(ZKHelixDataAccessor dataAccessor,
       ConfigAccessor configAccessor, boolean skipZKRead, String namespace) {
@@ -956,6 +959,9 @@ public class MaintenanceManagementService {
             getInstanceHealthStatus(clusterId, instanceName,
                 Collections.singletonList(HealthCheck.MIN_ACTIVE_REPLICA_CHECK_FAILED),
                 possibleToStopInstances, includeDetails);
+        if (helixStoppableCheck.containsValue(false)) {
+          _minActiveReplicaCheckFailed = true;
+        }
         stoppableCheck.add(new StoppableCheck(helixStoppableCheck, StoppableCheck.Category.HELIX_OWN_CHECK));
 
         if (stoppableCheck.isStoppable()) {
@@ -969,6 +975,14 @@ public class MaintenanceManagementService {
         throw new HelixException(errorMessage, e);
       }
     }
+  }
+
+  /**
+   * @return true if the min active replica check failed for at least one instance of the stoppable
+   * check this service last ran.
+   */
+  public boolean isMinActiveReplicaCheckFailed() {
+    return _minActiveReplicaCheckFailed;
   }
 
   public static class MaintenanceManagementServiceBuilder {
