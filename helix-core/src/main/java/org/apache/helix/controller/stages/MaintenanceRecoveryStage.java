@@ -109,8 +109,43 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
       int effectiveExitThreshold = ClusterConfig.resolveEffectiveThreshold(
           absoluteExitThreshold, percentageExitThreshold, routableInstanceCount);
 
+      // An exit threshold looser than the entry threshold makes the cluster flap: for any count
+      // in (entry, exit] this stage exits maintenance mode and the entry check in
+      // BestPossibleStateCalcStage immediately re-enters it. ClusterConfig can only
+      // cross-validate absolute-against-absolute and percentage-against-percentage, so a mixed
+      // configuration such as a percentage entry with an absolute exit reaches here unvalidated;
+      // comparing those two statically is impossible because a percentage only becomes a count
+      // once the routable instance count is known. Clamp here, where that count is known.
+      // An entry threshold of -1 means auto-enter is off, so nothing can re-enter and a
+      // previously persisted maintenance signal must still be allowed to auto-exit.
+      int effectiveEntryThreshold = ClusterConfig.resolveEffectiveThreshold(
+          clusterConfig.getMaxOfflineInstancesAllowed(),
+          clusterConfig.getMaxOfflineInstancesAllowedPercentage(), routableInstanceCount);
+      boolean exitLooserThanEntry =
+          effectiveEntryThreshold >= 0 && effectiveExitThreshold > effectiveEntryThreshold;
+      int configuredExitThreshold = effectiveExitThreshold;
+      if (exitLooserThanEntry) {
+        effectiveExitThreshold = effectiveEntryThreshold;
+      }
+
       shouldExitMaintenance = effectiveExitThreshold >= 0
           && instancesUnableToAcceptOnlineReplicas <= effectiveExitThreshold;
+
+      // Only warn when the clamp actually suppressed an exit, so a cluster that is staying in
+      // maintenance mode on its own merits does not log this on every pipeline run.
+      if (exitLooserThanEntry && !shouldExitMaintenance
+          && instancesUnableToAcceptOnlineReplicas <= configuredExitThreshold) {
+        LogUtil.logWarn(LOG, event.getEventId(), String.format(
+            "Cluster %s has an auto-exit threshold (%d) looser than its auto-enter threshold "
+                + "(%d) for %d routable instances, so exiting maintenance mode would immediately "
+                + "re-enter it. Clamping the exit threshold to the enter threshold and staying in "
+                + "maintenance mode. Configured exit absolute=%d, percentage=%d%%; enter "
+                + "absolute=%d, percentage=%d%%.",
+            event.getClusterName(), configuredExitThreshold, effectiveEntryThreshold,
+            routableInstanceCount, absoluteExitThreshold, percentageExitThreshold,
+            clusterConfig.getMaxOfflineInstancesAllowed(),
+            clusterConfig.getMaxOfflineInstancesAllowedPercentage()));
+      }
       reason = String.format(
           "Auto-exiting maintenance mode for cluster %s; instances unable to take ONLINE "
               + "replicas count %d is less than or equal to effective exit threshold %d "
