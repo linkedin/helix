@@ -180,8 +180,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     Assert.assertTrue(
         tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason().isEmpty());
     String disableReason = "Reason";
-    tool.setInstanceOperation(clusterName, instanceName,
-        InstanceConstants.InstanceOperation.DISABLE, disableReason);
+    tool.enableInstance(clusterName, instanceName, false, disableReason);
     Assert.assertEquals(disableReason, tool.getInstanceConfig(clusterName, instanceName).getInstanceDisabledReason());
     tool.enableInstance(clusterName, instanceName, true);
     Assert.assertTrue(

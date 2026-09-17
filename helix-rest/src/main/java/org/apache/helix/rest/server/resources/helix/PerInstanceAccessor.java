@@ -505,8 +505,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           admin.enableInstance(clusterId, instanceName, true);
           break;
         case disable:
-          admin.setInstanceOperation(clusterId, instanceName,
-              InstanceConstants.InstanceOperation.DISABLE, disabledReason);
+          admin.enableInstance(clusterId, instanceName, false, disabledReason);
           break;
 
         case reset:
