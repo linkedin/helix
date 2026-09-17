@@ -436,7 +436,7 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     for (int i = 0; i < numResources; i++) {
       String resource = cluster + "_db_" + i;
       org.apache.helix.model.ResourceConfig resourceConfig =
-          new org.apache.helix.model.ResourceConfig.Builder(resource).setNumReplica(NUM_REPLICA)
+          new org.apache.helix.model.ResourceConfig.Builder(resource)
               .build();
       _configAccessor.setResourceConfig(cluster, resource, resourceConfig);
       resources.add(resource);

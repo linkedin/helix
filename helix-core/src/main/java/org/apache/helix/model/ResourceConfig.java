@@ -48,9 +48,7 @@ public class ResourceConfig extends HelixProperty {
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
     NUM_PARTITIONS,
-    STATE_MODEL_DEF_REF,
     STATE_MODEL_FACTORY_NAME,
-    REPLICAS,
     MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
@@ -100,20 +98,20 @@ public class ResourceConfig extends HelixProperty {
   }
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
-      String stateModelDefRef, String stateModelFactoryName, String numReplica,
+      String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
       Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
-    this(resourceId, monitorDisabled, numPartitions, stateModelDefRef, stateModelFactoryName,
-        numReplica, minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
+    this(resourceId, monitorDisabled, numPartitions, stateModelFactoryName,
+        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
         externalViewDisabled, rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
-      String stateModelDefRef, String stateModelFactoryName, String numReplica,
+      String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
       Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
@@ -133,16 +131,8 @@ public class ResourceConfig extends HelixProperty {
       _record.setIntField(ResourceConfigProperty.NUM_PARTITIONS.name(), numPartitions);
     }
 
-    if (stateModelDefRef != null) {
-      _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_DEF_REF.name(), stateModelDefRef);
-    }
-
     if (stateModelFactoryName != null) {
       _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(), stateModelFactoryName);
-    }
-
-    if (numReplica != null) {
-      _record.setSimpleField(ResourceConfigProperty.REPLICAS.name(), numReplica);
     }
 
     if (minActiveReplica >= 0) {
@@ -230,28 +220,11 @@ public class ResourceConfig extends HelixProperty {
   }
 
   /**
-   * Get the state model associated with this resource
-   * @return an identifier of the state model
-   */
-  public String getStateModelDefRef() {
-    return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_DEF_REF.name());
-  }
-
-  /**
    * Get the state model factory associated with this resource
    * @return state model factory name
    */
   public String getStateModelFactoryName() {
     return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name());
-  }
-
-  /**
-   * Get the number of replicas for each partition of this resource
-   * @return number of replicas (as a string)
-   */
-  public String getNumReplica() {
-    // TODO: use IdealState.getNumbReplica()?
-    return _record.getSimpleField(ResourceConfigProperty.REPLICAS.name());
   }
 
   /**
@@ -600,9 +573,7 @@ public class ResourceConfig extends HelixProperty {
     private String _resourceId;
     private Boolean _monitorDisabled;
     private int _numPartitions;
-    private String _stateModelDefRef;
     private String _stateModelFactoryName;
-    private String _numReplica;
     private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
@@ -652,15 +623,6 @@ public class ResourceConfig extends HelixProperty {
       return this;
     }
 
-    public String getStateModelDefRef() {
-      return _stateModelDefRef;
-    }
-
-    public Builder setStateModelDefRef(String stateModelDefRef) {
-      _stateModelDefRef = stateModelDefRef;
-      return this;
-    }
-
     public String getStateModelFactoryName() {
       return _stateModelFactoryName;
     }
@@ -668,19 +630,6 @@ public class ResourceConfig extends HelixProperty {
     public Builder setStateModelFactoryName(String stateModelFactoryName) {
       _stateModelFactoryName = stateModelFactoryName;
       return this;
-    }
-
-    public String getNumReplica() {
-      return _numReplica;
-    }
-
-    public Builder setNumReplica(String numReplica) {
-      _numReplica = numReplica;
-      return this;
-    }
-
-    public Builder setNumReplica(int numReplica) {
-      return setNumReplica(String.valueOf(numReplica));
     }
 
     public int getMinActiveReplica() {
@@ -821,22 +770,6 @@ public class ResourceConfig extends HelixProperty {
         throw new IllegalArgumentException("Invalid number of partitions!");
       }
 
-      if (_stateModelDefRef == null) {
-        throw new IllegalArgumentException("State Model Definition Reference is not set!");
-      }
-
-      if (_numReplica == null) {
-        throw new IllegalArgumentException("Number of replica is not set!");
-      } else {
-        if (!_numReplica.equals(ResourceConfigConstants.ANY_LIVEINSTANCE.name())) {
-          try {
-            Integer.parseInt(_numReplica);
-          } catch (NumberFormatException ex) {
-            throw new IllegalArgumentException("Invalid number of replica!");
-          }
-        }
-      }
-
       if (_partitionCapacityMap != null) {
         if (_partitionCapacityMap.keySet().stream()
             .noneMatch(partition -> partition.equals(DEFAULT_PARTITION_KEY))) {
@@ -855,8 +788,8 @@ public class ResourceConfig extends HelixProperty {
       // TODO: Reenable the validation in the future when ResourceConfig is ready.
       // validate();
 
-      return new ResourceConfig(_resourceId, _monitorDisabled, _numPartitions, _stateModelDefRef,
-          _stateModelFactoryName, _numReplica, _minActiveReplica, _maxPartitionsPerInstance,
+      return new ResourceConfig(_resourceId, _monitorDisabled, _numPartitions,
+          _stateModelFactoryName, _minActiveReplica, _maxPartitionsPerInstance,
           _instanceGroupTag, _helixEnabled, _externalViewDisabled, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
@@ -901,14 +834,9 @@ public class ResourceConfig extends HelixProperty {
         idealState.getMaxPartitionsPerInstance());
     mergedZNRecord.setIntFieldIfAbsent(ResourceConfigProperty.NUM_PARTITIONS.name(),
         idealState.getNumPartitions());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.STATE_MODEL_DEF_REF.name(),
-            idealState.getStateModelDefRef());
     mergedZNRecord.setSimpleFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
         idealState.getStateModelFactoryName());
-    mergedZNRecord.setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.REPLICAS.name(),
-        idealState.getReplicas());
     mergedZNRecord
         .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
             idealState.getMinActiveReplicas());
