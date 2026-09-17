@@ -1000,6 +1000,43 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  /**
+   * Records capacity rejections observed during one mapping-calculation pass.
+   * <p>
+   * The attribution is split across the two MBeans that already exist rather than emitting one
+   * attribute per (resource, instance) pair: {@code ResourceMonitor} answers "this resource is
+   * being refused" and {@code InstanceMonitor} answers "this instance is refusing placements".
+   * That keeps both halves of the attribution at R + I attributes instead of R x I, and avoids
+   * adding unbounded, never-decaying instance-named attributes to every resource MBean.
+   *
+   * @param rejectionsByResource Resource name to (instance name to rejection count for this pass)
+   */
+  public void recordMappingCapacityRejections(
+      Map<String, Map<String, Long>> rejectionsByResource) {
+    Map<String, Long> perInstanceTotals = new HashMap<>();
+    for (Map.Entry<String, Map<String, Long>> resourceEntry : rejectionsByResource.entrySet()) {
+      long resourceTotal = 0L;
+      for (Map.Entry<String, Long> instanceEntry : resourceEntry.getValue().entrySet()) {
+        long count = instanceEntry.getValue();
+        resourceTotal += count;
+        perInstanceTotals.merge(instanceEntry.getKey(), count, Long::sum);
+      }
+      ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceEntry.getKey());
+      if (resourceMonitor != null) {
+        resourceMonitor.incrementMappingCapacityRejectionCounter(resourceTotal);
+      }
+    }
+
+    for (Map.Entry<String, Long> entry : perInstanceTotals.entrySet()) {
+      // Instance monitors are registered from the live instance list, so an instance that just
+      // left the cluster may have no monitor. Skipping it is correct: nothing is left to report.
+      InstanceMonitor instanceMonitor = _instanceMonitorMap.get(entry.getKey());
+      if (instanceMonitor != null) {
+        instanceMonitor.incrementMappingCapacityRejectionCounter(entry.getValue());
+      }
+    }
+  }
+
   private ResourceMonitor getOrCreateResourceMonitor(String resourceName) {
     try {
       if (!_resourceMonitorMap.containsKey(resourceName)) {

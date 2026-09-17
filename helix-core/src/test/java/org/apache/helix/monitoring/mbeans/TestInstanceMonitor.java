@@ -84,6 +84,33 @@ public class TestInstanceMonitor {
   }
 
   @Test
+  public void testMappingCapacityRejectionCounter() throws JMException {
+    InstanceMonitor monitor = new InstanceMonitor("testCluster", "testInstance",
+        new ObjectName("testDomain:key=mappingCapacityRejection"));
+    monitor.register();
+
+    try {
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 0L);
+      int attributeCountBefore = monitor.getMBeanInfo().getAttributes().length;
+
+      monitor.incrementMappingCapacityRejectionCounter(4);
+      monitor.incrementMappingCapacityRejectionCounter(6);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 10L);
+
+      // Non-positive increments are ignored.
+      monitor.incrementMappingCapacityRejectionCounter(0);
+      monitor.incrementMappingCapacityRejectionCounter(-3);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 10L);
+
+      // The counter is a fixed attribute, so it must not churn the MBean's attribute set.
+      Assert.assertEquals(monitor.getMBeanInfo().getAttributes().length, attributeCountBefore);
+      Assert.assertEquals(monitor.getAttribute("MappingCapacityRejectionCounter"), 10L);
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testInstanceOperationDurationMetrics() throws JMException {
     String testCluster = "testCluster";
     String testInstance = "testInstance";
