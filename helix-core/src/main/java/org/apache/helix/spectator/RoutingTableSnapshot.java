@@ -68,60 +68,6 @@ public class RoutingTableSnapshot {
   }
 
   /**
-   * returns all instances for resources contains any given tags in {resource group} that are in a
-   * specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   */
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state,
-      List<String> resourceTags) {
-    return _routingTable.getInstancesForResourceGroup(resourceGroupName, state, resourceTags);
-  }
-
-  /**
-   * returns all instances for all resources in {resource group} that are in a specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty set if there is no instance in a given state
-   */
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state) {
-    return _routingTable.getInstancesForResourceGroup(resourceGroupName, state);
-  }
-
-  /**
-   * returns the instances for {resource group,partition} pair in all resources belongs to the given
-   * resource group that are in a specific {state}.
-   * The return results aggregate all partition states from all the resources in the given resource
-   * group.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   */
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state) {
-    return _routingTable.getInstancesForResourceGroup(resourceGroupName, partitionName, state);
-  }
-
-  /**
-   * returns the instances for {resource group,partition} pair contains any of the given tags that
-   * are in a specific {state}.
-   * Find all resources belongs to the given resource group that have any of the given resource tags
-   * and return the aggregated partition states from all these resources.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @param resourceTags
-   * @return empty list if there is no instance in a given state
-   */
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state, List<String> resourceTags) {
-    return _routingTable.getInstancesForResourceGroup(resourceGroupName, partitionName, state,
-        resourceTags);
-  }
-
-  /**
    * Return all liveInstances in the cluster now.
    * @return
    */

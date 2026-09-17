@@ -424,28 +424,6 @@ public class ZkTestBase {
     return idealState;
   }
 
-  protected IdealState createIdealState(String resourceGroupName, String instanceGroupTag,
-      List<String> instanceNames, int numPartition, int replica, String rebalanceMode,
-      String stateModelDef) {
-    IdealState is = _gSetupTool.createIdealStateForResourceGroup(resourceGroupName,
-        instanceGroupTag, numPartition, replica, rebalanceMode, stateModelDef);
-
-    // setup initial partition->instance mapping.
-    int nodeIdx = 0;
-    int numNode = instanceNames.size();
-    assert (numNode >= replica);
-    for (int i = 0; i < numPartition; i++) {
-      String partitionName = resourceGroupName + "_" + i;
-      for (int j = 0; j < replica; j++) {
-        is.setPartitionState(partitionName, instanceNames.get((nodeIdx + j) % numNode),
-            OnlineOfflineSMD.States.ONLINE.toString());
-      }
-      nodeIdx++;
-    }
-
-    return is;
-  }
-
   protected void createDBInSemiAuto(ClusterSetup clusterSetup, String clusterName, String dbName,
       List<String> preferenceList, String stateModelDef, int numPartition, int replica) {
     clusterSetup.addResourceToCluster(clusterName, dbName, numPartition, stateModelDef,

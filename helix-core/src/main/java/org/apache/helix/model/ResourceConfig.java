@@ -55,9 +55,6 @@ public class ResourceConfig extends HelixProperty {
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     HELIX_ENABLED,
-    RESOURCE_GROUP_NAME,
-    RESOURCE_TYPE,
-    GROUP_ROUTING_ENABLED,
     EXTERNAL_VIEW_DISABLED,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
@@ -105,25 +102,23 @@ public class ResourceConfig extends HelixProperty {
   public ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
       String stateModelDefRef, String stateModelFactoryName, String numReplica,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-      Boolean helixEnabled, String resourceGroupName, String resourceType,
-      Boolean groupRoutingEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
+      Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled, numPartitions, stateModelDefRef, stateModelFactoryName,
         numReplica, minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
-        resourceGroupName, resourceType, groupRoutingEnabled, externalViewDisabled, rebalanceConfig,
-        stateTransitionTimeoutConfig, listFields, mapFields, p2pMessageEnabled, null);
+        externalViewDisabled, rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
+        p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
-    String stateModelDefRef, String stateModelFactoryName, String numReplica,
-    int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-        Boolean helixEnabled, String resourceGroupName, String resourceType,
-        Boolean groupRoutingEnabled, Boolean externalViewDisabled,
-        RebalanceConfig rebalanceConfig, StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
-        Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
-        Boolean p2pMessageEnabled, Map<String, Map<String, Integer>> partitionCapacityMap) {
+      String stateModelDefRef, String stateModelFactoryName, String numReplica,
+      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
+      StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
+      Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
+      Boolean p2pMessageEnabled, Map<String, Map<String, Integer>> partitionCapacityMap) {
     super(resourceId);
 
     if (monitorDisabled != null) {
@@ -164,19 +159,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (helixEnabled != null) {
       _record.setBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), helixEnabled);
-    }
-
-    if (resourceGroupName != null) {
-      _record.setSimpleField(ResourceConfigProperty.RESOURCE_GROUP_NAME.name(), resourceGroupName);
-    }
-
-    if (resourceType != null) {
-      _record.setSimpleField(ResourceConfigProperty.RESOURCE_TYPE.name(), resourceType);
-    }
-
-    if (groupRoutingEnabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.GROUP_ROUTING_ENABLED.name(),
-          groupRoutingEnabled);
     }
 
     if (externalViewDisabled != null) {
@@ -348,33 +330,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public Boolean isEnabled() {
     return _record.getBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), true);
-  }
-
-  /**
-   * Get the resource type
-   * @return the resource type, or null if none is being set
-   */
-  public String getResourceType() {
-    return _record.getSimpleField(ResourceConfigProperty.RESOURCE_TYPE.name());
-  }
-
-  /**
-   * Get the resource group name
-   *
-   * @return
-   */
-  public String getResourceGroupName() {
-    return _record.getSimpleField(ResourceConfigProperty.RESOURCE_GROUP_NAME.name());
-  }
-
-  /**
-   * Get if the resource group routing feature is enabled or not
-   * By default, it's disabled
-   *
-   * @return true if enabled; false otherwise
-   */
-  public Boolean isGroupRoutingEnabled() {
-    return _record.getBooleanField(ResourceConfigProperty.GROUP_ROUTING_ENABLED.name(), false);
   }
 
   /**
@@ -652,9 +607,6 @@ public class ResourceConfig extends HelixProperty {
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
     private Boolean _helixEnabled;
-    private String _resourceGroupName;
-    private String _resourceType;
-    private Boolean _groupRoutingEnabled;
     private Boolean _externalViewDisabled;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
@@ -764,33 +716,6 @@ public class ResourceConfig extends HelixProperty {
 
     public Builder setHelixEnabled(boolean helixEnabled) {
       _helixEnabled = helixEnabled;
-      return this;
-    }
-
-    public String getResourceType() {
-      return _resourceType;
-    }
-
-    public Builder setResourceType(String resourceType) {
-      _resourceType = resourceType;
-      return this;
-    }
-
-    public String getResourceGroupName() {
-      return _resourceGroupName;
-    }
-
-    public Builder setResourceGroupName(String resourceGroupName) {
-      _resourceGroupName = resourceGroupName;
-      return this;
-    }
-
-    public Boolean isGroupRoutingEnabled() {
-      return _groupRoutingEnabled;
-    }
-
-    public Builder setGroupRoutingEnabled(boolean groupRoutingEnabled) {
-      _groupRoutingEnabled = groupRoutingEnabled;
       return this;
     }
 
@@ -932,9 +857,9 @@ public class ResourceConfig extends HelixProperty {
 
       return new ResourceConfig(_resourceId, _monitorDisabled, _numPartitions, _stateModelDefRef,
           _stateModelFactoryName, _numReplica, _minActiveReplica, _maxPartitionsPerInstance,
-          _instanceGroupTag, _helixEnabled, _resourceGroupName, _resourceType, _groupRoutingEnabled,
-          _externalViewDisabled, _rebalanceConfig, _stateTransitionTimeoutConfig, _preferenceLists,
-          _mapFields, _p2pMessageEnabled, _partitionCapacityMap);
+          _instanceGroupTag, _helixEnabled, _externalViewDisabled, _rebalanceConfig,
+          _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
+          _partitionCapacityMap);
     }
   }
 
@@ -990,12 +915,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord
         .setBooleanFieldIfAbsent(ResourceConfig.ResourceConfigProperty.HELIX_ENABLED.name(),
             idealState.isEnabled());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.RESOURCE_GROUP_NAME.name(),
-            idealState.getResourceGroupName());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.RESOURCE_TYPE.name(),
-            idealState.getResourceType());
     mergedZNRecord.setBooleanFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(),
         idealState.isExternalViewDisabled());
@@ -1005,4 +924,3 @@ public class ResourceConfig extends HelixProperty {
     return mergedResourceConfig;
   }
 }
-

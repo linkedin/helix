@@ -38,7 +38,6 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
   /**
    * The following fields are considered as non-topology related.
    * MONITORING_DISABLED,
-   * GROUP_ROUTING_ENABLED,
    * EXTERNAL_VIEW_DISABLED,
    * DELAY_REBALANCE_ENABLED,
    * HELIX_ENABLED
@@ -51,9 +50,7 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
                   ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
                   ResourceConfigProperty.REPLICAS.name(),
                   ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-                  ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
-                  ResourceConfigProperty.RESOURCE_GROUP_NAME.name(),
-                  ResourceConfigProperty.RESOURCE_TYPE.name()),
+                  ResourceConfigProperty.INSTANCE_GROUP_TAG.name()),
           FieldType.MAP_FIELD, ImmutableSet
               .of(ResourceConfigProperty.PARTITION_CAPACITY_MAP.name()));
 

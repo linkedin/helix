@@ -40,7 +40,6 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
-import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.SystemPropertyKeys;
@@ -481,49 +480,6 @@ public class ClusterSetup {
         bucketSize, maxPartitionsPerInstance);
   }
 
-  /**
-   * Get the mangled IdealState name if resourceGroup/resourceTag is enable.
-   */
-  public static String genIdealStateNameWithResourceTag(String resourceName, String resourceTag) {
-    return resourceName + "$" + resourceTag;
-  }
-
-  /**
-   * Create an IdealState for a resource that belongs to a resource group We use
-   * "resourceGroupName$resourceInstanceTag" as the IdealState znode name to differetiate different
-   * resources from the same resourceGroup.
-   */
-  public IdealState createIdealStateForResourceGroup(String resourceGroupName,
-      String resourceTag, int numPartition, int replica, String rebalanceMode, String stateModelDefName) {
-    String idealStateId = genIdealStateNameWithResourceTag(resourceGroupName, resourceTag);
-    IdealState idealState = new IdealState(idealStateId);
-    idealState.setNumPartitions(numPartition);
-    idealState.setStateModelDefRef(stateModelDefName);
-    IdealState.RebalanceMode mode =
-        idealState.rebalanceModeFromString(rebalanceMode, IdealState.RebalanceMode.SEMI_AUTO);
-    idealState.setRebalanceMode(mode);
-    idealState.setReplicas("" + replica);
-    idealState.setStateModelFactoryName(HelixConstants.DEFAULT_STATE_MODEL_FACTORY);
-    idealState.setResourceGroupName(resourceGroupName);
-    idealState.setInstanceGroupTag(resourceTag);
-    idealState.enableGroupRouting(true);
-
-    return idealState;
-  }
-
-  /**
-   * Enable or disable a resource within a resource group associated with a given resource tag
-   *
-   * @param clusterName
-   * @param resourceName
-   * @param resourceTag
-   */
-  public void enableResource(String clusterName, String resourceName, String resourceTag,
-      boolean enabled) {
-    String idealStateId = genIdealStateNameWithResourceTag(resourceName, resourceTag);
-    _admin.enableResource(clusterName, idealStateId, enabled);
-  }
-
   public void dropResourceFromCluster(String clusterName, String resourceName) {
     _admin.dropResource(clusterName, resourceName);
   }
@@ -935,7 +891,7 @@ public class ClusterSetup {
     Option enableResourceOption =
         OptionBuilder.withLongOpt(enableResource).withDescription("Enable/disable a resource")
             .hasArgs(3).isRequired(false)
-            .withArgName("clusterName resourceName true/false <-tag resourceTag>")
+            .withArgName("clusterName resourceName true/false")
             .create();
 
     Option rebalanceOption =
@@ -1472,11 +1428,10 @@ public class ClusterSetup {
       String resourceName = cmd.getOptionValues(enableResource)[1];
       boolean enabled = Boolean.parseBoolean(cmd.getOptionValues(enableResource)[2].toLowerCase());
       if (cmd.hasOption(tag)) {
-        String resourceTag = cmd.getOptionValues(tag)[0];
-        setupTool.enableResource(clusterName, resourceName, resourceTag, enabled);
-      } else {
-        setupTool.getClusterManagementTool().enableResource(clusterName, resourceName, enabled);
+        throw new HelixException(
+            "Resource-group routing is removed; use -enableResource with the full resource name without -tag.");
       }
+      setupTool.getClusterManagementTool().enableResource(clusterName, resourceName, enabled);
     } else if (cmd.hasOption(enablePartition)) {
       String[] args = cmd.getOptionValues(enablePartition);
 

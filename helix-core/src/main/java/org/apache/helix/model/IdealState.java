@@ -65,9 +65,8 @@ public class IdealState extends HelixProperty {
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     HELIX_ENABLED,
+    @Deprecated
     RESOURCE_GROUP_NAME,
-    RESOURCE_TYPE,
-    GROUP_ROUTING_ENABLED,
     EXTERNAL_VIEW_DISABLED
   }
 
@@ -204,30 +203,6 @@ public class IdealState extends HelixProperty {
   }
 
   /**
-   * Set the resource group name
-   * @param resourceGroupName
-   */
-  public void setResourceGroupName(String resourceGroupName) {
-    _record.setSimpleField(IdealStateProperty.RESOURCE_GROUP_NAME.toString(), resourceGroupName);
-  }
-
-  /**
-   * Set the resource type
-   * @param resourceType
-   */
-  public void setResourceType(String resourceType) {
-    _record.setSimpleField(IdealStateProperty.RESOURCE_TYPE.toString(), resourceType);
-  }
-
-  /**
-   * Get the resource type
-   * @return the resource type, or null if none is being set
-   */
-  public String getResourceType() {
-    return _record.getSimpleField(IdealStateProperty.RESOURCE_TYPE.toString());
-  }
-
-  /**
    * Set the delay time (in ms) that Helix should move the partition after an instance goes offline.
    * @param delayInMilliseconds
    */
@@ -265,29 +240,12 @@ public class IdealState extends HelixProperty {
    * Get the resource group name
    *
    * @return
+   * @deprecated Resource-group routing is removed. Retained for existing callers reading legacy
+   *     metadata; the stored value does not affect Helix routing.
    */
+  @Deprecated
   public String getResourceGroupName() {
     return _record.getSimpleField(IdealStateProperty.RESOURCE_GROUP_NAME.toString());
-  }
-
-  /**
-   * Get if the resource group routing feature is enabled or not
-   * By default, it's disabled
-   *
-   * @return true if enabled; false otherwise
-   */
-  public boolean isResourceGroupEnabled() {
-    return _record.getBooleanField(IdealStateProperty.GROUP_ROUTING_ENABLED.name(), false);
-  }
-
-  /**
-   * Enable/Disable the aggregated routing on resource group.
-   *
-   * @param enabled
-   */
-  public void enableGroupRouting(boolean enabled) {
-    _record.setSimpleField(IdealStateProperty.GROUP_ROUTING_ENABLED.name(),
-        Boolean.toString(enabled));
   }
 
   /**

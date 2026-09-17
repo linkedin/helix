@@ -228,6 +228,32 @@ public class TestHelixPropoertyTimmer {
     }
   }
 
+  @Test
+  public void testLegacyGroupRoutingFieldsAreTrimmable() {
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    ResourceConfig resourceConfig = _resourceConfigMap.get(RESOURCE_NAME);
+    idealState.setInstanceGroupTag("placementTag");
+    resourceConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "placementTag");
+    for (String legacyField :
+        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
+      idealState.getRecord().setSimpleField(legacyField, "legacyValue");
+      resourceConfig.getRecord().setSimpleField(legacyField, "legacyValue");
+    }
+
+    IdealState trimmedIdealState = IdealStateTrimmer.getInstance().trimProperty(idealState);
+    ResourceConfig trimmedResourceConfig =
+        ResourceConfigTrimmer.getInstance().trimProperty(resourceConfig);
+    for (String legacyField :
+        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
+      Assert.assertFalse(trimmedIdealState.getRecord().getSimpleFields().containsKey(legacyField));
+      Assert.assertFalse(trimmedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
+      Assert.assertEquals(idealState.getRecord().getSimpleField(legacyField), "legacyValue");
+      Assert.assertEquals(resourceConfig.getRecord().getSimpleField(legacyField), "legacyValue");
+    }
+    Assert.assertEquals(trimmedIdealState.getInstanceGroupTag(), "placementTag");
+    Assert.assertEquals(trimmedResourceConfig.getInstanceGroupTag(), "placementTag");
+  }
+
   private void modifyListMapfieldKeysAndVerifyDetector(HelixProperty helixProperty,
       HelixConstants.ChangeType expectedChangeType, ResourceChangeDetector detector,
       ResourceControllerDataProvider dataProvider) {

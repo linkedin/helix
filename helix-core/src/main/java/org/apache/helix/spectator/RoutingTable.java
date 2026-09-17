@@ -48,9 +48,6 @@ class RoutingTable {
   // mapping a resourceName to the ResourceInfo
   private final Map<String, ResourceInfo> _resourceInfoMap;
 
-  // mapping a resource group name to a resourceGroupInfo
-  private final Map<String, ResourceGroupInfo> _resourceGroupInfoMap;
-
   private final Collection<LiveInstance> _liveInstances;
   protected final Collection<InstanceConfig> _instanceConfigs;
   private final Collection<ExternalView> _externalViews;
@@ -92,7 +89,6 @@ class RoutingTable {
     // TODO Refactor these constructors so we don't have so many constructor.
     _propertyType = propertytype;
     _resourceInfoMap = new HashMap<>();
-    _resourceGroupInfoMap = new HashMap<>();
     _liveInstances = new HashSet<>(liveInstances);
     _instanceConfigs = new HashSet<>(instanceConfigs);
     _externalViews = new HashSet<>(externalViews);
@@ -113,12 +109,7 @@ class RoutingTable {
             String currentState = stateMap.get(instanceName);
             if (instanceConfigMap.containsKey(instanceName)) {
               InstanceConfig instanceConfig = instanceConfigMap.get(instanceName);
-              if (extView.isGroupRoutingEnabled()) {
-                addEntry(resourceName, extView.getResourceGroupName(),
-                    extView.getInstanceGroupTag(), partitionName, currentState, instanceConfig);
-              } else {
-                addEntry(resourceName, partitionName, currentState, instanceConfig);
-              }
+              addEntry(resourceName, partitionName, currentState, instanceConfig);
             } else {
               logger.warn(
                   "Participant {} is not found with proper configuration information. It might already be removed from the cluster. "
@@ -177,27 +168,8 @@ class RoutingTable {
     resourceInfo.addEntry(partitionName, state, config);
   }
 
-  /**
-   * add an entry with a resource with resourceGrouping enabled.
-   */
-  private void addEntry(String resourceName, String resourceGroupName, String resourceTag,
-      String partitionName, String state, InstanceConfig config) {
-    addEntry(resourceName, partitionName, state, config);
-
-    if (!_resourceGroupInfoMap.containsKey(resourceGroupName)) {
-      _resourceGroupInfoMap.put(resourceGroupName, new ResourceGroupInfo());
-    }
-
-    ResourceGroupInfo resourceGroupInfo = _resourceGroupInfoMap.get(resourceGroupName);
-    resourceGroupInfo.addEntry(resourceTag, partitionName, state, config);
-  }
-
   ResourceInfo get(String resourceName) {
     return _resourceInfoMap.get(resourceName);
-  }
-
-  ResourceGroupInfo getResourceGroup(String resourceGroupName) {
-    return _resourceGroupInfoMap.get(resourceGroupName);
   }
 
   /**
@@ -214,50 +186,6 @@ class RoutingTable {
     }
     if (instanceSet == null) {
       instanceSet = Collections.emptySet();
-    }
-    return instanceSet;
-  }
-
-  /**
-   * returns all instances for all resources in {resource group} that are in a specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   */
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state) {
-    Set<InstanceConfig> instanceSet = null;
-    ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);
-    if (resourceGroupInfo != null) {
-      instanceSet = resourceGroupInfo.getInstances(state);
-    }
-    if (instanceSet == null) {
-      instanceSet = Collections.emptySet();
-    }
-    return instanceSet;
-  }
-
-  /**
-   * returns all instances for resources contains any given tags in {resource group} that are in a
-   * specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   */
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state,
-      List<String> resourceTags) {
-    Set<InstanceConfig> instanceSet = null;
-    ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);
-    if (resourceGroupInfo != null) {
-      instanceSet = new HashSet<>();
-      for (String tag : resourceTags) {
-        Set<InstanceConfig> instances = resourceGroupInfo.getInstances(state, tag);
-        if (instances != null) {
-          instanceSet.addAll(resourceGroupInfo.getInstances(state, tag));
-        }
-      }
-    }
-    if (instanceSet == null) {
-      return Collections.emptySet();
     }
     return instanceSet;
   }
@@ -287,32 +215,6 @@ class RoutingTable {
   }
 
   /**
-   * returns the instances for {resource group,partition} pair in all resources belongs to the given
-   * resource group that are in a specific {state}.
-   * The return results aggregate all partition states from all the resources in the given resource
-   * group.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   */
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state) {
-    List<InstanceConfig> instanceList = null;
-    ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);
-    if (resourceGroupInfo != null) {
-      PartitionInfo keyInfo = resourceGroupInfo.get(partitionName);
-      if (keyInfo != null) {
-        instanceList = keyInfo.get(state);
-      }
-    }
-    if (instanceList == null) {
-      instanceList = Collections.emptyList();
-    }
-    return Collections.unmodifiableList(instanceList);
-  }
-
-  /**
    * Return all liveInstances in the cluster now.
    * @return
    */
@@ -333,37 +235,6 @@ class RoutingTable {
    */
   protected Collection<String> getResources() {
     return Collections.unmodifiableCollection(_resourceInfoMap.keySet());
-  }
-
-  /**
-   * returns the instances for {resource group,partition} pair contains any of the given tags
-   * that are in a specific {state}.
-   * Find all resources belongs to the given resource group that have any of the given resource tags
-   * and return the aggregated partition states from all these resources.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @param resourceTags
-   * @return empty list if there is no instance in a given state
-   */
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state, List<String> resourceTags) {
-    ResourceGroupInfo resourceGroupInfo = getResourceGroup(resourceGroupName);
-    List<InstanceConfig> instanceList = null;
-    if (resourceGroupInfo != null) {
-      instanceList = new ArrayList<>();
-      for (String tag : resourceTags) {
-        RoutingTable.PartitionInfo keyInfo = resourceGroupInfo.get(partitionName, tag);
-        if (keyInfo != null && keyInfo.containsState(state)) {
-          instanceList.addAll(keyInfo.get(state));
-        }
-      }
-    }
-    if (instanceList == null) {
-      return Collections.emptyList();
-    }
-
-    return Collections.unmodifiableList(instanceList);
   }
 
   /**
@@ -428,63 +299,6 @@ class RoutingTable {
     }
   }
 
-  /**
-   * Class to store instances, partitions and their states for each resource group.
-   */
-  class ResourceGroupInfo {
-    // aggregated partitions and instances info for all resources in the resource group.
-    ResourceInfo aggregatedResourceInfo;
-
-    // <ResourceTag, ResourceInfo> maps resource tag to the resource with the tag
-    // in this resource group.
-    // Each ResourceInfo saves only partitions and instances for that resource.
-    Map<String, ResourceInfo> tagToResourceMap;
-
-    public ResourceGroupInfo() {
-      aggregatedResourceInfo = new ResourceInfo();
-      tagToResourceMap = new HashMap<>();
-    }
-
-    public void addEntry(String resourceTag, String stateUnitKey, String state,
-        InstanceConfig config) {
-      // add the new entry to the aggregated resource info
-      aggregatedResourceInfo.addEntry(stateUnitKey, state, config);
-
-      // add the entry to the resourceInfo with given tag
-      if (!tagToResourceMap.containsKey(resourceTag)) {
-        tagToResourceMap.put(resourceTag, new ResourceInfo());
-      }
-      ResourceInfo resourceInfo = tagToResourceMap.get(resourceTag);
-      resourceInfo.addEntry(stateUnitKey, state, config);
-    }
-
-    public Set<InstanceConfig> getInstances(String state) {
-      return aggregatedResourceInfo.getInstances(state);
-    }
-
-    public Set<InstanceConfig> getInstances(String state, String resourceTag) {
-      ResourceInfo resourceInfo = tagToResourceMap.get(resourceTag);
-      if (resourceInfo != null) {
-        return resourceInfo.getInstances(state);
-      }
-
-      return null;
-    }
-
-    PartitionInfo get(String stateUnitKey) {
-      return aggregatedResourceInfo.get(stateUnitKey);
-    }
-
-    PartitionInfo get(String stateUnitKey, String resourceTag) {
-      ResourceInfo resourceInfo = tagToResourceMap.get(resourceTag);
-      if (resourceInfo == null) {
-        return null;
-      }
-
-      return resourceInfo.get(stateUnitKey);
-    }
-  }
-
   class PartitionInfo {
     Map<String, List<InstanceConfig>> stateInfoMap;
 
@@ -502,10 +316,6 @@ class RoutingTable {
 
     List<InstanceConfig> get(String state) {
       return stateInfoMap.get(state);
-    }
-
-    boolean containsState(String state) {
-      return stateInfoMap.containsKey(state);
     }
   }
 

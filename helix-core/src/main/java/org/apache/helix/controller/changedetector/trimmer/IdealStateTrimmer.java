@@ -40,7 +40,6 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
    * The following fields are considered as non-topology related.
    * REBALANCE_DELAY,
    * REBALANCE_TIMER_PERIOD,
-   * GROUP_ROUTING_ENABLED,
    * EXTERNAL_VIEW_DISABLED,
    * HELIX_ENABLED,
    * ResourceConfigProperty.DELAY_REBALANCE_ENABLED
@@ -57,9 +56,7 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
           IdealStateProperty.REBALANCER_CLASS_NAME.name(),
           IdealStateProperty.REBALANCE_STRATEGY.name(),
           IdealStateProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-          IdealStateProperty.INSTANCE_GROUP_TAG.name(),
-          IdealStateProperty.RESOURCE_GROUP_NAME.name(),
-          IdealStateProperty.RESOURCE_TYPE.name()));
+          IdealStateProperty.INSTANCE_GROUP_TAG.name()));
 
   private IdealStateTrimmer() {
   }
