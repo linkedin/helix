@@ -47,7 +47,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
-    NUM_PARTITIONS,
     STATE_MODEL_FACTORY_NAME,
     MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
@@ -97,20 +96,20 @@ public class ResourceConfig extends HelixProperty {
     super(record, id);
   }
 
-  public ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
+  public ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
       Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
-    this(resourceId, monitorDisabled, numPartitions, stateModelFactoryName,
+    this(resourceId, monitorDisabled, stateModelFactoryName,
         minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
         externalViewDisabled, rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
-  private ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
+  private ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
       int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
       Boolean helixEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
@@ -125,10 +124,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (p2pMessageEnabled != null) {
       _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), p2pMessageEnabled);
-    }
-
-    if (numPartitions > 0) {
-      _record.setIntField(ResourceConfigProperty.NUM_PARTITIONS.name(), numPartitions);
     }
 
     if (stateModelFactoryName != null) {
@@ -209,14 +204,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public String getResourceName() {
     return _record.getId();
-  }
-
-  /**
-   * Get the number of partitions of this resource
-   * @return the number of partitions
-   */
-  public int getNumPartitions() {
-    return _record.getIntField(ResourceConfigProperty.NUM_PARTITIONS.name(), 0);
   }
 
   /**
@@ -572,7 +559,6 @@ public class ResourceConfig extends HelixProperty {
   public static class Builder {
     private String _resourceId;
     private Boolean _monitorDisabled;
-    private int _numPartitions;
     private String _stateModelFactoryName;
     private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
@@ -612,15 +598,6 @@ public class ResourceConfig extends HelixProperty {
 
     public String getResourceId() {
       return _resourceId;
-    }
-
-    public int getNumPartitions() {
-      return _numPartitions;
-    }
-
-    public Builder setNumPartitions(int numPartitions) {
-      _numPartitions = numPartitions;
-      return this;
     }
 
     public String getStateModelFactoryName() {
@@ -766,10 +743,6 @@ public class ResourceConfig extends HelixProperty {
           throw new IllegalArgumentException("Invalid RebalanceConfig!");
         }
       }
-      if (_numPartitions <= 0) {
-        throw new IllegalArgumentException("Invalid number of partitions!");
-      }
-
       if (_partitionCapacityMap != null) {
         if (_partitionCapacityMap.keySet().stream()
             .noneMatch(partition -> partition.equals(DEFAULT_PARTITION_KEY))) {
@@ -788,7 +761,7 @@ public class ResourceConfig extends HelixProperty {
       // TODO: Reenable the validation in the future when ResourceConfig is ready.
       // validate();
 
-      return new ResourceConfig(_resourceId, _monitorDisabled, _numPartitions,
+      return new ResourceConfig(_resourceId, _monitorDisabled,
           _stateModelFactoryName, _minActiveReplica, _maxPartitionsPerInstance,
           _instanceGroupTag, _helixEnabled, _externalViewDisabled, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
@@ -832,8 +805,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord.setIntFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
         idealState.getMaxPartitionsPerInstance());
-    mergedZNRecord.setIntFieldIfAbsent(ResourceConfigProperty.NUM_PARTITIONS.name(),
-        idealState.getNumPartitions());
     mergedZNRecord.setSimpleFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
         idealState.getStateModelFactoryName());
