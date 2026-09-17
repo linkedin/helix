@@ -256,7 +256,8 @@ public abstract class AbstractTestClusterModel {
       // Construct one AssignableReplica for each partition in the current state.
       cs.getPartitionStateMap().entrySet().stream().forEach(entry -> assignmentSet
               .add(new AssignableReplica(dataProvider.getClusterConfig(), resourceConfig,
-                  entry.getKey(), entry.getValue(), entry.getValue().equals("MASTER") ? 1 : 2)));
+                  entry.getKey(), entry.getValue(), entry.getValue().equals("MASTER") ? 1 : 2,
+                  Integer.MAX_VALUE)));
     }
     return assignmentSet;
   }
