@@ -46,6 +46,13 @@ public class HelixCloudProperty {
   private static final String CONNECTION_TIMEOUT_MS = "connection_timeout_ms";
   private static final String REQUEST_TIMEOUT_MS = "request_timeout_ms";
 
+  // LinkedIn cloud-info processor coordinates. Every cloud-enabled cluster at LinkedIn uses the
+  // CUSTOMIZED provider with this single processor implementation, so the engine supplies these as
+  // defaults rather than requiring every cluster/provisioner to specify them in CloudConfig.
+  private static final String DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE = "com.linkedin.helix.cloudinfo";
+  private static final String DEFAULT_CLOUD_INFO_PROCESSOR_NAME =
+      "LinkedInCloudInstanceInformationProcessor";
+
   // Denote whether the instance is considered as in a cloud environment.
   private boolean _isCloudEnabled;
 
@@ -96,9 +103,14 @@ public class HelixCloudProperty {
     setCloudEnabled(cloudConfig.isCloudEnabled());
     setCloudId(cloudConfig.getCloudID());
     String cloudProviderStr = cloudConfig.getCloudProvider();
+    // When a cluster is cloud-enabled but no provider is specified, default to the CUSTOMIZED
+    // provider so the engine can supply the cloud-info processor package and name below. This lets
+    // provisioners omit these constant values from CloudConfig.
+    if (cloudProviderStr == null && cloudConfig.isCloudEnabled()) {
+      cloudProviderStr = CloudProvider.CUSTOMIZED.name();
+    }
     setCloudProvider(cloudProviderStr);
     if (cloudProviderStr != null) {
-      String cloudInfoProcessorName = null;
       switch (CloudProvider.valueOf(cloudProviderStr)) {
         case AZURE:
           Properties azureProperties = new Properties();
@@ -124,13 +136,15 @@ public class HelixCloudProperty {
           break;
         case CUSTOMIZED:
           setCloudInfoSources(cloudConfig.getCloudInfoSources());
-          // Although it is unlikely that cloudInfoProcessorPackage is null, when using the CUSTOMIZED
-          // cloud provider, we will set the processor package to helix cloud package to preserves the
-          // backwards compatibility.
+          // The processor package and name are constant across LinkedIn's cloud-enabled clusters,
+          // so when they are absent from CloudConfig the engine falls back to the LinkedIn defaults.
+          // Explicitly provided values are still respected for backwards compatibility.
           setCloudInfoProcessorPackage(cloudConfig.getCloudInfoProcessorPackage() != null
               ? cloudConfig.getCloudInfoProcessorPackage()
-              : DEFAULT_CLOUD_PROCESSOR_PACKAGE_PREFIX + cloudProviderStr.toLowerCase());
-          setCloudInfoProcessorName(cloudConfig.getCloudInfoProcessorName());
+              : DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE);
+          setCloudInfoProcessorName(cloudConfig.getCloudInfoProcessorName() != null
+              ? cloudConfig.getCloudInfoProcessorName()
+              : DEFAULT_CLOUD_INFO_PROCESSOR_NAME);
           break;
         default:
           throw new HelixException(
