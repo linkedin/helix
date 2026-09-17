@@ -154,7 +154,7 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
     ResourceConfig resourceConfig = new ResourceConfig.Builder(TEST_DB)
         .setStateTransitionTimeoutConfig(stateTransitionTimeoutConfig)
         .setRebalanceConfig(new RebalanceConfig(new ZNRecord(TEST_DB)))
-        .setNumPartitions(_PARTITIONS).setHelixEnabled(false).build();
+        .setHelixEnabled(false).build();
     _configAccessor.setResourceConfig(CLUSTER_NAME, TEST_DB, resourceConfig);
     setParticipants(TEST_DB);
 

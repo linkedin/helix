@@ -186,9 +186,8 @@ public class TestResourceConfig {
 
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
-    ResourceConfig resourceConfig = new ResourceConfig("resource", false, 2, "DEFAULT",
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "DEFAULT",
         1, 10, "placementTag", true, false, null, null, null, null, true);
-    Assert.assertEquals(resourceConfig.getNumPartitions(), 2);
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
     Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
@@ -199,7 +198,7 @@ public class TestResourceConfig {
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
-            "STATE_MODEL_DEF_REF", "REPLICAS"}) {
+            "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -236,7 +235,6 @@ public class TestResourceConfig {
         testIdealState.getInstanceGroupTag());
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testIdealState.getMaxPartitionsPerInstance());
-    Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testIdealState.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testIdealState.getStateModelFactoryName());
     Assert.assertEquals(mergedResourceConfig.getMinActiveReplica(),
@@ -256,7 +254,6 @@ public class TestResourceConfig {
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
     configBuilder.setMaxPartitionsPerInstance(2);
-    configBuilder.setNumPartitions(2);
     configBuilder.setStateModelFactoryName("testRCFactory");
     configBuilder.setMinActiveReplica(2);
     configBuilder.setHelixEnabled(false);
@@ -271,7 +268,6 @@ public class TestResourceConfig {
         .assertEquals(mergedResourceConfig.getInstanceGroupTag(), testConfig.getInstanceGroupTag());
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testConfig.getMaxPartitionsPerInstance());
-    Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testConfig.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testConfig.getStateModelFactoryName());
     Assert
