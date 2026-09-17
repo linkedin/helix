@@ -185,6 +185,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
    *                           check fails. If false, when helix own check fails, the subsequent
    *                           custom checks will not be performed.
    * @param skipHealthCheckCategories StoppableCheck Categories to skip.
+   * @param rebalanceIfMinActiveReplicaNotMet request an on-demand rebalance when the min active
+   *                                          replica check fails and a rebalance can help
    * @return json response representing if queried instance is stoppable
    * @throws IOException if there is any IO/network error
    */
@@ -197,7 +199,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @PathParam("instanceName") String instanceName, @QueryParam("skipZKRead") boolean skipZKRead,
       @QueryParam("continueOnFailures") boolean continueOnFailures,
       @QueryParam("skipHealthCheckCategories") String skipHealthCheckCategories,
-      @DefaultValue("false") @QueryParam("includeDetails") boolean includeDetails)
+      @DefaultValue("false") @QueryParam("includeDetails") boolean includeDetails,
+      @DefaultValue("false") @QueryParam("rebalanceIfMinActiveReplicaNotMet")
+      boolean rebalanceIfMinActiveReplicaNotMet)
       throws IOException {
 
     Set<StoppableCheck.Category> skipHealthCheckCategorySet;
@@ -241,6 +245,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       LOG.error("Current cluster: {}, instance: {} has issue with health checks!", clusterId,
           instanceName, e);
       return serverError(e);
+    }
+    if (rebalanceIfMinActiveReplicaNotMet && maintenanceService.isMinActiveReplicaCheckFailed()) {
+      rebalanceOnMinActiveReplicaFailure(clusterId);
     }
     return OK(OBJECT_MAPPER.writeValueAsString(stoppableCheck));
   }

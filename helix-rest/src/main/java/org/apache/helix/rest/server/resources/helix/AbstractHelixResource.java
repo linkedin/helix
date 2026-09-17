@@ -20,7 +20,12 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -29,15 +34,22 @@ import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.PropertyKey;
+import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.server.ServerContext;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.task.TaskDriver;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier;
+import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
@@ -53,6 +65,8 @@ import org.slf4j.LoggerFactory;
 public class AbstractHelixResource extends AbstractResource {
 
   private static final Logger LOG = LoggerFactory.getLogger(AbstractHelixResource.class);
+
+  private static final long CONVERGENCE_CHECK_PERIOD_MS = 1000;
 
   public RealmAwareZkClient getRealmAwareZkClient() {
     ServerContext serverContext = getServerContext();
@@ -162,6 +176,91 @@ public class AbstractHelixResource extends AbstractResource {
     } catch (IOException e) {
       LOG.error("Failed to serialize guard rail validation result", e);
       return serverError();
+    }
+  }
+
+  /**
+   * Requests an on-demand rebalance for a caller that asked to rebalance when a stoppable check
+   * reported a min active replica failure. It is only requested when at least one instance is
+   * offline or disabled inside the delayed rebalance window, which is the state an on-demand
+   * rebalance overrides, and the cluster is converged, so the rebalance is not piled on top of
+   * transitions still in flight. An instance that went offline before the last on-demand rebalance
+   * is no longer inside that window, so a rebalance does not repeat itself.
+   * <p>
+   * The rebalance is requested and not waited on, because a REST request must not block on the
+   * cluster converging. Failures are logged and swallowed because this is a side effect of the
+   * check, not the answer the caller asked for.
+   *
+   * @param clusterId the cluster to rebalance
+   */
+  protected void rebalanceOnMinActiveReplicaFailure(String clusterId) {
+    try {
+      ClusterConfig clusterConfig = getConfigAccessor().getClusterConfig(clusterId);
+      if (clusterConfig == null) {
+        return;
+      }
+      if (!hasInstanceInDelayedRebalanceWindow(clusterId, clusterConfig)) {
+        LOG.info("Cluster {}: skipping on-demand rebalance, no instance is held by the delayed "
+            + "rebalance window", clusterId);
+        return;
+      }
+      if (!isConverged(clusterId)) {
+        LOG.info("Cluster {}: skipping on-demand rebalance, cluster is not converged", clusterId);
+        return;
+      }
+      getHelixAdmin().onDemandRebalance(clusterId);
+      LOG.info("Cluster {}: requested on-demand rebalance after a min active replica check failure",
+          clusterId);
+    } catch (Exception e) {
+      LOG.error("Cluster {}: failed to request on-demand rebalance", clusterId, e);
+    }
+  }
+
+  /**
+   * @return true if the delayed rebalance window is currently keeping at least one offline or
+   * disabled instance in the assignment, which is the only state an on-demand rebalance changes.
+   */
+  private boolean hasInstanceInDelayedRebalanceWindow(String clusterId,
+      ClusterConfig clusterConfig) {
+    HelixDataAccessor accessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    Map<String, InstanceConfig> instanceConfigMap =
+        accessor.getChildValuesMap(keyBuilder.instanceConfigs(), true);
+    Set<String> allNodes = instanceConfigMap.keySet();
+    Set<String> liveNodes = new HashSet<>(accessor.getChildNames(keyBuilder.liveInstances()));
+    Set<String> liveEnabledNodes = liveNodes.stream()
+        .filter(node -> instanceConfigMap.containsKey(node) && instanceConfigMap.get(node)
+            .getInstanceEnabled()).collect(Collectors.toSet());
+
+    Map<String, Long> instanceOfflineTimeMap = new HashMap<>();
+    for (String instance : allNodes) {
+      if (liveNodes.contains(instance)) {
+        continue;
+      }
+      ParticipantHistory history = accessor.getProperty(keyBuilder.participantHistory(instance));
+      if (history != null) {
+        instanceOfflineTimeMap.put(instance, history.getLastOfflineTime());
+      }
+    }
+
+    Set<String> activeNodes = DelayedRebalanceUtil.getActiveNodes(allNodes, liveEnabledNodes,
+        instanceOfflineTimeMap, liveNodes, instanceConfigMap, clusterConfig);
+    return activeNodes.size() > liveEnabledNodes.size();
+  }
+
+  /**
+   * @return true if the cluster is converged right now. The timeout matches the polling period so
+   * the state is evaluated at most twice, which keeps this an immediate check rather than a wait.
+   */
+  private boolean isConverged(String clusterId) {
+    ZkHelixClusterVerifier verifier =
+        new StrictMatchExternalViewVerifier.Builder(clusterId).setZkClient(getRealmAwareZkClient())
+            .setLenientMatch(true).build();
+    try {
+      return verifier.verifyByPolling(CONVERGENCE_CHECK_PERIOD_MS, CONVERGENCE_CHECK_PERIOD_MS);
+    } finally {
+      // The zk client is owned by the server context, so this only drops the verifier's own state.
+      verifier.close();
     }
   }
 }
