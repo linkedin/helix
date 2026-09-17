@@ -141,18 +141,21 @@ public class TestReadClusterDataStageDomainValidation {
   }
 
   @Test
-  public void testDetectsInvalidWithLegacyTopology() throws Exception {
+  public void testDetectsInvalidWhenTopologyAwareButNoTopology() throws Exception {
     _clusterConfig.getRecord().setSimpleField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, "true");
     _clusterConfig.setTopologyAwareEnabled(true);
+    // No cluster TOPOLOGY is configured. The legacy per-instance ZONE_ID topology mode has been
+    // removed, so every instance is flagged invalid until ClusterConfig.TOPOLOGY and each
+    // instance's DOMAIN are configured.
 
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
 
-    InstanceConfig validConfig = new InstanceConfig("instance_with_zone");
-    validConfig.setZoneId("us-west-1");
-    instanceConfigMap.put("instance_with_zone", validConfig);
+    InstanceConfig withDomain = new InstanceConfig("instance_with_domain");
+    withDomain.setDomain("zone=us-west-1,instance=instance_with_domain");
+    instanceConfigMap.put("instance_with_domain", withDomain);
 
-    InstanceConfig invalidConfig = new InstanceConfig("instance_no_zone");
-    instanceConfigMap.put("instance_no_zone", invalidConfig);
+    InstanceConfig noDomain = new InstanceConfig("instance_no_domain");
+    instanceConfigMap.put("instance_no_domain", noDomain);
 
     when(_dataProvider.getInstanceConfigMap()).thenReturn(instanceConfigMap);
 
@@ -161,8 +164,8 @@ public class TestReadClusterDataStageDomainValidation {
     ReadClusterDataStage.validateAndReportInstanceDomainInfo(
         _clusterConfig, _dataProvider, _monitor);
 
-    assertDomainInfoValidGauge("instance_with_zone", 1L);
-    assertDomainInfoValidGauge("instance_no_zone", 0L);
+    assertDomainInfoValidGauge("instance_with_domain", 0L);
+    assertDomainInfoValidGauge("instance_no_domain", 0L);
   }
 
   @Test

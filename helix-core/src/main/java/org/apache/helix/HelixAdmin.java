@@ -711,8 +711,6 @@ public interface HelixAdmin {
    */
   void removeInstanceTag(String clusterName, String instanceName, String tag);
 
-  void setInstanceZoneId(String clusterName, String instanceName, String zoneId);
-
   /**
    * Enable/disable batch message mode for specified cluster.
    * By default batch message mode is disabled.

@@ -115,8 +115,11 @@ public class TestTopology {
     }
   }
 
-  @Test
-  public void testCreateClusterTopologyWithDefaultTopology() {
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testTopologyAwareWithoutTopologyThrows() {
+    // Topology-aware placement now requires an explicit cluster TOPOLOGY plus each instance's
+    // DOMAIN. The legacy default "/root/zone/instance" mode backed by the per-instance ZONE_ID
+    // field has been removed, so constructing a Topology without a cluster TOPOLOGY must fail fast.
     ClusterConfig clusterConfig = new ClusterConfig("Test_Cluster");
     clusterConfig.setTopologyAwareEnabled(true);
 
@@ -124,53 +127,19 @@ public class TestTopology {
     List<String> liveNodes = new ArrayList<String>();
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<String, InstanceConfig>();
 
-    Map<String, Integer> nodeToWeightMap = new HashMap<String, Integer>();
-
     for (int i = 0; i < 100; i++) {
       String instance = "localhost_" + i;
       InstanceConfig config = new InstanceConfig(instance);
-      String zoneId = "rack_" + i / 10;
-      config.setZoneId(zoneId);
       config.setHostName(instance);
       config.setPort("9000");
       allNodes.add(instance);
-
-      int weight = 0;
       if (i % 10 != 0) {
         liveNodes.add(instance);
-        weight = 1000;
-        if (i % 3 == 0) {
-          // set random instance weight.
-          weight = (i + 1) * 100;
-          config.setWeight(weight);
-        }
       }
-
       instanceConfigMap.put(instance, config);
-
-      if (!nodeToWeightMap.containsKey(zoneId)) {
-        nodeToWeightMap.put(zoneId, 0);
-      }
-      nodeToWeightMap.put(zoneId, nodeToWeightMap.get(zoneId) + weight);
     }
 
-    Topology topo = new Topology(allNodes, liveNodes, instanceConfigMap, clusterConfig);
-
-    Assert.assertTrue(topo.getEndNodeType().equals(Topology.Types.INSTANCE.name()));
-    Assert.assertTrue(topo.getFaultZoneType().equals(Topology.Types.ZONE.name()));
-
-    List<Node> faultZones = topo.getFaultZones();
-    Assert.assertEquals(faultZones.size(), 10);
-
-    Node root = topo.getRootNode();
-
-    Assert.assertEquals(root.getChildrenCount(Topology.Types.ZONE.name()), 10);
-    Assert.assertEquals(root.getChildrenCount(topo.getEndNodeType()), 100);
-
-    // validate weights.
-    for (Node rack : root.getChildren()) {
-      Assert.assertEquals(rack.getWeight(), (long) nodeToWeightMap.get(rack.getName()));
-    }
+    new Topology(allNodes, liveNodes, instanceConfigMap, clusterConfig);
   }
 
   @DataProvider

@@ -297,6 +297,16 @@ public class ZkTestBase {
     configAccessor.setClusterConfig(clusterName, clusterConfig);
   }
 
+  protected void enableTopologyAwareRebalance(HelixZkClient zkClient, String clusterName,
+      Boolean enabled, String topology, String faultZoneType) {
+    ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setTopologyAwareEnabled(enabled);
+    clusterConfig.setTopology(topology);
+    clusterConfig.setFaultZoneType(faultZoneType);
+    configAccessor.setClusterConfig(clusterName, clusterConfig);
+  }
+
   protected void enableDelayRebalanceInCluster(HelixZkClient zkClient, String clusterName,
       boolean enabled) {
     ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
