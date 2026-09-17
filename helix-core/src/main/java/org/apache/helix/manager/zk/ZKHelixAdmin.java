@@ -389,10 +389,17 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
       final boolean enabled) {
+    enableInstance(clusterName, instanceName, enabled, null);
+  }
+
+  @Deprecated
+  @Override
+  public void enableInstance(final String clusterName, final String instanceName,
+      final boolean enabled, final String reason) {
     logger.info("{} instance {} in cluster {}.", enabled ? "Enable" : "Disable", instanceName,
         clusterName);
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
-    enableSingleInstance(clusterName, instanceName, enabled, baseAccessor);
+    enableSingleInstance(clusterName, instanceName, enabled, reason, baseAccessor);
   }
 
   @Deprecated
@@ -2635,7 +2642,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Deprecated
   private void enableSingleInstance(final String clusterName, final String instanceName,
-      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor) {
+      final boolean enabled, final String reason, BaseDataAccessor<ZNRecord> baseAccessor) {
     String path = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
 
     if (!baseAccessor.exists(path, 0)) {
@@ -2643,7 +2650,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           + ", instance config does not exist");
     }
 
-    baseAccessor.update(path, new DataUpdater<ZNRecord>() {
+    boolean updated = baseAccessor.update(path, new DataUpdater<ZNRecord>() {
       @Override
       public ZNRecord update(ZNRecord currentData) {
         if (currentData == null) {
@@ -2654,12 +2661,18 @@ public class ZKHelixAdmin implements HelixAdmin {
         InstanceConfig config = new InstanceConfig(currentData);
         config.setInstanceEnabled(enabled);
         if (!enabled) {
-          // reset any existing disabled reason when toggling enablement.
           config.resetInstanceDisabledTypeAndReason();
+          if (reason != null) {
+            config.setInstanceDisabledReason(reason);
+          }
         }
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
+    if (!updated) {
+      throw new HelixException("Failed to update enablement for instance " + instanceName
+          + " in cluster " + clusterName);
+    }
   }
 
   public static String assembleInstanceBatchedDisabledInfo(String reason, String timeStamp) {

@@ -273,6 +273,12 @@ public class MockHelixAdmin implements HelixAdmin {
   @Deprecated
   @Override
   public void enableInstance(String clusterName, String instanceName, boolean enabled) {
+    enableInstance(clusterName, instanceName, enabled, null);
+  }
+
+  @Deprecated
+  @Override
+  public void enableInstance(String clusterName, String instanceName, boolean enabled, String reason) {
     String instanceConfigsPath = PropertyPathBuilder.instanceConfig(clusterName);
     if (!_baseDataAccessor.exists(instanceConfigsPath, 0)) {
       _baseDataAccessor.create(instanceConfigsPath, new ZNRecord(instanceName), 0);
@@ -286,6 +292,9 @@ public class MockHelixAdmin implements HelixAdmin {
     if (!enabled) {
       // TODO: Replace this when the HELIX_ENABLED and HELIX_DISABLED fields are removed.
       instanceConfig.resetInstanceDisabledTypeAndReason();
+      if (reason != null) {
+        instanceConfig.setInstanceDisabledReason(reason);
+      }
     }
     _baseDataAccessor.set(instanceConfigPath, instanceConfig.getRecord(), 0);
   }
