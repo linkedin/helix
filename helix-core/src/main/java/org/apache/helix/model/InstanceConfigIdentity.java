@@ -21,6 +21,11 @@ package org.apache.helix.model;
 
 import java.util.Objects;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * The observed identity of a single instance config node at a point in time: which node it is
  * (creation id) and which revision of it was read (config version).
@@ -42,6 +47,7 @@ import java.util.Objects;
  * <p>
  * Instances of this class are immutable.
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class InstanceConfigIdentity {
 
   /**
@@ -63,10 +69,13 @@ public class InstanceConfigIdentity {
    * @param configVersion    the data version of the config node, or {@link #UNKNOWN_VERSION}
    * @param configCreationId the creation id of the config node, or {@link #UNKNOWN_CREATION_ID}
    */
-  public InstanceConfigIdentity(String instanceName, int configVersion, long configCreationId) {
+  @JsonCreator
+  public InstanceConfigIdentity(@JsonProperty("instanceName") String instanceName,
+      @JsonProperty("configVersion") Integer configVersion,
+      @JsonProperty("configCreationId") Long configCreationId) {
     _instanceName = instanceName;
-    _configVersion = configVersion;
-    _configCreationId = configCreationId;
+    _configVersion = configVersion != null ? configVersion : UNKNOWN_VERSION;
+    _configCreationId = configCreationId != null ? configCreationId : UNKNOWN_CREATION_ID;
   }
 
   public String getInstanceName() {
@@ -85,6 +94,7 @@ public class InstanceConfigIdentity {
    * @return true when both the config version and the creation id are known, so this identity can
    *         be asserted against an observed config.
    */
+  @JsonIgnore
   public boolean isFullySpecified() {
     return _instanceName != null && !_instanceName.isEmpty() && _configVersion >= 0
         && _configCreationId >= 0;

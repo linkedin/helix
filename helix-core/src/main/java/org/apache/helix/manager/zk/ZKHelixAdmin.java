@@ -1071,6 +1071,16 @@ public class ZKHelixAdmin implements HelixAdmin {
             .build();
       }
 
+      // The marker check above only catches a swap-in a previous coordinated preparation marked.
+      // A swap-in a direct preparation committed to another instance's slot stays UNKNOWN, so it
+      // reaches this point looking free, and aligning it here would take that slot away.
+      SwapPairResult heldSwapInRefusal =
+          checkSwapInIsNotHoldingAnotherSlot(clusterName, request, swapInConfig, logicalIdKey,
+              swapOutLogicalId, swapOutIdentity, swapInIdentity);
+      if (heldSwapInRefusal != null) {
+        return heldSwapInRefusal;
+      }
+
       // A coordinated swap only moves the logical id, so the swap-in stays in its own fault zone
       // while taking over the swap-out's slot. Unless the two are already in one fault zone, the
       // slot would change fault zone, which is a placement decision this call must not make on its
@@ -1109,6 +1119,15 @@ public class ZKHelixAdmin implements HelixAdmin {
                     + "UNKNOWN and therefore unassignable until the swap is completed.",
                 swapInInstanceName, swapInOperation, clusterName));
       }
+      // A direct preparation leaves the swap-in UNKNOWN by design, so a swap-in already prepared
+      // for another swap-out is indistinguishable from a free one by its instance operation alone.
+      // Its logical id is what says which slot it is already committed to.
+      SwapPairResult heldSwapInRefusal =
+          checkSwapInIsNotHoldingAnotherSlot(clusterName, request, swapInConfig, logicalIdKey,
+              swapOutLogicalId, swapOutIdentity, swapInIdentity);
+      if (heldSwapInRefusal != null) {
+        return heldSwapInRefusal;
+      }
 
       Map<String, String> mergedDomain = new LinkedHashMap<>(swapOutDomain);
       // There is deliberately no fault zone precondition here. A direct swap copies the whole
@@ -1146,6 +1165,41 @@ public class ZKHelixAdmin implements HelixAdmin {
         swapInInstanceName, swapInIdentity.getConfigVersion());
     return applySwapPairWrite(clusterName, swapOutPath, swapInPath, null, desiredSwapInRecord,
         swapOutIdentity, swapInIdentity, SwapPairResult.Status.PREPARED);
+  }
+
+  /**
+   * Refuse a preparation whose swap-in is already committed to a topology slot belonging to some
+   * instance other than the requested swap-out. Writing the requested slot onto such a swap-in
+   * would take it away from the pair that is already using it, and the pair-scoping check on the
+   * swap-out side cannot see this because it deliberately excludes the named swap-in.
+   * <p>
+   * The requested swap-out is excluded here on purpose: a swap-in that already carries the
+   * requested swap-out's logical id is this same pair being prepared again, which stays idempotent.
+   *
+   * @return the refusal, or null when the swap-in is free to take the requested slot.
+   */
+  private SwapPairResult checkSwapInIsNotHoldingAnotherSlot(String clusterName,
+      SwapPairRequest request, InstanceConfig swapInConfig, String logicalIdKey,
+      String swapOutLogicalId, InstanceConfigIdentity swapOutIdentity,
+      InstanceConfigIdentity swapInIdentity) {
+    String swapOutInstanceName = request.getSwapOutInstanceName();
+    String swapInInstanceName = request.getSwapInInstanceName();
+    List<String> otherSlotHolders =
+        InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
+                swapInConfig).stream().map(InstanceConfig::getInstanceName)
+            .filter(name -> !name.equals(swapOutInstanceName)).sorted()
+            .collect(Collectors.toList());
+    if (otherSlotHolders.isEmpty()) {
+      return null;
+    }
+    return swapPairRefusal(SwapPairResult.Status.PAIR_MISMATCH, swapOutIdentity, swapInIdentity,
+        String.format(
+            "The swap-in instance %s already carries logical id %s in cluster %s, which instances "
+                + "%s also carry, so it is already holding or claiming their topology slot. "
+                + "Preparing it for logical id %s would take that slot away from them. Resolve "
+                + "that swap before preparing this one.", swapInInstanceName,
+            swapInConfig.getLogicalId(logicalIdKey), clusterName, otherSlotHolders,
+            swapOutLogicalId));
   }
 
   /**

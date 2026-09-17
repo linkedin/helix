@@ -22,6 +22,14 @@ package org.apache.helix.model;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * The outcome of a pair-scoped swap preparation or completion.
@@ -35,6 +43,8 @@ import java.util.List;
  * config metadata observed while processing the request or after its transaction. These values
  * are not an atomic snapshot of both configs and do not confer ownership or incarnation fencing.
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class SwapPairResult {
 
   /**
@@ -94,6 +104,10 @@ public class SwapPairResult {
      */
     INVALID_REQUEST(false),
     /**
+     * The Helix deployment does not offer the pair-scoped contract.
+     */
+    UNSUPPORTED(false),
+    /**
      * The write failed for a reason other than a conflict. Whether it took effect is unknown, so a
      * caller must re-read before retrying.
      */
@@ -118,6 +132,22 @@ public class SwapPairResult {
   private final List<String> _blockers;
   private final InstanceConfigIdentity _observedSwapOutIdentity;
   private final InstanceConfigIdentity _observedSwapInIdentity;
+
+  @JsonCreator
+  public SwapPairResult(@JsonProperty("status") Status status,
+      @JsonProperty("blockers") List<String> blockers,
+      @JsonProperty("observedSwapOut") InstanceConfigIdentity observedSwapOutIdentity,
+      @JsonProperty("observedSwapIn") InstanceConfigIdentity observedSwapInIdentity) {
+    _status = status;
+    _blockers = Collections.unmodifiableList(
+        new ArrayList<>(blockers != null ? blockers : Collections.emptyList()));
+    _observedSwapOutIdentity = observedSwapOutIdentity;
+    _observedSwapInIdentity = observedSwapInIdentity;
+  }
+
+  public static SwapPairResult of(Status status, String detail) {
+    return new Builder(status).addBlocker(detail).build();
+  }
 
   private SwapPairResult(Builder builder) {
     _status = builder._status;
@@ -149,6 +179,7 @@ public class SwapPairResult {
    * @return the swap-out config identity this call acted on or refused on, or null when the config
    *         could not be read.
    */
+  @JsonProperty("observedSwapOut")
   public InstanceConfigIdentity getObservedSwapOutIdentity() {
     return _observedSwapOutIdentity;
   }
@@ -157,14 +188,21 @@ public class SwapPairResult {
    * @return the swap-in config identity this call acted on or refused on, or null when the config
    *         could not be read.
    */
+  @JsonProperty("observedSwapIn")
   public InstanceConfigIdentity getObservedSwapInIdentity() {
     return _observedSwapInIdentity;
   }
 
   /**
-   * Narrow this result to the older boolean-plus-blockers shape, for callers that only need to
-   * know whether the requested end state holds. The explicit status is lost.
+   * @return blockers joined for callers that surface a single detail string.
    */
+  @JsonIgnore
+  public String getDetail() {
+    List<String> details =
+        _blockers.stream().filter(Objects::nonNull).collect(Collectors.toList());
+    return details.isEmpty() ? null : String.join("; ", details);
+  }
+
   public OperationCheckResult toOperationCheckResult() {
     if (isSuccessful()) {
       return OperationCheckResult.success();
