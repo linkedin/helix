@@ -35,6 +35,7 @@ import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
+import org.apache.helix.manager.zk.DefaultSchedulerMessageHandlerFactory;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.MasterSlaveSMD;
@@ -45,7 +46,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Persist the ResourceAssignment of each resource that went through rebalancing
+ * Persist computed assignments for SEMI_AUTO and FULL_AUTO resources, except scheduler task queues
+ * whose IdealState map fields hold message metadata.
  */
 public class PersistAssignmentStage extends AbstractAsyncBaseStage {
   private static final Logger LOG = LoggerFactory.getLogger(PersistAssignmentStage.class);
@@ -86,6 +88,11 @@ public class PersistAssignmentStage extends AbstractAsyncBaseStage {
       final IdealState idealState = cache.getIdealState(resourceId);
       if (idealState == null) {
         LogUtil.logWarn(LOG, event.getEventId(), "IdealState not found for resource " + resourceId);
+        return;
+      }
+      if (DefaultSchedulerMessageHandlerFactory.SCHEDULER_TASK_QUEUE
+          .equalsIgnoreCase(idealState.getStateModelDefRef())) {
+        // Replacing these maps would erase the task messages and their controller-message IDs.
         return;
       }
       IdealState.RebalanceMode mode = idealState.getRebalanceMode();

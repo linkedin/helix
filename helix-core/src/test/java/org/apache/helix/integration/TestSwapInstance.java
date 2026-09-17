@@ -21,6 +21,7 @@ package org.apache.helix.integration;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
+import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.model.IdealState;
@@ -52,7 +53,6 @@ public class TestSwapInstance extends ZkStandAloneCMTestBase {
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
 
     // Get ideal states before swap
-    IdealState semiIS = dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates("db-semi"));
     IdealState customizedIS =
         dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates("db-customized"));
     IdealState faIs =
@@ -92,6 +92,15 @@ public class TestSwapInstance extends ZkStandAloneCMTestBase {
     // disable old instance
     _gSetupTool.getClusterManagementTool().enableInstance(CLUSTER_NAME, oldInstanceName, false);
     Assert.assertTrue(_clusterVerifier.verifyByPolling());
+
+    // SEMI_AUTO maps are computed state: snapshot after the old master's failover is persisted.
+    Assert.assertTrue(TestHelper.verify(() -> {
+      IdealState current = dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates("db-semi"));
+      return current.getRecord().getMapFields().size() == current.getNumPartitions()
+          && current.getRecord().getMapFields().values().stream()
+              .noneMatch(assignment -> "MASTER".equals(assignment.get(oldInstanceName)));
+    }, TestHelper.WAIT_DURATION), "SEMI_AUTO assignment did not persist the old instance's failover");
+    IdealState semiIS = dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates("db-semi"));
 
     // We can swap now
     _gSetupTool.swapInstance(CLUSTER_NAME, oldInstanceName, newInstanceName);
