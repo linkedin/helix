@@ -187,11 +187,10 @@ public class TestResourceConfig {
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
     ResourceConfig resourceConfig = new ResourceConfig("resource", false, 2, "DEFAULT",
-        1, 10, "placementTag", true, false, null, null, null, null, true);
+        1, "placementTag", true, false, null, null, null, null, true);
     Assert.assertEquals(resourceConfig.getNumPartitions(), 2);
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
-    Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
     Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
     Assert.assertTrue(resourceConfig.isEnabled());
     Assert.assertFalse(resourceConfig.isMonitoringDisabled());
@@ -199,7 +198,7 @@ public class TestResourceConfig {
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
-            "STATE_MODEL_DEF_REF", "REPLICAS"}) {
+            "STATE_MODEL_DEF_REF", "REPLICAS", "MAX_PARTITIONS_PER_INSTANCE"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -234,8 +233,6 @@ public class TestResourceConfig {
         ResourceConfig.mergeIdealStateWithResourceConfig(null, testIdealState);
     Assert.assertEquals(mergedResourceConfig.getInstanceGroupTag(),
         testIdealState.getInstanceGroupTag());
-    Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
-        testIdealState.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testIdealState.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testIdealState.getStateModelFactoryName());
@@ -255,7 +252,6 @@ public class TestResourceConfig {
     // Test priority, Resource Config field has higher priority.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
-    configBuilder.setMaxPartitionsPerInstance(2);
     configBuilder.setNumPartitions(2);
     configBuilder.setStateModelFactoryName("testRCFactory");
     configBuilder.setMinActiveReplica(2);
@@ -269,8 +265,6 @@ public class TestResourceConfig {
         ResourceConfig.mergeIdealStateWithResourceConfig(testConfig, testIdealState);
     Assert
         .assertEquals(mergedResourceConfig.getInstanceGroupTag(), testConfig.getInstanceGroupTag());
-    Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
-        testConfig.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testConfig.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testConfig.getStateModelFactoryName());

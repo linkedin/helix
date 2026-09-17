@@ -333,7 +333,8 @@ public class DelayedRebalanceUtil {
           resourceAssignment.getReplicaMap(partition).forEach((logicalId, state) ->
               allocatedReplicas.computeIfAbsent(logicalId, key -> new HashSet<>())
                   .add(new AssignableReplica(clusterData.getClusterConfig(), mergedResourceConfig,
-                      partition.getPartitionName(), state, statePriorityMap.get(state)))));
+                      partition.getPartitionName(), state, statePriorityMap.get(state),
+                      idealState.getMaxPartitionsPerInstance()))));
       // only proceed for resource requiring delayed rebalance overwrites
       List<String> partitions =
           partitionsMissingMinActiveReplicas.getOrDefault(resourceName, Collections.emptyList());
@@ -513,7 +514,8 @@ public class DelayedRebalanceUtil {
         int curActiveStateCount = activeStateReplicaCount.getOrDefault(state, 0);
         for (int i = 0; i < stateCountMap.get(state) - curActiveStateCount && replicaGapCount > 0; i++) {
           toBeAssignedReplicas.add(
-              new AssignableReplica(clusterData.getClusterConfig(), resourceConfig, partitionName, state, priority));
+              new AssignableReplica(clusterData.getClusterConfig(), resourceConfig, partitionName, state, priority,
+                  currentIdealState.getMaxPartitionsPerInstance()));
           replicaGapCount--;
         }
       }

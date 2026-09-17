@@ -94,7 +94,7 @@ public class TestAssignableNode extends AbstractTestClusterModel {
 
     // Test 2 - release assignment from the AssignableNode
     AssignableReplica removingReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "MASTER", 1);
+        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "MASTER", 1, Integer.MAX_VALUE);
     expectedAssignment.get(_resourceNames.get(1)).remove(_partitionNames.get(2));
     expectedCapacityMap.put("item1", 9);
     expectedCapacityMap.put("item2", 18);
@@ -137,7 +137,7 @@ public class TestAssignableNode extends AbstractTestClusterModel {
 
     // Test 3 - add assignment to the AssignableNode
     AssignableReplica addingReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "SLAVE", 2);
+        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "SLAVE", 2, Integer.MAX_VALUE);
     expectedAssignment.get(_resourceNames.get(1)).add(_partitionNames.get(2));
     expectedCapacityMap.put("item1", 4);
     expectedCapacityMap.put("item2", 8);
@@ -180,7 +180,7 @@ public class TestAssignableNode extends AbstractTestClusterModel {
         testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
     AssignableReplica removingReplica = new AssignableReplica(testCache.getClusterConfig(),
         testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2) + "non-exist",
-        "MASTER", 1);
+        "MASTER", 1, Integer.MAX_VALUE);
 
     // Release shall pass.
     assignableNode.release(removingReplica);
@@ -195,7 +195,7 @@ public class TestAssignableNode extends AbstractTestClusterModel {
         testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
     assignableNode.assignInitBatch(assignmentSet);
     AssignableReplica duplicateReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(0)), _partitionNames.get(0), "SLAVE", 2);
+        testCache.getResourceConfig(_resourceNames.get(0)), _partitionNames.get(0), "SLAVE", 2, Integer.MAX_VALUE);
     assignableNode.assign(duplicateReplica);
   }
 
