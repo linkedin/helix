@@ -106,6 +106,11 @@ public class ZkClient implements Watcher {
   // TODO: remove it once we have a better way to exit retry for this case
   private static final int NUM_CHILDREN_LIMIT = 100 * 1000;
 
+  // Batch size for deleteRecursively. Sized so each multi() packet stays well
+  // below jute.maxbuffer (4 MB default): ~240 bytes/op * 1000 ops ~= 240 KB.
+  // See deleteRecursively for context.
+  private static final int DELETE_RECURSIVE_BATCH_SIZE = 1000;
+
   private static final boolean SYNC_ON_SESSION = Boolean.parseBoolean(
       System.getProperty(ZkSystemPropertyKeys.ZK_AUTOSYNC_ENABLED, "true"));
   private static final String SYNC_PATH = "/";
@@ -1777,31 +1782,117 @@ public class ZkClient implements Watcher {
 
   /**
    * Delete the path as well as all its children.
-   * @param path
-   * @throws ZkClientException
+   *
+   * <p>This operation is <b>not atomic</b>: it may partially complete on
+   * failure. A second call is safe to run and will resume the deletion
+   * (already-deleted znodes are tolerated as NoNode results).
+   *
+   * <p>Implementation: BFS-collects all descendant paths children-first, then
+   * issues delete operations in batches of {@value #DELETE_RECURSIVE_BATCH_SIZE}
+   * via {@link #multi(Iterable)}. Batching keeps each on-wire packet well
+   * below {@code jute.maxbuffer} (4 MB by default) so this method works for
+   * arbitrarily large subtrees. If the parent znode is racily re-populated
+   * mid-delete (e.g. another agent writing children), the resulting NotEmpty
+   * is bubbled up wrapped in
+   * {@code ZkClientException -> ZkException -> KeeperException.NotEmptyException}
+   * so callers' existing NotEmpty-retry loops can re-walk and retry.
+   *
+   * @param path ZK path to delete (no-op if path does not exist)
+   * @throws ZkClientException on unrecoverable failure
    */
   public void deleteRecursively(String path) throws ZkClientException {
-    List<String> children;
-    try {
-      children = getChildren(path, false);
-    } catch (ZkNoNodeException e) {
-      // if the node to be deleted does not exist, treat it as success.
+    if (!exists(path)) {
       return;
     }
-
-    for (String subPath : children) {
-      deleteRecursively(path + "/" + subPath);
-    }
-
-    // delete() function call will return true if successful, false if the path does not
-    // exist (in this context, it should be treated as successful), and throw exception
-    // if there is any other failure case.
+    List<String> orderedPaths;
     try {
-      delete(path);
-    } catch (Exception e) {
-      LOG.error("zkclient {}, Failed to delete {}, exception {}", _uid, path, e);
-      throw new ZkClientException("Failed to delete " + path, e);
+      orderedPaths = collectSubtreeChildrenFirst(path);
+    } catch (ZkNoNodeException e) {
+      return;
     }
+    if (orderedPaths.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < orderedPaths.size(); i += DELETE_RECURSIVE_BATCH_SIZE) {
+      int end = Math.min(i + DELETE_RECURSIVE_BATCH_SIZE, orderedPaths.size());
+      List<Op> ops = new ArrayList<>(end - i);
+      for (int j = i; j < end; j++) {
+        ops.add(Op.delete(orderedPaths.get(j), -1));
+      }
+      List<OpResult> opResults;
+      try {
+        opResults = multi(ops);
+      } catch (Exception e) {
+        LOG.error("zkclient {}, Failed batched delete for {} (batch index {}, size {}), exception {}",
+            _uid, path, i, ops.size(), e);
+        throw new ZkClientException("Failed to delete " + path, e);
+      }
+      Map<String, KeeperException.Code> failedPathsMap = new HashMap<>();
+      Map<String, KeeperException.Code> notEmptyPathsMap = new HashMap<>();
+      for (int k = 0; k < opResults.size(); k++) {
+        if (opResults.get(k) instanceof OpResult.ErrorResult) {
+          KeeperException.Code code = KeeperException.Code
+              .get(((OpResult.ErrorResult) opResults.get(k)).getErr());
+          if (code == KeeperException.Code.OK || code == KeeperException.Code.NONODE) {
+            // NoNode is tolerated: a previous partial delete or concurrent
+            // delete may have already removed this znode.
+            continue;
+          }
+          if (code == KeeperException.Code.NOTEMPTY) {
+            // NotEmpty surfaces when a child znode appears under a parent we
+            // are deleting (e.g. controller writing ParticipantHistory while
+            // an instance is being dropped). Bubble in the same exception
+            // shape callers may already inspect for retry.
+            notEmptyPathsMap.put(ops.get(k).getPath(), code);
+          } else {
+            failedPathsMap.put(ops.get(k).getPath(), code);
+          }
+        }
+      }
+      if (!notEmptyPathsMap.isEmpty()) {
+        String firstNotEmptyPath = notEmptyPathsMap.keySet().iterator().next();
+        LOG.warn("zkclient {}, NotEmpty during recursive delete of {} on paths {}",
+            _uid, path, notEmptyPathsMap.keySet());
+        throw new ZkClientException("Failed to delete " + path,
+            new ZkException(
+                "Failed to delete " + path + " due to NotEmpty on " + notEmptyPathsMap.keySet(),
+                new KeeperException.NotEmptyException(firstNotEmptyPath)));
+      }
+      if (!failedPathsMap.isEmpty()) {
+        LOG.error("zkclient {}, Failed batched delete for {} with error codes {}",
+            _uid, path, failedPathsMap);
+        throw new ZkClientException(
+            "Failed to delete " + path + " with ZK error codes: " + failedPathsMap);
+      }
+    }
+  }
+
+  /**
+   * BFS-walk the subtree rooted at {@code root} and return all znode paths
+   * ordered children-first (safe for sequential deletion). NoNode encountered
+   * during traversal is tolerated: the missing branch is skipped.
+   */
+  private List<String> collectSubtreeChildrenFirst(String root) {
+    List<String> orderedPaths = new ArrayList<>();
+    Queue<String> queue = new LinkedList<>();
+    queue.offer(root);
+    while (!queue.isEmpty()) {
+      String node = queue.poll();
+      List<String> children;
+      try {
+        children = getChildren(node, false);
+      } catch (ZkNoNodeException e) {
+        continue;
+      }
+      if (children != null) {
+        for (String child : children) {
+          queue.offer(node + "/" + child);
+        }
+      }
+      orderedPaths.add(node);
+    }
+    Collections.reverse(orderedPaths);
+    return orderedPaths;
   }
 
   /**
