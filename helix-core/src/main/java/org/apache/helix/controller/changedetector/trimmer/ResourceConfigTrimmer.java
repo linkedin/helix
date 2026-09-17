@@ -40,6 +40,7 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
    * MONITORING_DISABLED,
    * STATE_MODEL_DEF_REF,
    * REPLICAS,
+   * MIN_ACTIVE_REPLICAS,
    * EXTERNAL_VIEW_DISABLED,
    * DELAY_REBALANCE_ENABLED,
    * HELIX_ENABLED
@@ -48,7 +49,6 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
       .of(FieldType.SIMPLE_FIELD, ImmutableSet
               .of(ResourceConfigProperty.NUM_PARTITIONS.name(),
                   ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
-                  ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
                   ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
                   ResourceConfigProperty.INSTANCE_GROUP_TAG.name()),
           FieldType.MAP_FIELD, ImmutableSet
