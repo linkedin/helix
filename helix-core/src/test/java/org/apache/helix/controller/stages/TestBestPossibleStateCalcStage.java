@@ -34,6 +34,7 @@ import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.util.StageThreadPoolHelper;
@@ -96,6 +97,7 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
   /*
    * Tests the pipeline detects offline instances exceed the threshold and auto enters maintenance,
    * the maintenance rebalancer is used immediately. No bootstraps in the best possible output.
+   * Both live-instance views must stay intact in that run, even with the timeout config unset.
    */
   @Test
   public void testAutoEnterMaintenanceWhenExceedingOfflineNodes() {
@@ -112,6 +114,8 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     // Set offline instances threshold
     ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
     clusterConfig.setMaxOfflineInstancesAllowed(1);
+    Assert.assertNull(
+        clusterConfig.getRecord().getSimpleField("OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE"));
     setClusterConfig(clusterConfig);
 
     Map<String, Resource> resourceMap =
@@ -130,16 +134,31 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
       admin.enableInstance(_clusterName, liveInstances.get(i), false);
     }
 
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
     event.addAttribute(AttributeName.helixmanager.name(), manager);
     event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
     event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
     event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
-    event.addAttribute(AttributeName.ControllerDataProvider.name(),
-        new ResourceControllerDataProvider());
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
 
     runStage(event, new ReadClusterDataStage());
+    Assert.assertFalse(cache.isMaintenanceModeEnabled());
+    Map<String, LiveInstance> liveInstancesBeforeMaintenance =
+        new HashMap<>(cache.getLiveInstances());
+    Map<String, LiveInstance> assignableLiveInstancesBeforeMaintenance =
+        new HashMap<>(cache.getAssignableLiveInstances());
+    Assert.assertEquals(liveInstancesBeforeMaintenance.size(), numInstances);
+    Assert.assertFalse(assignableLiveInstancesBeforeMaintenance.isEmpty());
+
     runStage(event, new BestPossibleStateCalcStage());
+
+    // Do not refresh: another refresh would hide the old empty-cache bug on maintenance entry.
+    Assert.assertTrue(cache.isMaintenanceModeEnabled());
+    Assert.assertEquals(cache.getLiveInstances(), liveInstancesBeforeMaintenance,
+        "Entering maintenance mid-pipeline must not hide live instances");
+    Assert.assertEquals(cache.getAssignableLiveInstances(), assignableLiveInstancesBeforeMaintenance,
+        "Entering maintenance mid-pipeline must not hide assignable live instances");
 
     BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
 
