@@ -364,16 +364,10 @@ public class InstanceUtil {
    * helix-rest exposes the same computation read-only so clients never have to reimplement
    * (and drift from) these rules.
    *
-   * <p><b>The caller owns the definition of "live", and it is not always the raw
-   * {@code /LIVEINSTANCES} membership.</b> While the cluster is in maintenance mode and
-   * {@code OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE} is set to a non-negative value, the
-   * controller's {@code BaseControllerDataProvider#getLiveInstances()} withholds instances that
-   * had been offline longer than that window, and keeps withholding them for the remainder of
-   * the maintenance mode even after they come back up. That exclusion is sticky controller
-   * state accumulated across pipeline runs, so a caller reading ZooKeeper directly cannot
-   * reconstruct it and will pass a strictly larger live set, yielding a strictly smaller
-   * population than the controller counts. The two agree whenever the cluster is out of
-   * maintenance mode or the timeout is unset (the default, {@code -1}).
+   * <p><b>The caller owns the definition of "live".</b> This method computes the population from
+   * whatever live set the caller supplies; it does not read {@code /LIVEINSTANCES} itself. The
+   * controller and helix-rest both pass the raw live membership, so they compute the same
+   * population for the same cluster state.
    *
    * @param instanceConfigMap all instance configs in the cluster, keyed by instance name.
    *                          Must not be null; an empty map yields an empty population.
