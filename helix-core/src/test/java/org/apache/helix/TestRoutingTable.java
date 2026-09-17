@@ -38,6 +38,7 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope.ConfigScopeProperty;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.spectator.RoutingTableProvider;
+import org.apache.helix.spectator.RoutingTableSnapshot;
 import org.testng.Assert;
 import org.testng.AssertJUnit;
 import org.testng.annotations.BeforeClass;
@@ -146,6 +147,42 @@ public class TestRoutingTable {
     }
   }
 
+
+  @Test
+  public void testLegacyGroupMetadataDoesNotChangeResourceRouting() {
+    RoutingTableProvider routingTable = new RoutingTableProvider();
+    try {
+      List<ExternalView> externalViews = new ArrayList<>();
+      for (int i = 0; i < 2; i++) {
+        ZNRecord record = new ZNRecord("TESTDB" + i);
+        record.setSimpleField("RESOURCE_GROUP_NAME", "legacyGroup");
+        record.setSimpleField("RESOURCE_TYPE", "legacyType");
+        record.setBooleanField("GROUP_ROUTING_ENABLED", true);
+        add(record, "sharedPartition", "localhost_890" + i, "ONLINE");
+        externalViews.add(new ExternalView(record));
+      }
+      routingTable.onExternalViewChange(externalViews, changeContext);
+      RoutingTableSnapshot snapshot = routingTable.getRoutingTableSnapshot();
+      for (int i = 0; i < 2; i++) {
+        String resource = "TESTDB" + i;
+        String instance = "localhost_890" + i;
+        List<InstanceConfig> instances =
+            routingTable.getInstancesForResource(resource, "sharedPartition", "ONLINE");
+        Assert.assertEquals(instances.size(), 1);
+        Assert.assertEquals(instances.get(0).getInstanceName(), instance);
+        Assert.assertEquals(routingTable.getInstancesForResource(resource, "ONLINE"),
+            new HashSet<>(instances));
+        Assert.assertEquals(snapshot.getInstancesForResource(resource, "sharedPartition", "ONLINE"),
+            instances);
+        Assert.assertEquals(snapshot.getInstancesForResource(resource, "ONLINE"),
+            new HashSet<>(instances));
+      }
+      Assert.assertTrue(routingTable.getInstancesForResource("legacyGroup", "ONLINE").isEmpty());
+      Assert.assertTrue(snapshot.getInstancesForResource("legacyGroup", "ONLINE").isEmpty());
+    } finally {
+      routingTable.shutdown();
+    }
+  }
 
   @Test()
   public void testGetResources() {

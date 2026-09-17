@@ -480,47 +480,6 @@ public class RoutingTableProvider
   }
 
   /**
-   * returns the instances for {resource group,partition} pair in all resources belongs to the given
-   * resource group that are in a specific {state}.
-   * The return results aggregate all partition states from all the resources in the given resource
-   * group.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
-   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
-   *     instead. Kept for binary compatibility; slated for removal in a future major release.
-   */
-  @Deprecated
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state) {
-    return getRoutingTableRef(DEFAULT_PROPERTY_TYPE, DEFAULT_STATE_TYPE)
-        .getInstancesForResourceGroup(resourceGroupName, partitionName, state);
-  }
-
-  /**
-   * returns the instances for {resource group,partition} pair contains any of the given tags
-   * that are in a specific {state}.
-   * Find all resources belongs to the given resource group that have any of the given resource tags
-   * and return the aggregated partition states from all these resources.
-   * @param resourceGroupName
-   * @param partitionName
-   * @param state
-   * @param resourceTags
-   * @return empty list if there is no instance in a given state
-   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
-   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
-   *     instead. Kept for binary compatibility; slated for removal in a future major release.
-   */
-  @Deprecated
-  public List<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName,
-      String partitionName, String state, List<String> resourceTags) {
-    return getRoutingTableRef(DEFAULT_PROPERTY_TYPE, DEFAULT_STATE_TYPE)
-        .getInstancesForResourceGroup(resourceGroupName, partitionName, state, resourceTags);
-  }
-
-  /**
    * For specific routing table associated with {propertyType, stateType}
    * returns all instances for {resource} that are in a specific {state}
    * This method will be deprecated, please use the
@@ -542,38 +501,6 @@ public class RoutingTableProvider
   public Set<InstanceConfig> getInstancesForResource(String resourceName, String state) {
     return getRoutingTableRef(DEFAULT_PROPERTY_TYPE, DEFAULT_STATE_TYPE)
         .getInstancesForResource(resourceName, state);
-  }
-
-  /**
-   * returns all instances for all resources in {resource group} that are in a specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
-   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
-   *     instead. Kept for binary compatibility; slated for removal in a future major release.
-   */
-  @Deprecated
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state) {
-    return getRoutingTableRef(DEFAULT_PROPERTY_TYPE, DEFAULT_STATE_TYPE)
-        .getInstancesForResourceGroup(resourceGroupName, state);
-  }
-
-  /**
-   * returns all instances for resources contains any given tags in {resource group} that are in a
-   * specific {state}
-   * @param resourceGroupName
-   * @param state
-   * @return empty list if there is no instance in a given state
-   * @deprecated Resource-group routing is retired: the routing table no longer aggregates group
-   *     state, so this method always returns an empty result. Use {@link #getInstancesForResource}
-   *     instead. Kept for binary compatibility; slated for removal in a future major release.
-   */
-  @Deprecated
-  public Set<InstanceConfig> getInstancesForResourceGroup(String resourceGroupName, String state,
-      List<String> resourceTags) {
-    return getRoutingTableRef(DEFAULT_PROPERTY_TYPE, DEFAULT_STATE_TYPE)
-        .getInstancesForResourceGroup(resourceGroupName, state, resourceTags);
   }
 
   /**

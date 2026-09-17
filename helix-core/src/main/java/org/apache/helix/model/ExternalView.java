@@ -37,7 +37,9 @@ public class ExternalView extends HelixProperty {
    */
   public enum ExternalViewProperty {
     INSTANCE_GROUP_TAG,
+    @Deprecated
     RESOURCE_GROUP_NAME,
+    @Deprecated
     GROUP_ROUTING_ENABLED,
     MIN_ACTIVE_REPLICAS,
     STATE_MODEL_DEF_REF,
@@ -112,8 +114,8 @@ public class ExternalView extends HelixProperty {
    * Get the resource group name
    *
    * @return the name of the resource group this resource belongs to.
-   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
-   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
+   * @deprecated Resource-group routing is removed. Retained for existing callers reading legacy
+   *     metadata; the stored value does not affect Helix routing.
    */
   @Deprecated
   public String getResourceGroupName() {
@@ -121,11 +123,11 @@ public class ExternalView extends HelixProperty {
   }
 
   /**
-   * Check whether the group routing is enabled for this resource.
+   * Read the legacy group-routing flag stored on this resource.
    *
-   * @return true if the group routing enabled for this resource; false otherwise
-   * @deprecated Resource-group routing is retired (unused fleet-wide) and the routing path has
-   *     been removed. Kept for binary compatibility; slated for removal in a future major release.
+   * @return the stored legacy group-routing flag, or false if absent
+   * @deprecated Resource-group routing is removed. Retained for existing callers reading legacy
+   *     metadata; a true value does not enable Helix routing by resource group.
    */
   @Deprecated
   public boolean isGroupRoutingEnabled() {
