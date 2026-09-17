@@ -48,7 +48,6 @@ public class ResourceConfig extends HelixProperty {
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
     STATE_MODEL_FACTORY_NAME,
-    MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     DELAY_REBALANCE_ENABLED,
@@ -96,20 +95,20 @@ public class ResourceConfig extends HelixProperty {
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled, stateModelFactoryName,
-        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag,
+        maxPartitionsPerInstance, instanceGroupTag,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
@@ -126,10 +125,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (stateModelFactoryName != null) {
       _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(), stateModelFactoryName);
-    }
-
-    if (minActiveReplica >= 0) {
-      _record.setIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), minActiveReplica);
     }
 
     if (maxPartitionsPerInstance >= 0) {
@@ -201,15 +196,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public String getStateModelFactoryName() {
     return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name());
-  }
-
-  /**
-   * Get the number of minimal active partitions for this resource.
-   *
-   * @return
-   */
-  public int getMinActiveReplica() {
-    return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
   }
 
   // Delimiter used for storing active states as a comma-separated string in simpleField
@@ -531,7 +517,6 @@ public class ResourceConfig extends HelixProperty {
     private String _resourceId;
     private Boolean _monitorDisabled;
     private String _stateModelFactoryName;
-    private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
@@ -575,15 +560,6 @@ public class ResourceConfig extends HelixProperty {
 
     public Builder setStateModelFactoryName(String stateModelFactoryName) {
       _stateModelFactoryName = stateModelFactoryName;
-      return this;
-    }
-
-    public int getMinActiveReplica() {
-      return _minActiveReplica;
-    }
-
-    public Builder setMinActiveReplica(int minActiveReplica) {
-      _minActiveReplica = minActiveReplica;
       return this;
     }
 
@@ -713,7 +689,7 @@ public class ResourceConfig extends HelixProperty {
       // validate();
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
-          _stateModelFactoryName, _minActiveReplica, _maxPartitionsPerInstance,
+          _stateModelFactoryName, _maxPartitionsPerInstance,
           _instanceGroupTag, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
@@ -759,9 +735,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord.setSimpleFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
         idealState.getStateModelFactoryName());
-    mergedZNRecord
-        .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-            idealState.getMinActiveReplicas());
     mergedZNRecord.setBooleanFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
         idealState.isDelayRebalanceEnabled());

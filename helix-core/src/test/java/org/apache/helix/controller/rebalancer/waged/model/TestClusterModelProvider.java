@@ -308,7 +308,6 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
     Map<String, IdealState> isMap = new HashMap<>();
     for (String resource : _resourceNames) {
       ResourceConfig resourceConfig = new ResourceConfig.Builder(resource)
-          .setMinActiveReplica(minActiveReplica)
           .build();
       _resourceConfigMap.put(resource, resourceConfig);
       IdealState is = new IdealState(resource);
