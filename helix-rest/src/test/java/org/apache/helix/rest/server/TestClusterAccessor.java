@@ -1767,7 +1767,6 @@ public class TestClusterAccessor extends AbstractTestClass {
   private ClusterConfig createClusterConfig(String cluster) {
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
 
-    clusterConfig.setPersistBestPossibleAssignment(true);
     clusterConfig.getRecord().setSimpleField("SimpleField1", "Value1");
     clusterConfig.getRecord().setSimpleField("SimpleField2", "Value2");
 

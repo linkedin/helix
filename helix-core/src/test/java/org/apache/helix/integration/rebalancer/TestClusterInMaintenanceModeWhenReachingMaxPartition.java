@@ -81,7 +81,6 @@ public class TestClusterInMaintenanceModeWhenReachingMaxPartition extends ZkTest
             .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
             .build();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     _dataAccessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
   }
 
