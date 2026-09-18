@@ -79,6 +79,9 @@ public class AssignableNode implements Comparable<AssignableNode> {
   // Keys (resource|partition) making up _hiddenOccupancy, so a replica is never charged for room
   // it is itself already occupying.
   private Set<String> _hiddenOccupancyKeys = Collections.emptySet();
+  // Replicas this gate may act on: those whose partition is currently short of copies the planner
+  // can model. A partition at full strength is exempt, so hidden occupancy can never move it.
+  private Set<String> _gatedReplicaKeys = Collections.emptySet();
   private Map<String, Integer> _remainingTopStateCapacity;
 
   /**
@@ -125,9 +128,11 @@ public class AssignableNode implements Comparable<AssignableNode> {
    *                        assign()/release() adjust it as replicas move into and out of the plan.
    * @param hiddenOccupancyKeys the (resource, partition) keys making up that total
    */
-  void setHiddenOccupancy(Map<String, Integer> hiddenOccupancy, Set<String> hiddenOccupancyKeys) {
+  void setHiddenOccupancy(Map<String, Integer> hiddenOccupancy, Set<String> hiddenOccupancyKeys,
+      Set<String> gatedReplicaKeys) {
     _hiddenOccupancy = hiddenOccupancy;
     _hiddenOccupancyKeys = hiddenOccupancyKeys;
+    _gatedReplicaKeys = gatedReplicaKeys;
   }
 
   /**
@@ -143,9 +148,16 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * @return weight to withhold from this node's remaining capacity, never negative
    */
   public int getHiddenOccupancy(String capacityKey, AssignableReplica candidate) {
+    String candidateKey =
+        occupancyKey(candidate.getResourceName(), candidate.getPartitionName());
+    // Only a partition short of replicas is subject to this. One at full strength already has
+    // somewhere to live, and moving it because an unrelated partition changed this node's hidden
+    // occupancy is churn with nothing bought for it.
+    if (!_gatedReplicaKeys.contains(candidateKey)) {
+      return 0;
+    }
     int hidden = _hiddenOccupancy.getOrDefault(capacityKey, 0);
-    if (_hiddenOccupancyKeys
-        .contains(occupancyKey(candidate.getResourceName(), candidate.getPartitionName()))) {
+    if (_hiddenOccupancyKeys.contains(candidateKey)) {
       hidden -= candidate.getCapacity().getOrDefault(capacityKey, 0);
     }
     return Math.max(0, hidden);
