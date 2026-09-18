@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,6 +35,7 @@ import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 
 import com.codahale.metrics.annotation.ResponseMetered;
@@ -41,6 +43,9 @@ import com.codahale.metrics.annotation.Timed;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.AccessOption;
@@ -79,8 +84,11 @@ import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.rest.server.service.VirtualTopologyGroupService;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.util.ExternalViewConvergenceEvaluator;
+import org.apache.helix.util.ExternalViewConvergenceResult;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -92,6 +100,13 @@ import io.swagger.annotations.ApiOperation;
 @Api (value = "", description = "Helix REST Clusters  APIs")
 public class ClusterAccessor extends AbstractHelixResource {
   private static Logger LOG = LoggerFactory.getLogger(ClusterAccessor.class.getName());
+
+  private static final String CONVERGENCE_CLUSTER_SCOPE = "CLUSTER";
+  private static final String CONVERGENCE_RESOURCES_SCOPE = "RESOURCES";
+  private static final String MATCH_MODE_STRICT = "STRICT";
+  private static final String MATCH_MODE_LENIENT = "LENIENT";
+  // Upper bound on how many resources one response names individually. The counts stay exact.
+  private static final int MAX_REPORTED_RESOURCES = 100;
 
   public enum ClusterProperties {
     controller,
@@ -106,6 +121,28 @@ public class ClusterAccessor extends AbstractHelixResource {
     maintenanceSignal,
     maintenanceHistory,
     clusterName
+  }
+
+  /**
+   * Response field names of the convergence status read. The constant names are the wire names,
+   * so a rename is visibly a change to the response schema.
+   */
+  public enum ConvergenceProperties {
+    scope,
+    matchMode,
+    status,
+    observedAtMillis,
+    evaluatedResourceCount,
+    pendingResourceCount,
+    failedResourceCount,
+    unknownResourceCount,
+    skippedResourceCount,
+    pendingResources,
+    failedResources,
+    unknownResources,
+    skippedResources,
+    clusterReason,
+    detailTruncated
   }
 
   @NamespaceAuth
@@ -161,6 +198,153 @@ public class ClusterAccessor extends AbstractHelixResource {
     clusterInfo.put(ClusterProperties.liveInstances.name(), liveInstances);
 
     return JSONRepresentation(clusterInfo);
+  }
+
+  /**
+   * Reports whether the external views of the cluster match the mapping their ideal states imply,
+   * using {@link ExternalViewConvergenceEvaluator}, the calculation
+   * {@link org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier} performs. The
+   * response schema is documented in the project README.
+   *
+   * <p>{@code CONVERGED} is claimed only when every evaluated resource matched. {@code PENDING}
+   * means retrying can change the answer and {@code FAILED} means a resource could not be
+   * evaluated, so neither may be read as convergence, and a caller that cannot parse
+   * {@code status} must not treat HTTP 200 as convergence. A server that predates this endpoint
+   * answers 404, which is also not convergence.
+   *
+   * <p>This is a single bounded read, not a subscription: it never waits for convergence, opens no
+   * connection of its own, leaves behind no verifier or background task, never writes cluster or
+   * participant metadata and never triggers a rebalance. {@code observedAtMillis} is when the
+   * evaluation started reading, and its inputs are collected with several requests, so the result
+   * is not an atomic snapshot of the cluster.
+   */
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{clusterId}/convergence-status")
+  @ApiOperation(value = "Return whether the cluster has converged",
+      notes = "Helix REST Cluster Convergence Status Get API")
+  public Response getConvergenceStatus(@PathParam("clusterId") String clusterId,
+      @QueryParam("resources") String resourcesParam,
+      @QueryParam("matchMode") String matchModeParam) {
+    boolean lenientMatch;
+    if (matchModeParam == null || matchModeParam.isEmpty()
+        || MATCH_MODE_STRICT.equalsIgnoreCase(matchModeParam)) {
+      lenientMatch = false;
+    } else if (MATCH_MODE_LENIENT.equalsIgnoreCase(matchModeParam)) {
+      lenientMatch = true;
+    } else {
+      // Falling back to a default would answer a question the caller did not ask.
+      return badRequest("Invalid matchMode " + matchModeParam + ", expected " + MATCH_MODE_STRICT
+          + " or " + MATCH_MODE_LENIENT);
+    }
+
+    Set<String> resources = null;
+    if (resourcesParam != null) {
+      resources = new HashSet<>();
+      for (String resource : resourcesParam.split(",")) {
+        String trimmed = resource.trim();
+        if (!trimmed.isEmpty()) {
+          resources.add(trimmed);
+        }
+      }
+      if (resources.isEmpty()) {
+        // An empty filter would silently widen the question to the whole cluster.
+        return badRequest("The resources parameter was provided without any resource name");
+      }
+    }
+
+    try {
+      return computeConvergenceStatus(clusterId, resources, lenientMatch);
+    } catch (HelixException | ZkException | IllegalArgumentException e) {
+      // A cluster that could not be read is not a converged cluster, and reporting it as one
+      // would let a caller act on an assignment Helix never confirmed.
+      LOG.warn("Failed to evaluate convergence status for cluster {}", clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private Response computeConvergenceStatus(String clusterId, Set<String> resources,
+      boolean lenientMatch) {
+    HelixDataAccessor accessor = getDataAccssor(clusterId);
+    // Read the cluster config on its own first: it separates a cluster that does not exist from a
+    // read that failed, which the refresh below would surface only as a missing configuration.
+    List<ClusterConfig> clusterConfigs = accessor
+        .getProperty(Collections.singletonList(accessor.keyBuilder().clusterConfig()), true);
+    if (clusterConfigs == null || clusterConfigs.size() != 1) {
+      throw new HelixException("Incomplete cluster config response for " + clusterId);
+    }
+    if (clusterConfigs.get(0) == null) {
+      return notFound();
+    }
+
+    ExternalViewConvergenceResult result =
+        new ExternalViewConvergenceEvaluator.Builder().setLenientMatch(lenientMatch).build()
+            .evaluate(accessor,
+                ExternalViewConvergenceEvaluator.readOnlySnapshot(clusterId, accessor), resources,
+                null);
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    root.put(ConvergenceProperties.scope.name(),
+        resources == null ? CONVERGENCE_CLUSTER_SCOPE : CONVERGENCE_RESOURCES_SCOPE);
+    root.put(ConvergenceProperties.matchMode.name(),
+        lenientMatch ? MATCH_MODE_LENIENT : MATCH_MODE_STRICT);
+    root.put(ConvergenceProperties.status.name(), result.getStatus().name());
+    root.put(ConvergenceProperties.observedAtMillis.name(), result.getObservedAtMillis());
+    root.put(ConvergenceProperties.evaluatedResourceCount.name(),
+        result.getEvaluatedResourceCount());
+    root.put(ConvergenceProperties.pendingResourceCount.name(), result.getPendingResources().size());
+    root.put(ConvergenceProperties.failedResourceCount.name(), result.getFailedResources().size());
+    root.put(ConvergenceProperties.unknownResourceCount.name(), result.getUnknownResources().size());
+    root.put(ConvergenceProperties.skippedResourceCount.name(), result.getSkippedResources().size());
+
+    // The counts above are always complete. The per resource detail is capped so a cluster with
+    // many resources cannot turn one status read into an unbounded response.
+    int budget = MAX_REPORTED_RESOURCES;
+    ObjectNode pendingNode = root.putObject(ConvergenceProperties.pendingResources.name());
+    budget = putReasons(pendingNode, result.getPendingResources(), budget);
+    ObjectNode failedNode = root.putObject(ConvergenceProperties.failedResources.name());
+    budget = putReasons(failedNode, result.getFailedResources(), budget);
+    ArrayNode unknownNode = root.putArray(ConvergenceProperties.unknownResources.name());
+    budget = putNames(unknownNode, result.getUnknownResources(), budget);
+    ArrayNode skippedNode = root.putArray(ConvergenceProperties.skippedResources.name());
+    putNames(skippedNode, result.getSkippedResources(), budget);
+    int reported =
+        pendingNode.size() + failedNode.size() + unknownNode.size() + skippedNode.size();
+    root.put(ConvergenceProperties.detailTruncated.name(),
+        reported < result.getPendingResources().size() + result.getFailedResources().size()
+            + result.getUnknownResources().size() + result.getSkippedResources().size());
+
+    if (result.getClusterReason() != null) {
+      root.put(ConvergenceProperties.clusterReason.name(), result.getClusterReason().name());
+    }
+
+    return JSONRepresentation(root, HttpHeaders.CACHE_CONTROL, "no-store");
+  }
+
+  private static int putReasons(ObjectNode target,
+      Map<String, ExternalViewConvergenceResult.Reason> reasons, int budget) {
+    for (Map.Entry<String, ExternalViewConvergenceResult.Reason> entry : reasons.entrySet()) {
+      if (budget <= 0) {
+        break;
+      }
+      target.put(entry.getKey(), entry.getValue().name());
+      budget--;
+    }
+    return budget;
+  }
+
+  private static int putNames(ArrayNode target, Collection<String> names, int budget) {
+    for (String name : names) {
+      if (budget <= 0) {
+        break;
+      }
+      target.add(name);
+      budget--;
+    }
+    return budget;
   }
 
   @NamespaceAuth
