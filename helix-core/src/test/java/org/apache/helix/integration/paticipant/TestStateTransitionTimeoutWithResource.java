@@ -154,7 +154,9 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
     ResourceConfig resourceConfig = new ResourceConfig.Builder(TEST_DB)
         .setStateTransitionTimeoutConfig(stateTransitionTimeoutConfig)
         .setRebalanceConfig(new RebalanceConfig(new ZNRecord(TEST_DB)))
-        .setHelixEnabled(false).build();
+        .build();
+    // A persisted legacy RC flag must not override enableResource(), which writes IdealState.
+    resourceConfig.getRecord().setBooleanField("HELIX_ENABLED", false);
     _configAccessor.setResourceConfig(CLUSTER_NAME, TEST_DB, resourceConfig);
     setParticipants(TEST_DB);
 
@@ -167,6 +169,12 @@ public class TestStateTransitionTimeoutWithResource extends ZkStandAloneCMTestBa
 
     Assert.assertTrue(TestHelper.verify(() -> verify(TEST_DB), TestHelper.WAIT_DURATION),
         "Expected one resource-configured timeout and ERROR state for every ideal master");
+    Assert.assertTrue(
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, TEST_DB)
+            .isEnabled());
+    Assert.assertEquals(
+        _configAccessor.getResourceConfig(CLUSTER_NAME, TEST_DB).getRecord()
+            .getSimpleField("HELIX_ENABLED"), "false");
   }
 
   @Test
