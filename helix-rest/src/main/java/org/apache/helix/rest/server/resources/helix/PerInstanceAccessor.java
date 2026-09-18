@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -69,10 +70,13 @@ import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceConfigIdentity;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
+import org.apache.helix.model.SwapPairRequest;
+import org.apache.helix.model.SwapPairResult;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
@@ -125,6 +129,180 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     Set<String> nonBlockingHelixCheck = new HashSet<>();
     boolean skipZKRead = false;
     boolean performOperation = true;
+  }
+
+  /**
+   * Body of a pair-scoped swap command. Both instances are named explicitly so the command can
+   * never act on a peer the caller did not ask for, and the path instance has to be one of them so
+   * the resource a request is addressed to matches the instances it would change.
+   */
+  private static class SwapPairInput {
+    static final String SWAP_OUT_INSTANCE_NAME = "swapOutInstanceName";
+    static final String SWAP_IN_INSTANCE_NAME = "swapInInstanceName";
+    static final String SWAP_MODE = "swapMode";
+    static final String PRESERVED_SWAP_IN_DOMAIN_KEYS = "preservedSwapInDomainKeys";
+    static final String EXPECTED_SWAP_OUT_CONFIG_VERSION = "expectedSwapOutConfigVersion";
+    static final String EXPECTED_SWAP_OUT_CONFIG_CREATION_ID = "expectedSwapOutConfigCreationId";
+    static final String EXPECTED_SWAP_IN_CONFIG_VERSION = "expectedSwapInConfigVersion";
+    static final String EXPECTED_SWAP_IN_CONFIG_CREATION_ID = "expectedSwapInConfigCreationId";
+
+    String swapOutInstanceName;
+    String swapInInstanceName;
+    SwapPairRequest.SwapMode swapMode;
+    Set<String> preservedSwapInDomainKeys = Collections.emptySet();
+    InstanceConfigIdentity expectedSwapOutIdentity;
+    InstanceConfigIdentity expectedSwapInIdentity;
+    boolean force;
+    String errorMessage;
+
+    static SwapPairInput parse(JsonNode node, String pathInstanceName, boolean force,
+        boolean requireSwapMode) {
+      SwapPairInput input = new SwapPairInput();
+      input.force = force;
+      if (node == null) {
+        input.errorMessage = "A swap pair command requires a body naming both instances.";
+        return input;
+      }
+      input.swapOutInstanceName = textOrNull(node, SWAP_OUT_INSTANCE_NAME);
+      input.swapInInstanceName = textOrNull(node, SWAP_IN_INSTANCE_NAME);
+      if (input.swapOutInstanceName == null || input.swapInInstanceName == null) {
+        input.errorMessage =
+            "A swap pair command requires both " + SWAP_OUT_INSTANCE_NAME + " and "
+                + SWAP_IN_INSTANCE_NAME + " in the body.";
+        return input;
+      }
+      if (!pathInstanceName.equals(input.swapOutInstanceName) && !pathInstanceName.equals(
+          input.swapInInstanceName)) {
+        input.errorMessage = "Instance " + pathInstanceName
+            + " in the request path is neither the swap-out nor the swap-in instance of the body.";
+        return input;
+      }
+
+      String swapMode = textOrNull(node, SWAP_MODE);
+      if (swapMode != null) {
+        try {
+          input.swapMode = SwapPairRequest.SwapMode.valueOf(swapMode);
+        } catch (IllegalArgumentException e) {
+          input.errorMessage = "Invalid " + SWAP_MODE + " : " + swapMode;
+          return input;
+        }
+      } else if (requireSwapMode) {
+        input.errorMessage = "A swap pair command requires " + SWAP_MODE + " in the body.";
+        return input;
+      }
+
+      JsonNode preservedKeys = node.get(PRESERVED_SWAP_IN_DOMAIN_KEYS);
+      if (preservedKeys != null && !preservedKeys.isNull()) {
+        if (!preservedKeys.isArray()) {
+          input.errorMessage = PRESERVED_SWAP_IN_DOMAIN_KEYS + " must be an array of domain keys.";
+          return input;
+        }
+        Set<String> keys = new LinkedHashSet<>();
+        for (JsonNode preservedKey : preservedKeys) {
+          keys.add(preservedKey.textValue());
+        }
+        if (keys.contains(null)) {
+          input.errorMessage =
+              PRESERVED_SWAP_IN_DOMAIN_KEYS + " must only contain domain key strings.";
+          return input;
+        }
+        input.preservedSwapInDomainKeys = keys;
+      }
+
+      input.expectedSwapOutIdentity =
+          parseExpectedIdentity(node, input.swapOutInstanceName, EXPECTED_SWAP_OUT_CONFIG_VERSION,
+              EXPECTED_SWAP_OUT_CONFIG_CREATION_ID, input);
+      if (input.errorMessage != null) {
+        return input;
+      }
+      input.expectedSwapInIdentity =
+          parseExpectedIdentity(node, input.swapInInstanceName, EXPECTED_SWAP_IN_CONFIG_VERSION,
+              EXPECTED_SWAP_IN_CONFIG_CREATION_ID, input);
+      return input;
+    }
+
+    private static InstanceConfigIdentity parseExpectedIdentity(JsonNode node, String instanceName,
+        String versionField, String creationIdField, SwapPairInput input) {
+      JsonNode version = node.get(versionField);
+      JsonNode creationId = node.get(creationIdField);
+      boolean hasVersion = version != null && !version.isNull();
+      boolean hasCreationId = creationId != null && !creationId.isNull();
+      if (!hasVersion && !hasCreationId) {
+        return null;
+      }
+      if (!hasVersion || !hasCreationId) {
+        // A half-specified expectation cannot be enforced, so it is rejected rather than being
+        // enforced in part.
+        input.errorMessage =
+            "Both " + versionField + " and " + creationIdField + " must be provided together.";
+        return null;
+      }
+      if (!version.isNumber() || !creationId.isNumber()) {
+        input.errorMessage = versionField + " and " + creationIdField + " must be numbers.";
+        return null;
+      }
+      return new InstanceConfigIdentity(instanceName, version.intValue(), creationId.longValue());
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+      JsonNode value = node.get(field);
+      return value == null || value.isNull() ? null : value.textValue();
+    }
+
+    SwapPairRequest toRequest(String reason,
+        InstanceConstants.InstanceOperationSource instanceOperationSource) {
+      SwapPairRequest.Builder builder =
+          new SwapPairRequest.Builder(swapOutInstanceName, swapInInstanceName).setSwapMode(swapMode)
+              .setPreservedSwapInDomainKeys(preservedSwapInDomainKeys)
+              .setExpectedSwapOutIdentity(expectedSwapOutIdentity)
+              .setExpectedSwapInIdentity(expectedSwapInIdentity).setForceComplete(force)
+              .setReason(reason);
+      if (instanceOperationSource != null) {
+        builder.setOperationSource(instanceOperationSource);
+      }
+      return builder.build();
+    }
+  }
+
+  private static void putSwapPairIdentity(ObjectNode target, String role, String instanceName,
+      InstanceConfigIdentity identity) {
+    ObjectNode identityNode = JsonNodeFactory.instance.objectNode();
+    identityNode.put("instanceName", instanceName);
+    if (identity == null) {
+      identityNode.put("exists", false);
+    } else {
+      identityNode.put("exists", true);
+      identityNode.put("configVersion", identity.getConfigVersion());
+      identityNode.put("configCreationId", identity.getConfigCreationId());
+    }
+    target.set(role, identityNode);
+  }
+
+  private static ObjectNode toSwapPairResponse(SwapPairInput input, SwapPairResult result) {
+    ObjectNode response = JsonNodeFactory.instance.objectNode();
+    response.put("status", result.getStatus().name());
+    // Kept alongside the explicit status so a client that only distinguishes success from failure
+    // reads the same shape the older swap commands return.
+    response.put("successful", result.isSuccessful());
+    ArrayNode blockers = response.putArray("blockers");
+    result.getBlockers().forEach(blockers::add);
+    response.put(SwapPairInput.SWAP_OUT_INSTANCE_NAME, input.swapOutInstanceName);
+    response.put(SwapPairInput.SWAP_IN_INSTANCE_NAME, input.swapInInstanceName);
+    putObservedSwapPairIdentity(response, "observedSwapOut", result.getObservedSwapOutIdentity());
+    putObservedSwapPairIdentity(response, "observedSwapIn", result.getObservedSwapInIdentity());
+    return response;
+  }
+
+  private static void putObservedSwapPairIdentity(ObjectNode target, String role,
+      InstanceConfigIdentity identity) {
+    if (identity == null) {
+      return;
+    }
+    ObjectNode identityNode = JsonNodeFactory.instance.objectNode();
+    identityNode.put("instanceName", identity.getInstanceName());
+    identityNode.put("configVersion", identity.getConfigVersion());
+    identityNode.put("configCreationId", identity.getConfigCreationId());
+    target.set(role, identityNode);
   }
 
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
@@ -598,6 +776,35 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
               "successful", completeSwapResult.isSuccessful(),
               "blockers", completeSwapResult.getBlockers())));
+        case getSwapPairIdentities: {
+          SwapPairInput identitiesInput = SwapPairInput.parse(node, instanceName, force, false);
+          if (identitiesInput.errorMessage != null) {
+            return badRequest(identitiesInput.errorMessage);
+          }
+          InstanceConfigIdentity swapOutIdentity =
+              admin.getInstanceConfigIdentity(clusterId, identitiesInput.swapOutInstanceName);
+          InstanceConfigIdentity swapInIdentity =
+              admin.getInstanceConfigIdentity(clusterId, identitiesInput.swapInInstanceName);
+          ObjectNode identitiesResponse = JsonNodeFactory.instance.objectNode();
+          putSwapPairIdentity(identitiesResponse, "swapOut",
+              identitiesInput.swapOutInstanceName, swapOutIdentity);
+          putSwapPairIdentity(identitiesResponse, "swapIn", identitiesInput.swapInInstanceName,
+              swapInIdentity);
+          return OK(OBJECT_MAPPER.writeValueAsString(identitiesResponse));
+        }
+        case prepareSwapPair:
+        case completeSwapPair: {
+          SwapPairInput swapPairInput = SwapPairInput.parse(node, instanceName, force, true);
+          if (swapPairInput.errorMessage != null) {
+            return badRequest(swapPairInput.errorMessage);
+          }
+          SwapPairRequest swapPairRequest = swapPairInput.toRequest(reason, instanceOperationSource);
+          SwapPairResult swapPairResult = cmd == Command.prepareSwapPair
+              ? admin.prepareSwapPair(clusterId, swapPairRequest)
+              : admin.completeSwapPair(clusterId, swapPairRequest);
+          return OK(OBJECT_MAPPER.writeValueAsString(toSwapPairResponse(swapPairInput,
+              swapPairResult)));
+        }
         case addInstanceTag:
           if (!validInstance(node, instanceName)) {
             return badRequest("Instance names are not match!");
