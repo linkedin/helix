@@ -54,6 +54,7 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
+import org.apache.helix.api.status.MaintenanceModeOwnershipHandle;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
@@ -345,6 +346,36 @@ public class ClusterAccessor extends AbstractHelixResource {
             .manuallyEnableMaintenanceMode(clusterId, command == Command.enableMaintenanceMode,
                 content, customFieldsMap);
         break;
+      case acquireMaintenanceMode:
+        try {
+          Map<String, String> fields =
+              OBJECT_MAPPER.readValue(content, new TypeReference<HashMap<String, String>>() {
+              });
+          return JSONRepresentation(helixAdmin.acquireMaintenanceMode(clusterId,
+              getRequiredField(fields, "ownerId"), getRequiredField(fields, "windowId"),
+              fields.get("reason")));
+        } catch (IllegalArgumentException | JsonProcessingException ex) {
+          return badRequest(ex.getMessage());
+        } catch (Exception ex) {
+          LOG.error("Failed to acquire owned maintenance mode for cluster {}", clusterId, ex);
+          return serverError(ex);
+        }
+      case releaseMaintenanceMode:
+        try {
+          Map<String, String> fields =
+              OBJECT_MAPPER.readValue(content, new TypeReference<HashMap<String, String>>() {
+              });
+          MaintenanceModeOwnershipHandle handle =
+              new MaintenanceModeOwnershipHandle(clusterId, getRequiredField(fields, "ownerId"),
+                  getRequiredField(fields, "windowId"), getRequiredField(fields, "fenceId"));
+          return JSONRepresentation(
+              helixAdmin.releaseMaintenanceMode(handle, fields.get("reason")));
+        } catch (IllegalArgumentException | JsonProcessingException ex) {
+          return badRequest(ex.getMessage());
+        } catch (Exception ex) {
+          LOG.error("Failed to release owned maintenance mode for cluster {}", clusterId, ex);
+          return serverError(ex);
+        }
       case enableWagedRebalanceForAllResources:
         // Enable WAGED rebalance for all resources in the cluster
         List<String> resources = helixAdmin.getResourcesInCluster(clusterId);
@@ -376,6 +407,17 @@ public class ClusterAccessor extends AbstractHelixResource {
     }
 
     return OK();
+  }
+
+  private static String getRequiredField(Map<String, String> fields, String fieldName) {
+    if (fields == null) {
+      throw new IllegalArgumentException("Request body must be a JSON object");
+    }
+    String value = fields.get(fieldName);
+    if (value == null || value.trim().isEmpty()) {
+      throw new IllegalArgumentException(fieldName + " must be non-empty");
+    }
+    return value;
   }
 
   private void addVirtualTopologyGroup(String clusterId, String content) throws JsonProcessingException {

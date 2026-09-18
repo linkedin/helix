@@ -28,6 +28,9 @@ import javax.annotation.Nullable;
 
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
+import org.apache.helix.api.status.MaintenanceModeAcquireResult;
+import org.apache.helix.api.status.MaintenanceModeOwnershipHandle;
+import org.apache.helix.api.status.MaintenanceModeReleaseResult;
 import org.apache.helix.api.topology.ClusterTopology;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
@@ -431,6 +434,46 @@ public interface HelixAdmin {
    * @return true if in maintenance mode, false otherwise
    */
   boolean isInMaintenanceMode(String clusterName);
+
+  /**
+   * Acquires a maintenance-mode window, or ensures that the exact requested owned window already
+   * exists.
+   *
+   * <p>The caller supplies a stable, unique window identifier so the same request can be retried
+   * after an uncertain response. A handle is returned only when the active signal belongs to the
+   * exact owner and window identifiers in this request. Existing manual, automatic, legacy, or
+   * foreign-owned windows are reported without a handle and are never adopted.
+   *
+   * <p>Window identifiers must not be reused for distinct operation windows.
+   * Acquired windows are USER-triggered, so controller auto-recovery does not remove them. Manual
+   * operator disable remains an unconditional escape path. Callers must keep this API disabled
+   * while legacy automation that clears maintenance by reason can still act on the same cluster.
+   *
+   * @param clusterName cluster to place in maintenance mode
+   * @param ownerId logical owner of the requested window
+   * @param windowId caller-generated unique identifier for this window
+   * @param reason human-readable maintenance reason
+   * @return the typed acquisition outcome
+   */
+  default MaintenanceModeAcquireResult acquireMaintenanceMode(String clusterName, String ownerId,
+      String windowId, String reason) {
+    throw new UnsupportedOperationException("Owned maintenance mode is not supported");
+  }
+
+  /**
+   * Releases the exact maintenance-mode window represented by {@code handle}.
+   *
+   * <p>The operation rejects foreign or replaced windows. Implementations return a typed outcome
+   * instead of treating a missing or conflicting signal as a successful delete.
+   *
+   * @param handle handle returned by {@link #acquireMaintenanceMode}
+   * @param reason human-readable release reason
+   * @return applied, unchanged, or conflict
+   */
+  default MaintenanceModeReleaseResult releaseMaintenanceMode(
+      MaintenanceModeOwnershipHandle handle, String reason) {
+    throw new UnsupportedOperationException("Owned maintenance mode is not supported");
+  }
 
   /**
    * Requests to put a cluster into a management mode

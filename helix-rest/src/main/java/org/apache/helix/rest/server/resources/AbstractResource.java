@@ -66,6 +66,8 @@ public class AbstractResource {
     disable,
     enableMaintenanceMode,
     disableMaintenanceMode,
+    acquireMaintenanceMode,
+    releaseMaintenanceMode,
     enablePartitions,
     disablePartitions,
     update,

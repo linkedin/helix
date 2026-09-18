@@ -623,6 +623,17 @@ public class PropertyPathBuilder {
     return "/" + clusterName + "/CONTROLLER/MAINTENANCE";
   }
 
+  /**
+   * Returns the path of a unique child fence for one maintenance-mode window.
+   *
+   * @param clusterName cluster containing the maintenance signal
+   * @param fenceId unique fence identifier
+   * @return maintenance fence path
+   */
+  public static String maintenanceFence(String clusterName, String fenceId) {
+    return maintenance(clusterName) + "/OWNERSHIP_FENCE_" + fenceId;
+  }
+
   // PATH = "/<clusterName>/STATUS/CLUSTER/<clusterName>"
   public static String clusterStatus(String clusterName) {
     return "/" + clusterName + "/STATUS/CLUSTER/" + clusterName;
