@@ -66,48 +66,20 @@ public class TestReplicaActivateConstraint {
     when(_testReplica.getResourceName()).thenReturn(TEST_RESOURCE);
     when(_testReplica.getPartitionName()).thenReturn(TEST_PARTITION);
     when(_testNode.getDisabledPartitionsMap()).thenReturn(disabledReplicaMap);
-    when(_clusterContext.isRelaxedDisabledPartitionConstraintEnabled(TEST_RESOURCE)).thenReturn(false);
 
     Assert.assertFalse(_faultZoneAwareConstraint.isAssignmentValid(_testNode, _testReplica, _clusterContext));
   }
 
   @Test
-  public void validWhenPartitionIsDisabledButRelaxedModeEnabled() {
-    Map<String, List<String>> disabledReplicaMap = new HashMap<>();
-    disabledReplicaMap.put(TEST_RESOURCE, Collections.singletonList(TEST_PARTITION));
-
-    when(_testReplica.getResourceName()).thenReturn(TEST_RESOURCE);
-    when(_testReplica.getPartitionName()).thenReturn(TEST_PARTITION);
-    when(_testNode.getDisabledPartitionsMap()).thenReturn(disabledReplicaMap);
-    when(_clusterContext.isRelaxedDisabledPartitionConstraintEnabled(TEST_RESOURCE)).thenReturn(true);
-
-    Assert.assertTrue(_faultZoneAwareConstraint.isAssignmentValid(_testNode, _testReplica, _clusterContext));
-  }
-
-  @Test
-  public void invalidWhenAllResourcesDisabledAndRelaxedModeDisabled() {
+  public void invalidWhenAllResourcesDisabled() {
     Map<String, List<String>> disabledReplicaMap = new HashMap<>();
     disabledReplicaMap.put(InstanceConstants.ALL_RESOURCES_DISABLED_PARTITION_KEY, Collections.singletonList("*"));
 
     when(_testReplica.getResourceName()).thenReturn(TEST_RESOURCE);
     when(_testReplica.getPartitionName()).thenReturn(TEST_PARTITION);
     when(_testNode.getDisabledPartitionsMap()).thenReturn(disabledReplicaMap);
-    when(_clusterContext.isRelaxedDisabledPartitionConstraintEnabled(TEST_RESOURCE)).thenReturn(false);
 
     Assert.assertFalse(_faultZoneAwareConstraint.isAssignmentValid(_testNode, _testReplica, _clusterContext));
-  }
-
-  @Test
-  public void validWhenAllResourcesDisabledButRelaxedModeEnabled() {
-    Map<String, List<String>> disabledReplicaMap = new HashMap<>();
-    disabledReplicaMap.put(InstanceConstants.ALL_RESOURCES_DISABLED_PARTITION_KEY, Collections.singletonList("*"));
-
-    when(_testReplica.getResourceName()).thenReturn(TEST_RESOURCE);
-    when(_testReplica.getPartitionName()).thenReturn(TEST_PARTITION);
-    when(_testNode.getDisabledPartitionsMap()).thenReturn(disabledReplicaMap);
-    when(_clusterContext.isRelaxedDisabledPartitionConstraintEnabled(TEST_RESOURCE)).thenReturn(true);
-
-    Assert.assertTrue(_faultZoneAwareConstraint.isAssignmentValid(_testNode, _testReplica, _clusterContext));
   }
 
 }
