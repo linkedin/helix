@@ -74,6 +74,9 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   private static final Logger logger =
       LoggerFactory.getLogger(BestPossibleStateCalcStage.class.getName());
   private static final String STAGE_NAME = "BestPossibleStateCalcStage";
+  // One cause typically strands many partitions; the count carries the severity and a short sample
+  // is enough to identify the resource.
+  private static final int MAX_UNPLACED_PARTITIONS_LOGGED = 10;
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -528,7 +531,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       // Check if the WAGED rebalancer has calculated the result for this resource or not.
       if (is != null && checkBestPossibleStateCalculation(is, resource, currentStateOutput, cache)) {
         // The WAGED rebalancer calculates a valid result, record in the output
-        updateBestPossibleStateOutput(output, resource, is);
+        updateBestPossibleStateOutput(output, resource, is, cache);
       } else {
         failureResources.add(resource.getResourceName());
         LogUtil.logWarn(logger, _eventId,
@@ -540,13 +543,18 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   }
 
   private void updateBestPossibleStateOutput(BestPossibleStateOutput output, Resource resource,
-      IdealState computedIdealState) {
+      IdealState computedIdealState, ResourceControllerDataProvider cache) {
     output.setPreferenceLists(resource.getResourceName(), computedIdealState.getPreferenceLists());
+    List<String> unplacedPartitions = new ArrayList<>();
     for (Partition partition : resource.getPartitions()) {
       Map<String, String> newStateMap =
           computedIdealState.getInstanceStateMap(partition.getPartitionName());
       output.setState(resource.getResourceName(), partition, newStateMap);
+      if (isUnplacedAgainstPlan(cache, computedIdealState, partition, newStateMap)) {
+        unplacedPartitions.add(partition.getPartitionName());
+      }
     }
+    reportUnplacedPartitions(resource.getResourceName(), computedIdealState, unplacedPartitions);
   }
 
   private boolean computeSingleResourceBestPossibleState(ClusterEvent event,
@@ -614,10 +622,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
 
         // Set the calculated result to the output.
         output.setPreferenceLists(resourceName, idealState.getPreferenceLists());
+        List<String> unplacedPartitions = new ArrayList<>();
         for (Partition partition : resource.getPartitions()) {
           Map<String, String> newStateMap = partitionStateAssignment.getReplicaMap(partition);
           output.setState(resourceName, partition, newStateMap);
+          if (isUnplacedAgainstPlan(cache, idealState, partition, newStateMap)) {
+            unplacedPartitions.add(partition.getPartitionName());
+          }
         }
+        reportUnplacedPartitions(resourceName, idealState, unplacedPartitions);
 
         return true;
       } catch (HelixException e) {
@@ -630,6 +643,48 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     }
     // Exception or rebalancer is not found
     return false;
+  }
+
+  /**
+   * Whether the rebalancer planned this partition onto live instances but placed it nowhere. The
+   * preference list comes from the rebalancer's plan and the state map from the mapping calculator
+   * that enforces it; the two are never compared, so a partition can be published with a healthy
+   * looking preference list and no replicas at all. Restricted to enabled resources whose plan
+   * names at least one live instance, so an outage is not reported. Diagnostic only.
+   */
+  private boolean isUnplacedAgainstPlan(ResourceControllerDataProvider cache, IdealState idealState,
+      Partition partition, Map<String, String> newStateMap) {
+    if (newStateMap != null && !newStateMap.isEmpty()) {
+      return false;
+    }
+    if (!idealState.isEnabled()) {
+      return false;
+    }
+    List<String> preferenceList = idealState.getPreferenceList(partition.getPartitionName());
+    if (preferenceList == null || preferenceList.isEmpty()) {
+      return false;
+    }
+    return !Collections.disjoint(preferenceList, cache.getLiveInstances().keySet());
+  }
+
+  /**
+   * Reports one message per resource per pipeline run. A single cause typically strands many
+   * partitions at once, so the count is the actionable signal; logging each one would flood the log
+   * during the very incident this is meant to surface.
+   */
+  private void reportUnplacedPartitions(String resourceName, IdealState idealState,
+      List<String> unplacedPartitions) {
+    if (unplacedPartitions.isEmpty()) {
+      return;
+    }
+    List<String> sample = unplacedPartitions.subList(0,
+        Math.min(MAX_UNPLACED_PARTITIONS_LOGGED, unplacedPartitions.size()));
+    LogUtil.logError(logger, _eventId, String.format(
+        "Resource: %s had %d partition(s) assigned no replica although their preference lists "
+            + "contain live instances. The computed assignment contradicts the plan; these "
+            + "partitions are unavailable. Sample: %s. Preference list of %s: %s.",
+        resourceName, unplacedPartitions.size(), sample, sample.get(0),
+        idealState.getPreferenceList(sample.get(0))));
   }
 
   private boolean checkBestPossibleStateCalculation(IdealState idealState, Resource resource,
