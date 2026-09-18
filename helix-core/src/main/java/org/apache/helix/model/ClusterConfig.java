@@ -194,6 +194,7 @@ public class ClusterConfig extends HelixProperty {
 
     // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
     RELAXED_DISABLED_PARTITION_CONSTRAINT,
+    WAGED_COUNT_UNALLOCATED_OCCUPANCY,
 
     // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
     // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
@@ -1088,6 +1089,48 @@ public class ClusterConfig extends HelixProperty {
    */
   public void setRelaxedDisabledPartitionConstraint(boolean enabled) {
     _record.setBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
+  }
+
+  /**
+   * Whether the WAGED rebalancer accounts for occupancy that is physically present on an instance
+   * but absent from the assignment the rebalancer computed for it.
+   * <p>
+   * The rebalancer derives an instance's used capacity only from the replicas it placed there
+   * itself, while {@code WagedInstanceCapacity}, which validates its output, charges every replica
+   * reported in the instance's current state. A replica that is present but unassigned -- typically
+   * one sitting in a state whose count is -1, which produces no assignable replica -- is therefore
+   * free to the rebalancer and used to the capacity check. The rebalancer ranks the instance among
+   * the emptiest available and proposes a placement onto it, the capacity check rejects that
+   * placement, and because neither side's input has changed the next pass repeats the same rejected
+   * choice. The partition is never placed anywhere else.
+   * <p>
+   * When enabled, that occupancy is withheld from the instance's remaining capacity in
+   * {@code NodeCapacityConstraint}, so an instance the capacity check would refuse is not offered
+   * as a candidate in the first place. This is an eligibility test rather than a preference: it can
+   * make a specific instance ineligible for a replica, and it is deliberately not part of scoring,
+   * so it cannot reorder the instances that remain eligible.
+   * <p>
+   * This prevents a partition from being trapped, but does not by itself repair one already
+   * trapped: a replica whose planned assignment already matches the baseline is treated as
+   * allocated and is not reconsidered. Toggling the partition off and on again returns it to the
+   * work list.
+   * <p>
+   * Disabled if not set.
+   * @return true if unallocated occupancy is counted, false otherwise
+   */
+  public boolean isWagedCountUnallocatedOccupancyEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.WAGED_COUNT_UNALLOCATED_OCCUPANCY.name(), false);
+  }
+
+  /**
+   * Enable/disable counting occupancy that is physically present on an instance but absent from the
+   * assignment the WAGED rebalancer computed for it.
+   * @param enabled true to count unallocated occupancy, false to ignore it (default)
+   */
+  public void setWagedCountUnallocatedOccupancyEnabled(boolean enabled) {
+    _record
+        .setBooleanField(ClusterConfigProperty.WAGED_COUNT_UNALLOCATED_OCCUPANCY.name(), enabled);
   }
 
   /**

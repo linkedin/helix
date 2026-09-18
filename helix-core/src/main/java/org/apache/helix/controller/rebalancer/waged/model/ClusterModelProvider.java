@@ -34,10 +34,14 @@ import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
@@ -74,7 +78,7 @@ public class ClusterModelProvider {
       Set<String> activeInstances,
       Map<String, ResourceAssignment> resourceAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
-        Collections.emptyMap(), resourceAssignment,
+        Collections.emptyMap(), resourceAssignment, resourceAssignment,
         ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES);
   }
 
@@ -97,7 +101,8 @@ public class ClusterModelProvider {
       Map<String, Resource> resourceMap, Set<String> activeInstances,
       Map<String, ResourceAssignment> bestPossibleAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
-        Collections.emptyMap(), bestPossibleAssignment, ClusterModel.RebalanceScopeType.EMERGENCY);
+        Collections.emptyMap(), bestPossibleAssignment, bestPossibleAssignment,
+        ClusterModel.RebalanceScopeType.EMERGENCY);
   }
 
   /**
@@ -121,7 +126,8 @@ public class ClusterModelProvider {
       Set<String> activeInstances, Map<String, ResourceAssignment> baselineAssignment,
       Map<String, ResourceAssignment> bestPossibleAssignment) {
     return generateClusterModel(dataProvider, resourceMap, activeInstances, Collections.emptyMap(),
-        baselineAssignment, bestPossibleAssignment, ClusterModel.RebalanceScopeType.PARTIAL);
+        baselineAssignment, bestPossibleAssignment, bestPossibleAssignment,
+        ClusterModel.RebalanceScopeType.PARTIAL);
   }
 
   /**
@@ -140,8 +146,18 @@ public class ClusterModelProvider {
       ResourceControllerDataProvider dataProvider, Map<String, Resource> resourceMap,
       Set<String> allInstances, Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
       Map<String, ResourceAssignment> baselineAssignment) {
+    return generateClusterModelForBaseline(dataProvider, resourceMap, allInstances, clusterChanges,
+        baselineAssignment, Collections.emptyMap());
+  }
+
+  public static ClusterModel generateClusterModelForBaseline(
+      ResourceControllerDataProvider dataProvider, Map<String, Resource> resourceMap,
+      Set<String> allInstances, Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
+      Map<String, ResourceAssignment> baselineAssignment,
+      Map<String, ResourceAssignment> bestPossibleAssignment) {
     return generateClusterModel(dataProvider, resourceMap, allInstances, clusterChanges,
-        Collections.emptyMap(), baselineAssignment, ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
+        Collections.emptyMap(), baselineAssignment, bestPossibleAssignment,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
   }
 
   /**
@@ -159,8 +175,202 @@ public class ClusterModelProvider {
       Map<String, ResourceAssignment> currentStateAssignment) {
     return generateClusterModel(dataProvider, resourceMap,
         dataProvider.getEnabledLiveInstances(), Collections.emptyMap(),
-        Collections.emptyMap(), currentStateAssignment,
+        Collections.emptyMap(), currentStateAssignment, currentStateAssignment,
         ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
+  }
+
+  /**
+   * Record occupancy that physically exists on an instance but that the plan does not place there
+   * and that the planner structurally cannot model.
+   * <p>
+   * {@link org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity} charges every
+   * current-state replica of a WAGED resource against its instance, with no filter on the reported
+   * state. The planner only ever creates an {@link AssignableReplica} for states the state model
+   * gives a positive count -- see {@link StateModelDefinition#getStateCountMap}, which skips
+   * everything else. A replica left in an uncounted state therefore occupies real room that the
+   * planner cannot see: it ranks the instance among the emptiest in the cluster, proposes a
+   * placement, the capacity check rejects it, and since none of the planner's inputs changed it
+   * proposes the same placement again next round. The partition stays unplaced for as long as the
+   * replica stays stuck, however much room the rest of the cluster has.
+   * <p>
+   * Occupancy is recorded when, and only when, the capacity ledger charges a replica that the
+   * planner has no way to model. That is exactly two conditions on a replica the instance reports
+   * in its current state:
+   * <ul>
+   * <li>Its reported state has no positive count in the state model, so
+   * {@link StateModelDefinition#getStateCountMap} omits it and no {@link AssignableReplica} is ever
+   * built for it. This is the whole of the divergence: the ledger charges by current state with no
+   * state filter, so a state the planner cannot model is a state only one of the two sees.</li>
+   * <li>The replica was not charged to this instance by {@code assignInitBatch}. One that was is
+   * already accounted for, and counting it again would double-charge a replica that is merely
+   * still coming up. This tests the charged set rather than the committed assignment: a replica
+   * the committed assignment still shows here may have been pulled into the work list, in which
+   * case nothing charged it and skipping it would leave real occupancy invisible.</li>
+   * </ul>
+   * The result is therefore the exact difference between the two ledgers, which is what makes the
+   * planner stop proposing placements the capacity check is bound to reject. No attempt is made to
+   * judge whether the occupancy is stuck or merely in motion -- a pending-message test was tried
+   * and is wrong, because a replica wedged mid-transition is precisely the case this exists for.
+   * <p>
+   * Churn safety does not rest on filtering transient occupancy out; it rests on where this runs.
+   * The set of replicas to be assigned is decided, and every already-placed replica is charged by
+   * {@code assignInitBatch}, before this is called, and {@code _remainingCapacity} is never
+   * mutated. So a replica that is stable where it is cannot be in the work list and cannot be
+   * evicted: the most this can do is send a replica that was already being placed this round to a
+   * different instance. Transient occupancy can change where a moving replica lands; it cannot make
+   * a settled one move.
+   * <p>
+   * Restricted to the scopes that plan against the existing assignment. The baseline is a
+   * from-scratch ideal placement that deliberately ignores where replicas currently sit, and it is
+   * the reference the cluster converges towards, so runtime occupancy must not move it.
+   * <p>
+   * Read from the data provider's current-state cache, which is read-only for the duration of the
+   * pass and so is safe on the asynchronous rebalance thread.
+   */
+  private static void recordHiddenOccupancy(Set<AssignableNode> assignableNodes,
+      Map<String, Set<AssignableReplica>> allocatedReplicas, Map<String, Resource> resourceMap,
+      ResourceControllerDataProvider dataProvider, ClusterModel.RebalanceScopeType scopeType) {
+    if (scopeType != ClusterModel.RebalanceScopeType.PARTIAL
+        && scopeType != ClusterModel.RebalanceScopeType.EMERGENCY) {
+      return;
+    }
+    // Nothing to reconcile with unless the capacity check that does the charging is running.
+    if (dataProvider.getWagedInstanceCapacity() == null) {
+      return;
+    }
+    ClusterConfig clusterConfig = dataProvider.getClusterConfig();
+    if (clusterConfig == null || !clusterConfig.isWagedCountUnallocatedOccupancyEnabled()) {
+      return;
+    }
+    Map<String, LiveInstance> liveInstances = dataProvider.getAssignableLiveInstances();
+
+    // What assignInitBatch actually charged, keyed by logical id so it lines up with that call
+    // exactly. Anything in here is ordinary occupancy rather than hidden.
+    //
+    // This is deliberately derived from the charged set rather than from the committed assignment.
+    // A replica the committed assignment still shows on an instance may have been pulled into the
+    // work list -- baseline and best-possible disagreeing about it is enough -- in which case it
+    // was never charged. Keying off the plan would then skip a replica that is physically resident
+    // and uncharged, which is the exact leak this method exists to close.
+    Map<String, Set<String>> chargedByLogicalId = new HashMap<>();
+    allocatedReplicas.forEach((logicalId, replicas) -> {
+      Set<String> keys =
+          chargedByLogicalId.computeIfAbsent(logicalId, k -> new HashSet<>());
+      replicas.forEach(replica -> keys
+          .add(AssignableNode.occupancyKey(replica.getResourceName(), replica.getPartitionName())));
+    });
+
+    // Only WAGED resources with a resolvable state model are in scope. Membership in stateModelDefs
+    // is the in-scope test, which is why the config map is allowed to hold nulls: a WAGED resource
+    // legitimately has no ResourceConfig when its weights come from the cluster-level defaults.
+    // Both are resolved once per resource here rather than inside the per-instance walk below.
+    Map<String, ResourceConfig> resourceConfigs = new HashMap<>();
+    Map<String, StateModelDefinition> stateModelDefs = new HashMap<>();
+    for (String resourceName : resourceMap.keySet()) {
+      IdealState idealState = dataProvider.getIdealState(resourceName);
+      if (!WagedValidationUtil.isWagedEnabled(idealState)) {
+        continue;
+      }
+      StateModelDefinition stateModelDef =
+          dataProvider.getStateModelDef(idealState.getStateModelDefRef());
+      if (stateModelDef == null) {
+        continue;
+      }
+      stateModelDefs.put(resourceName, stateModelDef);
+      resourceConfigs.put(resourceName, dataProvider.getResourceConfig(resourceName));
+    }
+    Map<String, Map<String, Integer>> partitionWeightCache = new HashMap<>();
+
+    for (AssignableNode node : assignableNodes) {
+      LiveInstance liveInstance = liveInstances.get(node.getInstanceName());
+      if (liveInstance == null) {
+        continue;
+      }
+      Map<String, CurrentState> currentStates =
+          dataProvider.getCurrentState(node.getInstanceName(), liveInstance.getEphemeralOwner());
+      if (currentStates == null || currentStates.isEmpty()) {
+        continue;
+      }
+      Set<String> charged =
+          chargedByLogicalId.getOrDefault(node.getLogicalId(), Collections.emptySet());
+
+      Map<String, Integer> hiddenUsage = new HashMap<>();
+      Set<String> hiddenKeys = new HashSet<>();
+      for (Map.Entry<String, CurrentState> entry : currentStates.entrySet()) {
+        String resourceName = entry.getKey();
+        StateModelDefinition stateModelDef = stateModelDefs.get(resourceName);
+        Resource resource = resourceMap.get(resourceName);
+        if (stateModelDef == null || resource == null) {
+          continue;
+        }
+        // May be null when partition weights come from the cluster-level defaults. Passed through
+        // as-is so the weight resolves exactly the way WagedResourceWeightsProvider resolves it for
+        // the capacity ledger -- the room withheld here has to be the room that ledger took.
+        ResourceConfig resourceConfig = resourceConfigs.get(resourceName);
+        for (Map.Entry<String, String> partitionState : entry.getValue().getPartitionStateMap()
+            .entrySet()) {
+          String partitionName = partitionState.getKey();
+          String state = partitionState.getValue();
+          if (resource.getPartition(partitionName) == null) {
+            continue;
+          }
+          String replicaKey = AssignableNode.occupancyKey(resourceName, partitionName);
+          // Already charged by assignInitBatch, so it is ordinary occupancy.
+          if (charged.contains(replicaKey)) {
+            continue;
+          }
+          // The planner can model this state, so the two ledgers already agree about it.
+          if (isPlannerVisibleState(stateModelDef, state)) {
+            continue;
+          }
+          Map<String, Integer> partitionWeights = partitionWeightCache.computeIfAbsent(replicaKey,
+              k -> WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig,
+                  clusterConfig));
+          if (partitionWeights == null || partitionWeights.isEmpty()) {
+            continue;
+          }
+          partitionWeights.forEach((key, value) -> hiddenUsage.merge(key, value, Integer::sum));
+          hiddenKeys.add(replicaKey);
+        }
+      }
+
+      if (!hiddenUsage.isEmpty()) {
+        logger.info(
+            "Instance {} holds {} in a state the rebalancer cannot model and that its plan does "
+                + "not place there, occupying {}. Withholding that much room so the rebalancer "
+                + "stops proposing placements the capacity check rejects.",
+            node.getInstanceName(), hiddenKeys, hiddenUsage);
+        node.setHiddenOccupancy(hiddenUsage, hiddenKeys);
+      }
+    }
+  }
+
+
+
+  /**
+   * Whether the planner creates an {@link AssignableReplica} for the given state.
+   * <p>
+   * Mirrors the filter in {@link StateModelDefinition#getStateCountMap}: only "N", "R" and a
+   * positive count produce replicas. Anything else -- including a state absent from the model --
+   * is one the planner cannot model but the capacity check still charges.
+   */
+  private static boolean isPlannerVisibleState(StateModelDefinition stateModelDef, String state) {
+    if (state == null) {
+      return false;
+    }
+    String num = stateModelDef.getNumInstancesPerState(state);
+    if (num == null) {
+      return false;
+    }
+    if (StateModelDefinition.STATE_REPLICA_COUNT_ALL_CANDIDATE_NODES.equals(num)
+        || StateModelDefinition.STATE_REPLICA_COUNT_ALL_REPLICAS.equals(num)) {
+      return true;
+    }
+    try {
+      return Integer.parseInt(num) > 0;
+    } catch (NumberFormatException e) {
+      return false;
+    }
   }
 
   /**
@@ -183,6 +393,7 @@ public class ClusterModelProvider {
       Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
       Map<String, ResourceAssignment> idealAssignment,
       Map<String, ResourceAssignment> currentAssignment,
+      Map<String, ResourceAssignment> committedAssignment,
       ClusterModel.RebalanceScopeType scopeType) {
     Map<String, InstanceConfig> assignableInstanceConfigMap = dataProvider.getAssignableInstanceConfigMap();
     // Construct all the assignable nodes and initialize with the allocated replicas.
@@ -259,6 +470,15 @@ public class ClusterModelProvider {
     // Update the allocated replicas to the assignable nodes.
     assignableNodes.parallelStream().forEach(node -> node.assignInitBatch(
         allocatedReplicas.getOrDefault(node.getLogicalId(), Collections.emptySet())));
+
+    // The ledger above only reflects replicas the rebalancer allocated. A replica physically on an
+    // instance but absent from the plan still occupies real space, and the capacity check charges
+    // it, so the rebalancer would otherwise treat that instance as the emptiest available and keep
+    // proposing placements the capacity check rejects. Deliberately after assignInitBatch and
+    // after toBeAssignedReplicas has been decided, so this cannot change which replicas move --
+    // only which instances remain eligible to receive them.
+    recordHiddenOccupancy(assignableNodes, allocatedReplicas, resourceMap, dataProvider,
+        scopeType);
 
     // Construct and initialize cluster context.
     ClusterContext context = new ClusterContext(
