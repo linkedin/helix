@@ -19,6 +19,10 @@ package org.apache.helix.task;
  * under the License.
  */
 
+import java.util.HashMap;
+import java.util.Map;
+import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestJobConfigValidation {
@@ -36,5 +40,30 @@ public class TestJobConfigValidation {
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testJobConfigCommandWithoutNumOfTask() {
     new JobConfig.Builder().setWorkflow("Workflow").setCommand("Dummy").build();
+  }
+
+  @DataProvider(name = "legacyAssignmentStrategyJobs")
+  public Object[][] legacyAssignmentStrategyJobs() {
+    return new Object[][] {
+        {null, true},
+        {"Resource", false}
+    };
+  }
+
+  @Test(dataProvider = "legacyAssignmentStrategyJobs")
+  public void testLegacyAssignmentStrategyIgnored(String targetResource, boolean genericJob) {
+    JobConfig original = new JobConfig.Builder().setWorkflow("Workflow").setJobId("Job")
+        .setCommand("Dummy").setNumberOfTasks(1).setTargetResource(targetResource).build();
+    Map<String, String> config = new HashMap<>(original.getRecord().getSimpleFields());
+    JobConfig expected = JobConfig.Builder.fromMap(config)
+        .addTaskConfigMap(original.getTaskConfigMap()).build();
+
+    config.put("AssignmentStrategy", "legacy.AssignmentStrategy");
+    JobConfig actual = JobConfig.Builder.fromMap(config)
+        .addTaskConfigMap(original.getTaskConfigMap()).build();
+
+    Assert.assertEquals(actual.getRecord(), expected.getRecord());
+    Assert.assertFalse(actual.getRecord().getSimpleFields().containsKey("AssignmentStrategy"));
+    Assert.assertEquals(TaskUtil.isGenericTaskJob(actual), genericJob);
   }
 }
