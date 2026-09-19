@@ -63,6 +63,25 @@ public class AssignableNode implements Comparable<AssignableNode> {
   private Map<String, Map<String, AssignableReplica>> _currentAssignedReplicaMap;
   // A map of <capacity key, capacity value> that tracks the current available node capacity
   private Map<String, Integer> _remainingCapacity;
+  // Occupancy that physically exists on this node but that the plan does not account for: a
+  // replica left in a state the state model leaves uncounted, whose drop never completed. The
+  // capacity ledger charges such a replica while the planner cannot model it at all, so without
+  // this the planner sees room the ledger will refuse to hand out and keeps re-proposing
+  // placements that get vetoed.
+  //
+  // Deliberately kept out of both _remainingCapacity and _maxAllowedCapacity. Those feed
+  // getProjectedHighestUtilization and ClusterContext's cluster-wide totals, so folding it in
+  // there would shift preference scores and could manufacture a capacity deficit. This is read by
+  // NodeCapacityConstraint alone, as pure eligibility.
+  // Invariant: holds exactly the physical occupancy _remainingCapacity does NOT reflect, so
+  // assign()/release() move weight across the boundary to keep it charged exactly once.
+  private Map<String, Integer> _hiddenOccupancy = Collections.emptyMap();
+  // Keys (resource|partition) making up _hiddenOccupancy, so a replica is never charged for room
+  // it is itself already occupying.
+  private Set<String> _hiddenOccupancyKeys = Collections.emptySet();
+  // Replicas this gate may act on: those whose partition is currently short of copies the planner
+  // can model. A partition at full strength is exempt, so hidden occupancy can never move it.
+  private Set<String> _gatedReplicaKeys = Collections.emptySet();
   private Map<String, Integer> _remainingTopStateCapacity;
 
   /**
@@ -94,6 +113,62 @@ public class AssignableNode implements Comparable<AssignableNode> {
 
   AssignableNode(ClusterConfig clusterConfig, InstanceConfig instanceConfig, String instanceName) {
     this(clusterConfig, null, instanceConfig, instanceName);
+  }
+
+  /**
+   * Record occupancy that physically exists on this node but that the plan does not place here.
+   * <p>
+   * Nothing is deducted from {@link #_remainingCapacity} or {@link #_maxAllowedCapacity}. Both are
+   * read by {@code getProjectedHighestUtilization} and by {@code ClusterContext}'s cluster-wide
+   * capacity totals, so deducting there would move preference scores and could drive the cluster
+   * estimate negative, which aborts the whole rebalance with CAPACITY_DEFICIT. Keeping it in a
+   * separate field confines the effect to {@code NodeCapacityConstraint}, where it acts purely as
+   * eligibility.
+   * @param hiddenOccupancy running total of unaccounted weight, by capacity key. Must be mutable:
+   *                        assign()/release() adjust it as replicas move into and out of the plan.
+   * @param hiddenOccupancyKeys the (resource, partition) keys making up that total
+   */
+  void setHiddenOccupancy(Map<String, Integer> hiddenOccupancy, Set<String> hiddenOccupancyKeys,
+      Set<String> gatedReplicaKeys) {
+    _hiddenOccupancy = hiddenOccupancy;
+    _hiddenOccupancyKeys = hiddenOccupancyKeys;
+    _gatedReplicaKeys = gatedReplicaKeys;
+  }
+
+  /**
+   * The unaccounted physical weight this node carries for the given capacity key when considering
+   * the given replica.
+   * <p>
+   * A replica that is itself part of the hidden occupancy is not charged for the room it already
+   * physically occupies -- placing it back where it already sits needs no new room, and charging
+   * it would bias the planner into moving a replica that is currently stuck exactly where moving
+   * it is least likely to help.
+   * @param capacityKey the capacity dimension being checked
+   * @param candidate the replica being considered for this node
+   * @return weight to withhold from this node's remaining capacity, never negative
+   */
+  public int getHiddenOccupancy(String capacityKey, AssignableReplica candidate) {
+    String candidateKey =
+        occupancyKey(candidate.getResourceName(), candidate.getPartitionName());
+    // Only a partition short of replicas is subject to this. One at full strength already has
+    // somewhere to live, and moving it because an unrelated partition changed this node's hidden
+    // occupancy is churn with nothing bought for it.
+    if (!_gatedReplicaKeys.contains(candidateKey)) {
+      return 0;
+    }
+    int hidden = _hiddenOccupancy.getOrDefault(capacityKey, 0);
+    if (_hiddenOccupancyKeys.contains(candidateKey)) {
+      hidden -= candidate.getCapacity().getOrDefault(capacityKey, 0);
+    }
+    return Math.max(0, hidden);
+  }
+
+  /**
+   * @return the unaccounted physical weight this node carries, by capacity key. Empty unless the
+   *         feature is enabled and the node holds replicas the plan does not place here.
+   */
+  Map<String, Integer> getHiddenOccupancy() {
+    return Collections.unmodifiableMap(_hiddenOccupancy);
   }
 
   /**
@@ -136,6 +211,9 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (assignableReplica.isReplicaTopState()) {
       updateRemainingCapacity(assignableReplica.getCapacity(), _remainingTopStateCapacity, false);
     }
+    // Now reflected in _remainingCapacity, so it must leave the hidden total or it would be
+    // charged twice.
+    moveOutOfHiddenOccupancy(assignableReplica, true);
   }
 
   /**
@@ -168,6 +246,42 @@ public class AssignableNode implements Comparable<AssignableNode> {
     if (removedReplica.isReplicaTopState()) {
       updateRemainingCapacity(removedReplica.getCapacity(), _remainingTopStateCapacity, true);
     }
+    // Rollback of an assignment: the replica is physically still here, so its weight goes back to
+    // the hidden total that _remainingCapacity no longer reflects.
+    moveOutOfHiddenOccupancy(removedReplica, false);
+  }
+
+  /**
+   * Keep the hidden-occupancy total in step with _remainingCapacity for a replica that is
+   * physically present on this node but was not part of the plan the model was built with.
+   * Such a replica must be charged exactly once: while unassigned it is counted in
+   * _hiddenOccupancy, and once assigned it is counted in _remainingCapacity instead.
+   * @param replica the replica being assigned or released
+   * @param assigned true when the replica was just assigned, false when an assignment was reverted
+   */
+  private void moveOutOfHiddenOccupancy(AssignableReplica replica, boolean assigned) {
+    if (!_hiddenOccupancyKeys
+        .contains(occupancyKey(replica.getResourceName(), replica.getPartitionName()))) {
+      return;
+    }
+    for (Map.Entry<String, Integer> capacity : replica.getCapacity().entrySet()) {
+      // A dimension the node carries no hidden occupancy on has nothing to move across, and
+      // merging there would leave a stray entry behind on every assign/release cycle.
+      if (!_hiddenOccupancy.containsKey(capacity.getKey())) {
+        continue;
+      }
+      _hiddenOccupancy.merge(capacity.getKey(),
+          assigned ? -capacity.getValue() : capacity.getValue(), Integer::sum);
+    }
+  }
+
+  /**
+   * The key identifying a replica within the hidden-occupancy bookkeeping. Deliberately
+   * (resource, partition) rather than (resource, partition, state) so it matches the granularity
+   * the capacity check itself dedupes on.
+   */
+  static String occupancyKey(String resourceName, String partitionName) {
+    return resourceName + "|" + partitionName;
   }
 
   /**
@@ -268,7 +382,8 @@ public class AssignableNode implements Comparable<AssignableNode> {
    *                            the supplied keys only, else across all capacity categories.
    * @return The highest utilization number of the node among the specified capacity category.
    */
-  public float getGeneralProjectedHighestUtilization(Map<String, Integer> newUsage, List<String> preferredScoringKeys) {
+  public float getGeneralProjectedHighestUtilization(Map<String, Integer> newUsage,
+      List<String> preferredScoringKeys) {
     return getProjectedHighestUtilization(newUsage, _remainingCapacity, preferredScoringKeys);
   }
 

@@ -39,10 +39,15 @@ class NodeCapacityConstraint extends HardConstraint {
 
     for (String key : replicaCapacity.keySet()) {
       if (nodeCapacity.containsKey(key)) {
-        if (nodeCapacity.get(key) < replicaCapacity.get(key)) {
+        // Room the node physically owes to occupancy the plan does not account for. Zero unless
+        // the node is holding a replica that is stuck somewhere the planner cannot see, in which
+        // case the capacity ledger would veto this placement anyway -- excluding the node here is
+        // what lets the planner pick a different one instead of re-proposing this one forever.
+        int available = nodeCapacity.get(key) - node.getHiddenOccupancy(key, replica);
+        if (available < replicaCapacity.get(key)) {
           if (enableLogging) {
             LOG.info("Node has insufficient capacity for: {}. Left available: {}, Required: {}",
-                key, nodeCapacity.get(key), replicaCapacity.get(key));
+                key, available, replicaCapacity.get(key));
           }
           return false;
         }
