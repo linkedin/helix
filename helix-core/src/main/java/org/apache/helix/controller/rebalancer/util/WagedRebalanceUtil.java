@@ -83,12 +83,13 @@ public class WagedRebalanceUtil {
     Objects.requireNonNull(previousAssignment, "previousAssignment must not be null");
     long startTime = System.currentTimeMillis();
     LOG.info("Start calculating for an assignment with algorithm {}",
-        algorithm.getClass().getSimpleName());
+        algorithm.getName());
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
     Map<String, ResourceAssignment> newAssignment =
         optimalAssignment.getOptimalResourceAssignment();
     Set<String> skippedResources = optimalAssignment.getSkippedResources();
     if (!skippedResources.isEmpty()) {
+      skippedResources = new HashSet<>(skippedResources);
       // A skipped resource may still have a partial entry in the result: an incremental baseline
       // and the partial, emergency and delayed overwrite phases pre-load the nodes with the
       // replicas that were already allocated, and updateAssignments emits whatever sits on the
@@ -107,6 +108,7 @@ public class WagedRebalanceUtil {
       List<String> yielded =
           resolveCarriedOverNodeReuse(newAssignment, skippedResources, previousAssignment,
               carriedOver, dropped);
+      skippedResources.addAll(yielded);
       LOG.warn(
           "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
               + "Carried the previous assignment forward for {}. Left out of this phase's result: "
@@ -119,8 +121,11 @@ public class WagedRebalanceUtil {
             clusterModel.getContext().getClusterName());
       }
     }
+    algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
+        clusterModel.getAssignableReplicaMap().keySet(),
+        Collections.unmodifiableSet(skippedResources));
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
-        algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
+        algorithm.getName(), System.currentTimeMillis() - startTime);
     return newAssignment;
   }
 
