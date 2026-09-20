@@ -74,6 +74,10 @@ public class ClusterContext {
   private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
   private final String _clusterName;
+  // True when the WAGED algorithm should isolate a rebalance failure to the failing
+  // instance-group-tag group and every group connected to it through shared nodes, instead of
+  // failing the whole rebalance. Read from the cluster config, default false.
+  private final boolean _instanceTagIsolationEnabled;
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -95,6 +99,9 @@ public class ClusterContext {
     Map<String, Long> totalCapacity = new HashMap<>();
     _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
+    _instanceTagIsolationEnabled = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::isWagedInstanceTagIsolationEnabled)
+        .orElse(ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
         .collect(Collectors.groupingBy(AssignableReplica::getResourceName))
@@ -150,6 +157,15 @@ public class ClusterContext {
    */
   public List<String> getPreferredScoringKeys() {
     return _preferredScoringKeys;
+  }
+
+  /**
+   * @return true if the WAGED algorithm should isolate a rebalance failure to the failing
+   *         instance-group-tag group and every group connected to it through shared nodes,
+   *         rebalancing the rest of the cluster. Default false.
+   */
+  public boolean isInstanceTagIsolationEnabled() {
+    return _instanceTagIsolationEnabled;
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {

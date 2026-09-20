@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterConfig.ClusterConfigProperty;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
  * A singleton HelixProperty Trimmer for ClusterConfig to remove the non-cluster-topology-related
@@ -61,7 +62,13 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
               .of(ClusterConfigProperty.TOPOLOGY.name(),
                   ClusterConfigProperty.FAULT_ZONE_TYPE.name(),
                   ClusterConfigProperty.TOPOLOGY_AWARE_ENABLED.name(),
-                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name()),
+                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
+                  // Flipping instance tag isolation changes how WAGED reacts to an unplaceable
+                  // group, so the change has to be visible to the change detector. The partial and
+                  // emergency calculations read the flag on every pipeline, but without this entry
+                  // the baseline would not be recalculated until some unrelated config change
+                  // happened to trigger the next global rebalance.
+                  ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name()),
           FieldType.LIST_FIELD, ImmutableSet
               .of(ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name()),
           FieldType.MAP_FIELD, ImmutableSet
@@ -79,7 +86,23 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
 
   @Override
   public ClusterConfig trimProperty(ClusterConfig property) {
-    return new ClusterConfig(doTrim(property));
+    ZNRecord trimmed = doTrim(property);
+    // Compare the isolation flag by the value it reads as. A flag that reads as its default, such
+    // as an explicit false or any value that is not a boolean, is dropped so it compares equal to
+    // an absent one, and a flag that reads as enabled is written down canonically. Otherwise
+    // rewriting the flag without changing what it reads as would look like a cluster config change
+    // and trigger a full baseline recalculation for nothing.
+    String isolation = ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name();
+    if (trimmed.getSimpleFields().containsKey(isolation)) {
+      boolean enabled = trimmed.getBooleanField(isolation,
+          ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
+      if (enabled == ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED) {
+        trimmed.getSimpleFields().remove(isolation);
+      } else {
+        trimmed.setBooleanField(isolation, enabled);
+      }
+    }
+    return new ClusterConfig(trimmed);
   }
 
   public static ClusterConfigTrimmer getInstance() {
