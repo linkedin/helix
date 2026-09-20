@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
 
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.model.ClusterConfig;
@@ -47,13 +48,83 @@ import org.testng.annotations.Test;
 
 /**
  * Capacity-facing behavior of WAGED instance-tag isolation: attributing a tag blind cluster
- * wide capacity deficit to the clique that caused it, in every rebalance scope. See
+ * wide capacity deficit to the clique that caused it, repairing partially placed skipped
+ * resources outside the baseline scope, and keeping the WAGED hard constraint reporters
+ * firing so an operator needs no new dashboards. See
  * {@link AbstractTestWagedInstanceTagIsolation} for the shared clique partitioned topology.
  */
 public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInstanceTagIsolation {
   // ---------------------------------------------------------------------------------------------
   // Skipped resources that are already partially placed on the nodes (PARTIAL/EMERGENCY scopes)
   // ---------------------------------------------------------------------------------------------
+
+  /**
+   * In the non baseline scopes the nodes come pre-loaded with the replicas that are already
+   * allocated, so a skipped resource can still emit a PARTIAL assignment. WagedRebalanceUtil has to
+   * overwrite that partial entry with the complete previous assignment, otherwise a half assigned
+   * resource would be persisted.
+   */
+  @Test
+  public void testPartiallyPlacedSkippedResourceIsReplacedByThePreviousAssignment()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig clusterConfig = createClusterConfig(true);
+    ResourceConfig brokenConfig =
+        taggedResource("R_broken", cliqueTag(0), UNPLACEABLE_PARTITION_WEIGHT);
+
+    // One partition of the broken resource is already sitting on a node, the other still needs to
+    // be placed and cannot be.
+    AssignableReplica alreadyPlaced =
+        new AssignableReplica(clusterConfig, brokenConfig, "R_broken_0", "ONLINE", 0);
+    Set<AssignableReplica> toBeAssigned = new HashSet<>();
+    toBeAssigned.add(new AssignableReplica(clusterConfig, brokenConfig, "R_broken_1", "ONLINE", 0));
+    addReplicas(toBeAssigned, clusterConfig,
+        taggedResource("R_healthy", cliqueTag(1), HEALTHY_PARTITION_WEIGHT), 3);
+
+    Set<AssignableNode> nodes = new HashSet<>();
+    AssignableNode preloaded = taggedNode(clusterConfig, instanceName(0, 0), 0, cliqueTag(0));
+    preloaded.assignInitBatch(Collections.singleton(alreadyPlaced));
+    nodes.add(preloaded);
+    for (int i = 1; i < 3; i++) {
+      nodes.add(taggedNode(clusterConfig, instanceName(0, i), i, cliqueTag(0)));
+    }
+    for (int i = 0; i < 3; i++) {
+      nodes.add(taggedNode(clusterConfig, instanceName(1, i), i, cliqueTag(1)));
+    }
+
+    Set<AssignableReplica> allReplicas = new HashSet<>(toBeAssigned);
+    allReplicas.add(alreadyPlaced);
+    ClusterContext context = new ClusterContext(allReplicas, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), clusterConfig);
+    ClusterModel clusterModel = new ClusterModel(context, toBeAssigned, nodes,
+        ClusterModel.RebalanceScopeType.PARTIAL);
+
+    // Sanity check: without the fallback the algorithm really does emit a partial entry.
+    OptimalAssignment raw = createAlgorithm().calculate(clusterModel);
+    Map<String, ResourceAssignment> rawResult = raw.getOptimalResourceAssignment();
+    Assert.assertEquals(raw.getSkippedResources(), Collections.singleton("R_broken"));
+    Assert.assertEquals(rawResult.get("R_broken").getMappedPartitions().size(), 1,
+        "Precondition: the skipped resource is emitted half assigned before the fallback runs");
+
+    // The complete previous assignment the Helix controller would carry forward.
+    ResourceAssignment previous = new ResourceAssignment("R_broken");
+    previous.addReplicaMap(new Partition("R_broken_0"),
+        Collections.singletonMap(instanceName(0, 0), "ONLINE"));
+    previous.addReplicaMap(new Partition("R_broken_1"),
+        Collections.singletonMap(instanceName(0, 1), "ONLINE"));
+
+    Map<String, ResourceAssignment> withFallback = WagedRebalanceUtil.calculateAssignment(
+        new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL),
+        createAlgorithm(), Collections.singletonMap("R_broken", previous));
+
+    Assert.assertEquals(withFallback.get("R_broken").getMappedPartitions().size(), 2,
+        "The partial entry must be replaced by the complete previous assignment");
+    Assert.assertEquals(normalize(withFallback).get("R_broken"), normalize(
+        Collections.singletonMap("R_broken", previous)).get("R_broken"));
+    Assert.assertNotSame(withFallback.get("R_broken"), previous,
+        "The carried over assignment must be a copy, never the caller's own object");
+    Assert.assertTrue(withFallback.containsKey("R_healthy"),
+        "The healthy clique keeps its newly calculated assignment");
+  }
 
   /**
    * The cluster wide capacity check is a tag blind sum over every replica in the cluster, but the
@@ -120,6 +191,183 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     Assert.assertEquals(assignment.getSkippedResources(), Collections.singleton("R_broken"),
         "Capacity attribution must report the frozen resource even when all its replicas were "
             + "already allocated, so it is carried forward");
+  }
+
+  /**
+   * A narrow rebalance scope frequently carries work for one clique only, and when that clique is
+   * the broken one every group with outstanding work fails. Judged over the scope that reads as a
+   * total cluster failure, the isolation rethrows, the caller discards the whole pipeline result
+   * and falls back to the last known good assignment, and every healthy clique stays frozen. The
+   * count has to be taken over every block the cluster's resources form instead, including the
+   * cliques whose replicas are all placed already. A clique that exists only as nodes, with no
+   * resource pinned to it, holds nothing that could keep rebalancing and does not count, which is
+   * why the healthy cliques here hold placed resources rather than just nodes.
+   */
+  @Test
+  public void testNarrowScopeWhereOnlyTheBrokenCliqueHasWorkStillIsolates()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig clusterConfig = createClusterConfig(true);
+
+    OptimalAssignment assignment =
+        createAlgorithm().calculate(narrowScopeWhereOnlyTheBrokenCliqueHasWork(clusterConfig));
+
+    Assert.assertEquals(assignment.getSkippedResources(), Collections.singleton("R_broken"),
+        "The only group with work failed, but five other cliques hold resources, so it is skipped "
+            + "rather than rethrown");
+    Map<String, ResourceAssignment> result = assignment.getOptimalResourceAssignment();
+    Assert.assertTrue(result.get("R_broken") == null
+            || result.get("R_broken").getMappedPartitions().isEmpty(),
+        "Nothing of the broken clique is half assigned; the caller carries its previous "
+            + "assignment forward whole");
+    for (int clique = 1; clique < 6; clique++) {
+      ResourceAssignment healthy = result.get(resourceName(clique));
+      Assert.assertNotNull(healthy, "Clique " + clique + " keeps its placed replicas");
+      Assert.assertEquals(healthy.getMappedPartitions().size(), 2);
+      for (Partition partition : healthy.getMappedPartitions()) {
+        for (String instance : healthy.getReplicaMap(partition).keySet()) {
+          Assert.assertTrue(instance.startsWith("instance_" + clique + "_"),
+              "Clique " + clique + " stays on its own nodes, found " + instance);
+        }
+      }
+    }
+  }
+
+  /**
+   * The same narrow scope with the flag off still throws, so the behaviour above is opt in.
+   */
+  @Test
+  public void testNarrowScopeWhereOnlyTheBrokenCliqueHasWorkStillThrowsWithIsolationOff()
+      throws IOException {
+    ClusterConfig clusterConfig = createClusterConfig(false);
+    try {
+      createAlgorithm().calculate(narrowScopeWhereOnlyTheBrokenCliqueHasWork(clusterConfig))
+          .getOptimalResourceAssignment();
+      Assert.fail("The default mode must still fail the whole rebalance");
+    } catch (HelixRebalanceException e) {
+      Assert.assertEquals(e.getFailureType(),
+          HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+    }
+  }
+
+  /**
+   * Six cliques of two nodes. Cliques 1 to 5 each hold a healthy resource whose replicas are all
+   * placed already, so a partial rebalance carries no work for them. Only clique 0 has anything
+   * outstanding, and its partitions are heavier than any single node in it so they can never be
+   * placed. The cluster wide sum stays comfortably positive, so this is the tag local failure
+   * rather than a capacity deficit.
+   */
+  private ClusterModel narrowScopeWhereOnlyTheBrokenCliqueHasWork(ClusterConfig clusterConfig)
+      throws IOException {
+    Set<AssignableReplica> toBeAssigned = new HashSet<>();
+    addReplicas(toBeAssigned, clusterConfig,
+        taggedResource("R_broken", cliqueTag(0), UNPLACEABLE_PARTITION_WEIGHT), 2);
+
+    Set<AssignableReplica> everything = new HashSet<>(toBeAssigned);
+    Set<AssignableNode> nodes = new HashSet<>();
+    for (int clique = 0; clique < 6; clique++) {
+      List<AssignableNode> cliqueNodes = new ArrayList<>();
+      for (int i = 0; i < 2; i++) {
+        AssignableNode node =
+            taggedNode(clusterConfig, instanceName(clique, i), i, cliqueTag(clique));
+        cliqueNodes.add(node);
+        nodes.add(node);
+      }
+      if (clique == 0) {
+        continue;
+      }
+      Set<AssignableReplica> placed = new HashSet<>();
+      addReplicas(placed, clusterConfig,
+          taggedResource(resourceName(clique), cliqueTag(clique), HEALTHY_PARTITION_WEIGHT), 2);
+      // Pre-load the nodes exactly the way the cluster model provider does.
+      int index = 0;
+      for (AssignableReplica replica : placed) {
+        cliqueNodes.get(index++ % cliqueNodes.size())
+            .assignInitBatch(Collections.singleton(replica));
+      }
+      everything.addAll(placed);
+    }
+
+    ClusterContext context = new ClusterContext(everything, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), clusterConfig);
+    Assert.assertTrue(context.getEstimateUtilizationMap().get(CAPACITY_KEY) > 0,
+        "Precondition: this must be a tag local failure, not a cluster wide capacity deficit");
+    return new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL);
+  }
+
+  /**
+   * With the flag off the same cluster fails the whole rebalance: the behaviour above is opt in.
+   */
+  @Test
+  public void testAlreadyPlacedCapacityDeficitStillThrowsWithIsolationOff()
+      throws IOException {
+    ClusterConfig clusterConfig = createClusterConfig(false);
+    ResourceConfig brokenConfig =
+        taggedResource("R_broken", cliqueTag(0), UNPLACEABLE_PARTITION_WEIGHT);
+    Set<AssignableReplica> alreadyPlaced = new HashSet<>();
+    addReplicas(alreadyPlaced, clusterConfig, brokenConfig, 5);
+
+    Set<AssignableReplica> toBeAssigned = new HashSet<>();
+    addReplicas(toBeAssigned, clusterConfig,
+        taggedResource("R_healthy", cliqueTag(1), HEALTHY_PARTITION_WEIGHT), 3);
+
+    Set<AssignableNode> nodes = new HashSet<>();
+    List<AssignableNode> brokenNodes = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      AssignableNode node = taggedNode(clusterConfig, instanceName(0, i), i, cliqueTag(0));
+      brokenNodes.add(node);
+      nodes.add(node);
+      nodes.add(taggedNode(clusterConfig, instanceName(1, i), i, cliqueTag(1)));
+    }
+    int index = 0;
+    for (AssignableReplica replica : alreadyPlaced) {
+      brokenNodes.get(index++ % brokenNodes.size()).assignInitBatch(
+          Collections.singleton(replica));
+    }
+
+    Set<AssignableReplica> everything = new HashSet<>(toBeAssigned);
+    everything.addAll(alreadyPlaced);
+    ClusterContext context = new ClusterContext(everything, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), clusterConfig);
+
+    try {
+      createAlgorithm().calculate(
+          new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL));
+      Assert.fail("The default mode must still fail the whole rebalance on a capacity deficit");
+    } catch (HelixRebalanceException e) {
+      Assert.assertEquals(e.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+    }
+  }
+
+  /**
+   * A brand new resource pinned to a clique that cannot be placed has no previous assignment to
+   * carry forward. It must be dropped from the result rather than persisted half assigned.
+   */
+  @Test
+  public void testSkippedResourceWithNoPreviousAssignmentIsDropped()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig clusterConfig = createClusterConfig(true);
+    Set<AssignableReplica> replicas = new HashSet<>();
+    addReplicas(replicas, clusterConfig,
+        taggedResource("R_broken", cliqueTag(0), UNPLACEABLE_PARTITION_WEIGHT), 2);
+    addReplicas(replicas, clusterConfig,
+        taggedResource("R_healthy", cliqueTag(1), HEALTHY_PARTITION_WEIGHT), 2);
+
+    Set<AssignableNode> nodes = new HashSet<>();
+    for (int i = 0; i < 3; i++) {
+      nodes.add(taggedNode(clusterConfig, instanceName(0, i), i, cliqueTag(0)));
+      nodes.add(taggedNode(clusterConfig, instanceName(1, i), i, cliqueTag(1)));
+    }
+
+    ClusterContext context = new ClusterContext(replicas, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), clusterConfig);
+    Map<String, ResourceAssignment> result = WagedRebalanceUtil.calculateAssignment(
+        new ClusterModel(context, replicas, nodes, ClusterModel.RebalanceScopeType.GLOBAL_BASELINE),
+        createAlgorithm(), Collections.emptyMap());
+
+    Assert.assertFalse(result.containsKey("R_broken"),
+        "A skipped resource with nothing to carry forward must be dropped, not half persisted");
+    Assert.assertTrue(result.containsKey("R_healthy"));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -395,6 +643,106 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
       Assert.assertEquals(result.get(resourceName(clique)).getMappedPartitions().size(),
           PARTITIONS_PER_RESOURCE);
     }
+  }
+
+  // --------------------------------------------------------------------------------------------
+  // Observability parity: an operator must not need new dashboards to notice a frozen clique
+  // --------------------------------------------------------------------------------------------
+
+  /**
+   * Isolation must not cost the operator any visibility. A clique that gets skipped still has to
+   * feed the two WAGED hard constraint reporters exactly as it does when the whole
+   * rebalance fails, so the alerting a cluster already has keeps firing with no customer change.
+   */
+  @Test
+  public void testSkippedCliqueStillFeedsTheHardConstraintReporters()
+      throws HelixRebalanceException, IOException {
+    int brokenClique = 3;
+    ClusterConfig clusterConfig = createClusterConfig(true);
+    Map<Integer, CliqueSpec> specs = allHealthy();
+    specs.put(brokenClique,
+        CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT));
+
+    Set<HardConstraint.Type> cumulative = ConcurrentHashMap.newKeySet();
+    Map<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshot = new HashMap<>();
+    ConstraintBasedAlgorithm algorithm = (ConstraintBasedAlgorithm) createAlgorithm();
+    algorithm.setHardConstraintFailureReporter(cumulative::add);
+    algorithm.setBlockingSnapshotReporter(snapshot::put);
+
+    OptimalAssignment optimalAssignment =
+        algorithm.calculate(createClusterModel(clusterConfig, specs));
+
+    // The rebalance succeeded for the other 19 cliques ...
+    Assert.assertEquals(optimalAssignment.getSkippedResources(),
+        Collections.singleton(resourceName(brokenClique)));
+    Assert.assertEquals(optimalAssignment.getOptimalResourceAssignment().size(), CLIQUE_COUNT - 1);
+    // ... and the operator still sees exactly why clique 3 could not be placed.
+    Assert.assertTrue(cumulative.contains(HardConstraint.Type.NODE_CAPACITY),
+        "The cumulative per type reporter must still fire for a skipped clique, got " + cumulative);
+    Assert.assertEquals(snapshot.size(), 1, "The snapshot must be published exactly once per run");
+    Assert.assertTrue(
+        snapshot.get(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE)
+            .contains(HardConstraint.Type.NODE_CAPACITY),
+        "The reversible blocking snapshot must still report the skipped clique, got " + snapshot);
+  }
+
+  /**
+   * The flip side: a run where every clique is placeable must publish an empty snapshot, so the
+   * "currently blocking" gauge falls back to zero once the broken clique is repaired.
+   */
+  @Test
+  public void testCleanRunPublishesAnEmptyBlockingSnapshotWithIsolationOn()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig clusterConfig = createClusterConfig(true);
+
+    Set<HardConstraint.Type> cumulative = ConcurrentHashMap.newKeySet();
+    Map<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshot = new HashMap<>();
+    ConstraintBasedAlgorithm algorithm = (ConstraintBasedAlgorithm) createAlgorithm();
+    algorithm.setHardConstraintFailureReporter(cumulative::add);
+    algorithm.setBlockingSnapshotReporter(snapshot::put);
+
+    OptimalAssignment optimalAssignment =
+        algorithm.calculate(createClusterModel(clusterConfig, allHealthy()));
+
+    Assert.assertTrue(optimalAssignment.getSkippedResources().isEmpty());
+    Assert.assertTrue(cumulative.isEmpty(), "A clean run must not report any blocking type");
+    Assert.assertEquals(snapshot.size(), 1);
+    Assert.assertTrue(snapshot.get(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE).isEmpty(),
+        "A clean run must publish an empty snapshot so the gauge resets");
+  }
+
+  /**
+   * The same reporters must behave identically with the flag off, which proves the metric contract
+   * is the same in both modes.
+   */
+  @Test
+  public void testReportersSeeTheSameBlockingTypeWhenIsolationIsOff()
+      throws IOException {
+    int brokenClique = 3;
+    ClusterConfig clusterConfig = createClusterConfig(false);
+    Map<Integer, CliqueSpec> specs = allHealthy();
+    specs.put(brokenClique,
+        CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT));
+
+    Set<HardConstraint.Type> cumulative = ConcurrentHashMap.newKeySet();
+    Map<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshot = new HashMap<>();
+    ConstraintBasedAlgorithm algorithm = (ConstraintBasedAlgorithm) createAlgorithm();
+    algorithm.setHardConstraintFailureReporter(cumulative::add);
+    algorithm.setBlockingSnapshotReporter(snapshot::put);
+
+    try {
+      algorithm.calculate(createClusterModel(clusterConfig, specs));
+      Assert.fail("The default global mode must still fail the whole rebalance");
+    } catch (HelixRebalanceException expected) {
+      Assert.assertEquals(expected.getFailureCategory(),
+          HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+    }
+
+    Assert.assertTrue(cumulative.contains(HardConstraint.Type.NODE_CAPACITY));
+    Assert.assertEquals(snapshot.size(), 1,
+        "The snapshot must be published even when the run throws");
+    Assert.assertTrue(snapshot.get(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE)
+        .contains(HardConstraint.Type.NODE_CAPACITY));
   }
 
   /**
