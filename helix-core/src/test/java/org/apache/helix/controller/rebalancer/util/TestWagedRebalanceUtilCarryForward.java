@@ -37,7 +37,8 @@ import org.testng.annotations.Test;
 
 /**
  * Covers what {@code calculateAssignment} does with the resources instance tag isolation skipped:
- * the previous assignment is carried forward, so a resource is never emitted half assigned.
+ * the previous assignment is carried forward, and a resource whose brand new assignment collides
+ * with a carried forward one gives its own calculation up as well.
  */
 public class TestWagedRebalanceUtilCarryForward {
   private static final String PARTITION = "Resource_0";
@@ -86,6 +87,46 @@ public class TestWagedRebalanceUtilCarryForward {
 
     Assert.assertTrue(result.isEmpty(),
         "A null previous assignment means absent, which is what the overwrite phase wants");
+  }
+
+  @Test
+  public void testResourceReusingACarriedOverInstanceIsYieldedToo() throws Exception {
+    // "Skipped" is carried forward onto instance-1. "Mover" was just calculated onto that same
+    // instance-1, which is only possible because it no longer belongs to the skipped group. Letting
+    // both land there would double book the node, so Mover goes back to what it had.
+    Map<String, ResourceAssignment> calculated = new HashMap<>();
+    calculated.put("Mover", assignment("Mover", "instance-1"));
+    calculated.put("Unrelated", assignment("Unrelated", "instance-7"));
+
+    Map<String, ResourceAssignment> previous = new HashMap<>();
+    previous.put("Skipped", assignment("Skipped", "instance-1"));
+    previous.put("Mover", assignment("Mover", "instance-3"));
+    previous.put("Unrelated", assignment("Unrelated", "instance-8"));
+
+    Map<String, ResourceAssignment> result =
+        calculate(calculated, Collections.singleton("Skipped"), previous);
+
+    Assert.assertEquals(instancesOf(result.get("Skipped")), Collections.singleton("instance-1"));
+    Assert.assertEquals(instancesOf(result.get("Mover")), Collections.singleton("instance-3"),
+        "The colliding resource gives up its new assignment");
+    Assert.assertEquals(instancesOf(result.get("Unrelated")), Collections.singleton("instance-7"),
+        "Everything that does not collide keeps its freshly calculated assignment");
+  }
+
+  @Test
+  public void testNoCollisionWhenTheCarriedOverInstanceIsUntouched() throws Exception {
+    Map<String, ResourceAssignment> calculated = new HashMap<>();
+    calculated.put("Mover", assignment("Mover", "instance-4"));
+
+    Map<String, ResourceAssignment> previous = new HashMap<>();
+    previous.put("Skipped", assignment("Skipped", "instance-1"));
+    previous.put("Mover", assignment("Mover", "instance-3"));
+
+    Map<String, ResourceAssignment> result =
+        calculate(calculated, Collections.singleton("Skipped"), previous);
+
+    Assert.assertEquals(instancesOf(result.get("Mover")), Collections.singleton("instance-4"),
+        "No shared instance means no reason to give the new assignment up");
   }
 
   @Test
