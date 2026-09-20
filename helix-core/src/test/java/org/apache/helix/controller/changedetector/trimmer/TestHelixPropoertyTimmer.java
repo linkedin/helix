@@ -181,6 +181,125 @@ public class TestHelixPropoertyTimmer {
     }
   }
 
+  /**
+   * Flipping WAGED instance tag isolation changes how the rebalancer reacts to a group it cannot
+   * place, so the flag has to survive trimming and reach the change detector. Otherwise an operator
+   * could turn it on during an incident and nothing would recalculate until some unrelated config
+   * change happened to come along and trigger the next global rebalance.
+   */
+  @Test
+  public void testWagedInstanceTagIsolationFlagIsNotTrimmed() {
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation on must be detected as a cluster config change");
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation back off must be detected as a cluster config change");
+  }
+
+  /**
+   * An explicit false reads exactly like an absent flag. Writing the default down on a cluster that
+   * never set the flag, or removing an explicit false again, must not read as a cluster config
+   * change, since that triggers a full baseline recalculation for nothing. Turning it on and back
+   * off must still be detected.
+   */
+  @Test
+  public void testWagedInstanceTagIsolationFlagWrittenAsItsDefaultIsNotAChange() {
+    String flag = ClusterConfig.ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name();
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertFalse(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Writing the flag down as false where it was absent leaves its effective value unchanged");
+
+    _clusterConfig.getRecord().setSimpleField(flag, "FALSE");
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertFalse(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "The flag is read ignoring case, so the default in another case is still the default");
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation on from an explicit false must be detected");
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation back off must be detected");
+
+    _clusterConfig.getRecord().getSimpleFields().remove(flag);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertFalse(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Removing an explicit false leaves the effective value unchanged too");
+
+    _clusterConfig.setTopologyAwareEnabled(!_clusterConfig.isTopologyAwareEnabled());
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "A change to any other topology field must still be detected");
+  }
+
+  /**
+   * The change detector compares the flag by the value the rebalancer reads it as. Any value that
+   * reads as false, boolean or not, compares equal to an absent flag, and true compares equal in
+   * any case. Rewriting the flag without changing what it reads as must not start a full baseline
+   * recalculation, and every write that does turn isolation on or off must still be detected.
+   */
+  @Test
+  public void testWagedInstanceTagIsolationFlagIsComparedByTheValueItReadsAs() {
+    String flag = ClusterConfig.ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name();
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    for (String readsAsFalse : new String[] {"0", "1", "no", "yes", "", "enabled"}) {
+      _clusterConfig.getRecord().setSimpleField(flag, readsAsFalse);
+      Assert.assertFalse(_clusterConfig.isWagedInstanceTagIsolationEnabled());
+      assertClusterConfigChange(detector, false,
+          "'" + readsAsFalse + "' reads as false, the same as the value before it");
+    }
+
+    _clusterConfig.getRecord().setSimpleField(flag, "TRUE");
+    Assert.assertTrue(_clusterConfig.isWagedInstanceTagIsolationEnabled());
+    assertClusterConfigChange(detector, true,
+        "Turning isolation on in upper case must be detected");
+
+    _clusterConfig.getRecord().setSimpleField(flag, "true");
+    assertClusterConfigChange(detector, false,
+        "Rewriting true in another case leaves isolation on");
+
+    _clusterConfig.getRecord().setSimpleField(flag, "0");
+    Assert.assertFalse(_clusterConfig.isWagedInstanceTagIsolationEnabled());
+    assertClusterConfigChange(detector, true,
+        "A value that reads as false turns isolation off, which must be detected");
+
+    _clusterConfig.getRecord().getSimpleFields().remove(flag);
+    assertClusterConfigChange(detector, false,
+        "Removing a value that reads as false leaves isolation off");
+  }
+
+  private void assertClusterConfigChange(ResourceChangeDetector detector, boolean expected,
+      String message) {
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        expected, message);
+  }
+
   @Test
   public void testIgnoreTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
@@ -283,7 +402,8 @@ public class TestHelixPropoertyTimmer {
             helixProperty.getRecord().setMapField(fieldKey, Collections.singletonMap("foo", "bar"));
             break;
           case SIMPLE_FIELD:
-            helixProperty.getRecord().setSimpleField(fieldKey, "foobar");
+            helixProperty.getRecord()
+                .setSimpleField(fieldKey, changedSimpleFieldValue(helixProperty, fieldKey));
             break;
           default:
             Assert.fail("Unknown field type " + type.name());
@@ -300,6 +420,18 @@ public class TestHelixPropoertyTimmer {
         }
       }
     }
+  }
+
+  // The isolation flag is compared by the value it reads as, so a change has to flip that value. An
+  // arbitrary string reads as false, exactly like the absent flag, and is rightly not a change.
+  private static String changedSimpleFieldValue(HelixProperty helixProperty, String fieldKey) {
+    if (helixProperty instanceof ClusterConfig
+        && ClusterConfig.ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name()
+        .equals(fieldKey)) {
+      return Boolean.toString(
+          !((ClusterConfig) helixProperty).isWagedInstanceTagIsolationEnabled());
+    }
+    return "foobar";
   }
 
   private void changeTrimmableValuesAndVerifyDetector(FieldType[] trimmableFieldTypes,
