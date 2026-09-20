@@ -181,6 +181,30 @@ public class TestHelixPropoertyTimmer {
     }
   }
 
+  /**
+   * Flipping WAGED instance tag isolation changes how the rebalancer reacts to a group it cannot
+   * place, so the flag has to survive trimming and reach the change detector. Otherwise an operator
+   * could turn it on during an incident and nothing would recalculate until some unrelated config
+   * change happened to come along and trigger the next global rebalance.
+   */
+  @Test
+  public void testWagedInstanceTagIsolationFlagIsNotTrimmed() {
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation on must be detected as a cluster config change");
+
+    _clusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).contains(CLUSTER_NAME),
+        "Turning instance tag isolation back off must be detected as a cluster config change");
+  }
+
   @Test
   public void testIgnoreTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
