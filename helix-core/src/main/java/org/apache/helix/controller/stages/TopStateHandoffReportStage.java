@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
@@ -259,7 +260,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         // previously published ExternalView confirms the partition was at or above min, so bring-up
         // time is not mis-counted as a recovery. Stamp the detection time as the recovery start.
         record = new MissingMinActiveReplicaRecord(System.currentTimeMillis());
-        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
+        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new ConcurrentHashMap<>())
             .put(partitionName, record);
       }
       if (record != null && clusterStatusMonitor != null) {
@@ -309,12 +310,22 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (record.isAttributionInvalid()) {
       return;
     }
-    long sequence = currentStateOutput.getRecoveryObservationSequence();
-    if (sequence != cache.getRecoveryObservationSequence()) {
-      record.invalidateAttribution("current-state snapshot is stale");
+    long epoch = currentStateOutput.getRecoveryObservationEpoch();
+    if (epoch != cache.getRecoveryObservationEpoch()) {
+      record.invalidateAttribution("controller monitoring epoch changed");
       return;
     }
-    // The async reporting worker may coalesce pipeline runs; incomplete history is not attribution.
+    long sequence = currentStateOutput.getRecoveryObservationSequence(record);
+    long matchingSequence =
+        record.matchingObservation(currentStateOutput, resourceName, partition, cache);
+    if (sequence < 0 && !record.hasObservation()) {
+      sequence = matchingSequence;
+    }
+    if (sequence < 0 || sequence != matchingSequence) {
+      record.invalidateAttribution("partition transition snapshot is stale");
+      return;
+    }
+    // Only relevant transition changes advance this sequence, not unrelated pipeline runs.
     record.observeSequence(sequence);
     if (record.isAttributionInvalid()) {
       return;
@@ -331,7 +342,11 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         record.invalidateAttribution("participant is no longer live");
         return;
       }
-      String session = liveInstance.getEphemeralOwner();
+      String session = currentStateOutput.getParticipantSession(instance);
+      if (session == null || !session.equals(liveInstance.getEphemeralOwner())) {
+        record.invalidateAttribution("participant session changed since the snapshot");
+        return;
+      }
       CurrentState currentState =
           resolveCurrentStates(cache, currentStateMemo, instance, session).get(resourceName);
       if (currentState == null
@@ -349,8 +364,9 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         return;
       }
     }
-    if (sequence != cache.getRecoveryObservationSequence()) {
-      record.invalidateAttribution("current-state snapshot changed during recovery observation");
+    if (epoch != cache.getRecoveryObservationEpoch()
+        || sequence != record.matchingObservation(currentStateOutput, resourceName, partition, cache)) {
+      record.invalidateAttribution("partition transition snapshot changed during recovery observation");
     }
     record.finishObservation(currentStateOutput.getCurrentStateMap(resourceName, partition).keySet());
   }

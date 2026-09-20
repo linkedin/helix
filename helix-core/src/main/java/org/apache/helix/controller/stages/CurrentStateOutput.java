@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.google.common.collect.Sets;
+import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
@@ -60,7 +61,9 @@ public class CurrentStateOutput {
   private final Map<String, Map<Partition, Map<String, String>>> _infoMap;
   private final Map<String, String> _resourceStateModelMap;
   private final Map<String, CurrentState> _curStateMetaMap;
-  private long _recoveryObservationSequence = -1L;
+  private long _recoveryObservationEpoch = -1L;
+  private final Map<String, String> _participantSessions = new HashMap<>();
+  private final Map<MissingMinActiveReplicaRecord, Long> _recoveryObservations = new HashMap<>();
 
   public CurrentStateOutput() {
     _currentStateMap = new HashMap<>();
@@ -74,12 +77,29 @@ public class CurrentStateOutput {
     _infoMap = new HashMap<>();
   }
 
-  void setRecoveryObservationSequence(long sequence) {
-    _recoveryObservationSequence = sequence;
+  void setRecoveryObservationEpoch(long epoch) {
+    _recoveryObservationEpoch = epoch;
   }
 
-  long getRecoveryObservationSequence() {
-    return _recoveryObservationSequence;
+  long getRecoveryObservationEpoch() {
+    return _recoveryObservationEpoch;
+  }
+
+  void setParticipantSession(String instance, String session) {
+    _participantSessions.put(instance, session);
+  }
+
+  String getParticipantSession(String instance) {
+    return _participantSessions.get(instance);
+  }
+
+  void captureRecoveryObservation(MissingMinActiveReplicaRecord record, String resource,
+      Partition partition, ResourceControllerDataProvider cache) {
+    _recoveryObservations.put(record, record.captureObservation(this, resource, partition, cache));
+  }
+
+  long getRecoveryObservationSequence(MissingMinActiveReplicaRecord record) {
+    return _recoveryObservations.getOrDefault(record, -1L);
   }
 
   public void setResourceStateModelDef(String resourceName, String stateModelDefName) {

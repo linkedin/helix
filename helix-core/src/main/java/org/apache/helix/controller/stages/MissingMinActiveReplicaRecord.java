@@ -29,6 +29,10 @@ import java.util.Objects;
 import java.util.Set;
 
 import org.apache.helix.HelixDefinedState;
+import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.Partition;
+import org.apache.helix.model.StateModelDefinition;
 
 /**
  * A record entry in cluster data cache tracking a partition whose active replica count has
@@ -48,7 +52,7 @@ public class MissingMinActiveReplicaRecord {
   private final long startTimeStamp;
   private final Map<String, ParticipantObservation> participantObservations = new HashMap<>();
   private final Map<String, RecoveryPath> recoveryPaths = new HashMap<>();
-  private String unavailableReason;
+  private volatile String unavailableReason;
   private Integer minActiveReplicas;
   private String stateModel;
   private String initialState;
@@ -57,6 +61,9 @@ public class MissingMinActiveReplicaRecord {
   private long observationSequence = -1L;
   private boolean hasPreviousObservation;
   private int newParticipants;
+  private Map<String, ParticipantVersion> producedObservation;
+  private RecoveryConfiguration producedConfiguration;
+  private long producedSequence;
 
   public MissingMinActiveReplicaRecord(long start) {
     startTimeStamp = start;
@@ -68,6 +75,48 @@ public class MissingMinActiveReplicaRecord {
 
   /* package */ boolean hasObservation() {
     return observationSequence > 0;
+  }
+
+  /* package */ synchronized long captureObservation(CurrentStateOutput output, String resource,
+      Partition partition, ResourceControllerDataProvider cache) {
+    if (isAttributionInvalid()) {
+      return -1L;
+    }
+    Map<String, ParticipantVersion> snapshot = snapshotVersion(output, resource, partition);
+    RecoveryConfiguration configuration = new RecoveryConfiguration(cache, resource);
+    if (!snapshot.equals(producedObservation) || !configuration.equals(producedConfiguration)) {
+      producedObservation = snapshot;
+      producedConfiguration = configuration;
+      producedSequence++;
+    }
+    return producedSequence;
+  }
+
+  /* package */ synchronized long matchingObservation(CurrentStateOutput output, String resource,
+      Partition partition, ResourceControllerDataProvider cache) {
+    if (isAttributionInvalid()) {
+      return -1L;
+    }
+    Map<String, ParticipantVersion> snapshot = snapshotVersion(output, resource, partition);
+    RecoveryConfiguration configuration = new RecoveryConfiguration(cache, resource);
+    if (producedObservation == null) {
+      producedObservation = snapshot;
+      producedConfiguration = configuration;
+      producedSequence++;
+    }
+    return snapshot.equals(producedObservation) && configuration.equals(producedConfiguration)
+        ? producedSequence : -1L;
+  }
+
+  private Map<String, ParticipantVersion> snapshotVersion(CurrentStateOutput output,
+      String resource, Partition partition) {
+    Map<String, ParticipantVersion> snapshot = new HashMap<>();
+    for (Map.Entry<String, String> entry : output.getCurrentStateMap(resource, partition).entrySet()) {
+      String instance = entry.getKey();
+      snapshot.put(instance, new ParticipantVersion(output.getParticipantSession(instance),
+          entry.getValue(), output.getEndTime(resource, partition, instance)));
+    }
+    return snapshot;
   }
 
   /* package */ void observeSequence(long sequence) {
@@ -258,12 +307,14 @@ public class MissingMinActiveReplicaRecord {
     return helixLatency;
   }
 
-  /* package */ void invalidateAttribution(String reason) {
+  /* package */ synchronized void invalidateAttribution(String reason) {
     if (unavailableReason == null) {
       unavailableReason = reason;
     }
     recoveryPaths.clear();
     participantObservations.clear();
+    producedObservation = null;
+    producedConfiguration = null;
   }
 
   /* package */ String getUnavailableReason() {
@@ -283,6 +334,75 @@ public class MissingMinActiveReplicaRecord {
 
     private RecoveryPath(boolean initiallyActive) {
       this.initiallyActive = initiallyActive;
+    }
+  }
+
+  private static class ParticipantVersion {
+    private final String session;
+    private final String state;
+    private final long end;
+
+    private ParticipantVersion(String session, String state, long end) {
+      this.session = session;
+      this.state = state;
+      this.end = end;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (!(other instanceof ParticipantVersion)) {
+        return false;
+      }
+      ParticipantVersion version = (ParticipantVersion) other;
+      return end == version.end && Objects.equals(session, version.session)
+          && Objects.equals(state, version.state);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(session, state, end);
+    }
+  }
+
+  private static class RecoveryConfiguration {
+    private final int minimum;
+    private final String model;
+    private final String initial;
+    private final Set<String> active;
+    private final boolean enabled;
+    private final boolean maintenance;
+
+    private RecoveryConfiguration(ResourceControllerDataProvider cache, String resource) {
+      IdealState idealState = cache.getIdealState(resource);
+      StateModelDefinition definition = idealState == null ? null
+          : cache.getStateModelDef(idealState.getStateModelDefRef());
+      int configuredMinimum = idealState == null ? -1 : idealState.getMinActiveReplicas();
+      minimum = idealState != null && configuredMinimum < 0
+          ? idealState.getReplicaCount(-1) : configuredMinimum;
+      enabled = idealState != null && idealState.isEnabled();
+      maintenance = cache.isMaintenanceModeEnabled();
+      model = definition == null ? null : definition.getId();
+      initial = definition == null ? null : definition.getInitialState();
+      active = definition == null ? new HashSet<>() : new HashSet<>(definition.getStatesPriorityList());
+      active.remove(initial);
+      active.remove(HelixDefinedState.DROPPED.name());
+      active.remove(HelixDefinedState.ERROR.name());
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (!(other instanceof RecoveryConfiguration)) {
+        return false;
+      }
+      RecoveryConfiguration configuration = (RecoveryConfiguration) other;
+      return minimum == configuration.minimum && enabled == configuration.enabled
+          && maintenance == configuration.maintenance && Objects.equals(model, configuration.model)
+          && Objects.equals(initial, configuration.initial) && active.equals(configuration.active);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(minimum, model, initial, active, enabled, maintenance);
     }
   }
 

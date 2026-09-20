@@ -93,14 +93,16 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
     final CurrentStateOutput currentStateOutput = new CurrentStateOutput();
     final CurrentStateOutput currentStateExcludingUnknown = new CurrentStateOutput();
     if (cache instanceof ResourceControllerDataProvider) {
-      long sequence = ((ResourceControllerDataProvider) cache).nextRecoveryObservationSequence();
-      currentStateOutput.setRecoveryObservationSequence(sequence);
-      currentStateExcludingUnknown.setRecoveryObservationSequence(sequence);
+      long epoch = ((ResourceControllerDataProvider) cache).getRecoveryObservationEpoch();
+      currentStateOutput.setRecoveryObservationEpoch(epoch);
+      currentStateExcludingUnknown.setRecoveryObservationEpoch(epoch);
     }
 
     for (LiveInstance instance : liveInstances.values()) {
       String instanceName = instance.getInstanceName();
       String instanceSessionId = instance.getEphemeralOwner();
+      currentStateOutput.setParticipantSession(instanceName, instanceSessionId);
+      currentStateExcludingUnknown.setParticipantSession(instanceName, instanceSessionId);
       InstanceConfig instanceConfig = cache.getInstanceConfigMap().get(instanceName);
 
       // Determine once whether this instance should be included in the UNKNOWN-excluding output,
@@ -121,6 +123,16 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       updateCurrentStates(instance, currentStates, currentStateOutput, secondaryOutput, resourceMap);
       updatePendingMessages(instance, cache, messages.values(), relayMessages.values(),
           existingStaleMessages, currentStateOutput, secondaryOutput, resourceMap);
+    }
+    if (cache instanceof ResourceControllerDataProvider) {
+      ResourceControllerDataProvider provider = (ResourceControllerDataProvider) cache;
+      provider.getMissingMinActiveReplicaMap().forEach((resource, records) ->
+          records.forEach((partition, record) -> {
+            if (!record.isAttributionInvalid()) {
+              currentStateOutput.captureRecoveryObservation(record, resource,
+                  new Partition(partition), provider);
+            }
+          }));
     }
     event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateExcludingUnknown);
