@@ -43,7 +43,7 @@ import org.apache.helix.HelixDefinedState;
  * synchronized participant/controller clocks. Inconsistent observations remain unavailable.
  */
 public class MissingMinActiveReplicaRecord {
-  private static final int MAX_TRACKING_ENTRIES = 64;
+  private static final int MAX_NEW_PARTICIPANTS = 64;
 
   private final long startTimeStamp;
   private final Map<String, ParticipantObservation> participantObservations = new HashMap<>();
@@ -56,6 +56,7 @@ public class MissingMinActiveReplicaRecord {
   private int initialActiveReplicas;
   private long observationSequence = -1L;
   private boolean hasPreviousObservation;
+  private int newParticipants;
 
   public MissingMinActiveReplicaRecord(long start) {
     startTimeStamp = start;
@@ -110,7 +111,7 @@ public class MissingMinActiveReplicaRecord {
       invalidateAttribution("initial participant transition history is missing");
       return;
     }
-    if (previous == null && participantObservations.size() == MAX_TRACKING_ENTRIES) {
+    if (previous == null && hasPreviousObservation && newParticipants == MAX_NEW_PARTICIPANTS) {
       invalidateAttribution("participant tracking limit exceeded");
       return;
     }
@@ -127,6 +128,9 @@ public class MissingMinActiveReplicaRecord {
     participantObservations.put(instance,
         new ParticipantObservation(session, state, executionStart, executionEnd));
     if (previous == null) {
+      if (hasPreviousObservation) {
+        newParticipants++;
+      }
       boolean initiallyActive = !hasPreviousObservation && activeStates.contains(state);
       recoveryPaths.put(instance, new RecoveryPath(initiallyActive));
       if (!hasPreviousObservation) {

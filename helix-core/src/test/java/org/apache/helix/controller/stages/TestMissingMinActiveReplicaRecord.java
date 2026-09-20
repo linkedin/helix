@@ -324,4 +324,20 @@ public class TestMissingMinActiveReplicaRecord {
     Assert.assertEquals(record.getHelixLatency(2000L), -1L);
     Assert.assertEquals(record.getUnavailableReason(), "participant tracking limit exceeded");
   }
+
+  @Test
+  public void testLargeBaselineDoesNotExhaustParticipantChurnLimit() {
+    MissingMinActiveReplicaRecord record = new MissingMinActiveReplicaRecord(1000L);
+    record.observeConfiguration(65, "MasterSlave", "OFFLINE", ACTIVE_STATES);
+    record.observeSequence(1L);
+    for (int i = 0; i < 64; i++) {
+      record.observeParticipant("healthy-" + i, "session", "SLAVE", "OFFLINE", 100L, 500L);
+    }
+    record.observeParticipant("repair", "session", "OFFLINE", null, -1L, -1L);
+    record.observeSequence(2L);
+    record.observeParticipant("repair", "session", "SLAVE", "OFFLINE", 1200L, 1500L);
+
+    Assert.assertEquals(record.getHelixLatency(2000L), 700L,
+        "The existing replica population must not consume the limit on new participant identities");
+  }
 }
