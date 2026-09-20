@@ -32,6 +32,7 @@ import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 
@@ -53,6 +54,8 @@ import org.apache.helix.model.ResourceConfig;
  *       does not depend on input order, whole-tag carry-forward, every rebalance scope and the
  *       untagged and overlapping-tag cases that must still fail exactly like the default global
  *       mode,</li>
+ *   <li>{@link TestWagedInstanceTagIsolationCapacity} covers cluster wide capacity deficit
+ *       attribution and the hard constraint reporter parity,</li>
  *   <li>{@link TestWagedIsolationFeatureParity} switches on one WAGED placement feature at a
  *       time and checks each against the default global mode, with and without a broken
  *       clique.</li>
@@ -241,5 +244,97 @@ abstract class AbstractTestWagedInstanceTagIsolation {
     }
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
     return new AssignableNode(clusterConfig, instanceConfig, instance);
+  }
+
+  /** Like {@link #taggedNode}, with the given DISK capacity instead of {@link #NODE_CAPACITY}. */
+  protected static AssignableNode sizedNode(ClusterConfig clusterConfig, String instance,
+      int capacity, String... tags) {
+    InstanceConfig instanceConfig = new InstanceConfig(instance);
+    instanceConfig.setInstanceCapacityMap(Collections.singletonMap(CAPACITY_KEY, capacity));
+    for (String tag : tags) {
+      instanceConfig.addTag(tag);
+    }
+    instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+    return new AssignableNode(clusterConfig, instanceConfig, instance);
+  }
+
+  /**
+   * Builds a delayed overwrite model the way ClusterModelProvider does. The population is every
+   * replica of every resource added. Each live node holds a replica of every partition the current
+   * assignment names it for, whether or not the resource config has that partition, and a
+   * mapped partition with fewer live replicas than its min active count gets the missing ones to
+   * assign. An instance the current assignment names that is not a live node is offline inside
+   * its delay window: it is not in the model, and its replicas are in the current assignment only.
+   */
+  protected static final class DelayedOverwriteCluster {
+    private final ClusterConfig _config;
+    private final Map<String, AssignableNode> _liveNodes = new HashMap<>();
+    private final Map<String, ResourceConfig> _resources = new HashMap<>();
+    private final Map<String, Integer> _minActive = new HashMap<>();
+    private final Set<AssignableReplica> _population = new HashSet<>();
+    private final Map<String, ResourceAssignment> _current = new HashMap<>();
+
+    DelayedOverwriteCluster(ClusterConfig config) {
+      _config = config;
+    }
+
+    DelayedOverwriteCluster liveNode(String instance, int capacity, String... tags) {
+      _liveNodes.put(instance, sizedNode(_config, instance, capacity, tags));
+      return this;
+    }
+
+    /** Adds partitions times replicas of the resource to the population. */
+    DelayedOverwriteCluster resource(ResourceConfig resource, int partitions, int replicas,
+        int minActive) {
+      String name = resource.getResourceName();
+      _resources.put(name, resource);
+      _minActive.put(name, Math.min(minActive, replicas));
+      for (int p = 0; p < partitions; p++) {
+        for (int r = 0; r < replicas; r++) {
+          _population.add(new AssignableReplica(_config, resource, name + "_" + p, "ONLINE", 0));
+        }
+      }
+      return this;
+    }
+
+    /** Names the instances holding one partition in the current assignment. */
+    DelayedOverwriteCluster current(String resource, int partition, String... instances) {
+      Map<String, String> replicas = new TreeMap<>();
+      for (String instance : instances) {
+        replicas.put(instance, "ONLINE");
+      }
+      _current.computeIfAbsent(resource, ResourceAssignment::new)
+          .addReplicaMap(new Partition(resource + "_" + partition), replicas);
+      return this;
+    }
+
+    ClusterModel build() {
+      Set<AssignableReplica> toAssign = new HashSet<>();
+      Map<String, Set<AssignableReplica>> allocated = new HashMap<>();
+      _current.forEach((resource, assignment) -> {
+        ResourceConfig config = _resources.get(resource);
+        for (Partition partition : assignment.getMappedPartitions()) {
+          String name = partition.getPartitionName();
+          int live = 0;
+          for (String instance : assignment.getReplicaMap(partition).keySet()) {
+            if (_liveNodes.containsKey(instance)) {
+              allocated.computeIfAbsent(instance, key -> new HashSet<>())
+                  .add(new AssignableReplica(_config, config, name, "ONLINE", 0));
+              live++;
+            }
+          }
+          for (int i = live; i < _minActive.get(resource); i++) {
+            toAssign.add(new AssignableReplica(_config, config, name, "ONLINE", 0));
+          }
+        }
+      });
+      allocated.forEach(
+          (instance, replicas) -> _liveNodes.get(instance).assignInitBatch(replicas));
+      Set<AssignableNode> nodes = new HashSet<>(_liveNodes.values());
+      ClusterContext context = new ClusterContext(_population, nodes, Collections.emptyMap(),
+          _current, _config);
+      return new ClusterModel(context, toAssign, nodes,
+          ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES);
+    }
   }
 }
