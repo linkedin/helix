@@ -41,7 +41,9 @@ import org.apache.helix.model.ResourceConfig;
  *
  * The topology under test is the clique partitioned one: the cluster is carved into disjoint
  * cliques, every instance carries exactly one clique tag, and every resource is pinned to one
- * clique tag through INSTANCE_GROUP_TAG.
+ * clique tag through INSTANCE_GROUP_TAG. {@link TestCliqueFailureBlastRadius} measures how far
+ * one unplaceable clique reaches: the whole cluster's rebalance in the default mode, and only that
+ * clique's share block with isolation on.
  *
  * The broadest suites on this fixture:
  * <ul>

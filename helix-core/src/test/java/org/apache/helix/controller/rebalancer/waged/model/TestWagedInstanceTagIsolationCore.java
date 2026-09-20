@@ -54,7 +54,8 @@ public class TestWagedInstanceTagIsolationCore extends AbstractTestWagedInstance
 
   /**
    * The headline case. With the flag on, the 19 healthy cliques are assigned even though clique 3
-   * cannot place a single replica. With the flag off this same topology throws.
+   * cannot place a single replica. With the flag off this same topology throws (see
+   * {@link TestCliqueFailureBlastRadius#testSingleBrokenCliqueBlocksAllOtherCliques}).
    */
   @Test
   public void testBrokenCliqueDoesNotBlockHealthyCliques()
