@@ -444,9 +444,9 @@ public class ResourceMonitor extends DynamicMBeanProvider {
    * below its {@code minActiveReplicas} returning to at least {@code minActiveReplicas}.
    *
    * @param totalDuration end-to-end degraded window ({@code T_end - T_start}), in ms
-   * @param helixLatency  the Helix-controlled portion of the window (detect / compute / throttle /
-   *                      delay-wait / dispatch), in ms; the remainder is participant execution time.
-   *                      Pass a negative value when attribution is unavailable to skip the gauge.
+   * @param helixLatency  recovery time after excluding participant execution on the required
+   *                      recovery path, in ms. Pass a negative value when this cannot be determined;
+   *                      the Helix-only histogram will not receive a sample.
    * @param succeeded     whether the partition recovered (vs. still degraded beyond threshold)
    */
   public void updatePartitionRecoveryStats(long totalDuration, long helixLatency,

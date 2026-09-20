@@ -348,7 +348,7 @@ public class TestResourceMonitor {
       Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
       Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
           .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 4000L);
-      // Unavailable attribution must leave the Helix-only histogram empty.
+      // Do not add a Helix-only sample when the duration cannot be calculated.
       Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
           .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 0L);
       Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L);

@@ -188,20 +188,20 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
 
   /**
    * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
-   * duration"). An edge detector runs once per pipeline execution per partition:
+   * duration"). Each reported observation handles these cases:
    * <ul>
-   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B). The
+   *   <li>healthy -&gt; degraded: record the detection time as the recovery start. The
    *       transition is confirmed against the previously published ExternalView so that a partition
    *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
    *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
-   *   <li>degraded -&gt; degraded: retain participant execution timing for attribution.</li>
+   *   <li>degraded -&gt; degraded: keep participant execution timing needed for the calculation.</li>
    *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
    * </ul>
    * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
    * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. Helix-only
-   * latency follows the timed replica activation that restores the minimum, excluding execution on
-   * that recovery path. Parallel work must not hide controller delay. Ambiguous or incomplete
-   * histories retain the negative sentinel rather than reporting healthy zero.
+   * latency uses the replica that brings the active count back to the minimum and excludes
+   * participant execution on its recovery path. Work on other replicas must not hide controller
+   * delay. If the data cannot determine the path, pass -1 so the monitor skips the latency sample.
    *
    * @param cache cluster data cache
    * @param clusterStatusMonitor monitor object
@@ -325,7 +325,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       record.invalidateAttribution("partition transition snapshot is stale");
       return;
     }
-    // Only relevant transition changes advance this sequence, not unrelated pipeline runs.
+    // Count changes to this recovery's data, not unrelated pipeline runs.
     record.observeSequence(sequence);
     if (record.isAttributionInvalid()) {
       return;

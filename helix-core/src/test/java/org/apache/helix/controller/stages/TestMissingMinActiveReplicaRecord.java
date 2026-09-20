@@ -60,8 +60,8 @@ public class TestMissingMinActiveReplicaRecord {
     record.observeParticipant("first-repair", "session", "OFFLINE", null, -1L, -1L);
     record.observeParticipant("second-repair", "session", "OFFLINE", null, -1L, -1L);
 
-    // Both repair replicas are required. Controller dispatch takes 800 ms for the second
-    // replica while the first is executing; that execution must not erase controller delay.
+    // Both replicas must recover. Helix spends 800 ms dispatching the second while the first
+    // executes. The metric must retain those 800 ms of Helix delay.
     record.observeSequence(2L);
     record.observeParticipant("first-repair", "session", "SLAVE", "OFFLINE", 1000L, 1900L);
     record.observeParticipant("second-repair", "session", "SLAVE", "OFFLINE", 1800L, 2000L);

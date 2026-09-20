@@ -126,7 +126,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   private void runTimedPipeline(Map<String, CurrentState> states, CacheInject inject)
       throws Exception {
     prepareTimedPipeline(states, inject);
-    // Propagate reporting failures instead of BaseStageTest.runStage swallowing them.
+    // Run reporting directly so an error fails the test instead of being caught by the helper.
     new TopStateHandoffReportStage().execute(event);
   }
 
@@ -434,7 +434,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     setExecution(failed, 1, "OFFLINE", start + 1000L, start + 2000L);
     runTimedPipeline(failed, null);
 
-    // A pipeline snapshot that the async reporting worker did not observe.
+    // The reporting worker skips this unchanged set of states.
     runStage(event, new CurrentStateComputationStage());
 
     Map<String, CurrentState> recovered = timedStates(statesOf("MASTER", "SLAVE", "OFFLINE"), start);

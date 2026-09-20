@@ -40,11 +40,11 @@ import org.apache.helix.model.StateModelDefinition;
  * was first observed below the minimum so that, once the count is restored, the controller can
  * compute how long the partition remained degraded (its recovery duration).
  * <p>
- * Attribution follows the replica activation that restores the required active-replica count.
- * Only execution on that recovery path is deducted; work on a parallel replica must not hide
- * controller delay on the required path. Ambiguous paths remain unavailable.
- * As with existing handoff monitoring, attribution uses epoch-millisecond timestamps and assumes
- * synchronized participant/controller clocks. Inconsistent observations remain unavailable.
+ * Use the replica that brings the active count back to the minimum. Subtract participant execution
+ * on that replica's recovery path, not time spent on other replicas working in parallel.
+ * Skip the latency sample when the required path cannot be determined.
+ * Timestamps are in milliseconds and come from both controller and participant clocks.
+ * As with existing handoff monitoring, this assumes those clocks agree.
  */
 public class MissingMinActiveReplicaRecord {
   private static final int MAX_NEW_PARTICIPANTS = 64;
