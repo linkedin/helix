@@ -22,7 +22,9 @@ package org.apache.helix.controller.rebalancer.waged.model;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.model.Partition;
@@ -86,6 +88,41 @@ public class TestOptimalAssignment extends ClusterModelTestHelper {
     } catch (HelixException ex) {
       Assert.assertTrue(ex.getMessage().startsWith(
           "Cannot get the optimal resource assignment since a calculation failure is recorded."));
+    }
+  }
+
+  /**
+   * Skipped resources are carried forward by the caller, so the set has to survive the caller
+   * mutating the collection it handed over and must never be writable through the getter.
+   */
+  @Test
+  public void testSkippedResourcesAreDefensivelyCopied() {
+    OptimalAssignment assignment = new OptimalAssignment();
+    Assert.assertTrue(assignment.getSkippedResources().isEmpty(),
+        "A fresh assignment has skipped nothing");
+
+    assignment.setSkippedResources(null);
+    Assert.assertTrue(assignment.getSkippedResources().isEmpty(), "Null means nothing was skipped");
+
+    assignment.setSkippedResources(Collections.emptySet());
+    Assert.assertTrue(assignment.getSkippedResources().isEmpty(), "Empty means nothing was skipped");
+
+    Set<String> caller = new HashSet<>(Arrays.asList("Resource1", "Resource2"));
+    assignment.setSkippedResources(caller);
+    Assert.assertEquals(assignment.getSkippedResources(),
+        new HashSet<>(Arrays.asList("Resource1", "Resource2")));
+
+    // The caller still owns its set, so later edits must not reach the recorded one.
+    caller.add("Resource3");
+    caller.remove("Resource1");
+    Assert.assertEquals(assignment.getSkippedResources(),
+        new HashSet<>(Arrays.asList("Resource1", "Resource2")));
+
+    try {
+      assignment.getSkippedResources().add("Resource4");
+      Assert.fail("The returned set should not be writable");
+    } catch (UnsupportedOperationException expected) {
+      // expected
     }
   }
 }
