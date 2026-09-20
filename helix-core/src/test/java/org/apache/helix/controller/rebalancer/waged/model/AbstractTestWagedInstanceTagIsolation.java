@@ -49,6 +49,10 @@ import org.apache.helix.model.ResourceConfig;
  * <ul>
  *   <li>{@link TestWagedInstanceTagIsolationCore} covers isolation, atomic rollback,
  *       determinism and parity with the default global mode,</li>
+ *   <li>{@link TestWagedInstanceTagIsolationBehavior} covers the flag, an isolation outcome that
+ *       does not depend on input order, whole-tag carry-forward, every rebalance scope and the
+ *       untagged and overlapping-tag cases that must still fail exactly like the default global
+ *       mode,</li>
  *   <li>{@link TestWagedIsolationFeatureParity} switches on one WAGED placement feature at a
  *       time and checks each against the default global mode, with and without a broken
  *       clique.</li>
