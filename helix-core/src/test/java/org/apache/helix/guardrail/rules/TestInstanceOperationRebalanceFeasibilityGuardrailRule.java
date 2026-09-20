@@ -38,7 +38,9 @@ import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.doReturn;
@@ -344,8 +346,125 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // WAGED instance tag isolation: the what-if carries a clique it cannot place forward on its
+  // previous assignment instead of failing, so the assignment can still name the target.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testIsolationCarriedAssignmentStillNamingTheTargetIsInfeasible() {
+    // Draining instance0 leaves its clique unplaceable, so both simulations return the same carried
+    // assignment, which still names instance0. Its replica must stop counting once instance0 leaves
+    // the assignable pool.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(
+            RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"),
+            RESOURCE + "_1", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(true)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    ValidationResult result = rule.validate(context(dataAccessor,
+        InstanceConstants.InstanceOperation.EVACUATE, fixedProvider(carried, carried)));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getPartitionName(), RESOURCE + "_0");
+    Assert.assertTrue(violation.getMessage().contains("from 2 to 1"),
+        "message should report the replica drop: " + violation.getMessage());
+  }
+
+  @Test
+  public void testWithoutIsolationEveryNonDroppedReplicaCounts() {
+    // With isolation off every non DROPPED entry counts, on any instance. Stock never sees
+    // this pair: without isolation an unplaceable clique fails the what-if outright.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(false)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    Assert.assertTrue(rule.validate(context(dataAccessor,
+        InstanceConstants.InstanceOperation.EVACUATE, fixedProvider(carried, carried)))
+        .isFeasible());
+  }
+
+  @Test
+  public void testIsolationIgnoresInstancesUnusableInBothSimulations() {
+    // An instance already out of the assignable pool, or unknown to the simulation, counts in
+    // neither simulation, so it cannot turn into a loss.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance1", "MASTER", "instance3", "SLAVE", "unknown", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(true)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    doReturn(ImmutableList.of(assignableInstance(INSTANCE), assignableInstance("instance1"),
+        instance("instance3", InstanceConstants.InstanceOperation.EVACUATE))).when(dataAccessor)
+        .getChildValues(BUILDER.instanceConfigs(), true);
+    Assert.assertTrue(rule.validate(context(dataAccessor,
+        InstanceConstants.InstanceOperation.EVACUATE, fixedProvider(carried, carried)))
+        .isFeasible());
+  }
+
+  @DataProvider(name = "untaggedResources")
+  public Object[][] untaggedResources() {
+    // The tag, and whether it sits on the resource config rather than on the ideal state.
+    return new Object[][] {{null, false}, {null, true}, {"", false}, {"", true}};
+  }
+
+  /**
+   * With isolation on, a resource whose tag is the empty string can use every instance, like a
+   * resource with no tag, wherever the empty tag is set. Draining an instance that holds one of
+   * its carried replicas reports the same single loss as for the resource with no tag.
+   */
+  @Test(dataProvider = "untaggedResources")
+  public void testIsolationCountsAnEmptyTagLikeNoTag(String tag, boolean onResourceConfig) {
+    ValidationResult result = validateCarriedDrain(tag, onResourceConfig);
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getResourceName(), RESOURCE);
+    Assert.assertEquals(violation.getPartitionName(), RESOURCE + "_0");
+    Assert.assertTrue(violation.getMessage().contains("from 2 to 1"),
+        "message should report the replica drop: " + violation.getMessage());
+    Assert.assertEquals(violation.getMessage(),
+        validateCarriedDrain(null, false).getViolations().get(0).getMessage());
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
+
+  // Evacuates the target with isolation on while both simulations return the same carried
+  // assignment, which keeps a replica of the resource on the target.
+  private ValidationResult validateCarriedDrain(String tag, boolean onResourceConfig) {
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(true)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    IdealState idealState = wagedIdealState(RESOURCE);
+    ResourceConfig resourceConfig = new ResourceConfig(RESOURCE);
+    if (onResourceConfig) {
+      resourceConfig.getRecord()
+          .setSimpleField(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), tag);
+      doReturn(ImmutableList.of(resourceConfig)).when(dataAccessor)
+          .getChildValues(BUILDER.resourceConfigs(), true);
+    } else {
+      idealState.setInstanceGroupTag(tag);
+    }
+    doReturn(ImmutableList.of(idealState)).when(dataAccessor)
+        .getChildValues(BUILDER.idealStates(), true);
+    return rule.validate(context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE,
+        fixedProvider(carried, carried)));
+  }
+
+  private static ClusterConfig isolationClusterConfig(boolean isolation) {
+    ClusterConfig clusterConfig = enabledClusterConfig();
+    clusterConfig.setWagedInstanceTagIsolationEnabled(isolation);
+    return clusterConfig;
+  }
 
   private GuardrailContext context(HelixDataAccessor dataAccessor,
       InstanceConstants.InstanceOperation proposedOp, WagedAssignmentProvider provider) {
