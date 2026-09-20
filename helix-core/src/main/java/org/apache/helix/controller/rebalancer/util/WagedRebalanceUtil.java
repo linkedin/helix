@@ -23,13 +23,16 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.slf4j.Logger;
@@ -92,15 +95,120 @@ public class WagedRebalanceUtil {
           dropped.add(resource);
         }
       }
+      List<String> yielded =
+          resolveCarriedOverNodeReuse(newAssignment, skippedResources, previousAssignment,
+              carriedOver, dropped);
       LOG.warn(
           "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
               + "Carried the previous assignment forward for {}. Left out of this phase's result: "
               + "{}.", skippedResources.size(), clusterModel.getRebalanceScopeType(),
           clusterModel.getContext().getClusterName(), carriedOver, dropped);
+      if (!yielded.isEmpty()) {
+        LOG.warn(
+            "Instance tag isolation also carried {} forward in cluster {} because a previously "
+                + "skipped group's assignment still names an instance that these resources were "
+                + "just assigned to. This happens when an instance is retagged out of a group while "
+                + "that group cannot be placed. Only the groups that actually collide give up their "
+                + "freshly calculated assignment; every other group keeps its own.", yielded,
+            clusterModel.getContext().getClusterName());
+      }
     }
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
     return newAssignment;
+  }
+
+  /**
+   * Carry a group forward as well when it was just assigned an instance that an already carried
+   * over group still names, and repeat until nothing collides.
+   *
+   * The share block partition in InstanceTagIsolation proves that no other group can reach the
+   * failing group's nodes, but it reasons about the tags instances carry now, while the carried
+   * over assignment reflects where replicas were placed before. If an instance is retagged out of a
+   * group while that group is broken, the group's previous assignment still names it, and the group
+   * that now owns it would be free to place there. Persisting both would overcommit the instance,
+   * which is exactly what the partition exists to prevent.
+   *
+   * The colliding group is therefore carried forward too, which is the same mechanism the mode
+   * already uses, rather than failing the whole rebalance. Its previous assignment predates the
+   * retag, so it cannot name the disputed instance, and the collision is resolved by giving up one
+   * group's fresh result instead of every group's. Groups that do not collide keep their freshly
+   * calculated assignment and keep converging.
+   *
+   * Carrying one group forward can expose a second collision, when another instance moved between
+   * two other groups, so the check repeats. Every round moves at least one more resource into the
+   * carried over set and never moves one back, so it terminates. In the worst case every group ends
+   * up carried forward, which is exactly the cluster wide fallback that would have happened anyway.
+   *
+   * This compares emitted instance names rather than tags, so it also covers divergences the
+   * partition cannot see, such as a node whose capacity or operation changed since the carried over
+   * assignment was computed. A shared name is treated as a conflict even when the instance had room
+   * for both, which is deliberately conservative: in the tag partitioned deployments this mode is
+   * for, an instance is owned by one group, so a shared name is a real overcommit. If a topology
+   * shares instances widely enough for that to cascade, the worst case is that every group ends up
+   * carried forward, which reproduces the previous assignment exactly and therefore persists
+   * nothing.
+   *
+   * Carrying groups forward is only sound because every carried entry is drawn from the same
+   * previousAssignment map, which is one internally coherent snapshot that was feasible when it was
+   * written. Two carried entries therefore cannot overcommit each other, and only carried against
+   * fresh has to be resolved here. A caller that passed a stitched together previous assignment
+   * would break that invariant.
+   *
+   * @return the resources that gave up their freshly calculated assignment, in the order they did.
+   */
+  private static List<String> resolveCarriedOverNodeReuse(
+      Map<String, ResourceAssignment> assignment, Set<String> skippedResources,
+      Map<String, ResourceAssignment> previousAssignment, List<String> carriedOver,
+      List<String> dropped) {
+    Set<String> carriedResources = new LinkedHashSet<>(skippedResources);
+    List<String> yielded = new ArrayList<>();
+    String colliding;
+    while ((colliding = findResourceReusingCarriedNode(assignment, carriedResources)) != null) {
+      if (carryForwardOrDrop(assignment, colliding, previousAssignment)) {
+        carriedOver.add(colliding);
+      } else {
+        dropped.add(colliding);
+      }
+      carriedResources.add(colliding);
+      yielded.add(colliding);
+    }
+    return yielded;
+  }
+
+  /**
+   * @return the first freshly calculated resource that names an instance some carried over resource
+   *         also names, or null when nothing collides.
+   */
+  private static String findResourceReusingCarriedNode(Map<String, ResourceAssignment> assignment,
+      Set<String> carriedResources) {
+    Set<String> carriedInstances = new TreeSet<>();
+    for (String resource : carriedResources) {
+      ResourceAssignment carried = assignment.get(resource);
+      if (carried != null) {
+        carriedInstances.addAll(instancesOf(carried));
+      }
+    }
+    if (carriedInstances.isEmpty()) {
+      return null;
+    }
+    // Sorted so that a cluster hitting several conflicts at once always resolves them in the same
+    // order, which keeps the emitted assignment stable across controller failovers.
+    for (String resource : new TreeSet<>(assignment.keySet())) {
+      if (carriedResources.contains(resource)) {
+        continue;
+      }
+      ResourceAssignment fresh = assignment.get(resource);
+      if (fresh == null) {
+        continue;
+      }
+      for (String instance : instancesOf(fresh)) {
+        if (carriedInstances.contains(instance)) {
+          return resource;
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -120,6 +228,14 @@ public class WagedRebalanceUtil {
     // Deep copy so the result never aliases the caller's previous assignment objects.
     assignment.put(resource, new ResourceAssignment(previous.getRecord()));
     return true;
+  }
+
+  private static Set<String> instancesOf(ResourceAssignment resourceAssignment) {
+    Set<String> instances = new TreeSet<>();
+    for (Partition partition : resourceAssignment.getMappedPartitions()) {
+      instances.addAll(resourceAssignment.getReplicaMap(partition).keySet());
+    }
+    return instances;
   }
 
   /**
