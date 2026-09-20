@@ -50,7 +50,10 @@ import org.apache.helix.model.ResourceConfig;
  *   <li>{@link TestWagedInstanceTagIsolationCore} covers isolation, atomic rollback,
  *       determinism and parity with the default global mode,</li>
  *   <li>{@link TestWagedInstanceTagIsolationCapacity} covers cluster wide capacity deficit
- *       attribution.</li>
+ *       attribution,</li>
+ *   <li>{@link TestWagedIsolationFeatureParity} switches on one WAGED placement feature at a
+ *       time and checks each against the default global mode, with and without a broken
+ *       clique.</li>
  * </ul>
  *
  * The cluster-model builders, assertion helpers and constants the subclasses share live here.
