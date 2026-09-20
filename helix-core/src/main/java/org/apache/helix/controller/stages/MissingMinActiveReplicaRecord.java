@@ -195,8 +195,8 @@ public class MissingMinActiveReplicaRecord {
     if (activeStates.contains(state)) {
       path.activeAt = executionEnd;
       path.executionAtActivation = path.executionDuration;
-    } else {
-      path.lastInactiveStepEnd = executionEnd;
+    } else if (path.firstInactiveStepEnd < 0) {
+      path.firstInactiveStepEnd = executionEnd;
     }
   }
 
@@ -238,8 +238,8 @@ public class MissingMinActiveReplicaRecord {
         continue;
       }
       for (RecoveryPath other : recoveryPaths.values()) {
-        if (other != path && other.lastInactiveStepEnd >= startTimeStamp
-            && other.lastInactiveStepEnd <= restoredAt) {
+        if (other != path && other.firstInactiveStepEnd >= startTimeStamp
+            && other.firstInactiveStepEnd <= restoredAt) {
           invalidateAttribution("cross-participant retry dependencies are unavailable");
           return TopStateHandoffReportStage.TIMESTAMP_NOT_RECORDED;
         }
@@ -275,7 +275,7 @@ public class MissingMinActiveReplicaRecord {
     private long executionDuration;
     private long activeAt = -1L;
     private long executionAtActivation;
-    private long lastInactiveStepEnd = -1L;
+    private long firstInactiveStepEnd = -1L;
 
     private RecoveryPath(boolean initiallyActive) {
       this.initiallyActive = initiallyActive;

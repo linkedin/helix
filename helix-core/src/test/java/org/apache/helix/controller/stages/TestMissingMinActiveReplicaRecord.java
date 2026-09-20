@@ -122,6 +122,20 @@ public class TestMissingMinActiveReplicaRecord {
   }
 
   @Test
+  public void testLaterResetDoesNotEraseEarlierCrossParticipantFailure() {
+    MissingMinActiveReplicaRecord record = recordFor(2, "one", "two");
+    record.observeParticipant("one", "session", "ERROR", "OFFLINE", 1100L, 1200L);
+    record.observeSequence(3L);
+    record.observeParticipant("one", "session", "OFFLINE", "ERROR", 1700L, 2200L);
+    record.observeParticipant("two", "session", "SLAVE", "OFFLINE", 1500L, 2000L);
+
+    Assert.assertEquals(record.getHelixLatency(2300L), -1L,
+        "A later reset cannot remove an earlier ambiguous recovery dependency");
+    Assert.assertEquals(record.getUnavailableReason(),
+        "cross-participant retry dependencies are unavailable");
+  }
+
+  @Test
   public void testAdditionalActiveReplicaLossIsUnavailable() {
     MissingMinActiveReplicaRecord record = recordFor(2, "one", "two");
     record.observeParticipant("healthy", "session", "ERROR", "MASTER", 1100L, 1200L);
