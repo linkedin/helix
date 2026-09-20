@@ -134,10 +134,10 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         clusterModel.getAssignableReplicaMap().values().stream().flatMap(Collection::stream)
             .collect(Collectors.toList());
     // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
-    InstanceTagIsolation isolation =
-        new InstanceTagIsolation(clusterModel, allReplicas, nodes);
+    InstanceTagIsolation isolation = new InstanceTagIsolation(clusterModel, nodes);
 
-    Map<String, Float> positiveEstimateClusterRemainCap = computeScoringCapacities(clusterModel);
+    Map<String, Float> positiveEstimateClusterRemainCap =
+        computeScoringCapacities(clusterModel, isolation);
 
     // Create a wrapper for each AssignableReplica.
     List<AssignableReplicaWithScore> toBeAssignedReplicas =
@@ -191,9 +191,12 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
    * for every key with a nonzero cluster capacity, to avoid a divide by zero.
    *
    * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
+   *         When instance tag isolation is on, a deficit that is really caused by individual
+   *         cliques is attributed to them instead, and only a genuine cluster wide shortfall
+   *         throws.
    */
-  private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel)
-      throws HelixRebalanceException {
+  private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
+      InstanceTagIsolation isolation) throws HelixRebalanceException {
     Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
     for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
         .getEstimateUtilizationMap().entrySet()) {
@@ -203,11 +206,19 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
         long remainingCapacity = clusterRemainingCap.getValue();
         long totalUsage = totalCapacity - remainingCapacity;
-        throw new HelixRebalanceException(String
+        HelixRebalanceException capacityDeficit = new HelixRebalanceException(String
             .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
                 clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
             HelixRebalanceException.Type.FAILED_TO_CALCULATE,
             HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+        // This cluster wide sum is tag blind, so one wildly oversubscribed clique can drag it
+        // negative while every other clique still fits comfortably on its own nodes.
+        Map<String, Float> residual =
+            isolation.absorbCapacityDeficit(capacityDeficit, DIV_GUARD);
+        if (residual == null) {
+          throw capacityDeficit;
+        }
+        return residual;
       }
       // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
       positiveEstimateClusterRemainCap.put(capacityKey,
