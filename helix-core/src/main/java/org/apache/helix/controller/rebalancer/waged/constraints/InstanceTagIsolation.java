@@ -164,6 +164,105 @@ class InstanceTagIsolation {
   }
 
   /**
+   * Try to tolerate a replica that could not be placed by rolling its whole group back and skipping
+   * the rest of it.
+   *
+   * @return true when the group was isolated and the caller should continue with the next replica,
+   *         false when the caller must throw and fail the whole rebalance as it does by default.
+   */
+  boolean tryIsolate(AssignableReplica replica, HelixRebalanceException failure) {
+    if (!_enabled) {
+      return false;
+    }
+    String group = groupKey(replica);
+    // Start the next group's diagnosis from a clean sink. The caller has already read the current
+    // one to build the failure message above.
+    _failureSink = new OptimalAssignment();
+    // Carry over the failing group together with every group it shares a node with, so the
+    // capacity the whole set occupies is off limits to everything still being calculated.
+    Set<String> closure = blockOf(group);
+    // Isolation is pointless only when the cluster holds no second block to recalculate around,
+    // which is what an untagged resource or a tag bridging instance produces by merging everything
+    // into one. Measured over every block the cluster's nodes form rather than over the groups that
+    // happen to have outstanding replicas this run: a partial rebalance can carry work for a single
+    // clique, and comparing against that would read as "shares nodes with every other group" on a
+    // cluster of twenty independent cliques and fail them all.
+    if (attributionBlocks().size() < 2) {
+      LOG.warn(
+          "Instance tag isolation cannot isolate group {} in cluster {}: it shares nodes with "
+              + "every other group, so there is nothing left to recalculate around it. Failing "
+              + "the whole rebalance exactly like the default global mode.", group,
+          _clusterModel.getContext().getClusterName());
+      return false;
+    }
+    int released = 0;
+    // Releasing in reverse order restores the node capacities and the fault zone map to exactly the
+    // state they had before this group's first replica was placed.
+    for (String member : closure) {
+      List<Placement> placements = _placementsByGroup.remove(member);
+      if (placements != null) {
+        for (int i = placements.size() - 1; i >= 0; i--) {
+          Placement placement = placements.get(i);
+          _clusterModel.release(placement._resourceName, placement._partitionName, placement._state,
+              placement._instanceName);
+          _skippedResources.add(placement._resourceName);
+          released++;
+        }
+      }
+      _failedGroups.add(member);
+    }
+    _skippedResources.add(replica.getResourceName());
+    if (_firstFailure == null) {
+      _firstFailure = failure;
+    }
+    LOG.warn(
+        "Instance tag isolation: rolling back and skipping group {} together with {} group(s) it "
+            + "shares nodes with, during the {} rebalance of cluster {}. {} replica(s) already "
+            + "placed were released. Skipped set: {}. Every other group keeps its newly calculated "
+            + "assignment.", group, closure.size() - 1, _clusterModel.getRebalanceScopeType(),
+        _clusterModel.getContext().getClusterName(), released, closure, failure);
+    return true;
+  }
+
+  /**
+   * Publish the isolation outcome onto the assignment the algorithm is about to return.
+   *
+   * @throws HelixRebalanceException when every independent block of the cluster failed, so that the
+   *         caller's existing failure handling, metrics and last known good fallback all still
+   *         apply.
+   */
+  void finish(OptimalAssignment optimalAssignment) throws HelixRebalanceException {
+    if (!_enabled || _failedGroups.isEmpty()) {
+      return;
+    }
+    // "Nothing could be placed anywhere" has to be judged over the whole cluster, not over the
+    // groups that happen to carry work in this run. Only a full rebalance sees every group; the
+    // partial, emergency and delayed overwrite scopes carry just the replicas that still need
+    // moving, which on a broken clique is frequently that clique alone. Counting groups there reads
+    // as "every group failed" and throws, the caller discards the entire pipeline result and falls
+    // back to the last known good assignment, and every healthy clique is frozen again. That is the
+    // exact freeze this mode exists to prevent, and it is why the count is taken over the blocks
+    // the cluster's nodes form instead.
+    List<Set<String>> blocks = attributionBlocks();
+    long failedBlocks =
+        blocks.stream().filter(block -> block.stream().anyMatch(_failedGroups::contains)).count();
+    if (blocks.isEmpty() || failedBlocks >= blocks.size()) {
+      // Every independent part of the cluster failed, so behave exactly like the default global
+      // mode. A block holding a group that never had work still counts as failed when any of its
+      // groups failed, so padding the universe cannot hide a genuine cluster wide failure.
+      throw _firstFailure;
+    }
+    LOG.warn(
+        "Instance tag isolation skipped {} of {} group(s) ({} resource(s)) in {} of {} independent "
+            + "block(s) during the {} rebalance of cluster {}. Skipped groups: {}.",
+        _failedGroups.size(), Math.max(_allGroups.size(), tagByGroup().size()),
+        _skippedResources.size(), failedBlocks, blocks.size(),
+        _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+        _failedGroups);
+    optimalAssignment.setSkippedResources(_skippedResources);
+  }
+
+  /**
    * The isolation unit of a replica.
    *
    * A resource pinned to an instance group tag can only ever be placed on that tag's nodes, so the
