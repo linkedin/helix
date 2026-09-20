@@ -60,6 +60,7 @@ public class CurrentStateOutput {
   private final Map<String, Map<Partition, Map<String, String>>> _infoMap;
   private final Map<String, String> _resourceStateModelMap;
   private final Map<String, CurrentState> _curStateMetaMap;
+  private long _recoveryObservationSequence = -1L;
 
   public CurrentStateOutput() {
     _currentStateMap = new HashMap<>();
@@ -71,6 +72,14 @@ public class CurrentStateOutput {
     _curStateMetaMap = new HashMap<>();
     _requestedStateMap = new HashMap<>();
     _infoMap = new HashMap<>();
+  }
+
+  void setRecoveryObservationSequence(long sequence) {
+    _recoveryObservationSequence = sequence;
+  }
+
+  long getRecoveryObservationSequence() {
+    return _recoveryObservationSequence;
   }
 
   public void setResourceStateModelDef(String resourceName, String stateModelDefName) {

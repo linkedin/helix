@@ -106,7 +106,10 @@ public class TestResourceControllerDataProvider {
     Assert.assertEquals(dataProvider.getMissingMinActiveReplicaMap().size(), 1);
 
     // clearMonitoringRecords wipes the recovery-tracking map.
+    long observation = dataProvider.nextRecoveryObservationSequence();
     dataProvider.clearMonitoringRecords();
     Assert.assertTrue(dataProvider.getMissingMinActiveReplicaMap().isEmpty());
+    Assert.assertTrue(dataProvider.getRecoveryObservationSequence() > observation,
+        "Resetting monitoring must invalidate earlier recovery snapshots");
   }
 }

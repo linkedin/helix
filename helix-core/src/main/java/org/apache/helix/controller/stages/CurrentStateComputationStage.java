@@ -92,6 +92,11 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
     final CurrentStateOutput currentStateOutput = new CurrentStateOutput();
     final CurrentStateOutput currentStateExcludingUnknown = new CurrentStateOutput();
+    if (cache instanceof ResourceControllerDataProvider) {
+      long sequence = ((ResourceControllerDataProvider) cache).nextRecoveryObservationSequence();
+      currentStateOutput.setRecoveryObservationSequence(sequence);
+      currentStateExcludingUnknown.setRecoveryObservationSequence(sequence);
+    }
 
     for (LiveInstance instance : liveInstances.values()) {
       String instanceName = instance.getInstanceName();

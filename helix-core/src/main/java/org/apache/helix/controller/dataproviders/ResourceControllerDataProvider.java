@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -98,6 +99,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // a partition stays degraded (its recovery duration). Persists across pipeline runs so a start
   // recorded in one run resolves to a duration in a later run, mirroring _missingTopStateMap.
   private Map<String, Map<String, MissingMinActiveReplicaRecord>> _missingMinActiveReplicaMap;
+  private final AtomicLong _recoveryObservationSequence = new AtomicLong();
 
   // Maintain a set of all ChangeTypes for change detection
   private Set<HelixConstants.ChangeType> _refreshedChangeTypes;
@@ -406,6 +408,14 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     return _missingMinActiveReplicaMap;
   }
 
+  public long nextRecoveryObservationSequence() {
+    return _recoveryObservationSequence.incrementAndGet();
+  }
+
+  public long getRecoveryObservationSequence() {
+    return _recoveryObservationSequence.get();
+  }
+
   public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
     return _inProgressHandoffMap;
   }
@@ -501,6 +511,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   }
 
   public void clearMonitoringRecords() {
+    _recoveryObservationSequence.incrementAndGet();
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
     _missingMinActiveReplicaMap.clear();
