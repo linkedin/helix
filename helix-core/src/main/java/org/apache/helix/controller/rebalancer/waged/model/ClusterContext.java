@@ -78,6 +78,7 @@ public class ClusterContext {
   // instance-group-tag group and every group connected to it through shared nodes, instead of
   // failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
+  private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -108,6 +109,10 @@ public class ClusterContext {
         .entrySet()) {
       int replicas = entry.getValue().size();
       totalReplicas += replicas;
+      if (_instanceTagIsolationEnabled) {
+        _resourceInstanceGroupTags.put(entry.getKey(),
+            entry.getValue().get(0).getResourceInstanceGroupTag());
+      }
 
       int replicaCnt = Math.max(1, estimateAvgReplicaCount(replicas, instanceCount));
       _estimatedMaxPartitionByResource.put(entry.getKey(), replicaCnt);
@@ -166,6 +171,14 @@ public class ClusterContext {
    */
   public boolean isInstanceTagIsolationEnabled() {
     return _instanceTagIsolationEnabled;
+  }
+
+  /**
+   * Resource tags for the full model, including resources whose replicas are already allocated.
+   * Kept only while instance tag isolation is enabled, and empty otherwise.
+   */
+  public Map<String, String> getResourceInstanceGroupTags() {
+    return Collections.unmodifiableMap(_resourceInstanceGroupTags);
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {
