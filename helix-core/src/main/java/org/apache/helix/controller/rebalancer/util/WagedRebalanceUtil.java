@@ -21,7 +21,9 @@ package org.apache.helix.controller.rebalancer.util;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -75,12 +77,13 @@ public class WagedRebalanceUtil {
       throws HelixRebalanceException {
     long startTime = System.currentTimeMillis();
     LOG.info("Start calculating for an assignment with algorithm {}",
-        algorithm.getClass().getSimpleName());
+        algorithm.getName());
     OptimalAssignment optimalAssignment = algorithm.calculate(clusterModel);
     Map<String, ResourceAssignment> newAssignment =
         optimalAssignment.getOptimalResourceAssignment();
     Set<String> skippedResources = optimalAssignment.getSkippedResources();
     if (!skippedResources.isEmpty()) {
+      skippedResources = new HashSet<>(skippedResources);
       // A skipped resource may still have a partial entry in the result: an incremental baseline
       // and the partial, emergency and delayed overwrite phases pre-load the nodes with the
       // replicas that were already allocated, and updateAssignments emits whatever sits on the
@@ -99,6 +102,7 @@ public class WagedRebalanceUtil {
       List<String> yielded =
           resolveCarriedOverNodeReuse(newAssignment, skippedResources, previousAssignment,
               carriedOver, dropped);
+      skippedResources.addAll(yielded);
       LOG.warn(
           "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
               + "Carried the previous assignment forward for {}. Left out of this phase's result: "
@@ -106,17 +110,21 @@ public class WagedRebalanceUtil {
           clusterModel.getContext().getClusterName(), carriedOver, dropped);
       if (!yielded.isEmpty()) {
         LOG.warn(
-            "Instance tag isolation also carried {} forward in cluster {} because a previously "
-                + "skipped resource's assignment still names an instance that these resources were "
-                + "just assigned to. This happens when an instance is retagged out of a group "
-                + "while that group is skipped. Only the resources that actually collide give up "
-                + "their freshly calculated assignment; every other resource keeps its "
-                + "own.", yielded,
+            "Instance tag isolation also carried {} forward during the {} rebalance of cluster {} "
+                + "because a previously skipped resource's assignment still names an instance that "
+                + "these resources were just assigned to. This happens when an instance is "
+                + "retagged out of a group while that group is skipped. Only the resources that "
+                + "actually collide give up their freshly calculated assignment; every other "
+                + "resource keeps its own.", yielded,
+            clusterModel.getRebalanceScopeType(),
             clusterModel.getContext().getClusterName());
       }
     }
+    algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
+        clusterModel.getAssignableReplicaMap().keySet(),
+        Collections.unmodifiableSet(skippedResources));
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
-        algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
+        algorithm.getName(), System.currentTimeMillis() - startTime);
     return newAssignment;
   }
 
