@@ -87,6 +87,7 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Message;
@@ -516,6 +517,14 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
+  }
+
+  @Override
+  public InstanceReplicaStatus getInstanceReplicaStatus(String clusterName,
+      String instanceName) {
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
+    return InstanceReplicaStatusCalculator.calculate(accessor, _baseDataAccessor, clusterName,
+        instanceName);
   }
 
   /**
