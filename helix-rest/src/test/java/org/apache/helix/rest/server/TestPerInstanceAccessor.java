@@ -46,6 +46,7 @@ import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.integration.manager.ClusterControllerManager;
@@ -594,11 +595,13 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   @Test(dependsOnMethods = "testDeleteInstance")
   public void updateInstance() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    // Disable instance
+    // Disable instance. CLUSTER_NAME's fixture sets minActiveReplicas (3) above the replica count
+    // (2), so the always-on disable min-active guard rail would block a plain disable; this test
+    // only exercises the disable/enable write path, so bypass the guard rail with force=true.
     Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
 
     new JerseyUriRequestBuilder(
-        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=reason1")
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=reason1&force=true")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
 
     Assert.assertFalse(
@@ -623,8 +626,8 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
 
-    // disable instance with no reason input
-    new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable")
+    // disable instance with no reason input (force=true bypasses the disable min-active guard rail)
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable&force=true")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
 
     Assert.assertFalse(
@@ -1883,6 +1886,125 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     dropParticipant(CLUSTER_NAME, instanceToKill);
     _bestPossibleClusterVerifier.verifyByPolling();
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the "disable" instance command. A plain instance disable drains the
+   * instance's replicas but historically ran no availability check -- unlike EVACUATE, which is
+   * guarded. This stands up a self-contained MasterSlave cluster whose minActiveReplicas equals the
+   * replica count, so every partition sits on all instances at exactly its minimum: disabling any
+   * one instance would push each hosted partition below minActiveReplicas, a deterministic violation
+   * the always-on guard rail must catch before writing HELIX_ENABLED=false. It verifies: (1) the
+   * disable is blocked (400 + verdict, instance stays enabled); (2) dryRun returns a 200 verdict and
+   * writes nothing; (3) force bypasses the guard rail and actually disables; and (4) once
+   * minActiveReplicas is lowered so the drain is safe, a plain disable passes and is written.
+   */
+  @Test(dependsOnMethods = "setInstanceOperationRebalanceFeasibilityGuardrail")
+  public void disableInstanceMinActiveReplicaGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterDisableMinActive";
+    try {
+      verifyDisableInstanceMinActiveReplicaGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyDisableInstanceMinActiveReplicaGuardrail(String cluster) throws Exception {
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+
+    _gSetupTool.addCluster(cluster, true);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13200 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    String resource = "TestDB_MinActive";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+        IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    // minActiveReplicas == replica: every partition sits on all instances at exactly its minimum,
+    // so dropping any one instance underflows minActiveReplicas on the remaining siblings.
+    idealState.setMinActiveReplicas(replica);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before exercising the guard rail");
+    }
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. Blocked: disabling target would drop every hosted partition below minActiveReplicas.
+    Response blocked = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+    Assert.assertFalse(blockedVerdict.get("feasible").asBoolean(),
+        "a disable that underflows minActiveReplicas must be infeasible");
+    Assert.assertTrue(
+        blockedVerdict.toString().contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "verdict should carry the rule id, but was: " + blockedVerdict);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "a blocked disable must not write HELIX_ENABLED=false");
+
+    // 2. dryRun: always 200 with the verdict, still writes nothing.
+    Response dryRun = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+    Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean(),
+        "dryRun verdict should report the disable as infeasible");
+    Assert.assertTrue(
+        dryRunVerdict.toString().contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "dryRun verdict should carry the rule id, but was: " + dryRunVerdict);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the guard rail and actually disables the instance.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test&force=true")
+        .format(cluster, target).post(this, entity);
+    Assert.assertFalse(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "force=true should bypass the guard rail and write HELIX_ENABLED=false");
+
+    // Restore the instance and lower minActiveReplicas so a drain is safe, then reconverge.
+    _gSetupTool.getClusterManagementTool().enableInstance(cluster, target, true);
+    idealState = _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(1);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should reconverge after lowering minActiveReplicas");
+    }
+
+    // 4. Feasible: with minActiveReplicas=1, disabling still leaves enough active replicas -> allowed.
+    String feasibleTarget = instances.get(1);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test")
+        .format(cluster, feasibleTarget).post(this, entity);
+    Assert.assertFalse(
+        _configAccessor.getInstanceConfig(cluster, feasibleTarget).getInstanceEnabled(),
+        "a disable that respects minActiveReplicas should pass and be written");
   }
 
   private Map<String, ExternalView> getEVs() {
