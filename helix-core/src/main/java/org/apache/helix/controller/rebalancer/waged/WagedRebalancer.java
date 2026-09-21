@@ -299,6 +299,28 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
           this::reportHardConstraintFailure);
       ((ConstraintBasedAlgorithm) algorithm).setBlockingSnapshotReporter(
           this::reportHardConstraintBlockingSnapshot);
+      ((ConstraintBasedAlgorithm) algorithm).setIsolationSnapshotReporter(
+          this::reportInstanceTagIsolationSnapshot);
+    }
+  }
+
+  /**
+   * Publish how many resources instance tag isolation is currently skipping.
+   *
+   * Only the global baseline is reported. It is the one scope whose replica list covers every
+   * resource, so its count is the true cluster wide number of isolated resources rather than a
+   * subset artifact of whatever the partial phase happened to carry, and routing a single owning
+   * phase keeps concurrent phases from clobbering each other's value.
+   */
+  void reportInstanceTagIsolationSnapshot(ClusterModel.RebalanceScopeType scope,
+      Set<String> skippedResources) {
+    if (scope != ClusterModel.RebalanceScopeType.GLOBAL_BASELINE) {
+      return;
+    }
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedInstanceTagIsolationSkippedResources(
+          skippedResources == null ? 0L : skippedResources.size());
     }
   }
 
