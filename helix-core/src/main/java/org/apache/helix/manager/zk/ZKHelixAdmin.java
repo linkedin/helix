@@ -1693,8 +1693,9 @@ public class ZKHelixAdmin implements HelixAdmin {
     createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
-    createPersistent(path, true, acl);
-    _zkClient.writeData(path, new ZNRecord(clusterName));
+    String parentPath = path.substring(0, path.lastIndexOf('/'));
+    createPersistent(parentPath, true, acl);
+    createPersistent(path, new ZNRecord(clusterName), acl);
     path = PropertyPathBuilder.instanceConfig(clusterName);
     createPersistent(path, false, acl);
     path = PropertyPathBuilder.resourceConfig(clusterName);

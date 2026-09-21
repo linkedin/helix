@@ -119,15 +119,26 @@ public interface HelixAdmin {
    *            metadata node created underneath it by this call. If null or empty, the default ACL
    *            of the underlying metadata store client is used, making this equivalent to
    *            {@link #addCluster(String, boolean)}. ZooKeeper does not propagate ACLs to children,
-   *            so nodes created after this call (resources, instances, live instances, ...) are
-   *            NOT covered and keep the client default ACL. The ACL is only applied when the nodes
-   *            are created by this call; the ACL of a pre-existing cluster is left untouched unless
-   *            recreateIfExists is true.
+   *            so nodes created after this call are NOT covered and keep the client default ACL.
+   *            This includes per-instance control-plane nodes such as
+   *            INSTANCES/{instance}/MESSAGES (state transition commands) and
+   *            INSTANCES/{instance}/CURRENTSTATES (reported partition state), not just resources,
+   *            live instances, and other data nodes; an open MESSAGES node lets an unauthenticated
+   *            client inject a state transition that a participant will execute. The ACL is only
+   *            applied when the nodes are created by this call; the ACL of a pre-existing cluster
+   *            is left untouched unless recreateIfExists is true.
    *            <p>
-   *            The supplied ACL must grant the calling client CREATE on the root, otherwise cluster
-   *            creation fails part way through and leaves an incomplete cluster behind. Deployments
-   *            running a server-side ACL provider that assigns ACLs on create may ignore this
-   *            argument entirely.
+   *            Creating the cluster root requires {@code CREATE} on its parent. The supplied ACL
+   *            must grant the calling client {@code CREATE} to create metadata underneath it.
+   *            Initial data is supplied during creation, so {@code WRITE} is not required for
+   *            initialization, but is needed for later updates. Recreating an existing cluster
+   *            requires {@code READ} to traverse it and {@code DELETE} on the relevant parent nodes,
+   *            as granted by the existing ACLs. Failed creation may leave an incomplete cluster.
+   *            Changing a node's ACL via {@code setACL} requires {@code ADMIN} on that node; the
+   *            creator has no implicit {@code ADMIN} privilege. Grant it to a trusted identity if
+   *            in-place ACL rotation is required. Deployments running a server-side ACL provider
+   *            that assigns ACLs on create may ignore this argument entirely; confirm the effective
+   *            ACLs with whoever operates the ensemble before relying on them.
    * @return true if successfully created, or if cluster already exists
    * @throws UnsupportedOperationException if a non-empty ACL is supplied and the implementation
    *         does not support custom ACLs

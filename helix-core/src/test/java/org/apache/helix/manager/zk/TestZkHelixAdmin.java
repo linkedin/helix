@@ -386,7 +386,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     // the ACL is applied to the cluster root
     Assert.assertEquals(getAcl(rootPath), acl);
-    // cluster config content is still written after the root is created with the custom ACL
+    // initial cluster config content is present with the custom ACL
     Assert.assertNotNull(_gZkClient.readData(PropertyPathBuilder.clusterConfig(clusterName), true));
 
     // every cluster metadata node created by addCluster carries the ACL as well. ZooKeeper has no
@@ -417,6 +417,42 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     deleteCluster(clusterName);
     System.out.println("END testAddClusterWithAcl at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testAddClusterWithoutWritePermission() throws Exception {
+    final String clusterName = getShortClassName() + "_withoutWrite";
+    String rootPath = "/" + clusterName;
+    if (_gZkClient.exists(rootPath)) {
+      _gZkClient.deleteRecursively(rootPath);
+    }
+    List<ACL> acl = Collections.singletonList(new ACL(
+        ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.DELETE,
+        ZooDefs.Ids.ANYONE_ID_UNSAFE));
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+
+    try {
+      Assert.assertTrue(tool.addCluster(clusterName, false, acl));
+      Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+      String configPath = PropertyPathBuilder.clusterConfig(clusterName);
+      ZNRecord config = _gZkClient.readData(configPath);
+      Assert.assertEquals(config, new ZNRecord(clusterName));
+      for (String path : new String[] {
+          rootPath, rootPath + "/CONFIGS", rootPath + "/CONFIGS/CLUSTER", configPath
+      }) {
+        Assert.assertEquals(getAcl(path), acl, "unexpected ACL on " + path);
+      }
+      try {
+        rawZooKeeper(_gZkClient).setData(configPath, new byte[0], -1);
+        Assert.fail("Expected updating the cluster config without WRITE to be rejected");
+      } catch (KeeperException.NoAuthException expected) {
+        // expected
+      }
+    } finally {
+      if (_gZkClient.exists(rootPath)) {
+        _gZkClient.deleteRecursively(rootPath);
+      }
+    }
   }
 
   @Test
@@ -480,6 +516,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         .buildZkClient(new HelixZkClient.ZkConnectionConfig(ZK_ADDR), clientConfig);
     ZooKeeper unauthorizedClient = null;
     try {
+      // Digest authentication is configured explicitly for this admin session.
+      // This test verifies ACL enforcement, not digest authentication support
+      // for controller/participant sessions created by ZKHelixManager.
       ((org.apache.helix.zookeeper.zkclient.ZkClient) authorizedClient)
           .addAuthInfo(DIGEST_SCHEME, credentials);
       if (authorizedClient.exists(rootPath)) {
@@ -530,9 +569,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       Assert.assertTrue(authorizedClient.exists(rootPath));
       Assert.assertTrue(authorizedClient.exists(idealStatePath));
 
-      // The nodes below the root carry the same ACL, so the unauthorized session cannot read or
-      // modify cluster data either. Without this, the root ACL would only protect the top level
-      // znodes while leaving every piece of cluster state world writable.
+      // The IDEALSTATES container and cluster config are protected: unauthorized sessions
+      // cannot read/write the config or create children under IDEALSTATES.
+      // Resource and per-instance nodes created later do not inherit these ACLs.
       Assert.assertEquals(getAcl(rawZooKeeper(authorizedClient), idealStatePath), acl);
       String clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterName);
       try {
@@ -566,10 +605,19 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       authorizedClient.deleteRecursively(rootPath);
       Assert.assertFalse(authorizedClient.exists(rootPath));
     } finally {
-      if (unauthorizedClient != null) {
-        unauthorizedClient.close();
+      try {
+        if (authorizedClient.exists(rootPath)) {
+          authorizedClient.deleteRecursively(rootPath);
+        }
+      } finally {
+        try {
+          if (unauthorizedClient != null) {
+            unauthorizedClient.close();
+          }
+        } finally {
+          authorizedClient.close();
+        }
       }
-      authorizedClient.close();
     }
 
     System.out.println(
