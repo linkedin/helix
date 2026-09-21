@@ -205,6 +205,22 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedBaselineComputeFailingGauge();
 
   /**
+   * Reversible gauge counting the resources that WAGED instance tag ("clique") failure isolation
+   * skipped on the most recent global baseline, 0 when nothing is isolated.
+   *
+   * This is the only signal that a clique is frozen. When isolation is enabled a clique that cannot
+   * be placed is deliberately carried forward instead of failing the rebalance, so the failure
+   * counters, getRebalanceFailureGauge() and getWagedBaselineComputeFailingGauge() all stay clean
+   * while that clique's partitions go unplaced indefinitely. Every other clique keeps converging,
+   * which is the point, but the frozen one is otherwise invisible.
+   *
+   * Always 0 when the feature is disabled. Alert on {@code > 0 for 1h} as a ticket: it means an
+   * operator has to repair the clique, since no amount of retrying will place it.
+   * @return the number of resources currently skipped by instance tag isolation.
+   */
+  long getWagedInstanceTagIsolationSkippedResourcesGauge();
+
+  /**
    * Reversible gauge for the delayed-rebalance-overwrite phase: 1 while the most recent overwrite
    * computation failed, 0 once a later one succeeds or is not needed. Owned by the
    * DELAYED_REBALANCE_OVERWRITES phase -- its only dedicated reversible signal (it otherwise shares

@@ -140,6 +140,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // WAGED can no longer recompute the ideal target. Distinct from the serving rollup gauges above,
   // which are owned by the PARTIAL phase.
   private volatile boolean _wagedBaselineComputeFailing = false;
+  private final AtomicLong _wagedInstanceTagIsolationSkippedResources = new AtomicLong(0L);
   // Reversible gauge: 1 while the most recent delayed-rebalance-overwrite computation failed, reset
   // to 0 when one next succeeds or is not needed. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES
   // phase -- its only dedicated reversible signal (it otherwise shares the fallback gauge with
@@ -1076,6 +1077,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
       _wagedRebalanceOverwriteFailing = false;
+      _wagedInstanceTagIsolationSkippedResources.set(0L);
       // Zero the DEFAULT controller-event pipeline backlog gauge on leadership change, for the
       // same reason as the counters above: the ClusterStatusMonitor instance is reused across
       // leadership periods, so a stale depth from a prior leader must not be re-reported by the
@@ -1619,6 +1621,19 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Set how many resources instance tag isolation is currently skipping, as reported by the last
+   * global baseline calculation. Zero means nothing is isolated.
+   *
+   * This is the only signal that a clique is frozen. Isolation deliberately converts a thrown
+   * rebalance failure into a quiet partial success, so the failure counters and the baseline health
+   * gauge all stay clean while an unplaceable clique goes unplaced indefinitely. Reversible, so it
+   * returns to zero on the first baseline that places everything.
+   */
+  public void updateWagedInstanceTagIsolationSkippedResources(long skippedResources) {
+    _wagedInstanceTagIsolationSkippedResources.set(skippedResources);
+  }
+
+  /**
    * Flip the fallback gauge. Set to true when WAGED returns the last-known-good assignment
    * instead of a freshly computed one; reset to false when a clean calculation succeeds.
    */
@@ -1744,6 +1759,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedBaselineComputeFailingGauge() {
     return _wagedBaselineComputeFailing ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedInstanceTagIsolationSkippedResourcesGauge() {
+    return _wagedInstanceTagIsolationSkippedResources.get();
   }
 
   @Override

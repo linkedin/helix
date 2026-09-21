@@ -79,6 +79,14 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
       _blockingSnapshotReporter;
+  // Optional listener invoked once per successful calculate() run with the rebalance scope and the
+  // resources instance tag isolation skipped that run, empty when nothing was isolated. Isolation
+  // deliberately turns a thrown rebalance failure into a quiet partial success, so without this a
+  // permanently unplaceable clique would be invisible: no exception, no failure counter, and a
+  // clean baseline health gauge. Reversible per run, so the gauge it drives falls back to zero as
+  // soon as a run places everything. May be null.
+  private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<String>>
+      _isolationSnapshotReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -109,13 +117,30 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     _blockingSnapshotReporter = reporter;
   }
 
+  /**
+   * Attach a per-run instance tag isolation reporter. It fires once per successful {@link #calculate}
+   * run with the rebalance scope and the resources that isolation skipped, empty when the run placed
+   * everything. Safe to call from any thread; null disables it.
+   */
+  public void setIsolationSnapshotReporter(
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> reporter) {
+    _isolationSnapshotReporter = reporter;
+  }
+
   @Override
   public OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException {
     // Track every HardConstraint.Type that blocks placement during this run, then publish the
     // complete set once (success or failure) as a reversible "currently blocking" snapshot.
     Set<HardConstraint.Type> blockingTypes = ConcurrentHashMap.newKeySet();
     try {
-      return calculateInternal(clusterModel, blockingTypes);
+      OptimalAssignment assignment = calculateInternal(clusterModel, blockingTypes);
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> isolationReporter =
+          _isolationSnapshotReporter;
+      if (isolationReporter != null) {
+        isolationReporter
+            .accept(clusterModel.getRebalanceScopeType(), assignment.getSkippedResources());
+      }
+      return assignment;
     } finally {
       BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshotReporter =
           _blockingSnapshotReporter;
