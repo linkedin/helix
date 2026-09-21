@@ -53,6 +53,15 @@ public interface RebalanceAlgorithm {
   /**
    * Observe a successful computation after carry-forward and collision handling. Evaluated
    * resources distinguish an incremental baseline from a full recomputation.
+   *
+   * Called after each successful computation, and with empty sets by the emergency rebalance and
+   * the delayed rebalance overwrite phases when they have nothing to compute. With instance tag
+   * isolation enabled, the global baseline defers the call until its result is persisted, found
+   * unchanged, or computed without a metadata store, and skips it when the write fails or a reset
+   * races the calculation. A pipeline that triggers no baseline calculation in that mode
+   * republishes, without computing anything, the skipped set the last published baseline
+   * recorded, as both sets in the global baseline scope. It does so only when no baseline is
+   * still running, no failure or reset has replaced that set since, and the set is not empty.
    */
   default void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
       Set<String> evaluatedResources, Set<String> skippedResources) {
