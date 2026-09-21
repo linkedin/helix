@@ -41,7 +41,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The ideal states of all partitions in a resource
+ * The ideal states of all partitions in a resource.
+ * Periodic rebalance is configured only through
+ * {@link ClusterConfig#setRebalanceTimePeriod(long)}. Legacy resource-level
+ * {@code REBALANCE_TIMER_PERIOD} fields are ignored and are not rewritten on read.
  */
 public class IdealState extends HelixProperty {
   /**
@@ -60,7 +63,6 @@ public class IdealState extends HelixProperty {
     IDEAL_STATE_MODE,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
-    REBALANCE_TIMER_PERIOD,
     REBALANCE_STRATEGY,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
@@ -591,14 +593,6 @@ public class IdealState extends HelixProperty {
   public String getStateModelFactoryName() {
     return _record.getStringField(IdealStateProperty.STATE_MODEL_FACTORY_NAME.toString(),
         HelixConstants.DEFAULT_STATE_MODEL_FACTORY);
-  }
-
-  /**
-   * Set the frequency with which to rebalance
-   * @return the rebalancing timer period
-   */
-  public long getRebalanceTimerPeriod() {
-    return _record.getLongField(IdealStateProperty.REBALANCE_TIMER_PERIOD.toString(), -1);
   }
 
   @Override

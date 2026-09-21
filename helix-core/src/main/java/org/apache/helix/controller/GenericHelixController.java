@@ -193,9 +193,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private long _continuousTaskRebalanceFailureCount = 0;
 
   /**
-   * The executors that can periodically run the rebalancing pipeline. A
-   * SingleThreadScheduledExecutor will start if there is resource group that has the config to do
-   * periodically rebalance.
+   * The executor that periodically runs the rebalancing pipeline when enabled in ClusterConfig.
    */
   private final ScheduledExecutorService _periodicalRebalanceExecutor =
       Executors.newSingleThreadScheduledExecutor();
@@ -903,7 +901,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       } else {
         // TODO: should be in the initialization of controller.
         if (_resourceControlDataProvider != null) {
-          checkRebalancingTimer(manager, Collections.<IdealState>emptyList(), dataProvider.getClusterConfig());
+          checkRebalancingTimer(manager, dataProvider.getClusterConfig());
         }
         if (_isMonitoring) {
           _clusterStatusMonitor.setEnabled(!_inManagementMode);
@@ -1191,8 +1189,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         "END: Generic GenericClusterController.onLiveInstanceChange() for cluster " + _clusterName);
   }
 
-  private void checkRebalancingTimer(HelixManager manager, List<IdealState> idealStates,
-      ClusterConfig clusterConfig) {
+  private void checkRebalancingTimer(HelixManager manager, ClusterConfig clusterConfig) {
     if (manager.getConfigAccessor() == null) {
       logger.warn(manager.getInstanceName()
           + " config accessor doesn't exist. should be in file-based mode.");
@@ -1202,14 +1199,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     long minPeriod = Long.MAX_VALUE;
     if (clusterConfig != null) {
       long period = clusterConfig.getRebalanceTimePeriod();
-      if (period > 0 && minPeriod > period) {
-        minPeriod = period;
-      }
-    }
-
-    // TODO: resource level rebalance does not make sense, to remove it!
-    for (IdealState idealState : idealStates) {
-      long period = idealState.getRebalanceTimerPeriod();
       if (period > 0 && minPeriod > period) {
         minPeriod = period;
       }
@@ -1235,7 +1224,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       HelixManager manager = changeContext.getManager();
       if (manager != null) {
         HelixDataAccessor dataAccessor = changeContext.getManager().getHelixDataAccessor();
-        checkRebalancingTimer(changeContext.getManager(), idealStates,
+        checkRebalancingTimer(manager,
             (ClusterConfig) dataAccessor.getProperty(dataAccessor.keyBuilder().clusterConfig()));
       }
     }

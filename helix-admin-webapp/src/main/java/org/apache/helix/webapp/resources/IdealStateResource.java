@@ -132,7 +132,7 @@ public class IdealStateResource extends ServerResource {
    * -H "Content-Type: application/json" http://{host:port}/clusters/{cluster}/resourceGroups/{resource}/idealState
    * <li>Expand resource: <code>n/a
    * <li>Add resource property:
-   * <code>curl -d 'jsonParameters={"command":"addResourceProperty","{REBALANCE_TIMER_PERIOD}":"{500}"}'
+   * <code>curl -d 'jsonParameters={"command":"addResourceProperty","{MAX_PARTITIONS_PER_INSTANCE}":"{500}"}'
    * -H "Content-Type: application/json" http://{host:port}/clusters/{cluster}/resourceGroups/{resource}/idealState
    */
   @Override

@@ -29,7 +29,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Resource's rebalance configurations
+ * Resource's rebalance configurations.
+ * Periodic rebalance is configured through
+ * {@link org.apache.helix.model.ClusterConfig#setRebalanceTimePeriod(long)}, not per resource.
+ * Legacy resource timer fields are ignored and are not emitted by {@link #getConfigsMap()}.
  */
 public class RebalanceConfig {
   /**
@@ -39,7 +42,6 @@ public class RebalanceConfig {
     REBALANCE_DELAY,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
-    REBALANCE_TIMER_PERIOD,
     REBALANCE_STRATEGY
   }
 
@@ -64,7 +66,6 @@ public class RebalanceConfig {
   private RebalanceMode _rebalanceMode;
   private String _rebalancerClassName;
   private String _rebalanceStrategy;
-  private long _rebalanceTimerPeriod = -1;  /* in milliseconds */
 
   private static final Logger _logger = LoggerFactory.getLogger(RebalanceConfig.class.getName());
 
@@ -81,8 +82,6 @@ public class RebalanceConfig {
     _rebalancerClassName =
         znRecord.getSimpleField(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name());
     _rebalanceStrategy = znRecord.getSimpleField(RebalanceConfigProperty.REBALANCE_STRATEGY.name());
-    _rebalanceTimerPeriod =
-        znRecord.getLongField(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(), -1);
   }
 
   /**
@@ -147,22 +146,6 @@ public class RebalanceConfig {
   }
 
   /**
-   * Get the frequency with which to rebalance
-   * @return the rebalancing timer period
-   */
-  public long getRebalanceTimerPeriod() {
-    return _rebalanceTimerPeriod;
-  }
-
-  /**
-   * Set the frequency with which to rebalance
-   * @param  rebalanceTimerPeriod
-   */
-  public void setRebalanceTimerPeriod(long rebalanceTimerPeriod) {
-    this._rebalanceTimerPeriod = rebalanceTimerPeriod;
-  }
-
-  /**
    * Generate the config map for RebalanceConfig.
    *
    * @return
@@ -183,11 +166,6 @@ public class RebalanceConfig {
     if (_rebalanceStrategy != null) {
       simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_STRATEGY.name(), _rebalanceStrategy);
     }
-    if (_rebalanceTimerPeriod > 0) {
-      simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(),
-          String.valueOf(_rebalanceTimerPeriod));
-    }
-
     return simpleFieldMap;
   }
 
@@ -195,4 +173,3 @@ public class RebalanceConfig {
     return true;
   }
 }
-
