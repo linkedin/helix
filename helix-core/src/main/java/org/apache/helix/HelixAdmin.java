@@ -651,6 +651,24 @@ public interface HelixAdmin {
       ConstraintItem constraintItem);
 
   /**
+   * Add or overwrite several constraint items of the same type in one shot.
+   * <p>
+   * Implementations backed by a metadata store should apply the whole map in a single update so
+   * callers do not observe a half-written batch. The default implementation falls back to applying
+   * the items one at a time and is therefore not atomic.
+   *
+   * @param clusterName
+   * @param constraintType
+   * @param constraintItems constraint id to constraint item
+   */
+  default void setConstraints(String clusterName, ConstraintType constraintType,
+      Map<String, ConstraintItem> constraintItems) {
+    for (Map.Entry<String, ConstraintItem> entry : constraintItems.entrySet()) {
+      setConstraint(clusterName, constraintType, entry.getKey(), entry.getValue());
+    }
+  }
+
+  /**
    * Remove a constraint item
    * @param clusterName
    * @param constraintType
