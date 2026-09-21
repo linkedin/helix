@@ -107,8 +107,15 @@ class InstanceTagIsolation {
   private HelixRebalanceException _firstFailure;
   // Computed on the first failure only, so the happy path stays identical to the default mode.
   private List<Set<String>> _shareBlocks;
+  private Map<String, Set<String>> _blockByGroup;
   private List<Set<String>> _attributionBlocks;
   private Map<String, String> _tagByGroup;
+  // A group key is a pure function of immutable replica fields, and the placement loop asks for the
+  // same one twice per replica, so memoize it. A cluster has orders of magnitude fewer distinct tags
+  // than replicas, which turns two string builds per replica into two lookups. Safe to keep
+  // unsynchronized: every caller runs on the single thread driving the placement loop.
+  private final Map<String, String> _tagGroupKeys = new HashMap<>();
+  private final Map<String, String> _untaggedGroupKeys = new HashMap<>();
 
   InstanceTagIsolation(ClusterModel clusterModel, List<AssignableReplica> allReplicas,
       List<AssignableNode> nodes) {
@@ -158,9 +165,8 @@ class InstanceTagIsolation {
     if (!_enabled) {
       return;
     }
-    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>()).add(
-        new Placement(replica.getResourceName(), replica.getPartitionName(),
-            replica.getReplicaState(), node.getInstanceName()));
+    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>())
+        .add(new Placement(replica, node));
   }
 
   /**
@@ -202,10 +208,11 @@ class InstanceTagIsolation {
       List<Placement> placements = _placementsByGroup.remove(member);
       if (placements != null) {
         for (int i = placements.size() - 1; i >= 0; i--) {
-          Placement placement = placements.get(i);
-          _clusterModel.release(placement._resourceName, placement._partitionName, placement._state,
-              placement._instanceName);
-          _skippedResources.add(placement._resourceName);
+          AssignableReplica placed = placements.get(i)._replica;
+          // The release path is keyed by state: releasing with the wrong state is a silent no-op.
+          _clusterModel.release(placed.getResourceName(), placed.getPartitionName(),
+              placed.getReplicaState(), placements.get(i)._node.getInstanceName());
+          _skippedResources.add(placed.getResourceName());
           released++;
         }
       }
@@ -246,7 +253,16 @@ class InstanceTagIsolation {
     List<Set<String>> blocks = attributionBlocks();
     long failedBlocks =
         blocks.stream().filter(block -> block.stream().anyMatch(_failedGroups::contains)).count();
-    if (blocks.isEmpty() || failedBlocks >= blocks.size()) {
+    // The global baseline is the one scope whose replica list covers the whole cluster, so there
+    // every group that could fail is present and "all of them failed" really does mean nothing was
+    // achieved. Report that like the default mode does, rather than returning an empty assignment
+    // and a clean bill of health. The block count alone does not catch it: a tag carried only by
+    // nodes that hold no replicas this run forms a block that can never fail, so it keeps
+    // failedBlocks below blocks.size() forever.
+    boolean everyWorkingGroupFailed = !_allGroups.isEmpty()
+        && _clusterModel.getRebalanceScopeType() == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE
+        && _failedGroups.containsAll(_allGroups);
+    if (blocks.isEmpty() || failedBlocks >= blocks.size() || everyWorkingGroupFailed) {
       // Every independent part of the cluster failed, so behave exactly like the default global
       // mode. A block holding a group that never had work still counts as failed when any of its
       // groups failed, so padding the universe cannot hide a genuine cluster wide failure.
@@ -419,10 +435,23 @@ class InstanceTagIsolation {
    * the same nodes and is carried over together. A resource with no tag has no declared domain and
    * can be placed anywhere, so it is keyed on its own, though it then shares nodes with everything.
    */
-  private static String groupKey(AssignableReplica replica) {
+  private String groupKey(AssignableReplica replica) {
     String tag = replica.getResourceInstanceGroupTag();
-    return (tag == null || tag.isEmpty()) ? UNTAGGED_GROUP_PREFIX + replica.getResourceName()
-        : TAG_GROUP_PREFIX + tag;
+    if (tag == null || tag.isEmpty()) {
+      String resource = replica.getResourceName();
+      String cached = _untaggedGroupKeys.get(resource);
+      if (cached == null) {
+        cached = UNTAGGED_GROUP_PREFIX + resource;
+        _untaggedGroupKeys.put(resource, cached);
+      }
+      return cached;
+    }
+    String cached = _tagGroupKeys.get(tag);
+    if (cached == null) {
+      cached = TAG_GROUP_PREFIX + tag;
+      _tagGroupKeys.put(tag, cached);
+    }
+    return cached;
   }
 
   /**
@@ -452,7 +481,15 @@ class InstanceTagIsolation {
    * The replica list only holds what still needs assigning, so a clique whose replicas are all
    * already placed contributes no group at all. It would then have no block, no demand and no way
    * to be blamed, and a deficit it alone caused would be declared unattributable. Adding a group
-   * for every tag any node carries gives such a clique a block to be blamed in.
+   * for a tag that only such a clique's nodes carry gives it a block to be blamed in.
+   *
+   * A tag carried by a node that some resource can already be placed on is deliberately left out.
+   * Such a tag is an operational label spanning cliques (an availability zone, a hardware
+   * generation, a pool name) rather than the name of a clique that lost its replicas. Adding it
+   * would create a group no resource can ever be placed in, and because the label is shared it
+   * would union every clique carrying it into one block. Both guards below then read "there is only
+   * one block", and the whole mode silently degrades into the default global one on any fleet whose
+   * instances carry an ordinary label alongside their clique tag.
    *
    * Kept separate from the partition above on purpose. That one is sized by the replica derived
    * group count, which is what the "shares nodes with every other group" and "every group failed"
@@ -464,9 +501,29 @@ class InstanceTagIsolation {
       return _attributionBlocks;
     }
     Map<String, String> tagByGroup = new HashMap<>(tagByGroup());
+    Set<String> resourceTags = new HashSet<>(tagByGroup.values());
+    resourceTags.remove(null);
+    // Every tag sitting on a node that a resource can already reach. A clique tag cannot appear
+    // here unless its own replicas are outstanding, in which case it is already a group.
+    Set<String> spanningTags = new HashSet<>();
+    for (AssignableNode node : _nodes) {
+      Set<String> nodeTags = node.getInstanceTags();
+      boolean reachable = false;
+      for (String tag : nodeTags) {
+        if (resourceTags.contains(tag)) {
+          reachable = true;
+          break;
+        }
+      }
+      if (reachable) {
+        spanningTags.addAll(nodeTags);
+      }
+    }
     for (AssignableNode node : _nodes) {
       for (String tag : node.getInstanceTags()) {
-        tagByGroup.putIfAbsent(TAG_GROUP_PREFIX + tag, tag);
+        if (!spanningTags.contains(tag)) {
+          tagByGroup.putIfAbsent(TAG_GROUP_PREFIX + tag, tag);
+        }
       }
     }
     _attributionBlocks = blocksOf(tagByGroup);
@@ -547,12 +604,20 @@ class InstanceTagIsolation {
 
   /** The share block containing this group, which is the unit that is carried over together. */
   private Set<String> blockOf(String group) {
-    for (Set<String> block : shareBlocks()) {
-      if (block.contains(group)) {
-        return block;
+    if (_blockByGroup == null) {
+      Map<String, Set<String>> blockByGroup = new HashMap<>();
+      for (Set<String> block : shareBlocks()) {
+        for (String member : block) {
+          // putIfAbsent so a group reachable from two blocks resolves to the first one, which is
+          // what the previous linear scan returned. The union find output is a genuine partition,
+          // so this cannot actually trigger, but it keeps the two forms equivalent regardless.
+          blockByGroup.putIfAbsent(member, block);
+        }
       }
+      _blockByGroup = blockByGroup;
     }
-    return Collections.singleton(group);
+    Set<String> block = _blockByGroup.get(group);
+    return block == null ? Collections.singleton(group) : block;
   }
 
   /** A group's tag, or null for an untagged group, which can use every node. */
@@ -572,21 +637,18 @@ class InstanceTagIsolation {
   /**
    * A placement made during this run, kept so it can be released if the group later fails.
    *
-   * All four fields are needed because the release path is keyed by state: releasing with the wrong
-   * state is a silent no-op.
+   * Holds the replica and the node it went to rather than the four strings the release path needs,
+   * so the happy path only stores two references and the extraction happens during a rollback that
+   * usually never runs. Both objects are immutable for the lifetime of a rebalance, so the values
+   * read back at release time are the ones that were placed.
    */
   private static final class Placement {
-    private final String _resourceName;
-    private final String _partitionName;
-    private final String _state;
-    private final String _instanceName;
+    private final AssignableReplica _replica;
+    private final AssignableNode _node;
 
-    private Placement(String resourceName, String partitionName, String state,
-        String instanceName) {
-      _resourceName = resourceName;
-      _partitionName = partitionName;
-      _state = state;
-      _instanceName = instanceName;
+    private Placement(AssignableReplica replica, AssignableNode node) {
+      _replica = replica;
+      _node = node;
     }
   }
 }
