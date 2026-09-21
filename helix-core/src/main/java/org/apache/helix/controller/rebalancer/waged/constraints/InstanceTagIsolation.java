@@ -128,8 +128,15 @@ class InstanceTagIsolation {
   private HelixRebalanceException _firstFailure;
   // Computed on the first failure only, so the happy path stays identical to the default mode.
   private List<Set<String>> _shareBlocks;
+  private Map<String, Set<String>> _blockByGroup;
   private List<Set<String>> _attributionBlocks;
   private Map<String, String> _tagByGroup;
+  // A group key is a pure function of immutable replica fields, and the placement loop asks for the
+  // same one twice per replica, so memoize it. A cluster has orders of magnitude fewer distinct
+  // tags than replicas, which turns two string builds per replica into two lookups. Safe to keep
+  // unsynchronized: every caller runs on the single thread driving the placement loop.
+  private final Map<String, String> _tagGroupKeys = new HashMap<>();
+  private final Map<String, String> _untaggedGroupKeys = new HashMap<>();
 
   InstanceTagIsolation(ClusterModel clusterModel, List<AssignableNode> nodes) {
     _enabled = clusterModel.getContext().isInstanceTagIsolationEnabled();
@@ -177,9 +184,8 @@ class InstanceTagIsolation {
     if (!_enabled) {
       return;
     }
-    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>()).add(
-        new Placement(replica.getResourceName(), replica.getPartitionName(),
-            replica.getReplicaState(), node.getInstanceName()));
+    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>())
+        .add(new Placement(replica, node));
   }
 
   /**
@@ -231,10 +237,13 @@ class InstanceTagIsolation {
       List<Placement> placements = _placementsByGroup.remove(member);
       if (placements != null) {
         for (int i = placements.size() - 1; i >= 0; i--) {
-          Placement placement = placements.get(i);
-          _clusterModel.release(placement._resourceName, placement._partitionName, placement._state,
-              placement._instanceName);
-          _skippedResources.add(placement._resourceName);
+          AssignableReplica placed = placements.get(i)._replica;
+          // The release path is keyed by state, so pass the placed replica's own state. With
+          // any other state the node keeps the replica and only logs a warning, while the fault
+          // zone entry is still removed, and a state the model does not index throws.
+          _clusterModel.release(placed.getResourceName(), placed.getPartitionName(),
+              placed.getReplicaState(), placements.get(i)._node.getInstanceName());
+          _skippedResources.add(placed.getResourceName());
           released++;
         }
       }
@@ -684,13 +693,25 @@ class InstanceTagIsolation {
    * the same nodes and is carried over together. A resource with no tag has no declared domain and
    * can be placed anywhere, so it is keyed on its own, though it then shares nodes with everything.
    */
-  private static String groupKey(AssignableReplica replica) {
+  private String groupKey(AssignableReplica replica) {
     return groupKey(replica.getResourceName(), replica.getResourceInstanceGroupTag());
   }
 
-  private static String groupKey(String resource, String tag) {
-    return (tag == null || tag.isEmpty()) ? UNTAGGED_GROUP_PREFIX + resource
-        : TAG_GROUP_PREFIX + tag;
+  private String groupKey(String resource, String tag) {
+    if (tag == null || tag.isEmpty()) {
+      String cached = _untaggedGroupKeys.get(resource);
+      if (cached == null) {
+        cached = UNTAGGED_GROUP_PREFIX + resource;
+        _untaggedGroupKeys.put(resource, cached);
+      }
+      return cached;
+    }
+    String cached = _tagGroupKeys.get(tag);
+    if (cached == null) {
+      cached = TAG_GROUP_PREFIX + tag;
+      _tagGroupKeys.put(tag, cached);
+    }
+    return cached;
   }
 
   /**
@@ -842,12 +863,19 @@ class InstanceTagIsolation {
 
   /** The share block containing this group, which is the unit that is carried over together. */
   private Set<String> blockOf(String group) {
-    for (Set<String> block : shareBlocks()) {
-      if (block.contains(group)) {
-        return block;
+    if (_blockByGroup == null) {
+      Map<String, Set<String>> blockByGroup = new HashMap<>();
+      for (Set<String> block : shareBlocks()) {
+        for (String member : block) {
+          // putIfAbsent so a group reachable from two blocks resolves to the first block in order.
+          // The union find output is a genuine partition, so this cannot actually trigger.
+          blockByGroup.putIfAbsent(member, block);
+        }
       }
+      _blockByGroup = blockByGroup;
     }
-    return Collections.singleton(group);
+    Set<String> block = _blockByGroup.get(group);
+    return block == null ? Collections.singleton(group) : block;
   }
 
   /**
@@ -884,22 +912,19 @@ class InstanceTagIsolation {
   /**
    * A placement made during this run, kept so it can be released if the group later fails.
    *
-   * All four fields are needed because the release path is keyed by state. With any other state
-   * the node keeps the replica and only logs a warning, while the fault zone entry is still
-   * removed, and a state the model does not index throws.
+   * Holds the replica and the node it went to rather than the four strings the release path needs,
+   * so the happy path only stores two references and the extraction happens during a rollback that
+   * usually never runs. The fields read back at release time (the replica's resource, partition and
+   * state, and the node's instance name) are final, so the values read back are the ones that were
+   * placed.
    */
   private static final class Placement {
-    private final String _resourceName;
-    private final String _partitionName;
-    private final String _state;
-    private final String _instanceName;
+    private final AssignableReplica _replica;
+    private final AssignableNode _node;
 
-    private Placement(String resourceName, String partitionName, String state,
-        String instanceName) {
-      _resourceName = resourceName;
-      _partitionName = partitionName;
-      _state = state;
-      _instanceName = instanceName;
+    private Placement(AssignableReplica replica, AssignableNode node) {
+      _replica = replica;
+      _node = node;
     }
   }
 }
