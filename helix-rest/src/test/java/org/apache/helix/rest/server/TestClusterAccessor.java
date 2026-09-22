@@ -47,6 +47,7 @@ import org.apache.helix.cloud.azure.AzureConstants;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.cloud.constants.VirtualTopologyGroupConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.integration.manager.ClusterDistributedController;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKUtil;
@@ -157,6 +158,89 @@ public class TestClusterAccessor extends AbstractTestClass {
     updateClusterConfigFromRest(TEST_CLUSTER, config, Command.update);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Guard rail: updating the cluster config to add a WAGED capacity key (INSTANCE_CAPACITY_KEYS) is
+   * rejected before it is written to ZooKeeper when some assignable instance does not declare that
+   * key, because WAGED could no longer build a cluster model and every WAGED resource would silently
+   * stop placing. This is the cluster-config write-path complement to the addWagedResource capacity
+   * key guard rail. Verifies enforcement (400 + verdict naming the starved instance, nothing
+   * written), dry-run (200 + the same infeasible verdict, nothing written), force bypass (written
+   * despite the gap), and the fully-covered happy path (written). Uses a dedicated cluster so it does
+   * not perturb the other tests that share {@link #TEST_CLUSTER}.
+   */
+  @Test
+  public void testUpdateClusterConfigCapacityKeyGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestClusterCapacityKeyGuardrail";
+    _gSetupTool.addCluster(clusterName, true);
+    String coveredInstance = clusterName + "_instance0";
+    String starvedInstance = clusterName + "_instance1";
+    try {
+      // Two assignable instances; both declare FOO, but only one declares BAR, so adding BAR as a
+      // required cluster capacity key would leave the starved instance uncovered.
+      _gSetupTool.addInstanceToCluster(clusterName, coveredInstance);
+      _gSetupTool.addInstanceToCluster(clusterName, starvedInstance);
+      setInstanceCapacity(clusterName, coveredInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100));
+
+      // The update under test sets INSTANCE_CAPACITY_KEYS = [FOO, BAR]. Only that field is sent; the
+      // endpoint merges it into the existing cluster config exactly as the guard rail evaluates it.
+      ClusterConfig delta = new ClusterConfig(clusterName);
+      delta.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+          MediaType.APPLICATION_JSON_TYPE);
+
+      // 1) Enforcement: 400 + a verdict naming the starved instance, and nothing written.
+      Response blocked = post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), entity,
+          Response.Status.BAD_REQUEST.getStatusCode(), true);
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(starvedInstance));
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys().isEmpty());
+
+      // 2) Dry-run: 200 with the same infeasible verdict, and still nothing written.
+      Response dryRun = post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name(), "dryRun", "true"), entity,
+          Response.Status.OK.getStatusCode(), true);
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys().isEmpty());
+
+      // 3) force=true bypasses the guard rail: the keys are written despite the gap.
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name(), "force", "true"), entity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+
+      // 4) Close the gap (the starved instance now declares BAR) and the same update passes the
+      //    guard rail: every assignable instance is covered, so the verdict is feasible.
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), entity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void setInstanceCapacity(String cluster, String instance,
+      Map<String, Integer> capacityMap) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(cluster, instance);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(cluster, instance, instanceConfig);
   }
 
   @Test(dependsOnMethods = "testValidateClusterConfigChange")

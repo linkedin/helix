@@ -43,13 +43,15 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for {@link CapacityKeyConsistencyGuardrailRule}, which certifies (for a WAGED resource
- * add) that every assignable instance declares every capacity key the cluster requires. The
+ * Unit tests for {@link CapacityKeyConsistencyGuardrailRule}, which certifies that every assignable
+ * instance declares every capacity key the cluster requires. The rule runs on two write paths: a
+ * WAGED resource add (validated against the committed cluster config) and a cluster-config update
+ * that changes the capacity keys (validated against the proposed, not-yet-written config). The
  * resource-side coverage is deliberately not this rule's concern -- it is already validated by
  * {@code ZKHelixAdmin#addResourceWithWeight} before the write -- so these tests exercise only the
  * instance side. Cluster state (cluster config + instance configs) is supplied through a mocked
- * {@link HelixDataAccessor}; the proposed resource config is passed directly through the
- * {@link GuardrailContext}.
+ * {@link HelixDataAccessor}; the proposed resource config or proposed cluster config is passed
+ * directly through the {@link GuardrailContext}.
  */
 public class TestCapacityKeyConsistencyGuardrailRule {
   private static final String CLUSTER = "testCluster";
@@ -173,11 +175,62 @@ public class TestCapacityKeyConsistencyGuardrailRule {
     Assert.assertTrue(result.getViolations().get(0).getMessage().contains("instance0"));
   }
 
+  @Test
+  public void testProposedClusterConfigMissingKeyIsInfeasible() {
+    // Cluster-config path: the committed config declares no capacity keys (the resource path would be
+    // feasible), but the PROPOSED cluster config adds FOO+BAR and instance0 omits BAR. Evaluating the
+    // proposed config makes this infeasible, proving the rule checks the not-yet-written config.
+    HelixDataAccessor dataAccessor = mockAccessor(new ClusterConfig(CLUSTER),
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ValidationResult result =
+        rule.validate(contextWithClusterConfig(dataAccessor, clusterConfig("FOO", "BAR")));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), CapacityKeyConsistencyGuardrailRule.RULE_ID);
+    // No resource is being added on the cluster-config path, so the violation carries no resource.
+    Assert.assertNull(violation.getResourceName());
+    Assert.assertTrue(violation.getMessage().contains("instance0"));
+    Assert.assertTrue(violation.getMessage().contains("BAR"));
+    Assert.assertTrue(violation.getMessage().contains("cluster config change"));
+  }
+
+  @Test
+  public void testProposedClusterConfigAllKeysPresentIsFeasible() {
+    // Every assignable instance declares both proposed keys, so adding them is safe.
+    HelixDataAccessor dataAccessor = mockAccessor(new ClusterConfig(CLUSTER), ImmutableList.of(
+        instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))));
+
+    Assert.assertTrue(rule.validate(
+        contextWithClusterConfig(dataAccessor, clusterConfig("FOO", "BAR"))).isFeasible());
+  }
+
+  @Test
+  public void testProposedClusterConfigRemovingAllKeysIsFeasible() {
+    // The committed config requires FOO (instance0 has an empty capacity map, which the resource path
+    // would reject), but the proposed config clears the capacity keys, so nothing is required. This
+    // exercises both the proposed-config precedence and the empty-keys short-circuit.
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig("FOO"),
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of())));
+
+    Assert.assertTrue(rule.validate(
+        contextWithClusterConfig(dataAccessor, new ClusterConfig(CLUSTER))).isFeasible());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
         .dataAccessor(dataAccessor)
         .proposedResourceConfig(proposedResourceConfig)
+        .build();
+  }
+
+  private GuardrailContext contextWithClusterConfig(HelixDataAccessor dataAccessor,
+      ClusterConfig proposedClusterConfig) {
+    return GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .proposedClusterConfig(proposedClusterConfig)
         .build();
   }
 

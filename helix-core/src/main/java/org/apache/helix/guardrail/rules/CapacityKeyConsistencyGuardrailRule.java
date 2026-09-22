@@ -37,9 +37,12 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 
 /**
- * Guard rail that blocks adding a WAGED resource when some assignable instance does not declare a
- * value for every capacity dimension (key) the cluster requires, i.e. when the instance-side
- * capacity map is inconsistent with the cluster's {@code INSTANCE_CAPACITY_KEYS}.
+ * Guard rail that blocks a mutation which would leave the cluster's WAGED
+ * {@code INSTANCE_CAPACITY_KEYS} unsatisfiable &mdash; i.e. when some assignable instance does not
+ * declare a value for every capacity dimension (key) the cluster requires. It runs on two write
+ * paths that can introduce such a gap: adding a WAGED resource (validated against the committed
+ * cluster config) and changing the cluster config's capacity keys (validated against the proposed,
+ * not-yet-written config, so a newly-added key is checked before it is persisted).
  * <p>
  * WAGED accounts for capacity along the fixed set of keys declared once in
  * {@link ClusterConfig#getInstanceCapacityKeys()}. To build its cluster model it requires that
@@ -69,12 +72,12 @@ import org.apache.helix.model.ResourceConfig;
  * (matching the rebalancer and {@link PartitionWeightCapacityGuardrailRule}); a non-assignable
  * instance's capacity is never consulted, so a gap there cannot break placement.
  * <p>
- * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request; it is not gated
- * behind a cluster config toggle. It is a no-op for a cluster that does not use the WAGED capacity
- * model (empty {@code INSTANCE_CAPACITY_KEYS}), returning feasible before reading any instance
- * config, so only a cluster that actually declares capacity keys is exposed to the fail-closed
- * instance-config scan below. {@code force=true} overrides the verdict; {@code dryRun=true} reports
- * it without writing.
+ * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request and every
+ * cluster-config update that changes the capacity keys; it is not gated behind a cluster config
+ * toggle. It is a no-op for a cluster that does not use the WAGED capacity model (empty
+ * {@code INSTANCE_CAPACITY_KEYS}), returning feasible before reading any instance config, so only a
+ * cluster that actually declares capacity keys is exposed to the fail-closed instance-config scan
+ * below. {@code force=true} overrides the verdict; {@code dryRun=true} reports it without writing.
  */
 public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "WAGED_INSTANCE_CAPACITY_KEY_MISSING";
@@ -93,14 +96,20 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   @Override
   public ValidationResult validate(GuardrailContext context) {
     ResourceConfig proposedResourceConfig = context.getProposedResourceConfig();
-    if (proposedResourceConfig == null) {
-      // Not a resource-scoped mutation; nothing for this rule to certify on the resource-add path.
+    ClusterConfig proposedClusterConfig = context.getProposedClusterConfig();
+    if (proposedResourceConfig == null && proposedClusterConfig == null) {
+      // Neither a resource-scoped add nor a cluster-config change; nothing for this rule to certify.
       return ValidationResult.feasible();
     }
 
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
-    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+
+    // On the cluster-config path validate the proposed (not-yet-written) config so the check reflects
+    // the keys the change would require; on the resource-add path read the committed cluster config.
+    ClusterConfig clusterConfig = proposedClusterConfig != null
+        ? proposedClusterConfig
+        : dataAccessor.getProperty(keyBuilder.clusterConfig());
     if (clusterConfig == null) {
       // No cluster config to read the required capacity keys from; defer to downstream validation.
       return ValidationResult.feasible();
@@ -114,8 +123,13 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
+    // On the resource-add path the verdict is scoped to the resource being added; the cluster-config
+    // path has no such resource, so its violations carry no resource name.
+    String resourceName =
+        proposedResourceConfig != null ? proposedResourceConfig.getResourceName() : null;
+
     List<Violation> violations = new ArrayList<>();
-    int totalViolations = collectInstanceViolations(dataAccessor, keyBuilder, proposedResourceConfig,
+    int totalViolations = collectInstanceViolations(dataAccessor, keyBuilder, resourceName,
         clusterConfig, capacityKeys, violations);
 
     if (violations.isEmpty()) {
@@ -123,14 +137,16 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
     }
     if (totalViolations > violations.size()) {
       int reported = violations.size();
-      violations.add(Violation.newBuilder(RULE_ID)
-          .resource(proposedResourceConfig.getResourceName())
+      Violation.Builder overflow = Violation.newBuilder(RULE_ID)
           .message(String.format(
               "Showing the first %d of %d instances missing a required capacity key; %d were omitted "
                   + "to bound the response size. The omitted instances are missing the same key(s); "
                   + "declare the reported keys on every assignable instance and resubmit.",
-              reported, totalViolations, totalViolations - reported))
-          .build());
+              reported, totalViolations, totalViolations - reported));
+      if (resourceName != null) {
+        overflow.resource(resourceName);
+      }
+      violations.add(overflow.build());
     }
     return ValidationResult.of(violations);
   }
@@ -138,14 +154,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   /**
    * Checks that every assignable instance's effective capacity map (cluster default instance capacity
    * overridden by the instance's capacity) declares every required capacity key. This is a
-   * precondition for the proposed resource to place: WAGED builds its model from every assignable
-   * instance, so a single instance missing a key fails the whole model. Reads instance configs
-   * fail-closed so a transient read error surfaces as a rejection rather than validation against
-   * partial state. Returns the total number of violations found (which may exceed the number appended
-   * to {@code violations} once the report cap is reached).
+   * precondition for WAGED to place any resource: it builds its model from every assignable instance,
+   * so a single instance missing a key fails the whole model. Reads instance configs fail-closed so a
+   * transient read error surfaces as a rejection rather than validation against partial state.
+   * {@code resourceName} scopes the resource-add path's violations to the resource being added and is
+   * {@code null} on the cluster-config path. Returns the total number of violations found (which may
+   * exceed the number appended to {@code violations} once the report cap is reached).
    */
   private int collectInstanceViolations(ReadOnlyDataAccessor dataAccessor,
-      PropertyKey.Builder keyBuilder, ResourceConfig proposedResourceConfig,
+      PropertyKey.Builder keyBuilder, String resourceName,
       ClusterConfig clusterConfig, List<String> capacityKeys, List<Violation> violations) {
     Map<String, Integer> defaultInstanceCapacity = clusterConfig.getDefaultInstanceCapacityMap();
     List<InstanceConfig> instanceConfigs =
@@ -174,19 +191,42 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
       if (violations.size() >= MAX_REPORTED_VIOLATIONS) {
         continue;
       }
-      violations.add(Violation.newBuilder(RULE_ID)
-          .resource(proposedResourceConfig.getResourceName())
-          .message(String.format(
-              "Instance %s does not declare WAGED capacity key(s) %s required by the cluster "
-                  + "(INSTANCE_CAPACITY_KEYS=%s); WAGED cannot build a model that includes it, so "
-                  + "resource %s (and every other WAGED resource) would be accepted but never place. "
-                  + "Add the missing key(s) to the instance's INSTANCE_CAPACITY_MAP or to the "
-                  + "cluster's DEFAULT_INSTANCE_CAPACITY_MAP.",
-              instanceConfig.getInstanceName(), missing, capacityKeys,
-              proposedResourceConfig.getResourceName()))
-          .build());
+      Violation.Builder violation = Violation.newBuilder(RULE_ID)
+          .message(instanceViolationMessage(resourceName, instanceConfig.getInstanceName(), missing,
+              capacityKeys));
+      if (resourceName != null) {
+        violation.resource(resourceName);
+      }
+      violations.add(violation.build());
     }
     return total;
+  }
+
+  /**
+   * Builds the per-instance violation message. The resource-add path ({@code resourceName != null})
+   * blames the specific resource being added; the cluster-config path frames the same gap as a
+   * consequence of the proposed capacity-key change. Both point the operator at the two places a key
+   * can be declared (the instance's {@code INSTANCE_CAPACITY_MAP} or the cluster's
+   * {@code DEFAULT_INSTANCE_CAPACITY_MAP}).
+   */
+  private static String instanceViolationMessage(String resourceName, String instanceName,
+      List<String> missing, List<String> capacityKeys) {
+    if (resourceName != null) {
+      return String.format(
+          "Instance %s does not declare WAGED capacity key(s) %s required by the cluster "
+              + "(INSTANCE_CAPACITY_KEYS=%s); WAGED cannot build a model that includes it, so "
+              + "resource %s (and every other WAGED resource) would be accepted but never place. "
+              + "Add the missing key(s) to the instance's INSTANCE_CAPACITY_MAP or to the "
+              + "cluster's DEFAULT_INSTANCE_CAPACITY_MAP.",
+          instanceName, missing, capacityKeys, resourceName);
+    }
+    return String.format(
+        "Instance %s does not declare WAGED capacity key(s) %s that this cluster config change would "
+            + "require (INSTANCE_CAPACITY_KEYS=%s); WAGED cannot build a model that includes it, so "
+            + "every WAGED resource would be accepted but never place. Add the missing key(s) to the "
+            + "instance's INSTANCE_CAPACITY_MAP or to the cluster's DEFAULT_INSTANCE_CAPACITY_MAP "
+            + "before applying this change.",
+        instanceName, missing, capacityKeys);
   }
 
   /**
