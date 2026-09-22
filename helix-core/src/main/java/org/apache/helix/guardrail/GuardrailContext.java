@@ -23,6 +23,7 @@ import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
@@ -48,6 +49,8 @@ public class GuardrailContext {
   private final WagedAssignmentProvider wagedAssignmentProvider;
   private final InstanceConfig proposedInstanceConfig;
   private final List<String> proposedRemovedInstanceTags;
+  private final ClusterConfig currentClusterConfig;
+  private final ClusterConfig proposedClusterConfig;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -59,6 +62,8 @@ public class GuardrailContext {
     this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
     this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
+    this.currentClusterConfig = builder.currentClusterConfig;
+    this.proposedClusterConfig = builder.proposedClusterConfig;
   }
 
   public String getClusterName() {
@@ -135,6 +140,16 @@ public class GuardrailContext {
     return proposedRemovedInstanceTags;
   }
 
+  /** The stored snapshot used by a version-checked cluster-config write, or null if absent. */
+  public ClusterConfig getCurrentClusterConfig() {
+    return currentClusterConfig;
+  }
+
+  /** The complete post-update cluster config, not a delta; null for other mutation types. */
+  public ClusterConfig getProposedClusterConfig() {
+    return proposedClusterConfig;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -149,6 +164,8 @@ public class GuardrailContext {
     private WagedAssignmentProvider wagedAssignmentProvider;
     private InstanceConfig proposedInstanceConfig;
     private List<String> proposedRemovedInstanceTags;
+    private ClusterConfig currentClusterConfig;
+    private ClusterConfig proposedClusterConfig;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -192,6 +209,16 @@ public class GuardrailContext {
 
     public Builder proposedRemovedInstanceTags(List<String> proposedRemovedInstanceTags) {
       this.proposedRemovedInstanceTags = proposedRemovedInstanceTags;
+      return this;
+    }
+
+    public Builder currentClusterConfig(ClusterConfig currentClusterConfig) {
+      this.currentClusterConfig = currentClusterConfig;
+      return this;
+    }
+
+    public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
+      this.proposedClusterConfig = proposedClusterConfig;
       return this;
     }
 
