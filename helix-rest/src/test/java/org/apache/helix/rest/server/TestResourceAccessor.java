@@ -833,6 +833,107 @@ public class TestResourceAccessor extends AbstractTestClass {
     }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
+
+  /**
+   * Guard rail: editing an existing WAGED resource's partition weight via updateResourceConfig is
+   * rejected when the new weight, in any dimension, exceeds the largest single instance's capacity
+   * -- the same permanently-unplaceable condition the add-path weight guard rail blocks, but on the
+   * raw config-edit write path, which otherwise never re-runs the resource-side weight validation.
+   * The merged (post-write) config is validated, matching how the ZK write merges the incoming
+   * record into the existing config. Verifies enforcement (400 + verdict, config unchanged),
+   * dry-run (200 + verdict, config unchanged), force bypass (written), and the within-capacity
+   * happy path (written). Shares the opt-in enablement and the save/restore discipline of the
+   * add-path weight guard test so it does not perturb the other tests sharing {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testUpdateResourceConfigWeightGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    String editResource = "guardrailWeightEditResource";
+    Map<String, Map<String, Integer>> withinCapacity = ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 100, "BAR", 100));
+    Map<String, Map<String, Integer>> overWeight = ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 1000, "BAR", 100));
+
+    try {
+      // Two capacity dimensions, every instance capacity 100 in each, and the opt-in guard enabled.
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      clusterConfig.setPartitionWeightGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      Map<String, Integer> instanceCapacity = ImmutableMap.of("FOO", 100, "BAR", 100);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instanceCapacity);
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // Create the resource within capacity so there is an existing config to edit.
+      Response created = putWagedResource(editResource,
+          wagedResourceConfig(editResource, withinCapacity), Collections.emptyMap());
+      Assert.assertEquals(created.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(storedDefaultWeight(editResource, "FOO"), 100);
+
+      // 1) Enforcement: raising the weight above capacity is blocked with 400 + verdict, and the
+      //    stored config is unchanged (still within capacity).
+      Response blocked = postResourceConfigUpdate(editResource, overWeight, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(PartitionWeightCapacityGuardrailRule.RULE_ID));
+      Assert.assertEquals(storedDefaultWeight(editResource, "FOO"), 100);
+
+      // 2) Dry-run: 200 with the same infeasible verdict, and the stored config still unchanged.
+      Response dryRun =
+          postResourceConfigUpdate(editResource, overWeight, ImmutableMap.of("dryRun", "true"));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(PartitionWeightCapacityGuardrailRule.RULE_ID));
+      Assert.assertEquals(storedDefaultWeight(editResource, "FOO"), 100);
+
+      // 3) force=true bypasses the guard rail: the over-weight edit is actually written.
+      Response forced =
+          postResourceConfigUpdate(editResource, overWeight, ImmutableMap.of("force", "true"));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(storedDefaultWeight(editResource, "FOO"), 1000);
+
+      // 4) A within-capacity edit passes the guard rail and is written normally.
+      Response valid =
+          postResourceConfigUpdate(editResource, withinCapacity, Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(storedDefaultWeight(editResource, "FOO"), 100);
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, editResource);
+      } catch (Exception ignored) {
+      }
+      // Restore cluster + instance capacity configuration and disable the opt-in guard rail again so
+      // it does not leak into other tests sharing this cluster.
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      restore.setPartitionWeightGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testAddResourceWithWeight")
   public void testDryRunAndForceRejectedForNonWagedCommand() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -856,6 +957,27 @@ public class TestResourceAccessor extends AbstractTestClass {
         .contains(forceResource));
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private Response postResourceConfigUpdate(String resourceName,
+      Map<String, Map<String, Integer>> partitionWeights, Map<String, Object> flags)
+      throws IOException {
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    resourceConfig.setPartitionCapacityMap(partitionWeights);
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(resourceConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget =
+        target("clusters/" + CLUSTER_NAME + "/resources/" + resourceName + "/configs")
+            .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
+  }
+
+  private int storedDefaultWeight(String resourceName, String dimension) throws IOException {
+    return _configAccessor.getResourceConfig(CLUSTER_NAME, resourceName).getPartitionCapacityMap()
+        .get(ResourceConfig.DEFAULT_PARTITION_KEY).get(dimension);
   }
 
   private Response putWagedResource(String resourceName, ResourceConfig resourceConfig,
