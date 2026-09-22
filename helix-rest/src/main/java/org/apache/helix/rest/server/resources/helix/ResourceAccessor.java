@@ -46,6 +46,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.guardrail.GuardrailContext;
@@ -498,7 +499,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   @Path("{resourceName}/configs")
   public Response updateResourceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("resourceName") String resourceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -508,6 +510,15 @@ public class ResourceAccessor extends AbstractHelixResource {
       } catch (HelixException ex) {
         return badRequest(ex.getMessage());
       }
+    }
+
+    // force and dryRun are only honored by the 'update' command, which runs the weight guard rail
+    // pipeline. Reject them for any other command (e.g. delete) so a caller is never misled into
+    // thinking a delete was simulated (dryRun) or its verdict overridden (force).
+    if ((force || dryRun) && command != Command.update) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'update' command, not '%s'.",
+          commandStr));
     }
 
     ZNRecord record;
@@ -527,6 +538,33 @@ public class ResourceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
       case update:
+        // Weight guard rail (opt-in via ClusterConfig#PARTITION_WEIGHT_GUARDRAIL_ENABLED): editing a
+        // WAGED resource's weights here is a raw config write that never re-runs the resource-side
+        // weight validation addResourceWithWeight applies on the add path. Raising a partition weight
+        // above every assignable instance's capacity in some dimension makes it permanently
+        // unplaceable, which fails the WAGED global rebalance (CAPACITY_DEFICIT) and silently stalls
+        // placement for the whole cluster. Validate the merged (post-write) resource config -- the
+        // same way the ZK write merges the incoming record into the existing config -- against the
+        // resource's real partitions (its current ideal state). force=true overrides; dryRun=true
+        // reports the verdict without writing.
+        ResourceConfig existingConfig = configAccessor.getResourceConfig(clusterId, resourceName);
+        ZNRecord mergedRecord =
+            existingConfig != null ? existingConfig.getRecord() : new ZNRecord(resourceName);
+        mergedRecord.update(record);
+        HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+        GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(dataAccessor)
+            .proposedResourceConfig(new ResourceConfig(mergedRecord))
+            .proposedIdealState(
+                dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName)))
+            .build();
+        GuardrailPipeline guardrailPipeline =
+            new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
+        Optional<Response> preflightResponse =
+            preflight(guardrailPipeline, guardrailContext, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         configAccessor.updateResourceConfig(clusterId, resourceName, resourceConfig);
         break;
       case delete:
