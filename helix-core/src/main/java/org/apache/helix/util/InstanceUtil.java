@@ -342,6 +342,32 @@ public class InstanceUtil {
   }
 
   /**
+   * Returns the set of routable instances, i.e. those whose InstanceOperation is not in
+   * {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}. SWAP_IN and UNKNOWN instances are
+   * excluded because they do not represent assignable cluster capacity.
+   *
+   * <p>This is the denominator of the cluster-wide offline budget: the population returned by
+   * {@link #getInstancesUnableToAcceptOnlineReplicas(Map, Collection, long)} is by construction a
+   * subset of it. Percentage-based auto Maintenance Mode thresholds
+   * ({@code MAX_OFFLINE_INSTANCES_ALLOWED_PERCENTAGE} at entry,
+   * {@code NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT_PERCENTAGE} at exit) resolve against this count, so
+   * entry and exit convert their percentages against the same denominator and cannot drift apart.
+   *
+   * @param instanceConfigMap all instance configs in the cluster, keyed by instance name.
+   *                          Must not be null; an empty map yields an empty population.
+   * @return a fresh modifiable set of instance names.
+   */
+  public static Set<String> getRoutableInstances(Map<String, InstanceConfig> instanceConfigMap) {
+    Objects.requireNonNull(instanceConfigMap, "instanceConfigMap must not be null");
+    return instanceConfigMap.entrySet().stream()
+        .filter(e -> e.getValue() != null)
+        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
+            e.getValue().getInstanceOperation().getOperation()))
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toCollection(HashSet::new));
+  }
+
+  /**
    * Returns the set of instances that count toward the cluster-wide offline budget driving
    * auto Maintenance Mode ({@code MAX_OFFLINE_INSTANCES_ALLOWED} at entry,
    * {@code NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT} at exit).
@@ -386,12 +412,7 @@ public class InstanceUtil {
     if (instanceConfigMap.isEmpty()) {
       return new HashSet<>();
     }
-    Set<String> result = instanceConfigMap.entrySet().stream()
-        .filter(e -> e.getValue() != null)
-        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-            e.getValue().getInstanceOperation().getOperation()))
-        .map(Map.Entry::getKey)
-        .collect(Collectors.toCollection(HashSet::new));
+    Set<String> result = getRoutableInstances(instanceConfigMap);
     result.removeAll(getEnabledLiveInstances(instanceConfigMap, liveInstanceNames));
     result.removeIf(name -> {
       InstanceConfig config = instanceConfigMap.get(name);
