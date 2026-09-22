@@ -23,6 +23,7 @@ import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
@@ -49,6 +50,7 @@ public class GuardrailContext {
   private final InstanceConfig proposedInstanceConfig;
   private final List<String> proposedRemovedInstanceTags;
   private final MinActiveReplicaChecker minActiveReplicaChecker;
+  private final ClusterConfig proposedClusterConfig;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -61,6 +63,7 @@ public class GuardrailContext {
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
     this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
     this.minActiveReplicaChecker = builder.minActiveReplicaChecker;
+    this.proposedClusterConfig = builder.proposedClusterConfig;
   }
 
   public String getClusterName() {
@@ -148,6 +151,16 @@ public class GuardrailContext {
     return minActiveReplicaChecker;
   }
 
+  /**
+   * The cluster config a mutation proposes to write, or {@code null} if the operation is not
+   * cluster-config-scoped. Rules read the to-be-written cluster settings (e.g. its WAGED
+   * {@code INSTANCE_CAPACITY_KEYS} / {@code DEFAULT_INSTANCE_CAPACITY_MAP}) from here rather than
+   * from ZK, since the merged config has not been persisted yet at pre-validation time.
+   */
+  public ClusterConfig getProposedClusterConfig() {
+    return proposedClusterConfig;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -163,6 +176,7 @@ public class GuardrailContext {
     private InstanceConfig proposedInstanceConfig;
     private List<String> proposedRemovedInstanceTags;
     private MinActiveReplicaChecker minActiveReplicaChecker;
+    private ClusterConfig proposedClusterConfig;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -211,6 +225,11 @@ public class GuardrailContext {
 
     public Builder minActiveReplicaChecker(MinActiveReplicaChecker minActiveReplicaChecker) {
       this.minActiveReplicaChecker = minActiveReplicaChecker;
+      return this;
+    }
+
+    public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
+      this.proposedClusterConfig = proposedClusterConfig;
       return this;
     }
 
