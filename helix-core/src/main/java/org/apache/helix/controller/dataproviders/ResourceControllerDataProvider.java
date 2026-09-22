@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -120,6 +121,11 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // WAGED specific capacity / weight provider
   WagedInstanceCapacity _wagedInstanceCapacity;
   WagedResourceWeightsProvider _wagedPartitionWeightProvider;
+
+  // Tracks capacity rejections per resource per instance during mapping calculation.
+  // Outer map key: resource name, Inner map key: instance name, Value: rejection count
+  private final AtomicReference<Map<String, Map<String, AtomicLong>>> _capacityRejectionMapRef =
+      new AtomicReference<>(new ConcurrentHashMap<>());
 
   public ResourceControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER);
@@ -511,6 +517,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
     _missingMinActiveReplicaMap.clear();
+    _capacityRejectionMapRef.set(new ConcurrentHashMap<>());
   }
 
   /**
@@ -619,5 +626,31 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     Set<String> disabledInstances = super.getDisabledInstancesForPartition(resource, partition);
     disabledInstances.addAll(_disabledInstancesForAllPartitionsSet);
     return disabledInstances;
+  }
+
+  /**
+   * Records a capacity rejection for a resource on a specific instance.
+   * This is called when the mapping calculator cannot assign a partition to an instance
+   * due to insufficient capacity.
+   *
+   * @param resourceName The resource whose partition was rejected
+   * @param instanceName The instance that rejected the partition
+   */
+  public void recordCapacityRejection(String resourceName, String instanceName) {
+    _capacityRejectionMapRef.get()
+        .computeIfAbsent(resourceName, k -> new ConcurrentHashMap<>())
+        .computeIfAbsent(instanceName, k -> new AtomicLong(0))
+        .incrementAndGet();
+  }
+
+  /**
+   * Gets and clears all capacity rejection data atomically.
+   * This returns the rejections from the current pipeline run and clears the tracking data
+   * for the next run. The returned data is used to increment the cumulative JMX counters.
+   *
+   * @return Map of resource name to (instance name to rejection count)
+   */
+  public Map<String, Map<String, AtomicLong>> getAndClearCapacityRejections() {
+    return _capacityRejectionMapRef.getAndSet(new ConcurrentHashMap<>());
   }
 }

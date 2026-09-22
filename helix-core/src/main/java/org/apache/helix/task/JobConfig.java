@@ -57,10 +57,6 @@ public class JobConfig extends ResourceConfig {
      */
     JobID,
     /**
-     * The assignment strategy of this job
-     */
-    AssignmentStrategy,
-    /**
      * The name of the target resource.
      */
     TargetResource,
