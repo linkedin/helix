@@ -1654,7 +1654,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger.info("Add cluster {}.", clusterName);
     String root = "/" + clusterName;
     boolean creationStarted = false;
-    boolean createdRoot = false;
+    List<String> createdPaths = new ArrayList<>();
 
     try {
       if (clusterRootExists(root)) {
@@ -1675,18 +1675,19 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
         return rootExists;
       }
-      createdRoot = true;
-      createZKPaths(clusterName, acl);
+      createdPaths.add(root);
+      createZKPaths(clusterName, acl, createdPaths);
       logger.info("Created cluster:" + clusterName);
       return true;
     } catch (RuntimeException e) {
-      if (createdRoot) {
+      for (int i = createdPaths.size() - 1; i >= 0; i--) {
+        String path = createdPaths.get(i);
         try {
-          _zkClient.deleteRecursively(root);
+          // A non-recursive delete atomically refuses nodes with another client's children.
+          _zkClient.delete(path);
         } catch (RuntimeException cleanupException) {
           e.addSuppressed(cleanupException);
-          logger.error("Failed to clean up partially created cluster:" + clusterName,
-              cleanupException);
+          logger.error("Failed to clean up partially created cluster node {}", path, cleanupException);
         }
       }
       for (Throwable cause = e; cause != null; cause = cause.getCause()) {
@@ -1725,55 +1726,55 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
   }
 
-  private void createZKPaths(String clusterName, List<ACL> acl) {
+  private void createZKPaths(String clusterName, List<ACL> acl, List<String> createdPaths) {
     String path;
 
     // IDEAL STATE
-    createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl, createdPaths);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
     if (acl == null || acl.isEmpty()) {
-      createPersistent(path, true, acl);
+      createPersistent(path, true, acl, createdPaths);
       _zkClient.writeData(path, new ZNRecord(clusterName));
     } else {
       String parentPath = path.substring(0, path.lastIndexOf('/'));
-      createPersistent(parentPath, true, acl);
-      createPersistent(path, new ZNRecord(clusterName), acl);
+      createPersistent(parentPath, true, acl, createdPaths);
+      createPersistent(path, new ZNRecord(clusterName), acl, createdPaths);
     }
     path = PropertyPathBuilder.instanceConfig(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
     path = PropertyPathBuilder.resourceConfig(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
     path = PropertyPathBuilder.customizedStateConfig(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
     // PROPERTY STORE
     path = PropertyPathBuilder.propertyStore(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
     // LIVE INSTANCES
-    createPersistent(PropertyPathBuilder.liveInstance(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.liveInstance(clusterName), false, acl, createdPaths);
     // MEMBER INSTANCES
-    createPersistent(PropertyPathBuilder.instance(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.instance(clusterName), false, acl, createdPaths);
     // External view
-    createPersistent(PropertyPathBuilder.externalView(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.externalView(clusterName), false, acl, createdPaths);
     // State model definition
-    createPersistent(PropertyPathBuilder.stateModelDef(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.stateModelDef(clusterName), false, acl, createdPaths);
 
     // controller
-    createPersistent(PropertyPathBuilder.controller(clusterName), false, acl);
+    createPersistent(PropertyPathBuilder.controller(clusterName), false, acl, createdPaths);
     path = PropertyPathBuilder.controllerHistory(clusterName);
     final ZNRecord emptyHistory = new ZNRecord(PropertyType.HISTORY.toString());
     final List<String> emptyList = new ArrayList<String>();
     emptyHistory.setListField(clusterName, emptyList);
-    createPersistent(path, emptyHistory, acl);
+    createPersistent(path, emptyHistory, acl, createdPaths);
 
     path = PropertyPathBuilder.controllerMessage(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
 
     path = PropertyPathBuilder.controllerStatusUpdate(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
 
     path = PropertyPathBuilder.controllerError(clusterName);
-    createPersistent(path, false, acl);
+    createPersistent(path, false, acl, createdPaths);
   }
 
   /**
@@ -1788,12 +1789,34 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
   }
 
-  private void createPersistent(String path, Object data, List<ACL> acl) {
+  private void createPersistent(String path, boolean createParents, List<ACL> acl,
+      List<String> createdPaths) {
+    try {
+      createPersistent(path, false, acl);
+      createdPaths.add(path);
+    } catch (ZkNodeExistsException e) {
+      if (!createParents) {
+        throw e;
+      }
+    } catch (ZkNoNodeException e) {
+      String parent = path.substring(0, path.lastIndexOf('/'));
+      // Do not recreate a concurrently removed root or create ancestors outside the cluster.
+      if (!createParents || parent.equals(createdPaths.get(0))) {
+        throw e;
+      }
+      createPersistent(parent, true, acl, createdPaths);
+      createPersistent(path, true, acl, createdPaths);
+    }
+  }
+
+  private void createPersistent(String path, Object data, List<ACL> acl,
+      List<String> createdPaths) {
     if (acl == null || acl.isEmpty()) {
       _zkClient.createPersistent(path, data);
     } else {
       _zkClient.createPersistent(path, data, acl);
     }
+    createdPaths.add(path);
   }
 
   @Override
