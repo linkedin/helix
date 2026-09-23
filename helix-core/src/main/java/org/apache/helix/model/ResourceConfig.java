@@ -51,7 +51,6 @@ public class ResourceConfig extends HelixProperty {
     MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
-    DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
     ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
@@ -733,9 +732,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord
         .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
             idealState.getMinActiveReplicas());
-    mergedZNRecord.setBooleanFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-        idealState.isDelayRebalanceEnabled());
     return mergedResourceConfig;
   }
 }

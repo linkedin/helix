@@ -39,6 +39,22 @@ Mailing list: http://helix.apache.org/mail-lists.html
 mvn clean install -Dmaven.test.skip.exec=true
 ```
 
+## Configuration compatibility
+
+`ResourceConfigProperty.DELAY_REBALANCE_ENABLED` has been removed. Its ResourceConfig
+copy was not consumed by delayed rebalancing, and merging an IdealState into a
+ResourceConfig no longer adds it. Existing raw ResourceConfig fields with this name
+remain opaque metadata; they are not deleted or migrated into another config.
+
+Delayed rebalancing remains supported through `IdealState.setDelayRebalanceEnabled`,
+`InstanceConfig.setDelayRebalanceEnabled`, and `ClusterConfig.setDelayRebalaceEnabled`.
+Their serialized `DELAY_REBALANCE_ENABLED` key and default value (`true`) are unchanged.
+Code referencing the removed ResourceConfig enum constant must use the corresponding
+IdealState, InstanceConfig, or ClusterConfig API/enum instead and be rebuilt before
+upgrading Helix. Already-compiled references to the removed enum constant are not
+binary compatible. Do not copy an old ResourceConfig value into IdealState as part of
+this cleanup: doing so could activate a previously ignored setting.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
