@@ -288,18 +288,20 @@ public interface HelixAdmin {
   void enableInstance(String clusterName, String instanceName, boolean enabled);
 
   /**
-   * @deprecated use {@link #setInstanceOperation(String, String, InstanceConstants.InstanceOperation)}
-   * @param clusterName
-   * @param instanceName
-   * @param enabled
-   * @param disabledType disabledType for disable operation. It is ignored when enabled is true.
-   *                     Existing disabledType will be over write if instance is in disabled state.
-   * @param reason set additional string description on why the instance is disabled when
-   *          <code>enabled</code> is false. Existing disabled reason will be over write if instance is in disabled state.
+   * Update legacy instance enablement and its disable reason without validating instance-operation
+   * transitions. The reason is set only when the effective operation is DISABLE; enabling clears it.
+   * @param clusterName the cluster name
+   * @param instanceName the instance name
+   * @param enabled whether to enable the instance
+   * @param reason the disable reason, or null to clear an existing reason
+   * @deprecated use {@link #setInstanceOperation(String, String, InstanceConstants.InstanceOperation,
+   * String)} for validated instance-operation updates
    */
   @Deprecated
-  void enableInstance(String clusterName, String instanceName, boolean enabled,
-      InstanceConstants.InstanceDisabledType disabledType, String reason);
+  default void enableInstance(String clusterName, String instanceName, boolean enabled,
+      String reason) {
+    throw new UnsupportedOperationException("enableInstance with reason is not implemented.");
+  }
 
   /**
    * Batch enable/disable instances in a cluster

@@ -42,6 +42,7 @@ import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -71,6 +72,7 @@ import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestPerInstanceAccessor extends AbstractTestClass {
@@ -604,9 +606,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertFalse(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
     Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
-    Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "reason1");
 
@@ -616,9 +615,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-    Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.INSTANCE_NOT_DISABLED);
     Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
@@ -818,6 +814,88 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     }, TestHelper.WAIT_DURATION);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @DataProvider(name = "legacyDisableOperations")
+  public Object[][] legacyDisableOperations() {
+    return new Object[][] {
+        {InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.DISABLE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.EVACUATE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.SWAP_IN, InstanceConstants.InstanceOperation.SWAP_IN},
+        {InstanceConstants.InstanceOperation.UNKNOWN, InstanceConstants.InstanceOperation.UNKNOWN}
+    };
+  }
+
+  @Test(dataProvider = "legacyDisableOperations")
+  public void testLegacyDisablePreservesInstanceOperations(
+      InstanceConstants.InstanceOperation initialOperation,
+      InstanceConstants.InstanceOperation disabledOperation) {
+    String cluster = TestHelper.getTestMethodName() + "_" + initialOperation;
+    String instance = "localhost_9999";
+    _gSetupTool.addCluster(cluster, true);
+    try {
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      InstanceConfig config = new InstanceConfig(instance);
+      config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+          .setOperation(initialOperation)
+          .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+      config.getRecord().setSimpleField(
+          InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "stale");
+      _configAccessor.setInstanceConfig(cluster, instance, config);
+      config = _configAccessor.getInstanceConfig(cluster, instance);
+      Assert.assertEquals(config.getInstanceOperation().getOperation(), initialOperation);
+      List<String> operations = new ArrayList<>(config.getRecord()
+          .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()));
+      String configPath = PropertyPathBuilder.instanceConfig(cluster, instance);
+      Entity<String> entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+      for (String reason : new String[] {"reason1", "reason2", null, ""}) {
+        int version = _gZkClient.getStat(configPath).getVersion();
+        String query = "clusters/{}/instances/{}?command=disable&instanceDisabledType=USER_OPERATION";
+        if (reason != null) {
+          query += "&instanceDisabledReason=" + reason;
+        }
+        new JerseyUriRequestBuilder(query).format(cluster, instance).post(this, entity).close();
+
+        Assert.assertEquals(_gZkClient.getStat(configPath).getVersion(), version + 1,
+            "Disablement and its reason must be written in one atomic update");
+        config = _configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertFalse(config.getRecord().getBooleanField(
+            InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), true));
+        Assert.assertEquals(config.getInstanceOperation().getOperation(), disabledOperation);
+        Assert.assertEquals(config.getRecord()
+            .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()),
+            operations, "Legacy disable must not rewrite modern instance operations");
+        Assert.assertEquals(config.getInstanceDisabledReason(),
+            disabledOperation == InstanceConstants.InstanceOperation.DISABLE && reason != null
+                ? reason : "");
+      }
+
+      if (initialOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE")
+            .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+            .format(cluster, instance).post(this, entity).close();
+        Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, instance).getRecord(),
+            config.getRecord(), "Rejected modern transitions must leave the config unchanged");
+      }
+
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=enable")
+          .format(cluster, instance).post(this, entity).close();
+      config = _configAccessor.getInstanceConfig(cluster, instance);
+      Assert.assertTrue(config.getRecord().getBooleanField(
+          InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), false));
+      Assert.assertEquals(config.getInstanceOperation().getOperation(),
+          initialOperation == InstanceConstants.InstanceOperation.DISABLE
+              ? InstanceConstants.InstanceOperation.ENABLE : initialOperation);
+      Assert.assertEquals(config.getInstanceDisabledReason(), "");
+      Assert.assertEquals(config.getRecord()
+          .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()),
+          operations);
+    } finally {
+      _gSetupTool.deleteCluster(cluster);
+    }
   }
 
   /**
