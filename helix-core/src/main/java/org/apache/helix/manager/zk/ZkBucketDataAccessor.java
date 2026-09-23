@@ -188,9 +188,10 @@ public class ZkBucketDataAccessor implements BucketDataAccessor, AutoCloseable {
     while (counter < numBuckets) {
       paths.add(versionedDataPath + "/" + counter);
       if (counter == numBuckets - 1) {
-        // Special treatment for the last bucket
-        buckets.add(
-            Arrays.copyOfRange(compressedRecord, ptr, ptr + compressedRecord.length % _bucketSize));
+        // The last bucket runs to the end of the payload. Note that its length is a full
+        // _bucketSize when compressedRecord.length is an exact multiple of _bucketSize, so it
+        // must not be derived from a remainder.
+        buckets.add(Arrays.copyOfRange(compressedRecord, ptr, compressedRecord.length));
       } else {
         buckets.add(Arrays.copyOfRange(compressedRecord, ptr, ptr + _bucketSize));
       }
@@ -298,8 +299,10 @@ public class ZkBucketDataAccessor implements BucketDataAccessor, AutoCloseable {
     int bucketSize = Integer.parseInt((String) bucketSizeObj);
     int dataSize = Integer.parseInt((String) dataSizeObj);
 
-    // Compute N - number of buckets
-    int numBuckets = (dataSize + _bucketSize - 1) / _bucketSize;
+    // Compute N - number of buckets. This must use the bucket size the data was WRITTEN with
+    // (read back from the metadata above), not this accessor's own configured _bucketSize, which
+    // may differ if the configuration changed between the write and this read.
+    int numBuckets = (dataSize + bucketSize - 1) / bucketSize;
     byte[] compressedRecord = new byte[dataSize];
     String dataPath = path + "/" + versionToRead;
 
@@ -314,13 +317,11 @@ public class ZkBucketDataAccessor implements BucketDataAccessor, AutoCloseable {
     // Combine buckets into one byte array
     int copyPtr = 0;
     for (int i = 0; i < numBuckets; i++) {
-      if (i == numBuckets - 1) {
-        // Special treatment for the last bucket
-        System.arraycopy(buckets.get(i), 0, compressedRecord, copyPtr, dataSize % bucketSize);
-      } else {
-        System.arraycopy(buckets.get(i), 0, compressedRecord, copyPtr, bucketSize);
-        copyPtr += bucketSize;
-      }
+      // Clamp to what is left of the payload. The final bucket holds a full bucketSize when
+      // dataSize is an exact multiple of bucketSize, so its length must not come from a remainder.
+      int copyLength = Math.min(bucketSize, dataSize - copyPtr);
+      System.arraycopy(buckets.get(i), 0, compressedRecord, copyPtr, copyLength);
+      copyPtr += copyLength;
     }
 
     // Decompress the byte array
