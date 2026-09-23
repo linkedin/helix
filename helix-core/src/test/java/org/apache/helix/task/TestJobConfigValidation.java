@@ -19,8 +19,11 @@ package org.apache.helix.task;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.helix.HelixProperty;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -65,5 +68,47 @@ public class TestJobConfigValidation {
     Assert.assertEquals(actual.getRecord(), expected.getRecord());
     Assert.assertFalse(actual.getRecord().getSimpleFields().containsKey("AssignmentStrategy"));
     Assert.assertEquals(TaskUtil.isGenericTaskJob(actual), genericJob);
+  }
+
+  @DataProvider
+  public Object[][] legacyExternalViewFlags() {
+    return new Object[][] {
+        {false, null}, {false, "true"}, {false, "false"},
+        {true, null}, {true, "true"}, {true, "false"}
+    };
+  }
+
+  @Test(dataProvider = "legacyExternalViewFlags")
+  public void testLegacyExternalViewFlagIgnored(boolean targeted, String legacyFlag) {
+    JobConfig.Builder builder = new JobConfig.Builder().setWorkflow("workflow").setJobId("job")
+        .setCommand("Dummy").setTimeoutPerTask(1000L).setTaskRetryDelay(50L)
+        .setNumConcurrentTasksPerInstance(2).setMaxAttemptsPerTask(3)
+        .setIgnoreDependentJobFailure(true);
+    if (targeted) {
+      builder.setTargetResource("database")
+          .setTargetPartitions(Collections.singletonList("database_0"))
+          .setTargetPartitionStates(Collections.singleton("SLAVE"));
+    } else {
+      builder.setNumberOfTasks(2);
+    }
+    JobConfig expected = builder.build();
+    Assert.assertFalse(expected.getRecord().getSimpleFields().containsKey("DisableExternalView"));
+
+    ZNRecord legacyRecord = new ZNRecord(expected.getRecord());
+    if (legacyFlag != null) {
+      legacyRecord.setSimpleField("DisableExternalView", legacyFlag);
+    }
+    ZNRecord originalRecord = new ZNRecord(legacyRecord);
+    JobConfig parsed = JobConfig.Builder.fromMap(legacyRecord.getSimpleFields())
+        .addTaskConfigMap(expected.getTaskConfigMap()).build();
+
+    Assert.assertEquals(parsed.getRecord(), expected.getRecord());
+    Assert.assertEquals(TaskUtil.isGenericTaskJob(parsed), !targeted);
+
+    JobConfig wrapped = new JobConfig(new HelixProperty(legacyRecord));
+    JobConfig copied = new JobConfig("copy", wrapped);
+    Assert.assertEquals(copied.getRecord(), new JobConfig("copy", expected).getRecord());
+    Assert.assertFalse(copied.getRecord().getSimpleFields().containsKey("DisableExternalView"));
+    Assert.assertEquals(legacyRecord, originalRecord, "Reading legacy records must not rewrite them");
   }
 }

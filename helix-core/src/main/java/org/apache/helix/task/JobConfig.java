@@ -40,6 +40,9 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
  * Provides a typed interface to job configurations.
+ * Jobs expose runtime state through {@link JobContext} and {@link WorkflowContext}, not
+ * ExternalViews. The legacy {@code DisableExternalView} input is ignored when rebuilding
+ * configurations; builders and job-ID copies do not emit it.
  */
 public class JobConfig extends ResourceConfig {
 
@@ -118,11 +121,6 @@ public class JobConfig extends ResourceConfig {
     TaskConfigs,
 
     /**
-     * Disable external view (not showing) for this job resource
-     */
-    DisableExternalView,
-
-    /**
      * The type of the job
      */
     JobType,
@@ -167,7 +165,6 @@ public class JobConfig extends ResourceConfig {
   public static final int DEFAULT_NUM_CONCURRENT_TASKS_PER_INSTANCE = 1;
   public static final int DEFAULT_FAILURE_THRESHOLD = 0;
   public static final int DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK = 0;
-  public static final boolean DEFAULT_DISABLE_EXTERNALVIEW = false;
   public static final boolean DEFAULT_IGNORE_DEPENDENT_JOB_FAILURE = false;
   public static final int DEFAULT_NUMBER_OF_TASKS = 0;
   public static final long DEFAULT_JOB_EXECUTION_START_TIME = -1L;
@@ -188,9 +185,9 @@ public class JobConfig extends ResourceConfig {
         jobConfig.getJobCommandConfigMap(), jobConfig.getTimeout(), jobConfig.getTimeoutPerTask(),
         jobConfig.getNumConcurrentTasksPerInstance(), jobConfig.getMaxAttemptsPerTask(),
         jobConfig.getMaxAttemptsPerTask(), jobConfig.getFailureThreshold(),
-        jobConfig.getTaskRetryDelay(), jobConfig.isDisableExternalView(),
-        jobConfig.isIgnoreDependentJobFailure(), jobConfig.getTaskConfigMap(),
-        jobConfig.getJobType(), jobConfig.getInstanceGroupTag(), jobConfig.getExecutionDelay(),
+        jobConfig.getTaskRetryDelay(), jobConfig.isIgnoreDependentJobFailure(),
+        jobConfig.getTaskConfigMap(), jobConfig.getJobType(), jobConfig.getInstanceGroupTag(),
+        jobConfig.getExecutionDelay(),
         jobConfig.getExecutionStart(), jobId, jobConfig.getExpiry(),
         jobConfig.getTerminalStateExpiry(), jobConfig.isRebalanceRunningTask());
   }
@@ -199,7 +196,7 @@ public class JobConfig extends ResourceConfig {
       Set<String> targetPartitionStates, String command, Map<String, String> jobCommandConfigMap,
       long timeout, long timeoutPerTask, int numConcurrentTasksPerInstance, int maxAttemptsPerTask,
       int maxForcedReassignmentsPerTask, int failureThreshold, long retryDelay,
-      boolean disableExternalView, boolean ignoreDependentJobFailure,
+      boolean ignoreDependentJobFailure,
       Map<String, TaskConfig> taskConfigMap, String jobType, String instanceGroupTag,
       long executionDelay, long executionStart, String jobId, long expiry, long terminalStateExpiry,
       boolean rebalanceRunningTask) {
@@ -243,7 +240,6 @@ public class JobConfig extends ResourceConfig {
     getRecord().setIntField(JobConfigProperty.MaxForcedReassignmentsPerTask.name(),
         maxForcedReassignmentsPerTask);
     getRecord().setIntField(JobConfigProperty.FailureThreshold.name(), failureThreshold);
-    getRecord().setBooleanField(JobConfigProperty.DisableExternalView.name(), disableExternalView);
     getRecord().setIntField(JobConfigProperty.ConcurrentTasksPerInstance.name(),
         numConcurrentTasksPerInstance);
     getRecord().setBooleanField(JobConfigProperty.IgnoreDependentJobFailure.name(),
@@ -348,11 +344,6 @@ public class JobConfig extends ResourceConfig {
   public long getExecutionStart() {
     return getRecord().getLongField(JobConfigProperty.StartTime.name(),
         DEFAULT_JOB_EXECUTION_START_TIME);
-  }
-
-  public boolean isDisableExternalView() {
-    return getRecord().getBooleanField(JobConfigProperty.DisableExternalView.name(),
-        DEFAULT_DISABLE_EXTERNALVIEW);
   }
 
   public boolean isIgnoreDependentJobFailure() {
@@ -465,7 +456,6 @@ public class JobConfig extends ResourceConfig {
     private long _executionDelay = DEFAULT_Job_EXECUTION_DELAY_TIME;
     private long _expiry = WorkflowConfig.DEFAULT_EXPIRY;
     private long _terminalStateExpiry = DEFAULT_TERMINAL_STATE_EXPIRY;
-    private boolean _disableExternalView = DEFAULT_DISABLE_EXTERNALVIEW;
     private boolean _ignoreDependentJobFailure = DEFAULT_IGNORE_DEPENDENT_JOB_FAILURE;
     private int _numberOfTasks = DEFAULT_NUMBER_OF_TASKS;
     private boolean _rebalanceRunningTask = DEFAULT_REBALANCE_RUNNING_TASK;
@@ -487,7 +477,7 @@ public class JobConfig extends ResourceConfig {
       return new JobConfig(_workflow, _targetResource, _targetPartitions, _targetPartitionStates,
           _command, _commandConfig, _timeout, _timeoutPerTask, _numConcurrentTasksPerInstance,
           _maxAttemptsPerTask, _maxForcedReassignmentsPerTask, _failureThreshold, _retryDelay,
-          _disableExternalView, _ignoreDependentJobFailure, _taskConfigMap, _jobType,
+          _ignoreDependentJobFailure, _taskConfigMap, _jobType,
           _instanceGroupTag, _executionDelay, _executionStart, _jobId, _expiry,
           _terminalStateExpiry, _rebalanceRunningTask);
     }
@@ -548,10 +538,6 @@ public class JobConfig extends ResourceConfig {
       }
       if (cfg.containsKey(JobConfigProperty.StartTime.name())) {
         b.setExecutionStart(Long.parseLong(cfg.get(JobConfigProperty.StartTime.name())));
-      }
-      if (cfg.containsKey(JobConfigProperty.DisableExternalView.name())) {
-        b.setDisableExternalView(
-            Boolean.parseBoolean(cfg.get(JobConfigProperty.DisableExternalView.name())));
       }
       if (cfg.containsKey(JobConfigProperty.IgnoreDependentJobFailure.name())) {
         b.setIgnoreDependentJobFailure(
@@ -665,11 +651,6 @@ public class JobConfig extends ResourceConfig {
 
     public Builder setExecutionStart(long v) {
       _executionStart = v;
-      return this;
-    }
-
-    public Builder setDisableExternalView(boolean disableExternalView) {
-      _disableExternalView = disableExternalView;
       return this;
     }
 
@@ -794,7 +775,6 @@ public class JobConfig extends ResourceConfig {
           .setNumConcurrentTasksPerInstance(jobBean.numConcurrentTasksPerInstance)
           .setTimeout(jobBean.timeout).setTimeoutPerTask(jobBean.timeoutPerPartition)
           .setFailureThreshold(jobBean.failureThreshold).setTaskRetryDelay(jobBean.taskRetryDelay)
-          .setDisableExternalView(jobBean.disableExternalView)
           .setIgnoreDependentJobFailure(jobBean.ignoreDependentJobFailure)
           .setNumberOfTasks(jobBean.numberOfTasks).setExecutionDelay(jobBean.executionDelay)
           .setExecutionStart(jobBean.executionStart)
