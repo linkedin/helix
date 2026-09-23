@@ -50,6 +50,17 @@ Helix is a generic cluster management framework used for automatic management of
 5. Pluggable distributed state machine to manage the state of a resource via state transitions
 6. Automatic load balancing and throttling of transitions 
 
+## LinkedIn fork compatibility
+
+`GreedyRebalanceStrategy` and its cluster config
+`GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE` have been removed from this fork.
+Before upgrading, migrate any resource whose IdealState `REBALANCE_STRATEGY` names
+that class to an explicitly chosen supported strategy. There is no automatic
+fallback: an obsolete selector fails assignment calculation. Existing raw copies
+of the retired cluster key are preserved but ignored and no longer impose a cap.
+The separate `MAX_PARTITIONS_PER_INSTANCE` settings and WAGED capacity constraints
+are unchanged; they are not automatic replacements for Greedy's global count cap.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 

@@ -72,10 +72,6 @@ public class ClusterConfig extends HelixProperty {
 
     // The following concerns maintenance mode
     MAX_PARTITIONS_PER_INSTANCE,
-    // The maximum number of partitions that an instance can serve in this cluster.
-    // This only works for GreedyRebalanceStrategy.
-    // TODO: if we want to support this for other rebalancers, we need to implement that logic
-    GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE,
     // The following two include offline AND disabled instances
     // TODO: At some point we should rename this to something like MAX_INSTANCES_UNABLE_TO_TAKE_ACCEPT_REPLICAS
     //     to make it clear that it includes both offline and non-assignable instances
@@ -547,26 +543,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public int getMaxPartitionsPerInstance() {
     return _record.getIntField(ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), -1);
-  }
-
-  /**
-   * Set the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @param globalMaxPartitionAllowedPerInstance the maximum number of partitions allowed
-   */
-  public void setGlobalMaxPartitionAllowedPerInstance(int globalMaxPartitionAllowedPerInstance) {
-    _record.setIntField(ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(),
-        globalMaxPartitionAllowedPerInstance);
-  }
-
-  /**
-   * Get the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @return the maximum number of partitions allowed, or Integer.MAX_VALUE
-   */
-  public int getGlobalMaxPartitionAllowedPerInstance() {
-    return _record.getIntField(
-        ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(), -1);
   }
 
   /**
