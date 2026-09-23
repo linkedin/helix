@@ -460,7 +460,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     String clusterName = getShortClassName() + "_deniedRoot";
     String rootPath = "/" + clusterName;
     RealmAwareZkClient client = Mockito.mock(RealmAwareZkClient.class);
-    Mockito.when(client.getChildren(rootPath)).thenThrow(new ZkNoNodeException());
+    Mockito.when(client.readData(rootPath)).thenThrow(new ZkNoNodeException());
     ZkException failure = new ZkException(KeeperException.create(KeeperException.Code.NOAUTH, "/"));
     Mockito.doThrow(failure).when(client).createPersistent(rootPath, false);
 
@@ -472,7 +472,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
-  public void testAddClusterUnreadableMetadata() throws Exception {
+  public void testAddClusterDoesNotValidateChildMetadata() throws Exception {
     String clusterName = getShortClassName() + "_unreadableMetadata";
     String rootPath = "/" + clusterName;
     String configPath = PropertyPathBuilder.clusterConfig(clusterName);
@@ -481,7 +481,8 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     try {
       rawZooKeeper(_gZkClient).setACL(configPath, Collections.singletonList(
           new ACL(ZooDefs.Perms.ALL & ~ZooDefs.Perms.READ, ZooDefs.Ids.ANYONE_ID_UNSAFE)), -1);
-      assertAddClusterUnauthorized(admin, clusterName, false, null);
+      Assert.assertTrue(admin.addCluster(clusterName, false));
+      Assert.assertTrue(admin.addCluster(clusterName, false, Collections.emptyList()));
     } finally {
       rawZooKeeper(_gZkClient).setACL(configPath, ZooDefs.Ids.OPEN_ACL_UNSAFE, -1);
       _gZkClient.deleteRecursively(rootPath);
@@ -527,8 +528,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
         if (failCleanup) {
           Assert.assertEquals(failure.getSuppressed().length, 1);
-          Assert.assertFalse(admin.addCluster(clusterName, false));
-          Assert.assertFalse(admin.addCluster(clusterName, false, acl));
+          // A readable root is accepted even if cleanup left the metadata incomplete.
+          Assert.assertTrue(admin.addCluster(clusterName, false));
+          Assert.assertTrue(admin.addCluster(clusterName, false, acl));
           Assert.assertFalse(_gZkClient.exists(failurePath));
         }
         Assert.assertTrue(admin.addCluster(clusterName, true, acl));
@@ -544,21 +546,45 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
   @Test
   public void testAddClusterConcurrentRootCreation() {
-    for (boolean complete : new boolean[] {false, true}) {
-      String clusterName = getShortClassName() + "_concurrent_" + complete;
+    for (boolean readable : new boolean[] {false, true}) {
+      String clusterName = getShortClassName() + "_concurrent_" + readable;
       String rootPath = "/" + clusterName;
       RealmAwareZkClient client = Mockito.mock(RealmAwareZkClient.class);
-      Mockito.when(client.getChildren(Mockito.anyString())).thenReturn(Collections.emptyList());
-      Mockito.when(client.getChildren(rootPath)).thenThrow(new ZkNoNodeException())
-          .thenReturn(Collections.emptyList());
-      Mockito.doThrow(new ZkNodeExistsException()).when(client).createPersistent(rootPath, false);
-      if (!complete) {
-        Mockito.when(client.getChildren(PropertyPathBuilder.clusterConfig(clusterName)))
-            .thenThrow(new ZkNoNodeException());
+      if (readable) {
+        Mockito.when(client.readData(rootPath)).thenThrow(new ZkNoNodeException()).thenReturn(null);
+      } else {
+        Mockito.when(client.readData(rootPath)).thenThrow(new ZkNoNodeException())
+            .thenThrow(new ZkException(KeeperException.create(KeeperException.Code.NOAUTH, rootPath)));
       }
+      Mockito.doThrow(new ZkNodeExistsException()).when(client).createPersistent(rootPath, false);
 
-      Assert.assertEquals(new ZKHelixAdmin(client).addCluster(clusterName, false), complete);
+      if (readable) {
+        Assert.assertTrue(new ZKHelixAdmin(client).addCluster(clusterName, false));
+      } else {
+        assertAddClusterUnauthorized(new ZKHelixAdmin(client), clusterName, false, null);
+      }
+      Mockito.verify(client, Mockito.never()).getChildren(Mockito.anyString());
       Mockito.verify(client, Mockito.never()).deleteRecursively(rootPath);
+    }
+  }
+
+  @Test
+  public void testAddClusterExistingEmptyRoot() {
+    String clusterName = getShortClassName() + "_emptyRoot";
+    String rootPath = "/" + clusterName;
+    _gZkClient.createPersistent(rootPath, false);
+    try {
+      Assert.assertNull(_gZkClient.readData(rootPath));
+      HelixZkClient client = Mockito.spy(_gZkClient);
+      HelixAdmin admin = new ZKHelixAdmin(client);
+      Assert.assertTrue(admin.addCluster(clusterName, false));
+      Assert.assertTrue(admin.addCluster(clusterName, false, null));
+      Assert.assertTrue(admin.addCluster(clusterName, false, Collections.emptyList()));
+      Assert.assertTrue(admin.addCluster(clusterName, false, ZooDefs.Ids.OPEN_ACL_UNSAFE));
+      Mockito.verify(client, Mockito.never()).getChildren(Mockito.anyString());
+      Assert.assertEquals(_gZkClient.getChildren(rootPath), Collections.emptyList());
+    } finally {
+      _gZkClient.deleteRecursively(rootPath);
     }
   }
 
@@ -575,6 +601,82 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       if (_gZkClient.exists("/" + parent)) {
         _gZkClient.deleteRecursively("/" + parent);
       }
+    }
+  }
+
+  @Test
+  public void testAddClusterNestedAclKeepsNamespaceShared() throws Exception {
+    String namespace = "/" + getShortClassName() + "_sharedNamespace";
+    String firstCluster = namespace.substring(1) + "/shared/first";
+    String secondCluster = namespace.substring(1) + "/shared/second";
+    String firstCredentials = "firstOwner:firstPassword";
+    String secondCredentials = "secondOwner:secondPassword";
+    List<ACL> firstAcl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
+        new Id(DIGEST_SCHEME, DigestAuthenticationProvider.generateDigest(firstCredentials))));
+    List<ACL> secondAcl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
+        new Id(DIGEST_SCHEME, DigestAuthenticationProvider.generateDigest(secondCredentials))));
+    HelixZkClient firstClient = DedicatedZkClientFactory.getInstance().buildZkClient(
+        new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+        new HelixZkClient.ZkClientConfig().setZkSerializer(new ZNRecordSerializer()));
+    HelixZkClient secondClient = null;
+    try {
+      ((org.apache.helix.zookeeper.zkclient.ZkClient) firstClient)
+          .addAuthInfo(DIGEST_SCHEME, firstCredentials.getBytes(StandardCharsets.UTF_8));
+      Assert.assertTrue(new ZKHelixAdmin(firstClient).addCluster(firstCluster, false, firstAcl));
+      Assert.assertEquals(getAcl(rawZooKeeper(firstClient), namespace), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+      Assert.assertEquals(getAcl(rawZooKeeper(firstClient), namespace + "/shared"),
+          ZooDefs.Ids.OPEN_ACL_UNSAFE);
+      Assert.assertEquals(getAcl(rawZooKeeper(firstClient), "/" + firstCluster), firstAcl);
+      Assert.assertEquals(
+          getAcl(rawZooKeeper(firstClient), PropertyPathBuilder.clusterConfig(firstCluster)), firstAcl);
+
+      secondClient = DedicatedZkClientFactory.getInstance().buildZkClient(
+          new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+          new HelixZkClient.ZkClientConfig().setZkSerializer(new ZNRecordSerializer()));
+      ((org.apache.helix.zookeeper.zkclient.ZkClient) secondClient)
+          .addAuthInfo(DIGEST_SCHEME, secondCredentials.getBytes(StandardCharsets.UTF_8));
+      Assert.assertTrue(new ZKHelixAdmin(secondClient).addCluster(secondCluster, false, secondAcl));
+      Assert.assertEquals(getAcl(rawZooKeeper(secondClient), "/" + secondCluster), secondAcl);
+      Assert.assertTrue(ZKUtil.isClusterSetup(firstCluster, firstClient));
+      Assert.assertTrue(ZKUtil.isClusterSetup(secondCluster, secondClient));
+    } finally {
+      try {
+        try {
+          if (secondClient != null && secondClient.exists("/" + secondCluster)) {
+            secondClient.deleteRecursively("/" + secondCluster);
+          }
+        } finally {
+          if (firstClient.exists(namespace)) {
+            firstClient.deleteRecursively(namespace);
+          }
+        }
+      } finally {
+        try {
+          if (secondClient != null) {
+            secondClient.close();
+          }
+        } finally {
+          firstClient.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testAddClusterPreservesExistingNamespaceAcl() throws Exception {
+    String namespace = "/" + getShortClassName() + "_existingNamespace";
+    String clusterName = namespace.substring(1) + "/shared/cluster";
+    List<ACL> namespaceAcl = Collections.singletonList(new ACL(
+        ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.DELETE,
+        ZooDefs.Ids.ANYONE_ID_UNSAFE));
+    _gZkClient.createPersistent(namespace, false, namespaceAcl);
+    try {
+      Assert.assertTrue(
+          new ZKHelixAdmin(_gZkClient).addCluster(clusterName, false, ZooDefs.Ids.OPEN_ACL_UNSAFE));
+      Assert.assertEquals(getAcl(namespace), namespaceAcl);
+      Assert.assertEquals(getAcl(namespace + "/shared"), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+    } finally {
+      _gZkClient.deleteRecursively(namespace);
     }
   }
 
@@ -611,8 +713,10 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       Assert.assertTrue(tool.addCluster(clusterName, false, acl));
       Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
       String configPath = PropertyPathBuilder.clusterConfig(clusterName);
-      ZNRecord config = _gZkClient.readData(configPath);
+      Stat configStat = new Stat();
+      ZNRecord config = _gZkClient.readData(configPath, configStat);
       Assert.assertEquals(config, new ZNRecord(clusterName));
+      Assert.assertEquals(configStat.getVersion(), 0);
       for (String path : new String[] {
           rootPath, rootPath + "/CONFIGS", rootPath + "/CONFIGS/CLUSTER", configPath
       }) {
@@ -636,19 +740,30 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println(
         "START testAddClusterWithoutAclKeepsDefaultAcl at " + new Date(System.currentTimeMillis()));
 
-    final String clusterName = getShortClassName() + "_noAcl";
-    String rootPath = "/" + clusterName;
-    if (_gZkClient.exists(rootPath)) {
-      _gZkClient.deleteRecursively(rootPath);
-    }
-
     HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
-    // an empty ACL list must behave exactly like the two argument overload
-    Assert.assertTrue(tool.addCluster(clusterName, true, Collections.emptyList()));
-    Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
-    Assert.assertEquals(getAcl(rootPath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
-
-    deleteCluster(clusterName);
+    for (int variant = 0; variant < 3; variant++) {
+      String clusterName = getShortClassName() + "_noAcl_" + variant;
+      String rootPath = "/" + clusterName;
+      try {
+        boolean created = variant == 0 ? tool.addCluster(clusterName, true)
+            : tool.addCluster(clusterName, true, variant == 1 ? null : Collections.emptyList());
+        Assert.assertTrue(created);
+        Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+        Assert.assertEquals(getAcl(rootPath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+        String configPath = PropertyPathBuilder.clusterConfig(clusterName);
+        Stat configStat = new Stat();
+        ZNRecord config = _gZkClient.readData(configPath, configStat);
+        Assert.assertEquals(config, new ZNRecord(clusterName));
+        Assert.assertEquals(configStat.getVersion(), 1);
+        Assert.assertEquals(getAcl(configPath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+        Assert.assertEquals(
+            _gZkClient.getStat(PropertyPathBuilder.controllerHistory(clusterName)).getVersion(), 0);
+      } finally {
+        if (_gZkClient.exists(rootPath)) {
+          _gZkClient.deleteRecursively(rootPath);
+        }
+      }
+    }
     System.out.println(
         "END testAddClusterWithoutAclKeepsDefaultAcl at " + new Date(System.currentTimeMillis()));
   }

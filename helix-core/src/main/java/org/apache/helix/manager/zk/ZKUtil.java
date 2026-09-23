@@ -83,7 +83,21 @@ public final class ZKUtil {
       logger.info("Fail to check cluster setup : zookeeper client is null!");
       return false;
     }
-    List<String> requiredPaths = getRequiredClusterPaths(clusterName);
+    List<String> requiredPaths = new ArrayList<>();
+    requiredPaths.add(PropertyPathBuilder.idealState(clusterName));
+    requiredPaths.add(PropertyPathBuilder.clusterConfig(clusterName));
+    requiredPaths.add(PropertyPathBuilder.instanceConfig(clusterName));
+    requiredPaths.add(PropertyPathBuilder.resourceConfig(clusterName));
+    requiredPaths.add(PropertyPathBuilder.propertyStore(clusterName));
+    requiredPaths.add(PropertyPathBuilder.liveInstance(clusterName));
+    requiredPaths.add(PropertyPathBuilder.instance(clusterName));
+    requiredPaths.add(PropertyPathBuilder.externalView(clusterName));
+    requiredPaths.add(PropertyPathBuilder.controller(clusterName));
+    requiredPaths.add(PropertyPathBuilder.stateModelDef(clusterName));
+    requiredPaths.add(PropertyPathBuilder.controllerMessage(clusterName));
+    requiredPaths.add(PropertyPathBuilder.controllerError(clusterName));
+    requiredPaths.add(PropertyPathBuilder.controllerStatusUpdate(clusterName));
+    requiredPaths.add(PropertyPathBuilder.controllerHistory(clusterName));
     boolean isValid = true;
 
     boolean[] ret = new boolean[requiredPaths.size()];
@@ -109,25 +123,6 @@ public final class ZKUtil {
     }
 
     return isValid;
-  }
-
-  static List<String> getRequiredClusterPaths(String clusterName) {
-    List<String> requiredPaths = new ArrayList<>();
-    requiredPaths.add(PropertyPathBuilder.idealState(clusterName));
-    requiredPaths.add(PropertyPathBuilder.clusterConfig(clusterName));
-    requiredPaths.add(PropertyPathBuilder.instanceConfig(clusterName));
-    requiredPaths.add(PropertyPathBuilder.resourceConfig(clusterName));
-    requiredPaths.add(PropertyPathBuilder.propertyStore(clusterName));
-    requiredPaths.add(PropertyPathBuilder.liveInstance(clusterName));
-    requiredPaths.add(PropertyPathBuilder.instance(clusterName));
-    requiredPaths.add(PropertyPathBuilder.externalView(clusterName));
-    requiredPaths.add(PropertyPathBuilder.controller(clusterName));
-    requiredPaths.add(PropertyPathBuilder.stateModelDef(clusterName));
-    requiredPaths.add(PropertyPathBuilder.controllerMessage(clusterName));
-    requiredPaths.add(PropertyPathBuilder.controllerError(clusterName));
-    requiredPaths.add(PropertyPathBuilder.controllerStatusUpdate(clusterName));
-    requiredPaths.add(PropertyPathBuilder.controllerHistory(clusterName));
-    return requiredPaths;
   }
 
   /**

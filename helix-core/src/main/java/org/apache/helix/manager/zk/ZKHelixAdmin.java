@@ -1659,7 +1659,8 @@ public class ZKHelixAdmin implements HelixAdmin {
     try {
       if (clusterRootExists(root)) {
         if (!recreateIfExists) {
-          return isClusterSetupWithReadAccess(clusterName);
+          logger.info("Cluster " + clusterName + " already exists");
+          return true;
         }
         logger.warn("Root directory exists.Cleaning the root directory:" + root);
         _zkClient.deleteRecursively(root);
@@ -1668,7 +1669,11 @@ public class ZKHelixAdmin implements HelixAdmin {
       try {
         createClusterRoot(root, acl);
       } catch (ZkNodeExistsException e) {
-        return isClusterSetupWithReadAccess(clusterName);
+        boolean rootExists = clusterRootExists(root);
+        if (!rootExists) {
+          logger.warn("Cluster root {} disappeared after concurrent creation", root);
+        }
+        return rootExists;
       }
       createdRoot = true;
       createZKPaths(clusterName, acl);
@@ -1701,23 +1706,10 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   private boolean clusterRootExists(String root) {
     try {
-      // Unlike exists(), getChildren() enforces READ on older ZooKeeper versions as well.
-      _zkClient.getChildren(root);
+      // A successful read enforces READ on both ZK versions; empty roots may return null data.
+      _zkClient.readData(root);
       return true;
     } catch (ZkNoNodeException e) {
-      return false;
-    }
-  }
-
-  private boolean isClusterSetupWithReadAccess(String clusterName) {
-    try {
-      _zkClient.getChildren("/" + clusterName);
-      for (String path : ZKUtil.getRequiredClusterPaths(clusterName)) {
-        _zkClient.getChildren(path);
-      }
-      return true;
-    } catch (ZkNoNodeException e) {
-      logger.warn("Cluster {} is incomplete: {}", clusterName, e.getMessage());
       return false;
     }
   }
@@ -1728,7 +1720,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       createPersistent(root, false, acl);
     } catch (ZkNoNodeException e) {
       String parent = root.substring(0, root.lastIndexOf('/'));
-      createPersistent(parent, true, acl);
+      createPersistent(parent, true, null);
       createPersistent(root, false, acl);
     }
   }
@@ -1740,9 +1732,14 @@ public class ZKHelixAdmin implements HelixAdmin {
     createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
-    String parentPath = path.substring(0, path.lastIndexOf('/'));
-    createPersistent(parentPath, true, acl);
-    createPersistent(path, new ZNRecord(clusterName), acl);
+    if (acl == null || acl.isEmpty()) {
+      createPersistent(path, true, acl);
+      _zkClient.writeData(path, new ZNRecord(clusterName));
+    } else {
+      String parentPath = path.substring(0, path.lastIndexOf('/'));
+      createPersistent(parentPath, true, acl);
+      createPersistent(path, new ZNRecord(clusterName), acl);
+    }
     path = PropertyPathBuilder.instanceConfig(clusterName);
     createPersistent(path, false, acl);
     path = PropertyPathBuilder.resourceConfig(clusterName);
