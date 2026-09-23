@@ -43,7 +43,6 @@ import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ClusterMessagingService;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
-import org.apache.helix.HelixCloudProperty;
 import org.apache.helix.HelixConstants.ChangeType;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
@@ -76,10 +75,6 @@ import org.apache.helix.api.listeners.LiveInstanceChangeListener;
 import org.apache.helix.api.listeners.MessageListener;
 import org.apache.helix.api.listeners.ResourceConfigChangeListener;
 import org.apache.helix.api.listeners.ScopedConfigChangeListener;
-import org.apache.helix.cloud.event.CloudEventHandlerFactory;
-import org.apache.helix.cloud.event.CloudEventListener;
-import org.apache.helix.cloud.event.helix.CloudEventCallbackProperty;
-import org.apache.helix.cloud.event.helix.HelixCloudEventListener;
 import org.apache.helix.controller.GenericHelixController;
 import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.healthcheck.ParticipantHealthReportCollector;
@@ -186,11 +181,6 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   private Set<Pipeline.Type> _enabledPipelineTypes;
   private CallbackHandler _leaderElectionHandler = null;
   protected final List<HelixTimerTask> _controllerTimerTasks = new ArrayList<>();
-
-  /**
-   * Cloud fields
-   */
-  private CloudEventListener _cloudEventListener;
 
   /**
    * status dump timer-task
@@ -874,18 +864,6 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       }
       throw e;
     }
-
-    if (_helixManagerProperty != null) {
-      HelixCloudProperty helixCloudProperty = _helixManagerProperty.getHelixCloudProperty();
-      if (helixCloudProperty != null && helixCloudProperty.isCloudEventCallbackEnabled()) {
-        _cloudEventListener =
-            new HelixCloudEventListener(helixCloudProperty.getCloudEventCallbackProperty(), this);
-        CloudEventHandlerFactory.getInstance(
-            _helixManagerProperty.getHelixCloudProperty().getCloudEventHandlerClassName())
-            .registerCloudEventListener(_cloudEventListener);
-        LOG.info("Using handler: " + helixCloudProperty.getCloudEventHandlerClassName());
-      }
-    }
   }
 
   @Override
@@ -941,17 +919,6 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       }
 
       _helixPropertyStore = null;
-
-      if (_cloudEventListener != null) {
-        try {
-          CloudEventHandlerFactory.getInstance(
-              _helixManagerProperty.getHelixCloudProperty().getCloudEventHandlerClassName())
-              .unregisterCloudEventListener(_cloudEventListener);
-        } catch (Exception e) {
-          LOG.error("Failed to unregister cloudEventListener.", e);
-        }
-        _cloudEventListener = null;
-      }
 
       synchronized (this) {
         if (_controller != null) {
@@ -1785,14 +1752,6 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
   @Override
   public Long getSessionStartTime() {
     return _sessionStartTime;
-  }
-
-  private CloudEventCallbackProperty getCloudEventListenerCallbackProperty() {
-    HelixCloudProperty cloudProperty = _helixManagerProperty.getHelixCloudProperty();
-    if (cloudProperty == null || !cloudProperty.isCloudEventCallbackEnabled()) {
-      return null;
-    }
-    return cloudProperty.getCloudEventCallbackProperty();
   }
 
   /*

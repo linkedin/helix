@@ -155,14 +155,6 @@ public class DelayedRebalanceUtil {
     // check the time instance got disabled.
     if (!instanceConfig.getInstanceEnabled()) {
       long disabledTime = instanceConfig.getInstanceEnabledTime();
-      String batchedDisabledTime = clusterConfig.getInstanceHelixDisabledTimeStamp(instance);
-      if (batchedDisabledTime != null && !batchedDisabledTime.isEmpty()) {
-        // Update batch disable time
-        long batchDisableTime = Long.parseLong(batchedDisabledTime);
-        if (disabledTime == -1 || disabledTime > batchDisableTime) {
-          disabledTime = batchDisableTime;
-        }
-      }
 
       // Check if the disabled instance is forced to be rebalanced by an on-demand rebalance.
       // If so, return it as an inactive instance.
