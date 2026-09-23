@@ -99,7 +99,9 @@ public interface HelixAdmin {
   /**
    * Add a cluster
    * @param clusterName
-   * @return true if successfully created, or if cluster already exists
+   * @return true if successfully created or an existing cluster is fully set up; false if
+   *         initialization fails or an existing cluster is incomplete
+   * @throws HelixException if the caller lacks permission for the requested operation
    */
   boolean addCluster(String clusterName);
 
@@ -107,7 +109,9 @@ public interface HelixAdmin {
    * Add a cluster
    * @param clusterName
    * @param recreateIfExists If the cluster already exists, it will delete it and recreate
-   * @return true if successfully created, or if cluster already exists
+   * @return true if successfully created or an existing cluster is fully set up; false if
+   *         initialization fails or an existing cluster is incomplete
+   * @throws HelixException if the caller lacks permission for the requested operation
    */
   boolean addCluster(String clusterName, boolean recreateIfExists);
 
@@ -130,16 +134,21 @@ public interface HelixAdmin {
    *            <p>
    *            Creating the cluster root requires {@code CREATE} on its parent. The supplied ACL
    *            must grant the calling client {@code CREATE} to create metadata underneath it.
+   *            Reusing an existing cluster requires {@code READ} on its root and required metadata.
    *            Initial data is supplied during creation, so {@code WRITE} is not required for
    *            initialization, but is needed for later updates. Recreating an existing cluster
    *            requires {@code READ} to traverse it and {@code DELETE} on the relevant parent nodes,
-   *            as granted by the existing ACLs. Failed creation may leave an incomplete cluster.
+   *            as granted by the existing ACLs. Failed creation triggers best-effort cleanup of
+   *            nodes under the root created by this call; an incomplete cluster may remain if
+   *            cleanup also fails.
    *            Changing a node's ACL via {@code setACL} requires {@code ADMIN} on that node; the
    *            creator has no implicit {@code ADMIN} privilege. Grant it to a trusted identity if
    *            in-place ACL rotation is required. Deployments running a server-side ACL provider
    *            that assigns ACLs on create may ignore this argument entirely; confirm the effective
    *            ACLs with whoever operates the ensemble before relying on them.
-   * @return true if successfully created, or if cluster already exists
+   * @return true if successfully created or an existing cluster is fully set up; false if
+   *         initialization fails or an existing cluster is incomplete
+   * @throws HelixException if the caller lacks permission for the requested operation
    * @throws UnsupportedOperationException if a non-empty ACL is supplied and the implementation
    *         does not support custom ACLs
    */

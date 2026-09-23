@@ -115,6 +115,7 @@ import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
@@ -1652,38 +1653,84 @@ public class ZKHelixAdmin implements HelixAdmin {
   public boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
     logger.info("Add cluster {}.", clusterName);
     String root = "/" + clusterName;
+    boolean creationStarted = false;
+    boolean createdRoot = false;
 
-    if (_zkClient.exists(root)) {
-      if (recreateIfExists) {
+    try {
+      if (clusterRootExists(root)) {
+        if (!recreateIfExists) {
+          return isClusterSetupWithReadAccess(clusterName);
+        }
         logger.warn("Root directory exists.Cleaning the root directory:" + root);
         _zkClient.deleteRecursively(root);
-      } else {
-        logger.info("Cluster " + clusterName + " already exists");
-        return true;
       }
-    }
-    try {
-      if (acl == null || acl.isEmpty()) {
-        _zkClient.createPersistent(root, true);
-      } else {
-        _zkClient.createPersistent(root, true, acl);
+      creationStarted = true;
+      try {
+        createClusterRoot(root, acl);
+      } catch (ZkNodeExistsException e) {
+        return isClusterSetupWithReadAccess(clusterName);
       }
-    } catch (Exception e) {
-      // some other process might have created the cluster
-      if (_zkClient.exists(root)) {
-        return true;
-      }
-      logger.error("Error creating cluster:" + clusterName, e);
-      return false;
-    }
-    try {
+      createdRoot = true;
       createZKPaths(clusterName, acl);
-    } catch (Exception e) {
+      logger.info("Created cluster:" + clusterName);
+      return true;
+    } catch (RuntimeException e) {
+      if (createdRoot) {
+        try {
+          _zkClient.deleteRecursively(root);
+        } catch (RuntimeException cleanupException) {
+          e.addSuppressed(cleanupException);
+          logger.error("Failed to clean up partially created cluster:" + clusterName,
+              cleanupException);
+        }
+      }
+      for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+        if (cause instanceof KeeperException.NoAuthException) {
+          throw new HelixException("Not authorized to add cluster " + clusterName
+              + ". Check the client's authenticated identity and ACL permissions for the "
+              + "requested operation.", e);
+        }
+      }
+      if (!creationStarted) {
+        throw e;
+      }
       logger.error("Error creating cluster:" + clusterName, e);
       return false;
     }
-    logger.info("Created cluster:" + clusterName);
-    return true;
+  }
+
+  private boolean clusterRootExists(String root) {
+    try {
+      // Unlike exists(), getChildren() enforces READ on older ZooKeeper versions as well.
+      _zkClient.getChildren(root);
+      return true;
+    } catch (ZkNoNodeException e) {
+      return false;
+    }
+  }
+
+  private boolean isClusterSetupWithReadAccess(String clusterName) {
+    try {
+      _zkClient.getChildren("/" + clusterName);
+      for (String path : ZKUtil.getRequiredClusterPaths(clusterName)) {
+        _zkClient.getChildren(path);
+      }
+      return true;
+    } catch (ZkNoNodeException e) {
+      logger.warn("Cluster {} is incomplete: {}", clusterName, e.getMessage());
+      return false;
+    }
+  }
+
+  private void createClusterRoot(String root, List<ACL> acl) {
+    try {
+      // Do not swallow NodeExists: another caller's root must not be treated as our own.
+      createPersistent(root, false, acl);
+    } catch (ZkNoNodeException e) {
+      String parent = root.substring(0, root.lastIndexOf('/'));
+      createPersistent(parent, true, acl);
+      createPersistent(root, false, acl);
+    }
   }
 
   private void createZKPaths(String clusterName, List<ACL> acl) {

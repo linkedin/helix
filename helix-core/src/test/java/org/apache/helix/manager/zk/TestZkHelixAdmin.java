@@ -89,6 +89,8 @@ import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
 import org.apache.helix.zookeeper.zkclient.ZkConnection;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Watcher;
@@ -417,6 +419,180 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     deleteCluster(clusterName);
     System.out.println("END testAddClusterWithAcl at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testAddClusterUnauthorizedCaller() throws Exception {
+    String clusterName = getShortClassName() + "_unauthorizedCreator";
+    String rootPath = "/" + clusterName;
+    String credentials = "clusterOwner:clusterOwnerPassword";
+    List<ACL> acl = Collections.singletonList(new ACL(ZooDefs.Perms.ALL,
+        new Id(DIGEST_SCHEME, DigestAuthenticationProvider.generateDigest(credentials))));
+    HelixZkClient ownerClient = DedicatedZkClientFactory.getInstance().buildZkClient(
+        new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+        new HelixZkClient.ZkClientConfig().setZkSerializer(new ZNRecordSerializer()));
+    try {
+      ((org.apache.helix.zookeeper.zkclient.ZkClient) ownerClient)
+          .addAuthInfo(DIGEST_SCHEME, credentials.getBytes(StandardCharsets.UTF_8));
+      if (ownerClient.exists(rootPath)) {
+        ownerClient.deleteRecursively(rootPath);
+      }
+      HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+      HelixException firstFailure = assertAddClusterUnauthorized(admin, clusterName, false, acl);
+      Assert.assertEquals(firstFailure.getCause().getSuppressed().length, 1,
+          "The cleanup failure must not replace the creation failure");
+      Assert.assertEquals(ownerClient.getChildren(rootPath), Collections.emptyList());
+      assertAddClusterUnauthorized(admin, clusterName, false, acl);
+      assertAddClusterUnauthorized(admin, clusterName, true, acl);
+    } finally {
+      try {
+        if (ownerClient.exists(rootPath)) {
+          ownerClient.deleteRecursively(rootPath);
+        }
+      } finally {
+        ownerClient.close();
+      }
+    }
+  }
+
+  @Test
+  public void testAddClusterUnauthorizedRootCreation() {
+    String clusterName = getShortClassName() + "_deniedRoot";
+    String rootPath = "/" + clusterName;
+    RealmAwareZkClient client = Mockito.mock(RealmAwareZkClient.class);
+    Mockito.when(client.getChildren(rootPath)).thenThrow(new ZkNoNodeException());
+    ZkException failure = new ZkException(KeeperException.create(KeeperException.Code.NOAUTH, "/"));
+    Mockito.doThrow(failure).when(client).createPersistent(rootPath, false);
+
+    HelixException actual =
+        assertAddClusterUnauthorized(new ZKHelixAdmin(client), clusterName, false, null);
+
+    Assert.assertSame(actual.getCause(), failure);
+    Mockito.verify(client, Mockito.never()).deleteRecursively(rootPath);
+  }
+
+  @Test
+  public void testAddClusterUnreadableMetadata() throws Exception {
+    String clusterName = getShortClassName() + "_unreadableMetadata";
+    String rootPath = "/" + clusterName;
+    String configPath = PropertyPathBuilder.clusterConfig(clusterName);
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    Assert.assertTrue(admin.addCluster(clusterName, true));
+    try {
+      rawZooKeeper(_gZkClient).setACL(configPath, Collections.singletonList(
+          new ACL(ZooDefs.Perms.ALL & ~ZooDefs.Perms.READ, ZooDefs.Ids.ANYONE_ID_UNSAFE)), -1);
+      assertAddClusterUnauthorized(admin, clusterName, false, null);
+    } finally {
+      rawZooKeeper(_gZkClient).setACL(configPath, ZooDefs.Ids.OPEN_ACL_UNSAFE, -1);
+      _gZkClient.deleteRecursively(rootPath);
+    }
+  }
+
+  @Test
+  public void testAddClusterUnauthorizedRecreation() throws Exception {
+    String clusterName = getShortClassName() + "_deniedRecreation";
+    String rootPath = "/" + clusterName;
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    Assert.assertTrue(admin.addCluster(clusterName, true));
+    try {
+      rawZooKeeper(_gZkClient).setACL(rootPath, Collections.singletonList(
+          new ACL(ZooDefs.Perms.ALL & ~ZooDefs.Perms.DELETE, ZooDefs.Ids.ANYONE_ID_UNSAFE)), -1);
+      assertAddClusterUnauthorized(admin, clusterName, true, null);
+      Assert.assertTrue(_gZkClient.exists(rootPath));
+    } finally {
+      rawZooKeeper(_gZkClient).setACL(rootPath, ZooDefs.Ids.OPEN_ACL_UNSAFE, -1);
+      _gZkClient.deleteRecursively(rootPath);
+    }
+  }
+
+  @Test
+  public void testAddClusterPartialCreation() {
+    for (boolean failCleanup : new boolean[] {false, true}) {
+      String clusterName = getShortClassName() + "_partial_" + failCleanup;
+      String rootPath = "/" + clusterName;
+      String failurePath = PropertyPathBuilder.liveInstance(clusterName);
+      List<ACL> acl = Collections.singletonList(new ACL(
+          ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.DELETE,
+          ZooDefs.Ids.ANYONE_ID_UNSAFE));
+      HelixZkClient client = Mockito.spy(_gZkClient);
+      ZkException failure = new ZkException("Injected metadata creation failure");
+      Mockito.doThrow(failure).when(client).createPersistent(failurePath, false, acl);
+      if (failCleanup) {
+        Mockito.doThrow(new ZkClientException("Injected cleanup failure"))
+            .when(client).deleteRecursively(rootPath);
+      }
+      try {
+        Assert.assertFalse(new ZKHelixAdmin(client).addCluster(clusterName, false, acl));
+        Assert.assertEquals(_gZkClient.exists(rootPath), failCleanup);
+        HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+        if (failCleanup) {
+          Assert.assertEquals(failure.getSuppressed().length, 1);
+          Assert.assertFalse(admin.addCluster(clusterName, false));
+          Assert.assertFalse(admin.addCluster(clusterName, false, acl));
+          Assert.assertFalse(_gZkClient.exists(failurePath));
+        }
+        Assert.assertTrue(admin.addCluster(clusterName, true, acl));
+        Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+        Assert.assertTrue(admin.addCluster(clusterName, false, acl));
+      } finally {
+        if (_gZkClient.exists(rootPath)) {
+          _gZkClient.deleteRecursively(rootPath);
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testAddClusterConcurrentRootCreation() {
+    for (boolean complete : new boolean[] {false, true}) {
+      String clusterName = getShortClassName() + "_concurrent_" + complete;
+      String rootPath = "/" + clusterName;
+      RealmAwareZkClient client = Mockito.mock(RealmAwareZkClient.class);
+      Mockito.when(client.getChildren(Mockito.anyString())).thenReturn(Collections.emptyList());
+      Mockito.when(client.getChildren(rootPath)).thenThrow(new ZkNoNodeException())
+          .thenReturn(Collections.emptyList());
+      Mockito.doThrow(new ZkNodeExistsException()).when(client).createPersistent(rootPath, false);
+      if (!complete) {
+        Mockito.when(client.getChildren(PropertyPathBuilder.clusterConfig(clusterName)))
+            .thenThrow(new ZkNoNodeException());
+      }
+
+      Assert.assertEquals(new ZKHelixAdmin(client).addCluster(clusterName, false), complete);
+      Mockito.verify(client, Mockito.never()).deleteRecursively(rootPath);
+    }
+  }
+
+  @Test
+  public void testAddClusterNestedPath() {
+    String parent = getShortClassName() + "_nestedParent";
+    String clusterName = parent + "/child";
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    try {
+      Assert.assertTrue(admin.addCluster(clusterName, false));
+      Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
+      Assert.assertTrue(admin.addCluster(clusterName, false));
+    } finally {
+      if (_gZkClient.exists("/" + parent)) {
+        _gZkClient.deleteRecursively("/" + parent);
+      }
+    }
+  }
+
+  private static HelixException assertAddClusterUnauthorized(HelixAdmin admin, String clusterName,
+      boolean recreateIfExists, List<ACL> acl) {
+    try {
+      admin.addCluster(clusterName, recreateIfExists, acl);
+    } catch (HelixException e) {
+      Assert.assertTrue(e.getMessage().contains("Not authorized"), e.getMessage());
+      Assert.assertTrue(e.getMessage().contains(clusterName), e.getMessage());
+      Throwable cause = e.getCause();
+      while (cause != null && !(cause instanceof KeeperException.NoAuthException)) {
+        cause = cause.getCause();
+      }
+      Assert.assertNotNull(cause, "The original NoAuth cause must be preserved");
+      return e;
+    }
+    throw new AssertionError("Expected an authorization failure for " + clusterName);
   }
 
   @Test
