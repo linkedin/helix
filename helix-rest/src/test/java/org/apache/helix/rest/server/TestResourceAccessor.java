@@ -44,6 +44,7 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CustomizedView;
@@ -864,6 +865,98 @@ public class TestResourceAccessor extends AbstractTestClass {
       }
     }
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * An ideal-state "update" that would leave MIN_ACTIVE_REPLICAS greater than REPLICAS is logically
+   * impossible -- a partition can never have more active replicas than it has replicas -- and would
+   * leave every partition perpetually below its minimum active count, defeating delayed rebalance
+   * and min-active health guarantees. The guard rail validates the merged (post-write) ideal state.
+   * This exercises the happy path (within bounds, written), enforcement (400 + verdict, unchanged),
+   * dry-run (200 + verdict, unchanged) and force bypass (written). The resource is created and
+   * dropped locally so it does not perturb the other tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testUpdateResourceIdealStateMinActiveGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String resourceName = "minActiveGuardrailResource";
+    try {
+      // Baseline: a valid resource with REPLICAS=3 and MIN_ACTIVE_REPLICAS=2.
+      _gSetupTool.addResourceToCluster(CLUSTER_NAME, resourceName, 1, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.name());
+      IdealState baseline =
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resourceName);
+      baseline.setReplicas("3");
+      baseline.setMinActiveReplicas(2);
+      _gSetupTool.getClusterManagementTool()
+          .setResourceIdealState(CLUSTER_NAME, resourceName, baseline);
+
+      // 1) Happy path: raising MIN_ACTIVE_REPLICAS to 3 stays within REPLICAS=3, so it is written.
+      Response valid = postIdealStateUpdate(resourceName, minActiveUpdate(resourceName, 3),
+          Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentMinActiveReplicas(resourceName), 3);
+
+      // 2) Enforcement: raising MIN_ACTIVE_REPLICAS to 5 above REPLICAS=3 is blocked with a 400
+      // infeasible verdict, and nothing is written (still 3).
+      Response blocked = postIdealStateUpdate(resourceName, minActiveUpdate(resourceName, 5),
+          Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(blockedVerdict.toString()
+          .contains(MinActiveReplicasConsistencyGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentMinActiveReplicas(resourceName), 3);
+
+      // 3) Dry-run reports the same infeasible verdict (200) without writing (still 3).
+      Response dryRun = postIdealStateUpdate(resourceName, minActiveUpdate(resourceName, 5),
+          ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(dryRunVerdict.toString()
+          .contains(MinActiveReplicasConsistencyGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentMinActiveReplicas(resourceName), 3);
+
+      // 4) force=true bypasses the guard rail: the inconsistent value is actually written.
+      Response forced = postIdealStateUpdate(resourceName, minActiveUpdate(resourceName, 5),
+          ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentMinActiveReplicas(resourceName), 5);
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resourceName);
+      } catch (Exception ignored) {
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private int currentMinActiveReplicas(String resourceName) {
+    return _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resourceName)
+        .getMinActiveReplicas();
+  }
+
+  private static ZNRecord minActiveUpdate(String resourceName, int minActiveReplicas) {
+    // A partial "update" record carrying only MIN_ACTIVE_REPLICAS; the endpoint merges it into the
+    // existing ideal state, so REPLICAS is taken from what is already in ZK.
+    IdealState update = new IdealState(resourceName);
+    update.setMinActiveReplicas(minActiveReplicas);
+    return update.getRecord();
+  }
+
+  private Response postIdealStateUpdate(String resourceName, ZNRecord record,
+      Map<String, Object> flags) throws IOException {
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget =
+        target("clusters/" + CLUSTER_NAME + "/resources/" + resourceName + "/idealState")
+            .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
   }
 
   @Test(dependsOnMethods = "testAddResourceWithWeight")
