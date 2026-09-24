@@ -1313,19 +1313,18 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
-    List<String> testList = new ArrayList<String>();
-    testList.add("TestURL");
-    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
-
-    // Bad request since Processor has not been defined.
+    // Bad request since CloudInfoSources has not been defined (still required for CUSTOMIZED).
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.BAD_REQUEST.getStatusCode());
 
+    List<String> testList = new ArrayList<String>();
+    testList.add("TestURL");
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
         "TestProcessorName");
 
-    // Now response should be OK since all fields are set
+    // Now response should be OK since all required fields are set
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.OK.getStatusCode());
