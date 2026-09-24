@@ -26,10 +26,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
-import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.TestAbstractRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -460,48 +461,29 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     }
   }
 
-  /**
-   * Determinism regression guard for the global per-instance-partition-limit (greedy) path.
-   *
-   * <p>When {@code globalMaxPartitionAllowedPerInstance} is set, all {@link GreedyRebalanceStrategy}
-   * resources share a single mutable {@link org.apache.helix.controller.common.CapacityNode} set, so
-   * {@link BestPossibleStateCalcStage} computes them sequentially in a deterministic (sorted) order.
-   * If that computation is ever parallelized again, threads reserve capacity in a non-deterministic
-   * order and the assignment differs from round to round, causing perpetual rebalance churn (and
-   * previously a ConcurrentModificationException).
-   *
-   * <p>This runs the stage over several pipeline rounds (reusing one data provider, exactly like the
-   * real controller reuses its cache) and asserts the greedy assignment is byte-for-byte identical
-   * across every round, that every partition is fully placed, and that no node exceeds the cap. It
-   * fails the instant someone reintroduces parallel computation of the shared-scoreboard resources.
-   */
-  @Test
-  public void testGreedyGlobalCapacityAssignmentIsDeterministicAcrossRounds() {
+  @Test(dataProvider = "supportedRebalanceStrategies", dataProviderClass = TestAbstractRebalancer.class)
+  public void testRetiredGlobalCapacityDoesNotAffectAssignment(String strategyName,
+      Class<?> strategyClass) {
     final int numInstances = 6;
     final int numPartitions = 5;
     final int numReplicas = 1;
-    final int globalMaxPartitionPerInstance = 2;
     final int numRounds = 5;
-    // Two resources that both use the greedy strategy so they share the global CapacityNode set.
-    String[] resources = new String[]{"greedyDB1", "greedyDB2"};
+    String[] resources = new String[]{"testDB1", "testDB2"};
 
     setupIdealState(numInstances, resources, numPartitions, numReplicas, RebalanceMode.FULL_AUTO,
         BuiltInStateModelDefinitions.OnlineOffline.name(), null,
-        GreedyRebalanceStrategy.class.getName(), -1 /* minActiveReplica not set */);
+        strategyName, -1);
     setupInstances(numInstances);
     setupLiveInstances(numInstances);
     setupStateModel();
 
-    // Activate the global per-instance partition limit (the shared-scoreboard path).
     ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
-    clusterConfig.setGlobalMaxPartitionAllowedPerInstance(globalMaxPartitionPerInstance);
-    setClusterConfig(clusterConfig);
+    String retiredKey = "GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE";
 
     Map<String, Resource> resourceMap =
         getResourceMap(resources, numPartitions, BuiltInStateModelDefinitions.OnlineOffline.name());
     CurrentStateOutput currentStateOutput = new CurrentStateOutput();
 
-    // Reuse a single data provider across rounds, exactly like the real controller reuses its cache.
     ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
     event.addAttribute(AttributeName.helixmanager.name(), manager);
     event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
@@ -512,15 +494,18 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
 
     String firstRoundAssignment = null;
     for (int round = 0; round < numRounds; round++) {
+      if (round == 1) {
+        // Ten replicas must still fit on six instances despite the obsolete global cap of one.
+        clusterConfig.getRecord().setIntField(retiredKey, 1);
+        setClusterConfig(clusterConfig);
+        cache.notifyDataChange(HelixConstants.ChangeType.CLUSTER_CONFIG);
+      }
       runStage(event, new ReadClusterDataStage());
       runStage(event, new BestPossibleStateCalcStage());
 
       BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
       Assert.assertNotNull(output, "BestPossibleStateOutput should not be null in round " + round);
 
-      // Every partition must be fully placed (so we compare real assignments, not coincidentally
-      // equal empty maps) and no node may exceed the global cap.
-      Map<String, Integer> perInstanceCount = new HashMap<>();
       for (String resource : resources) {
         for (int p = 0; p < numPartitions; p++) {
           Partition partition = new Partition(resource + "_" + p);
@@ -529,18 +514,10 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
               "State map should not be null for " + partition.getPartitionName() + " in round "
                   + round);
           Assert.assertEquals(stateMap.size(), numReplicas,
-              "Greedy should place exactly " + numReplicas + " replica(s) for "
+              "Should place exactly " + numReplicas + " replica(s) for "
                   + partition.getPartitionName() + " in round " + round);
-          for (String instance : stateMap.keySet()) {
-            perInstanceCount.merge(instance, 1, Integer::sum);
-          }
+          Assert.assertEquals(stateMap.values().iterator().next(), "ONLINE");
         }
-      }
-      for (Map.Entry<String, Integer> entry : perInstanceCount.entrySet()) {
-        Assert.assertTrue(entry.getValue() <= globalMaxPartitionPerInstance,
-            "Instance " + entry.getKey() + " holds " + entry.getValue()
-                + " partitions, exceeding the global cap of " + globalMaxPartitionPerInstance
-                + " in round " + round);
       }
 
       String assignment = canonicalizeAssignment(output, resources, numPartitions);
@@ -548,15 +525,15 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
         firstRoundAssignment = assignment;
       } else {
         Assert.assertEquals(assignment, firstRoundAssignment,
-            "Greedy global-capacity assignment must be identical across pipeline rounds; round "
-                + round + " differs from round 0. A non-deterministic result indicates the "
-                + "shared-scoreboard (greedy) resources are being computed in parallel again.");
+            "Legacy global-cap metadata must not change " + strategyClass.getSimpleName()
+                + " placement in round " + round);
+        Assert.assertEquals(cache.getClusterConfig().getRecord().getSimpleField(retiredKey), "1");
       }
     }
   }
 
   /**
-   * Builds a stable, iteration-order-independent string representation of the greedy resources'
+   * Builds a stable, iteration-order-independent string representation of the resources'
    * assignment so two pipeline rounds can be compared byte-for-byte.
    */
   private String canonicalizeAssignment(BestPossibleStateOutput output, String[] resources,
