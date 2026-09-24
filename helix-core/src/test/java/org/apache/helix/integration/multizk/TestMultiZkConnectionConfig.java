@@ -563,7 +563,7 @@ public class TestMultiZkConnectionConfig extends MultiZkTestBase {
         ZNRecord is = dataAccessorZkAddr.get(resourcePath, null, AccessOption.PERSISTENT);
         is.setSimpleField(RebalanceConfig.RebalanceConfigProperty.REBALANCER_CLASS_NAME.name(),
             DelayedAutoRebalancer.class.getName());
-        is.setSimpleField(RebalanceConfig.RebalanceConfigProperty.REBALANCE_STRATEGY.name(),
+        is.setSimpleField(IdealState.IdealStateProperty.REBALANCE_STRATEGY.name(),
             CrushEdRebalanceStrategy.class.getName());
         dataAccessorZkAddr.set(resourcePath, is, AccessOption.PERSISTENT);
         idealStateMap.computeIfAbsent(cluster, recordList -> new HashMap<>())

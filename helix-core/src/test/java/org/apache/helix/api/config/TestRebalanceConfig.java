@@ -19,8 +19,13 @@ package org.apache.helix.api.config;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+
+import com.google.common.collect.ImmutableMap;
+import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
+import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
@@ -41,6 +46,7 @@ public class TestRebalanceConfig {
     record.setSimpleField("REBALANCER_CLASS_NAME", "custom.Rebalancer");
     record.setSimpleField("REBALANCE_STRATEGY", "custom.Strategy");
     Map<String, String> expected = new HashMap<>(record.getSimpleFields());
+    expected.remove("REBALANCE_STRATEGY");
     if (legacyPeriod != null) {
       record.setSimpleField("REBALANCE_TIMER_PERIOD", legacyPeriod);
     }
@@ -51,7 +57,6 @@ public class TestRebalanceConfig {
     Assert.assertEquals(config.getRebalanceDelay(), 1000L);
     Assert.assertEquals(config.getRebalanceMode(), RebalanceConfig.RebalanceMode.FULL_AUTO);
     Assert.assertEquals(config.getRebalanceClassName(), "custom.Rebalancer");
-    Assert.assertEquals(config.getRebalanceStrategy(), "custom.Strategy");
 
     ResourceConfig resourceConfig =
         new ResourceConfig.Builder("resource").setRebalanceConfig(config).build();
@@ -59,5 +64,49 @@ public class TestRebalanceConfig {
         .containsKey("REBALANCE_TIMER_PERIOD"));
     Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), expected);
     Assert.assertEquals(record, originalRecord);
+  }
+
+  @DataProvider
+  public Object[][] legacyStrategies() {
+    return new Object[][] {
+        {null}, {""}, {CrushEdRebalanceStrategy.class.getName()}, {"not.a.strategy.Class"}
+    };
+  }
+
+  @Test(dataProvider = "legacyStrategies")
+  public void testLegacyStrategyIsNotSerialized(String strategy) {
+    Map<String, String> retainedFields = ImmutableMap.of(
+        "REBALANCE_DELAY", "1200",
+        "REBALANCE_MODE", "FULL_AUTO",
+        "REBALANCER_CLASS_NAME", DelayedAutoRebalancer.class.getName());
+    ZNRecord record = new ZNRecord("resource");
+    record.getSimpleFields().putAll(retainedFields);
+    if (strategy != null) {
+      record.setSimpleField("REBALANCE_STRATEGY", strategy);
+    }
+    ZNRecord original = new ZNRecord(record);
+
+    RebalanceConfig config = new RebalanceConfig(record);
+
+    Assert.assertEquals(config.getConfigsMap(), retainedFields);
+    Assert.assertEquals(config.getRebalanceDelay(), 1200L);
+    Assert.assertEquals(config.getRebalanceMode(), RebalanceConfig.RebalanceMode.FULL_AUTO);
+    Assert.assertEquals(config.getRebalanceClassName(), DelayedAutoRebalancer.class.getName());
+    Assert.assertEquals(record, original);
+  }
+
+  @Test
+  public void testRetainedSettingsCanStillBeUpdated() {
+    RebalanceConfig config = new RebalanceConfig(new ZNRecord("resource"));
+    Assert.assertEquals(config.getConfigsMap(), Collections.singletonMap("REBALANCE_MODE", "NONE"));
+
+    config.setRebalanceDelay(0);
+    config.setRebalanceMode(RebalanceConfig.RebalanceMode.SEMI_AUTO);
+    config.setRebalanceClassName(DelayedAutoRebalancer.class.getName());
+
+    Assert.assertEquals(config.getConfigsMap(), ImmutableMap.of(
+        "REBALANCE_DELAY", "0",
+        "REBALANCE_MODE", "SEMI_AUTO",
+        "REBALANCER_CLASS_NAME", DelayedAutoRebalancer.class.getName()));
   }
 }
