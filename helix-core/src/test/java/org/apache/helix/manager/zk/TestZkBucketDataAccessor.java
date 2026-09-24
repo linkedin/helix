@@ -38,7 +38,9 @@ import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordJacksonSerializer;
 import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
+import org.apache.helix.zookeeper.util.GZipCompressionUtil;
 import org.apache.helix.zookeeper.zkclient.exception.ZkMarshallingError;
 import org.apache.helix.zookeeper.zkclient.serialize.ZkSerializer;
 import org.testng.Assert;
@@ -225,6 +227,147 @@ public class TestZkBucketDataAccessor extends ZkTestBase {
       }
       return result;
     }, TestHelper.WAIT_DURATION));
+  }
+
+  /**
+   * CICP-5405 regression test.
+   * When the compressed payload length is an exact multiple of the bucket size, the last bucket
+   * must still be written and read at its full length. The previous implementation derived the
+   * final bucket's length from a modulo, which evaluates to 0 in this case, so the final bucket
+   * was written empty and the reconstructed payload kept a zeroed tail that failed to decompress.
+   */
+  @Test
+  public void testExactMultipleOfBucketSizeRoundTrip() throws IOException {
+    int bucketSize = 1024;
+    ZNRecord exactMultipleRecord = findRecordWithCompressedSizeMultipleOf(bucketSize);
+    BucketDataAccessor accessor =
+        new ZkBucketDataAccessor(_zkClient, bucketSize, VERSION_TTL_MS);
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    try {
+      HelixProperty property = new HelixProperty(exactMultipleRecord);
+      Assert.assertTrue(accessor.compressedBucketWrite(path, property));
+      HelixProperty readBack = accessor.compressedBucketRead(path, HelixProperty.class);
+      Assert.assertEquals(readBack, property,
+          "A payload whose compressed size is an exact multiple of the bucket size must round trip");
+    } finally {
+      accessor.compressedBucketDelete(path);
+      accessor.disconnect();
+    }
+  }
+
+  /**
+   * CICP-5405: sweep the sizes immediately around each bucket boundary so an off-by-one in the
+   * final bucket's length is caught regardless of which side of the boundary it falls on.
+   */
+  @Test
+  public void testBucketBoundarySizes() throws IOException {
+    int bucketSize = 1024;
+    BucketDataAccessor accessor =
+        new ZkBucketDataAccessor(_zkClient, bucketSize, VERSION_TTL_MS);
+    try {
+      for (int multiple = 1; multiple <= 3; multiple++) {
+        for (int delta : new int[] {-1, 0, 1}) {
+          int targetCompressedSize = multiple * bucketSize + delta;
+          ZNRecord candidate = findRecordWithCompressedSize(targetCompressedSize);
+          if (candidate == null) {
+            // GZip output is not guaranteed to hit every exact length; skip the ones it cannot
+            // produce rather than failing on an unreachable target.
+            continue;
+          }
+          String path = PATH + "_boundary_" + multiple + "_" + delta;
+          HelixProperty property = new HelixProperty(candidate);
+          Assert.assertTrue(accessor.compressedBucketWrite(path, property));
+          Assert.assertEquals(accessor.compressedBucketRead(path, HelixProperty.class), property,
+              "Round trip failed for compressed size " + targetCompressedSize + " with bucket size "
+                  + bucketSize);
+          accessor.compressedBucketDelete(path);
+        }
+      }
+    } finally {
+      accessor.disconnect();
+    }
+  }
+
+  /**
+   * CICP-5405: the reader must size its bucket loop using the bucket size the data was WRITTEN
+   * with (recorded in the metadata znode), not its own configured bucket size. Otherwise an
+   * accessor configured differently from the writer reads the wrong number of buckets.
+   */
+  @Test
+  public void testReadWithDifferentBucketSizeThanWrite() throws IOException {
+    int writeBucketSize = 1024;
+    int readBucketSize = 4 * 1024;
+    BucketDataAccessor writeAccessor =
+        new ZkBucketDataAccessor(_zkClient, writeBucketSize, VERSION_TTL_MS);
+    BucketDataAccessor readAccessor =
+        new ZkBucketDataAccessor(_zkClient, readBucketSize, VERSION_TTL_MS);
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    try {
+      // Large enough to span several buckets at the write size.
+      HelixProperty property = createLargeHelixProperty("differentBucketSize", 5000);
+      Assert.assertTrue(writeAccessor.compressedBucketWrite(path, property));
+      Assert.assertEquals(readAccessor.compressedBucketRead(path, HelixProperty.class), property,
+          "A reader configured with a different bucket size must still honor the written layout");
+    } finally {
+      writeAccessor.compressedBucketDelete(path);
+      writeAccessor.disconnect();
+      readAccessor.disconnect();
+    }
+  }
+
+  /**
+   * CICP-5405: a record small enough to fit in a single bucket must still round trip, covering the
+   * numBuckets == 1 case where the first bucket is also the last.
+   */
+  @Test
+  public void testSingleBucketRoundTrip() throws IOException {
+    int bucketSize = 50 * 1024;
+    BucketDataAccessor accessor =
+        new ZkBucketDataAccessor(_zkClient, bucketSize, VERSION_TTL_MS);
+    String path = PATH + "_" + TestHelper.getTestMethodName();
+    try {
+      HelixProperty property = new HelixProperty(record);
+      Assert.assertTrue(accessor.compressedBucketWrite(path, property));
+      Assert.assertEquals(accessor.compressedBucketRead(path, HelixProperty.class), property);
+    } finally {
+      accessor.compressedBucketDelete(path);
+      accessor.disconnect();
+    }
+  }
+
+  /**
+   * Grows a padding field until the compressed payload lands exactly on a bucket boundary.
+   * The compressed size is not a predictable function of the input size, so it is searched for
+   * rather than assumed. Incompressible padding is used so the compressed length advances roughly
+   * one byte per iteration and the search terminates quickly.
+   */
+  private ZNRecord findRecordWithCompressedSizeMultipleOf(int bucketSize) throws IOException {
+    ZNRecord found = findCompressedSize(length -> length > 0 && length % bucketSize == 0);
+    Assert.assertNotNull(found,
+        "Could not construct a record whose compressed size is a multiple of " + bucketSize);
+    return found;
+  }
+
+  private ZNRecord findRecordWithCompressedSize(int targetCompressedSize) throws IOException {
+    return findCompressedSize(length -> length == targetCompressedSize);
+  }
+
+  private ZNRecord findCompressedSize(java.util.function.IntPredicate matcher) throws IOException {
+    ZkSerializer serializer = new ZNRecordJacksonSerializer();
+    Random random = new Random(0); // Deterministic so failures reproduce.
+    StringBuilder padding = new StringBuilder();
+    for (int i = 0; i < 40000; i++) {
+      ZNRecord candidate = new ZNRecord(NAME_KEY);
+      candidate.setSimpleField("PADDING", padding.toString());
+      byte[] compressed = GZipCompressionUtil.compress(serializer.serialize(candidate));
+      if (matcher.test(compressed.length)) {
+        return candidate;
+      }
+      // Base64-ish random content resists compression, so each appended character advances the
+      // compressed length by about one byte.
+      padding.append((char) ('!' + random.nextInt(90)));
+    }
+    return null;
   }
 
   private HelixProperty createLargeHelixProperty(String name, int numEntries) {
