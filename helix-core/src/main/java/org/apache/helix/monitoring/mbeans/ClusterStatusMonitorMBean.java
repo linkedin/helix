@@ -206,17 +206,15 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /**
    * Reversible gauge counting the resources that WAGED instance tag ("clique") failure isolation
-   * skipped on the most recent global baseline, 0 when nothing is isolated.
+   * is carrying forward or omitting in any rebalance scope. Counts the union of the four scopes'
+   * unresolved skipped sets, including resources that yielded to a carry-forward collision.
+   * A healthy phase cannot clear another phase's snapshot, and an incremental baseline only
+   * resolves resources it evaluates. Emergency and overwrite snapshots clear when no longer needed.
    *
-   * This is the only signal that a clique is frozen. When isolation is enabled a clique that cannot
-   * be placed is deliberately carried forward instead of failing the rebalance, so the failure
-   * counters, getRebalanceFailureGauge() and getWagedBaselineComputeFailingGauge() all stay clean
-   * while that clique's partitions go unplaced indefinitely. Every other clique keeps converging,
-   * which is the point, but the frozen one is otherwise invisible.
-   *
-   * Always 0 when the feature is disabled. Alert on {@code > 0 for 1h} as a ticket: it means an
-   * operator has to repair the clique, since no amount of retrying will place it.
-   * @return the number of resources currently skipped by instance tag isolation.
+   * Alert on {@code > 0} to detect partial failures that return successfully and therefore do not
+   * trigger the existing whole-rebalance failure gauges. Logs identify the scope and resources.
+   * Resets when isolation is disabled or the Helix controller's monitoring lifecycle resets.
+   * @return the number of distinct resources with an unresolved isolation report.
    */
   long getWagedInstanceTagIsolationSkippedResourcesGauge();
 

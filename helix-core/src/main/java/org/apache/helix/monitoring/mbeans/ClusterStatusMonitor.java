@@ -23,6 +23,7 @@ import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -44,6 +45,7 @@ import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterModel.RebalanceScopeType;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.model.ExternalView;
@@ -141,6 +143,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // which are owned by the PARTIAL phase.
   private volatile boolean _wagedBaselineComputeFailing = false;
   private final AtomicLong _wagedInstanceTagIsolationSkippedResources = new AtomicLong(0L);
+  private final Map<RebalanceScopeType, Set<String>> _wagedIsolationSkippedByScope =
+      new EnumMap<>(RebalanceScopeType.class);
+  private Set<String> _wagedIsolationResources = Collections.emptySet();
+  private boolean _wagedIsolationEnabled;
+  private long _wagedIsolationGeneration;
   // Reversible gauge: 1 while the most recent delayed-rebalance-overwrite computation failed, reset
   // to 0 when one next succeeds or is not needed. Owned exclusively by the DELAYED_REBALANCE_OVERWRITES
   // phase -- its only dedicated reversible signal (it otherwise shares the fallback gauge with
@@ -1077,7 +1084,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
       _wagedRebalanceOverwriteFailing = false;
-      _wagedInstanceTagIsolationSkippedResources.set(0L);
+      resetWagedInstanceTagIsolation();
       // Zero the DEFAULT controller-event pipeline backlog gauge on leadership change, for the
       // same reason as the counters above: the ClusterStatusMonitor instance is reused across
       // leadership periods, so a stale depth from a prior leader must not be re-reported by the
@@ -1621,16 +1628,56 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Set how many resources instance tag isolation is currently skipping, as reported by the last
-   * global baseline calculation. Zero means nothing is isolated.
-   *
-   * This is the only signal that a clique is frozen. Isolation deliberately converts a thrown
-   * rebalance failure into a quiet partial success, so the failure counters and the baseline health
-   * gauge all stay clean while an unplaceable clique goes unplaced indefinitely. Reversible, so it
-   * returns to zero on the first baseline that places everything.
+   * Refresh the reporting lifecycle before scheduling computations. The returned generation
+   * prevents an in-flight computation from publishing after disable, reset or leadership change.
    */
-  public void updateWagedInstanceTagIsolationSkippedResources(long skippedResources) {
-    _wagedInstanceTagIsolationSkippedResources.set(skippedResources);
+  public synchronized long configureWagedInstanceTagIsolation(boolean enabled,
+      Set<String> resources) {
+    if (_wagedIsolationEnabled != enabled) {
+      resetWagedInstanceTagIsolation();
+    }
+    _wagedIsolationEnabled = enabled;
+    _wagedIsolationResources = enabled ? new HashSet<>(resources) : Collections.emptySet();
+    _wagedIsolationSkippedByScope.values().forEach(skipped -> skipped.retainAll(resources));
+    updateWagedIsolationSkippedResourceCount();
+    return _wagedIsolationGeneration;
+  }
+
+  public synchronized void resetWagedInstanceTagIsolation() {
+    _wagedIsolationGeneration++;
+    _wagedIsolationSkippedByScope.clear();
+    _wagedInstanceTagIsolationSkippedResources.set(0L);
+  }
+
+  /**
+   * Each phase owns its snapshot; healthy work in another phase cannot clear it. An incremental
+   * baseline only resolves resources it evaluated. The aggregate counts each resource once.
+   */
+  public synchronized void updateWagedInstanceTagIsolationSkippedResources(long generation,
+      RebalanceScopeType scope, Set<String> evaluatedResources, Set<String> skippedResources) {
+    if (!_wagedIsolationEnabled || generation != _wagedIsolationGeneration) {
+      return;
+    }
+    Set<String> skipped =
+        _wagedIsolationSkippedByScope.computeIfAbsent(scope, key -> new HashSet<>());
+    if (scope == RebalanceScopeType.GLOBAL_BASELINE) {
+      skipped.removeAll(evaluatedResources);
+    } else {
+      skipped.clear();
+    }
+    skipped.addAll(skippedResources);
+    skipped.retainAll(_wagedIsolationResources);
+    updateWagedIsolationSkippedResourceCount();
+  }
+
+  private void updateWagedIsolationSkippedResourceCount() {
+    if (_wagedIsolationSkippedByScope.isEmpty()) {
+      _wagedInstanceTagIsolationSkippedResources.set(0L);
+      return;
+    }
+    Set<String> skipped = new HashSet<>();
+    _wagedIsolationSkippedByScope.values().forEach(skipped::addAll);
+    _wagedInstanceTagIsolationSkippedResources.set(skipped.size());
   }
 
   /**

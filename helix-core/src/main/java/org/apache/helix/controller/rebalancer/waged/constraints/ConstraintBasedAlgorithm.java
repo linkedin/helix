@@ -79,12 +79,7 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
       _blockingSnapshotReporter;
-  // Optional listener invoked once per successful calculate() run with the rebalance scope and the
-  // resources instance tag isolation skipped that run, empty when nothing was isolated. Isolation
-  // deliberately turns a thrown rebalance failure into a quiet partial success, so without this a
-  // permanently unplaceable clique would be invisible: no exception, no failure counter, and a
-  // clean baseline health gauge. Reversible per run, so the gauge it drives falls back to zero as
-  // soon as a run places everything. May be null.
+  // Report after the carry-forward guard so resources yielding to stale assignments are included.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<String>>
       _isolationSnapshotReporter;
 
@@ -118,13 +113,21 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   }
 
   /**
-   * Attach a per-run instance tag isolation reporter. It fires once per successful {@link #calculate}
-   * run with the rebalance scope and the resources that isolation skipped, empty when the run placed
-   * everything. Safe to call from any thread; null disables it.
+   * Attach an observer of the final isolation outcome published by WagedRebalanceUtil.
+   * Safe to call from any thread; null disables it.
    */
   public void setIsolationSnapshotReporter(
       BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> reporter) {
     _isolationSnapshotReporter = reporter;
+  }
+
+  @Override
+  public void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+      Set<String> evaluatedResources, Set<String> skippedResources) {
+    BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> reporter = _isolationSnapshotReporter;
+    if (reporter != null) {
+      reporter.accept(scope, skippedResources);
+    }
   }
 
   @Override
@@ -133,14 +136,7 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     // complete set once (success or failure) as a reversible "currently blocking" snapshot.
     Set<HardConstraint.Type> blockingTypes = ConcurrentHashMap.newKeySet();
     try {
-      OptimalAssignment assignment = calculateInternal(clusterModel, blockingTypes);
-      BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> isolationReporter =
-          _isolationSnapshotReporter;
-      if (isolationReporter != null) {
-        isolationReporter
-            .accept(clusterModel.getRebalanceScopeType(), assignment.getSkippedResources());
-      }
-      return assignment;
+      return calculateInternal(clusterModel, blockingTypes);
     } finally {
       BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> snapshotReporter =
           _blockingSnapshotReporter;

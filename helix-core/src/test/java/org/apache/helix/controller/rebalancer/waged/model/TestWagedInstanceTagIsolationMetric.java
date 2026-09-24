@@ -20,12 +20,20 @@ package org.apache.helix.controller.rebalancer.waged.model;
  */
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
@@ -62,7 +70,7 @@ public class TestWagedInstanceTagIsolationMetric extends AbstractTestWagedInstan
     ClusterConfig clusterConfig = createClusterConfig(true);
 
     // A healthy cluster reports an empty set, never null, so the gauge reads zero.
-    algorithm.calculate(createClusterModel(clusterConfig, allHealthy()));
+    WagedRebalanceUtil.calculateAssignment(createClusterModel(clusterConfig, allHealthy()), algorithm);
     Assert.assertNotNull(lastReported.get(),
         "The reporter must fire even when nothing was isolated, otherwise the gauge can never "
             + "fall back to zero after a clique recovers");
@@ -72,13 +80,13 @@ public class TestWagedInstanceTagIsolationMetric extends AbstractTestWagedInstan
     // Breaking one clique must report exactly that clique's resource.
     Map<Integer, CliqueSpec> broken = new HashMap<>(allHealthy());
     broken.put(3, CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT));
-    algorithm.calculate(createClusterModel(clusterConfig, broken));
+    WagedRebalanceUtil.calculateAssignment(createClusterModel(clusterConfig, broken), algorithm);
     Assert.assertEquals(lastReported.get(), Collections.singleton(resourceName(3)),
         "The isolated clique's resource must be reported, otherwise a frozen clique is invisible: "
             + "isolation throws no exception and moves no failure counter");
 
     // Repairing it must bring the report back to empty.
-    algorithm.calculate(createClusterModel(clusterConfig, allHealthy()));
+    WagedRebalanceUtil.calculateAssignment(createClusterModel(clusterConfig, allHealthy()), algorithm);
     Assert.assertTrue(lastReported.get().isEmpty(),
         "The reported set must return to empty once the cluster is healthy again, saw "
             + lastReported.get());
@@ -101,7 +109,7 @@ public class TestWagedInstanceTagIsolationMetric extends AbstractTestWagedInstan
     for (int clique : new int[] {2, 7, 11}) {
       specs.put(clique, CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT));
     }
-    algorithm.calculate(createClusterModel(clusterConfig, specs));
+    WagedRebalanceUtil.calculateAssignment(createClusterModel(clusterConfig, specs), algorithm);
 
     Assert.assertEquals(lastReported.get().size(), 3,
         "All three broken cliques must be counted, saw " + lastReported.get());
@@ -122,7 +130,7 @@ public class TestWagedInstanceTagIsolationMetric extends AbstractTestWagedInstan
     Map<Integer, CliqueSpec> broken = new HashMap<>(allHealthy());
     broken.put(3, CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT));
     try {
-      algorithm.calculate(createClusterModel(clusterConfig, broken));
+      WagedRebalanceUtil.calculateAssignment(createClusterModel(clusterConfig, broken), algorithm);
       Assert.fail("The default global mode must still fail the whole rebalance");
     } catch (Exception expected) {
       // The default mode fails the whole rebalance, which is the behaviour being preserved.
@@ -142,12 +150,101 @@ public class TestWagedInstanceTagIsolationMetric extends AbstractTestWagedInstan
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
         "The gauge must start at zero on a cluster that never isolated anything");
 
-    monitor.updateWagedInstanceTagIsolationSkippedResources(3L);
+    Set<String> resources = new HashSet<>(Arrays.asList("R1", "R2", "R3"));
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, resources, resources);
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 3L);
 
-    monitor.updateWagedInstanceTagIsolationSkippedResources(0L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, resources, Collections.emptySet());
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
         "The gauge must fall back to zero once a baseline places everything, otherwise it latches "
             + "on and a recovered clique still looks broken");
+  }
+
+  @Test
+  public void testIncrementalBaselineCannotClearAnUnevaluatedResource() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestIsolationIncrementalMetric");
+    Set<String> resources = new HashSet<>(Arrays.asList("broken", "healthy"));
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, resources, Collections.singleton("broken"));
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, Collections.singleton("healthy"),
+        Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, Collections.singleton("broken"),
+        Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+  }
+
+  @Test
+  public void testConcurrentScopesAreDeduplicatedAndRecoverIndependently() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestIsolationConcurrentMetric");
+    Set<String> resources = new HashSet<>(Collections.singleton("shared"));
+    for (ClusterModel.RebalanceScopeType scope : ClusterModel.RebalanceScopeType.values()) {
+      resources.add(scope.name());
+    }
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    CountDownLatch start = new CountDownLatch(1);
+    List<Future<?>> results = new ArrayList<>();
+    try {
+      for (ClusterModel.RebalanceScopeType scope : ClusterModel.RebalanceScopeType.values()) {
+        results.add(executor.submit(() -> {
+          if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new AssertionError("Concurrent reporters never started");
+          }
+          Set<String> skipped = new HashSet<>(Arrays.asList("shared", scope.name()));
+          for (int i = 0; i < 100; i++) {
+            monitor.updateWagedInstanceTagIsolationSkippedResources(generation, scope, resources,
+                skipped);
+          }
+          return null;
+        }));
+      }
+      start.countDown();
+      for (Future<?> result : results) {
+        result.get(20, TimeUnit.SECONDS);
+      }
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 5L);
+      int remainingScopes = ClusterModel.RebalanceScopeType.values().length;
+      for (ClusterModel.RebalanceScopeType scope : ClusterModel.RebalanceScopeType.values()) {
+        monitor.updateWagedInstanceTagIsolationSkippedResources(generation, scope, resources,
+            Collections.emptySet());
+        remainingScopes--;
+        Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(),
+            remainingScopes == 0 ? 0L : remainingScopes + 1L);
+      }
+    } finally {
+      executor.shutdownNow();
+      Assert.assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  public void testDeletedResourcesAndOldLeadershipReportsCannotLatchTheGauge() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestIsolationMetricLifecycle");
+    Set<String> resources = new HashSet<>(Arrays.asList("deleted", "remaining"));
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.EMERGENCY, resources, resources);
+    monitor.configureWagedInstanceTagIsolation(true, Collections.singleton("remaining"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.PARTIAL, resources, Collections.singleton("deleted"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+    monitor.reset();
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        ClusterModel.RebalanceScopeType.EMERGENCY, resources, resources);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    long newGeneration =
+        monitor.configureWagedInstanceTagIsolation(true, Collections.singleton("remaining"));
+    monitor.updateWagedInstanceTagIsolationSkippedResources(newGeneration,
+        ClusterModel.RebalanceScopeType.PARTIAL, Collections.singleton("remaining"),
+        Collections.singleton("remaining"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
   }
 }

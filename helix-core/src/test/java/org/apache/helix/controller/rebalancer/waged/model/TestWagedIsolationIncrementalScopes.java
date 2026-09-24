@@ -27,9 +27,11 @@ import java.util.Map;
 import java.util.Set;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
+import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -92,6 +94,41 @@ public class TestWagedIsolationIncrementalScopes extends AbstractTestWagedInstan
       Assert.assertNotSame(result.get(resourceName(0)), old);
     }
     Assert.assertTrue(result.containsKey(resourceName(2)));
+  }
+
+  @Test
+  public void testAllocatedSiblingReportRequiresReevaluation() throws Exception {
+    ClusterModel.RebalanceScopeType scope = ClusterModel.RebalanceScopeType.GLOBAL_BASELINE;
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestIncrementalSiblingRecovery");
+    long generation = monitor.configureWagedInstanceTagIsolation(true,
+        new HashSet<>(Arrays.asList(resourceName(0), resourceName(1), resourceName(2))));
+    RebalanceAlgorithm delegate = createAlgorithm();
+    RebalanceAlgorithm reportingAlgorithm = new RebalanceAlgorithm() {
+      @Override
+      public OptimalAssignment calculate(ClusterModel model) throws HelixRebalanceException {
+        return delegate.calculate(model);
+      }
+
+      @Override
+      public void onAssignmentComputed(ClusterModel.RebalanceScopeType computedScope,
+          Set<String> evaluatedResources, Set<String> skippedResources) {
+        monitor.updateWagedInstanceTagIsolationSkippedResources(generation, computedScope,
+            evaluatedResources, skippedResources);
+      }
+    };
+    WagedRebalanceUtil.calculateAssignment(sparseModel(scope, true, cliqueTag(0)),
+        reportingAlgorithm);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+
+    WagedRebalanceUtil.calculateAssignment(
+        sparseModel(scope, true, cliqueTag(0), HEALTHY_PARTITION_WEIGHT), reportingAlgorithm);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L,
+        "An allocated sibling must not be declared recovered without re-evaluating it");
+
+    WagedRebalanceUtil.calculateAssignment(
+        sparseModel(scope, true, cliqueTag(0), HEALTHY_PARTITION_WEIGHT, true), reportingAlgorithm);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
+        "Re-evaluating the recovered group must clear its sibling's carried-forward report");
   }
 
   private ClusterModel sparseModel(ClusterModel.RebalanceScopeType scope, boolean enabled,
