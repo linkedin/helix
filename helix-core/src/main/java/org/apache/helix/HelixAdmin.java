@@ -45,6 +45,7 @@ import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
+import org.apache.zookeeper.data.ACL;
 
 /*
  * Helix cluster management
@@ -98,7 +99,9 @@ public interface HelixAdmin {
   /**
    * Add a cluster
    * @param clusterName
-   * @return true if successfully created, or if cluster already exists
+   * @return true if successfully created or the cluster root already exists and is readable;
+   *         false if initialization fails. Existing child metadata is not validated.
+   * @throws HelixException if the caller lacks permission for the requested operation
    */
   boolean addCluster(String clusterName);
 
@@ -106,9 +109,64 @@ public interface HelixAdmin {
    * Add a cluster
    * @param clusterName
    * @param recreateIfExists If the cluster already exists, it will delete it and recreate
-   * @return true if successfully created, or if cluster already exists
+   * @return true if successfully created or the cluster root already exists and is readable;
+   *         false if initialization fails. Existing child metadata is not validated.
+   * @throws HelixException if the caller lacks permission for the requested operation
    */
   boolean addCluster(String clusterName, boolean recreateIfExists);
+
+  /**
+   * Add a cluster whose metadata store nodes are created with the given ACLs
+   * @param clusterName
+   * @param recreateIfExists If the cluster already exists, it will delete it and recreate
+   * @param acl ACLs applied to the cluster root node ("/{clusterName}") and to every cluster
+   *            metadata node created underneath it by this call. If null or empty, the default ACL
+   *            of the underlying metadata store client is used, making this equivalent to
+   *            {@link #addCluster(String, boolean)}. Missing ancestors above the cluster root use
+   *            the client default ACL; existing ancestor ACLs are not changed.
+   *            ZooKeeper does not propagate ACLs to children, so nodes created after this call are
+   *            NOT covered and keep the client default ACL.
+   *            This includes per-instance control-plane nodes such as
+   *            INSTANCES/{instance}/MESSAGES (state transition commands) and
+   *            INSTANCES/{instance}/CURRENTSTATES (reported partition state), not just resources,
+   *            live instances, and other data nodes; an open MESSAGES node lets an unauthenticated
+   *            client inject a state transition that a participant will execute. The ACL is only
+   *            applied when the nodes are created by this call; the ACL of a pre-existing cluster
+   *            is left untouched unless recreateIfExists is true.
+   *            <p>
+   *            Creating the cluster root requires {@code CREATE} on its parent. The supplied ACL
+   *            must grant the calling client {@code CREATE} to create metadata underneath it.
+   *            Reusing an existing cluster requires {@code READ} on its root only; child metadata
+   *            completeness and permissions are not checked.
+   *            With a non-empty ACL, initial config data is supplied during creation, so
+   *            {@code WRITE} is not required for initialization, but is needed for later updates.
+   *            The default-ACL path retains its create-then-write config initialization.
+   *            During initialization, an existing config leaf causes a creation conflict rather
+   *            than an unconditional data write; existing config parents may be reused.
+   *            Recreating an existing cluster requires {@code READ} to traverse it and {@code DELETE}
+   *            on the relevant parent nodes, as granted by the existing ACLs.
+   *            Creation is not transactional and failures are not rolled back: deleting a path
+   *            during cleanup could delete a replacement created concurrently by another client.
+   *            Partial metadata may remain after failure and must be inspected before explicit
+   *            cleanup or recreation. A later call with {@code recreateIfExists=false} can return
+   *            true for that incomplete cluster if its root is readable.
+   *            Changing a node's ACL via {@code setACL} requires {@code ADMIN} on that node; the
+   *            creator has no implicit {@code ADMIN} privilege. Grant it to a trusted identity if
+   *            in-place ACL rotation is required. Deployments running a server-side ACL provider
+   *            that assigns ACLs on create may ignore this argument entirely; confirm the effective
+   *            ACLs with whoever operates the ensemble before relying on them.
+   * @return true if successfully created or the cluster root already exists and is readable;
+   *         false if initialization fails. Existing child metadata is not validated.
+   * @throws HelixException if the caller lacks permission for the requested operation
+   * @throws UnsupportedOperationException if a non-empty ACL is supplied and the implementation
+   *         does not support custom ACLs
+   */
+  default boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      return addCluster(clusterName, recreateIfExists);
+    }
+    throw new UnsupportedOperationException("addCluster with ACL is not implemented.");
+  }
 
   /**
    * Add a cluster and also add this cluster as a resource group in the super cluster

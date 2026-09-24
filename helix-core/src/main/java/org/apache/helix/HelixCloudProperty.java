@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Properties;
 
 import org.apache.helix.cloud.constants.CloudProvider;
-import org.apache.helix.cloud.event.CloudEventHandler;
-import org.apache.helix.cloud.event.helix.CloudEventCallbackProperty;
 import org.apache.helix.model.CloudConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +33,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Hold helix cloud properties read from CloudConfig and user defined files. Clients may override
  * the fields from their application.
+ * These properties support cloud instance discovery and participant auto-registration, not
+ * event-driven pause/resume callbacks.
  */
 public class HelixCloudProperty {
   private static final Logger LOG = LoggerFactory.getLogger(HelixCloudProperty.class.getName());
@@ -76,10 +76,6 @@ public class HelixCloudProperty {
 
   // Other customized properties that may be used.
   private final Properties _customizedCloudProperties = new Properties();
-
-  private boolean _isCloudEventCallbackEnabled;
-
-  private CloudEventCallbackProperty _cloudEventCallbackProperty;
 
   /**
    * Initialize Helix Cloud Property based on the provider
@@ -192,14 +188,6 @@ public class HelixCloudProperty {
     return _customizedCloudProperties;
   }
 
-  public String getCloudEventHandlerClassName() {
-    String defaultHandler = CloudEventHandler.class.getName();
-    return getCloudEventCallbackProperty() == null ? defaultHandler
-        : getCloudEventCallbackProperty().getUserArgs().getOrDefault(
-            CloudEventCallbackProperty.UserArgsInputKey.CLOUD_EVENT_HANDLER_CLASS_NAME,
-            defaultHandler);
-  }
-
   public void setCloudEnabled(boolean isCloudEnabled) {
     _isCloudEnabled = isCloudEnabled;
   }
@@ -242,21 +230,5 @@ public class HelixCloudProperty {
 
   public void setCustomizedCloudProperties(Properties customizedCloudProperties) {
     _customizedCloudProperties.putAll(customizedCloudProperties);
-  }
-
-  public boolean isCloudEventCallbackEnabled() {
-    return _isCloudEventCallbackEnabled;
-  }
-
-  public void setCloudEventCallbackEnabled(boolean enabled) {
-    _isCloudEventCallbackEnabled = enabled;
-  }
-
-  public CloudEventCallbackProperty getCloudEventCallbackProperty() {
-    return _cloudEventCallbackProperty;
-  }
-
-  public void setCloudEventCallbackProperty(CloudEventCallbackProperty cloudEventCallbackProperty) {
-    _cloudEventCallbackProperty = cloudEventCallbackProperty;
   }
 }

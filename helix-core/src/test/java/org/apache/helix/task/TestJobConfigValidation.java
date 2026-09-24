@@ -19,8 +19,11 @@ package org.apache.helix.task;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.helix.HelixProperty;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -65,5 +68,128 @@ public class TestJobConfigValidation {
     Assert.assertEquals(actual.getRecord(), expected.getRecord());
     Assert.assertFalse(actual.getRecord().getSimpleFields().containsKey("AssignmentStrategy"));
     Assert.assertEquals(TaskUtil.isGenericTaskJob(actual), genericJob);
+  }
+
+  @DataProvider
+  public Object[][] legacyExternalViewFlags() {
+    return new Object[][] {
+        {false, null}, {false, "true"}, {false, "false"},
+        {true, null}, {true, "true"}, {true, "false"}
+    };
+  }
+
+  @Test(dataProvider = "legacyExternalViewFlags")
+  public void testLegacyExternalViewFlagIgnored(boolean targeted, String legacyFlag) {
+    JobConfig.Builder builder = new JobConfig.Builder().setWorkflow("workflow").setJobId("job")
+        .setCommand("Dummy").setTimeoutPerTask(1000L).setTaskRetryDelay(50L)
+        .setNumConcurrentTasksPerInstance(2).setMaxAttemptsPerTask(3)
+        .setIgnoreDependentJobFailure(true);
+    if (targeted) {
+      builder.setTargetResource("database")
+          .setTargetPartitions(Collections.singletonList("database_0"))
+          .setTargetPartitionStates(Collections.singleton("SLAVE"));
+    } else {
+      builder.setNumberOfTasks(2);
+    }
+    JobConfig expected = builder.build();
+    Assert.assertFalse(expected.getRecord().getSimpleFields().containsKey("DisableExternalView"));
+
+    ZNRecord legacyRecord = new ZNRecord(expected.getRecord());
+    if (legacyFlag != null) {
+      legacyRecord.setSimpleField("DisableExternalView", legacyFlag);
+    }
+    ZNRecord originalRecord = new ZNRecord(legacyRecord);
+    JobConfig parsed = JobConfig.Builder.fromMap(legacyRecord.getSimpleFields())
+        .addTaskConfigMap(expected.getTaskConfigMap()).build();
+
+    Assert.assertEquals(parsed.getRecord(), expected.getRecord());
+    Assert.assertEquals(TaskUtil.isGenericTaskJob(parsed), !targeted);
+
+    JobConfig wrapped = new JobConfig(new HelixProperty(legacyRecord));
+    JobConfig copied = new JobConfig("copy", wrapped);
+    Assert.assertEquals(copied.getRecord(), new JobConfig("copy", expected).getRecord());
+    Assert.assertFalse(copied.getRecord().getSimpleFields().containsKey("DisableExternalView"));
+    Assert.assertEquals(legacyRecord, originalRecord, "Reading legacy records must not rewrite them");
+  }
+
+  @DataProvider
+  public Object[][] legacyForcedReassignments() {
+    return new Object[][] {
+        {false, null}, {false, "0"}, {false, "7"}, {false, "-1"}, {false, "invalid"},
+        {true, null}, {true, "0"}, {true, "7"}, {true, "-1"}, {true, "invalid"}
+    };
+  }
+
+  @Test(dataProvider = "legacyForcedReassignments")
+  public void testLegacyForcedReassignmentsIgnored(boolean targeted, String legacyValue) {
+    JobConfig.Builder builder = new JobConfig.Builder().setWorkflow("workflow").setJobId("job")
+        .setCommand("Dummy").setTimeout(5000L).setTimeoutPerTask(1000L).setTaskRetryDelay(50L)
+        .setNumConcurrentTasksPerInstance(2).setMaxAttemptsPerTask(3).setFailureThreshold(1)
+        .setIgnoreDependentJobFailure(true).setExpiry(2000L).setTerminalStateExpiry(3000L);
+    if (targeted) {
+      builder.setTargetResource("database")
+          .setTargetPartitions(Collections.singletonList("database_0"))
+          .setTargetPartitionStates(Collections.singleton("SLAVE"));
+    } else {
+      builder.setNumberOfTasks(2);
+    }
+    JobConfig expected = builder.build();
+    String retiredKey = "MaxForcedReassignmentsPerTask";
+    Assert.assertFalse(expected.getRecord().getSimpleFields().containsKey(retiredKey));
+    Assert.assertEquals(expected.getMaxAttemptsPerTask(), 3);
+    Assert.assertEquals(expected.getFailureThreshold(), 1);
+    Assert.assertEquals(expected.getTaskRetryDelay(), 50L);
+    Assert.assertTrue(expected.isIgnoreDependentJobFailure());
+    Assert.assertEquals(expected.getExpiry().longValue(), 2000L);
+    Assert.assertEquals(expected.getTerminalStateExpiry().longValue(), 3000L);
+
+    ZNRecord legacyRecord = new ZNRecord(expected.getRecord());
+    if (legacyValue != null) {
+      legacyRecord.setSimpleField(retiredKey, legacyValue);
+    }
+    ZNRecord originalRecord = new ZNRecord(legacyRecord);
+    JobConfig.Builder parsedBuilder = JobConfig.Builder.fromMap(legacyRecord.getSimpleFields())
+        .addTaskConfigMap(expected.getTaskConfigMap());
+    JobConfig parsed = parsedBuilder.build();
+    Assert.assertEquals(parsed.getRecord(), expected.getRecord());
+    Assert.assertEquals(TaskUtil.isGenericTaskJob(parsed), !targeted);
+
+    JobConfig wrapped = new JobConfig(new HelixProperty(legacyRecord));
+    Assert.assertEquals(wrapped.getMaxAttemptsPerTask(), 3);
+    Assert.assertEquals(wrapped.getRecord().getSimpleField(retiredKey), legacyValue);
+    JobConfig copied = new JobConfig("copy", wrapped);
+    Assert.assertEquals(copied.getRecord(), new JobConfig("copy", expected).getRecord());
+    Assert.assertFalse(copied.getRecord().getSimpleFields().containsKey(retiredKey));
+    Assert.assertEquals(copied.getMaxAttemptsPerTask(), 3);
+    Assert.assertEquals(legacyRecord, originalRecord, "Reading legacy records must not rewrite them");
+
+    Workflow workflow = new Workflow.Builder("workflow").addJob("job", parsedBuilder).build();
+    Map<String, String> submittedConfig = workflow.getJobConfigs().get("workflow_job");
+    Assert.assertFalse(submittedConfig.containsKey(retiredKey));
+    Assert.assertEquals(submittedConfig.get("MaxAttemptsPerTask"), "3");
+    Assert.assertEquals(submittedConfig.get("TerminalStateExpiry"), "3000");
+  }
+
+  @Test
+  public void testDefaultRetryConfiguration() {
+    JobConfig config = new JobConfig.Builder().setWorkflow("workflow").setCommand("Dummy")
+        .setNumberOfTasks(1).build();
+    Assert.assertEquals(config.getMaxAttemptsPerTask(), JobConfig.DEFAULT_MAX_ATTEMPTS_PER_TASK);
+    Assert.assertEquals(config.getTerminalStateExpiry().longValue(),
+        JobConfig.DEFAULT_TERMINAL_STATE_EXPIRY);
+    Assert.assertFalse(
+        config.getRecord().getSimpleFields().containsKey("MaxForcedReassignmentsPerTask"));
+  }
+
+  @DataProvider
+  public Object[][] invalidMaxAttempts() {
+    return new Object[][] {{0}, {-1}};
+  }
+
+  @Test(dataProvider = "invalidMaxAttempts", expectedExceptions = IllegalArgumentException.class,
+      expectedExceptionsMessageRegExp = ".*MaxAttemptsPerTask.*")
+  public void testMaxAttemptsValidationPreserved(int maxAttempts) {
+    new JobConfig.Builder().setWorkflow("workflow").setCommand("Dummy").setNumberOfTasks(1)
+        .setMaxAttemptsPerTask(maxAttempts).build();
   }
 }
