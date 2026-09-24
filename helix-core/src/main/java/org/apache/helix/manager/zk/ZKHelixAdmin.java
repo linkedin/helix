@@ -59,6 +59,12 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.PropertyType;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixConflictException;
+import org.apache.helix.api.instance.CheckedInstanceChanges;
+import org.apache.helix.api.instance.DisabledPartitionsChangeRequest;
+import org.apache.helix.api.instance.EffectiveDisabledPartitions;
+import org.apache.helix.api.instance.EffectiveInstanceOperation;
+import org.apache.helix.api.instance.InstanceOperationChangeRequest;
+import org.apache.helix.api.mutation.CheckedMutationResult;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
@@ -467,11 +473,50 @@ public class ZKHelixAdmin implements HelixAdmin {
         instanceOperationObj);
   }
 
+  /**
+   * Record an instance operation for one source only if the conditions carried by the request
+   * still hold when the write happens, instead of reading the instance config first and hoping
+   * it has not changed by the time the write lands.
+   *
+   * <p>The change is refused, and nothing is written, when a condition fails; it is skipped,
+   * and nothing is written, when the requested operation is already recorded for that source
+   * and in effect. See {@link CheckedInstanceChanges} for what the conditions guarantee and,
+   * just as importantly, what they do not.
+   *
+   * @param clusterName the cluster the instance belongs to.
+   * @param instanceName the instance to change.
+   * @param request the desired operation and the conditions under which to write it.
+   * @return the outcome together with the instance operation state in effect.
+   */
+  public CheckedMutationResult<EffectiveInstanceOperation> setInstanceOperationChecked(
+      String clusterName, String instanceName, InstanceOperationChangeRequest request) {
+    return CheckedInstanceChanges.setInstanceOperation(_baseDataAccessor, clusterName,
+        instanceName, request);
+  }
+
+  /**
+   * Bring partitions of one resource into the requested disabled state only if the conditions
+   * carried by the request still hold when the write happens.
+   *
+   * <p>The change is refused, and nothing is written, when a condition fails; it is skipped,
+   * and nothing is written, when the partitions are already in the requested state. See
+   * {@link CheckedInstanceChanges} for what the conditions guarantee and what they do not.
+   *
+   * @param clusterName the cluster the instance belongs to.
+   * @param instanceName the instance to change.
+   * @param request the desired partition state and the conditions under which to write it.
+   * @return the outcome together with the disabled partition state in effect.
+   */
+  public CheckedMutationResult<EffectiveDisabledPartitions> setPartitionsDisabledChecked(
+      String clusterName, String instanceName, DisabledPartitionsChangeRequest request) {
+    return CheckedInstanceChanges.setPartitionsDisabled(_baseDataAccessor, clusterName,
+        instanceName, request);
+  }
+
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName) {
     return isEvacuateFinished(clusterName, instanceName, Collections.emptySet());
   }
-
   @Override
   public boolean isEvacuateFinished(String clusterName, String instanceName,
       Set<InstanceDrainExclusionType> exclusionTypes) {
