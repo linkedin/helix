@@ -138,7 +138,7 @@ public class ResourceComputationStage extends AbstractBaseStage {
       String resourceName = workflowConfigEntry.getKey();
       WorkflowConfig workflowConfig = workflowConfigEntry.getValue();
       addResourceConfigToResourceMap(resourceName, workflowConfig, taskDataCache.getClusterConfig(),
-          resourceMap, resourceToRebalance);
+          null, resourceMap, resourceToRebalance);
       addPartition(resourceName, resourceName, resourceMap);
     }
   }
@@ -154,7 +154,7 @@ public class ResourceComputationStage extends AbstractBaseStage {
       String resourceName = jobConfigEntry.getKey();
       JobConfig jobConfig = jobConfigEntry.getValue();
       addResourceConfigToResourceMap(resourceName, jobConfig, taskDataCache.getClusterConfig(),
-          resourceMap, resourceToRebalance);
+          jobConfig.getInstanceGroupTag(), resourceMap, resourceToRebalance);
       int numPartitions = jobConfig.getTaskConfigMap().size();
       // If there is no task config, this is a targeted job. We get task counts based on target
       // resource IdealState
@@ -249,7 +249,7 @@ public class ResourceComputationStage extends AbstractBaseStage {
   }
 
   private void addResourceConfigToResourceMap(String resourceName, ResourceConfig resourceConfig,
-      ClusterConfig clusterConfig, Map<String, Resource> resourceMap,
+      ClusterConfig clusterConfig, String resourceTag, Map<String, Resource> resourceMap,
       Map<String, Resource> resourceToRebalance) {
     Resource resource = new Resource(resourceName, clusterConfig, resourceConfig);
     resourceMap.put(resourceName, resource);
@@ -260,7 +260,7 @@ public class ResourceComputationStage extends AbstractBaseStage {
       batchMessageMode |= clusterConfig.getBatchMessageMode();
     }
     resource.setBatchMessageMode(batchMessageMode);
-    resource.setResourceTag(resourceConfig.getInstanceGroupTag());
+    resource.setResourceTag(resourceTag);
     resourceToRebalance.put(resourceName, resource);
   }
 }

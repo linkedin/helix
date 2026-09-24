@@ -35,6 +35,7 @@ import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolv
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.ResourceConfig;
@@ -256,7 +257,8 @@ public abstract class AbstractTestClusterModel {
       // Construct one AssignableReplica for each partition in the current state.
       cs.getPartitionStateMap().entrySet().stream().forEach(entry -> assignmentSet
               .add(new AssignableReplica(dataProvider.getClusterConfig(), resourceConfig,
-                  entry.getKey(), entry.getValue(), entry.getValue().equals("MASTER") ? 1 : 2)));
+                  new IdealState(cs.getResourceName()), entry.getKey(), entry.getValue(),
+                  entry.getValue().equals("MASTER") ? 1 : 2)));
     }
     return assignmentSet;
   }

@@ -187,17 +187,16 @@ public class TestResourceConfig {
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
     ResourceConfig resourceConfig = new ResourceConfig("resource", false, "DEFAULT",
-        1, 10, "placementTag", null, null, null, null, true);
+        1, 10, null, null, null, null, true);
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
     Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
-    Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
     Assert.assertFalse(resourceConfig.isMonitoringDisabled());
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
-            "EXTERNAL_VIEW_DISABLED"}) {
+            "EXTERNAL_VIEW_DISABLED", "INSTANCE_GROUP_TAG"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -230,8 +229,8 @@ public class TestResourceConfig {
     // Test IdealState info overriding the empty config fields.
     ResourceConfig mergedResourceConfig =
         ResourceConfig.mergeIdealStateWithResourceConfig(null, testIdealState);
-    Assert.assertEquals(mergedResourceConfig.getInstanceGroupTag(),
-        testIdealState.getInstanceGroupTag());
+    Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields()
+        .containsKey("INSTANCE_GROUP_TAG"));
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testIdealState.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
@@ -247,18 +246,21 @@ public class TestResourceConfig {
         .booleanValue(), testIdealState.isDelayRebalanceEnabled());
     // Test priority, Resource Config field has higher priority.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
-    configBuilder.setInstanceGroupTag("testRCGroup");
     configBuilder.setMaxPartitionsPerInstance(2);
     configBuilder.setStateModelFactoryName("testRCFactory");
     configBuilder.setMinActiveReplica(2);
     testConfig = configBuilder.build();
+    Assert.assertFalse(testConfig.getRecord().getSimpleFields().containsKey("INSTANCE_GROUP_TAG"));
+    testConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyRCGroup");
     testConfig.getRecord().setSimpleField("RESOURCE_GROUP_NAME", "testRCGroup");
     testConfig.getRecord().setSimpleField("RESOURCE_TYPE", "RCType");
     testConfig.getRecord().setBooleanField("GROUP_ROUTING_ENABLED", false);
     mergedResourceConfig =
         ResourceConfig.mergeIdealStateWithResourceConfig(testConfig, testIdealState);
-    Assert
-        .assertEquals(mergedResourceConfig.getInstanceGroupTag(), testConfig.getInstanceGroupTag());
+    Assert.assertEquals(mergedResourceConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"),
+        "legacyRCGroup");
+    Assert.assertEquals(testConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"), "legacyRCGroup");
+    Assert.assertEquals(testIdealState.getInstanceGroupTag(), "testISGroup");
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testConfig.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
