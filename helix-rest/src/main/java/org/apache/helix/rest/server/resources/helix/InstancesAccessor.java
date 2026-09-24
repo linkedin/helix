@@ -391,7 +391,8 @@ public class InstancesAccessor extends AbstractHelixResource {
           .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
 
       InstanceOperationMaintenanceWriteHandler handler =
-          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor(),
+              getDataAccssor(clusterId));
       InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
           handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
 

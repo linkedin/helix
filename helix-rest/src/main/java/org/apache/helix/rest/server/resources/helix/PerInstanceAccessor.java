@@ -360,7 +360,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
 
       InstanceOperationMaintenanceWriteHandler handler =
-          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
+          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor(),
+              getDataAccssor(clusterId));
       InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
           handler.apply(clusterId, Collections.singletonList(instanceName), expiresAtMillis,
               System.currentTimeMillis());
@@ -373,6 +374,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       }
       String rejectReason = result.getRejected().get(instanceName);
       if (rejectReason != null) {
+        if (result.isWriteFailure(instanceName)) {
+          return serverError(new HelixException(rejectReason));
+        }
         // Single-instance call cannot be partial; surface the per-instance reason as 400.
         return badRequest(rejectReason);
       }
