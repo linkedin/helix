@@ -23,6 +23,7 @@ import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
@@ -48,6 +49,7 @@ public class GuardrailContext {
   private final WagedAssignmentProvider wagedAssignmentProvider;
   private final InstanceConfig proposedInstanceConfig;
   private final List<String> proposedRemovedInstanceTags;
+  private final ClusterConfig proposedClusterConfig;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -59,6 +61,7 @@ public class GuardrailContext {
     this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
     this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
+    this.proposedClusterConfig = builder.proposedClusterConfig;
   }
 
   public String getClusterName() {
@@ -135,6 +138,16 @@ public class GuardrailContext {
     return proposedRemovedInstanceTags;
   }
 
+  /**
+   * The cluster config a mutation proposes to write, or {@code null} if the operation is not
+   * cluster-config-scoped. Rules read the to-be-written cluster settings (e.g. its WAGED
+   * {@code INSTANCE_CAPACITY_KEYS} / {@code DEFAULT_INSTANCE_CAPACITY_MAP}) from here rather than
+   * from ZK, since the merged config has not been persisted yet at pre-validation time.
+   */
+  public ClusterConfig getProposedClusterConfig() {
+    return proposedClusterConfig;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -149,6 +162,7 @@ public class GuardrailContext {
     private WagedAssignmentProvider wagedAssignmentProvider;
     private InstanceConfig proposedInstanceConfig;
     private List<String> proposedRemovedInstanceTags;
+    private ClusterConfig proposedClusterConfig;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -192,6 +206,11 @@ public class GuardrailContext {
 
     public Builder proposedRemovedInstanceTags(List<String> proposedRemovedInstanceTags) {
       this.proposedRemovedInstanceTags = proposedRemovedInstanceTags;
+      return this;
+    }
+
+    public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
+      this.proposedClusterConfig = proposedClusterConfig;
       return this;
     }
 

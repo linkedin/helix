@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -54,6 +55,9 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
@@ -693,12 +697,25 @@ public class ClusterAccessor extends AbstractHelixResource {
   @POST
   @Path("{clusterId}/configs")
   public Response updateClusterConfig(@PathParam("clusterId") String clusterId,
-      @QueryParam("command") String commandStr, String content) {
+      @QueryParam("command") String commandStr,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     try {
       command = getCommand(commandStr);
     } catch (HelixException ex) {
       return badRequest(ex.getMessage());
+    }
+
+    // force and dryRun are only honored by the 'update' command, which runs the capacity-key guard
+    // rail pipeline. For any other command (e.g. delete) they are silently ignored and, worse,
+    // dryRun=true would still perform a real write — the opposite of a simulation. Reject them up
+    // front for unsupported commands so callers are never misled into thinking a mutation was
+    // simulated or its violations overridden.
+    if ((force || dryRun) && command != Command.update) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'update' command, not '%s'.",
+          commandStr));
     }
 
     ZNRecord record;
@@ -719,6 +736,26 @@ public class ClusterAccessor extends AbstractHelixResource {
       switch (command) {
         case update:
           validateClusterConfigChange(clusterId, configAccessor, config, command);
+          // Capacity-key guard rail (always on): the 'update' command merges the incoming record
+          // into the existing cluster config, so a change to INSTANCE_CAPACITY_KEYS (or the
+          // DEFAULT_INSTANCE_CAPACITY_MAP that backs it) can require a capacity key that some
+          // assignable instance does not declare. WAGED could then no longer build a cluster model,
+          // so every WAGED resource would silently stop placing. Validate the merged (proposed)
+          // config the same way validateClusterConfigChange computes it. force=true overrides;
+          // dryRun=true reports the verdict without writing.
+          ClusterConfig proposedClusterConfig = configAccessor.getClusterConfig(clusterId);
+          proposedClusterConfig.getRecord().update(config.getRecord());
+          GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+              .dataAccessor(getDataAccssor(clusterId))
+              .proposedClusterConfig(proposedClusterConfig)
+              .build();
+          GuardrailPipeline guardrailPipeline =
+              new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule());
+          Optional<Response> preflightResponse =
+              preflight(guardrailPipeline, guardrailContext, force, dryRun);
+          if (preflightResponse.isPresent()) {
+            return preflightResponse.get();
+          }
           configAccessor.updateClusterConfig(clusterId, config);
           break;
         case delete: {
