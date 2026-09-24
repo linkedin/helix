@@ -41,9 +41,9 @@ public class OptimalAssignment {
   private Map<String, ResourceAssignment> _optimalAssignment = Collections.emptyMap();
   private Map<AssignableReplica, Map<AssignableNode, List<String>>> _failedAssignments =
       new HashMap<>();
-  // Resources that were skipped because their instance-group-tag could not be fully placed while
-  // instance-tag isolation is enabled. These resources are absent from _optimalAssignment and the
-  // caller is expected to carry their previous assignment forward. Empty in the default global mode.
+  // Resources skipped by instance-tag isolation. Preloaded replicas may leave partial entries in
+  // _optimalAssignment; the caller replaces those with complete previous assignments or omits them
+  // from a temporary overwrite. Empty in the default global mode.
   private Set<String> _skippedResources = Collections.emptySet();
 
   /**
@@ -106,9 +106,10 @@ public class OptimalAssignment {
   }
 
   /**
-   * @return The resources that were skipped by instance-tag isolation. These resources have no entry
-   *         in {@link #getOptimalResourceAssignment()} and their previous assignment must be carried
-   *         forward by the caller. Never null; empty in the default global mode.
+   * @return The resources skipped by instance-tag isolation. Preloaded replicas may still leave
+   *         entries in {@link #getOptimalResourceAssignment()}; the caller must replace those
+   *         entries with the complete previous assignment, or drop them for a temporary overwrite.
+   *         Never null; empty in the default global mode.
    */
   public Set<String> getSkippedResources() {
     return _skippedResources;

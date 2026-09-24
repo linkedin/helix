@@ -189,9 +189,11 @@ class InstanceTagIsolation {
     // cluster of twenty independent cliques and fail them all.
     if (attributionBlocks().size() < 2) {
       LOG.warn(
-          "Instance tag isolation cannot isolate group {} in cluster {}: it shares nodes with "
-              + "every other group, so there is nothing left to recalculate around it. Failing "
+          "Instance tag isolation cannot isolate group {} during the {} rebalance of cluster {}: "
+              + "it shares nodes with every other group, so there is nothing left to recalculate "
+              + "around it. Failing "
               + "the whole rebalance exactly like the default global mode.", group,
+          _clusterModel.getRebalanceScopeType(),
           _clusterModel.getContext().getClusterName());
       return false;
     }
@@ -235,23 +237,28 @@ class InstanceTagIsolation {
     if (!_enabled || _failedGroups.isEmpty()) {
       return;
     }
-    // "Nothing could be placed anywhere" has to be judged over the whole cluster, not over the
-    // groups that happen to carry work in this run. Only a full rebalance sees every group; the
-    // partial, emergency and delayed overwrite scopes carry just the replicas that still need
-    // moving, which on a broken clique is frequently that clique alone. Counting groups there reads
-    // as "every group failed" and throws, the caller discards the entire pipeline result and falls
-    // back to the last known good assignment, and every healthy clique is frozen again. That is the
-    // exact freeze this mode exists to prevent, and it is why the count is taken over the blocks
-    // the cluster's nodes form instead.
+    // Outstanding work can belong only to the failing clique. Judge containment using the full
+    // resource inventory and node-reachability blocks, not only replicas being reassigned.
     List<Set<String>> blocks = attributionBlocks();
     long failedBlocks =
         blocks.stream().filter(block -> block.stream().anyMatch(_failedGroups::contains)).count();
-    if (blocks.isEmpty() || failedBlocks >= blocks.size()) {
+    // A baseline can also be incremental. Include allocated groups when deciding whether every
+    // resource failed; an unrelated resource edit must not turn one broken clique into a global
+    // failure. Node-only blocks cannot establish that any resource survived.
+    boolean everyWorkingGroupFailed = !_allGroups.isEmpty()
+        && _clusterModel.getRebalanceScopeType() == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE
+        && _failedGroups.containsAll(tagByGroup().keySet());
+    if (blocks.isEmpty() || failedBlocks >= blocks.size() || everyWorkingGroupFailed) {
       // Every independent part of the cluster failed, so behave exactly like the default global
       // mode. A block holding a group that never had work still counts as failed when any of its
       // groups failed, so padding the universe cannot hide a genuine cluster wide failure.
       throw _firstFailure;
     }
+    _clusterModel.getContext().getResourceInstanceGroupTags().forEach((resource, tag) -> {
+      if (_failedGroups.contains(groupKey(resource, tag))) {
+        _skippedResources.add(resource);
+      }
+    });
     LOG.warn(
         "Instance tag isolation skipped {} of {} group(s) ({} resource(s)) in {} of {} independent "
             + "block(s) during the {} rebalance of cluster {}. Skipped groups: {}.",
@@ -271,8 +278,11 @@ class InstanceTagIsolation {
    * can be placed anywhere, so it is keyed on its own, though it then shares nodes with everything.
    */
   private static String groupKey(AssignableReplica replica) {
-    String tag = replica.getResourceInstanceGroupTag();
-    return (tag == null || tag.isEmpty()) ? UNTAGGED_GROUP_PREFIX + replica.getResourceName()
+    return groupKey(replica.getResourceName(), replica.getResourceInstanceGroupTag());
+  }
+
+  private static String groupKey(String resource, String tag) {
+    return (tag == null || tag.isEmpty()) ? UNTAGGED_GROUP_PREFIX + resource
         : TAG_GROUP_PREFIX + tag;
   }
 
@@ -300,24 +310,48 @@ class InstanceTagIsolation {
    * The same partition computed over the groups the cluster wide capacity deficit has to be
    * attributed across, which is a wider set than the one above.
    *
-   * The replica list only holds what still needs assigning, so a clique whose replicas are all
-   * already placed contributes no group at all. It would then have no block, no demand and no way
-   * to be blamed, and a deficit it alone caused would be declared unattributable. Adding a group
-   * for every tag any node carries gives such a clique a block to be blamed in.
+   * Resource groups include already allocated replicas. Node-only tags also contribute blocks for
+   * models that have nodes outside the represented workload, without letting operational labels
+   * join otherwise independent resource groups.
    *
-   * Kept separate from the partition above on purpose. That one is sized by the replica derived
-   * group count, which is what the "shares nodes with every other group" and "every group failed"
-   * guards compare against, and padding it with groups that own no replicas and can never fail
-   * would stop those guards ever firing.
+   * A tag carried by a node that some resource can already be placed on is deliberately left out.
+   * Such a tag is an operational label spanning cliques (an availability zone, a hardware
+   * generation, a pool name) rather than the name of a clique that lost its replicas. Adding it
+   * would create a group no resource can ever be placed in, and because the label is shared it
+   * would union every clique carrying it into one block. Both guards below then read "there is only
+   * one block", and the whole mode silently degrades into the default global one on any fleet whose
+   * instances carry an ordinary label alongside their clique tag.
+   *
+   * Kept separate from the resource partition so an unused node tag cannot be mistaken for a
+   * resource that survived a failed baseline.
    */
   private List<Set<String>> attributionBlocks() {
     if (_attributionBlocks != null) {
       return _attributionBlocks;
     }
     Map<String, String> tagByGroup = new HashMap<>(tagByGroup());
+    Set<String> resourceTags = new HashSet<>(tagByGroup.values());
+    resourceTags.remove(null);
+    // Operational labels on reachable nodes must not connect otherwise independent cliques.
+    Set<String> spanningTags = new HashSet<>();
+    for (AssignableNode node : _nodes) {
+      Set<String> nodeTags = node.getInstanceTags();
+      boolean reachable = false;
+      for (String tag : nodeTags) {
+        if (resourceTags.contains(tag)) {
+          reachable = true;
+          break;
+        }
+      }
+      if (reachable) {
+        spanningTags.addAll(nodeTags);
+      }
+    }
     for (AssignableNode node : _nodes) {
       for (String tag : node.getInstanceTags()) {
-        tagByGroup.putIfAbsent(TAG_GROUP_PREFIX + tag, tag);
+        if (!spanningTags.contains(tag)) {
+          tagByGroup.putIfAbsent(TAG_GROUP_PREFIX + tag, tag);
+        }
       }
     }
     _attributionBlocks = blocksOf(tagByGroup);
@@ -410,10 +444,8 @@ class InstanceTagIsolation {
   private Map<String, String> tagByGroup() {
     if (_tagByGroup == null) {
       Map<String, String> tagByGroup = new HashMap<>();
-      for (AssignableReplica replica : _allReplicas) {
-        String tag = replica.getResourceInstanceGroupTag();
-        tagByGroup.put(groupKey(replica), (tag == null || tag.isEmpty()) ? null : tag);
-      }
+      _clusterModel.getContext().getResourceInstanceGroupTags().forEach((resource, tag) ->
+          tagByGroup.put(groupKey(resource, tag), (tag == null || tag.isEmpty()) ? null : tag));
       _tagByGroup = tagByGroup;
     }
     return _tagByGroup;

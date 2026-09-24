@@ -130,6 +130,35 @@ public class TestWagedRebalanceUtilCarryForward {
   }
 
   @Test
+  public void testFinalIsolationReportIncludesResourcesYieldingToACollision() throws Exception {
+    Map<String, ResourceAssignment> calculated = new HashMap<>();
+    calculated.put("Mover", assignment("Mover", "instance-1"));
+    calculated.put("Healthy", assignment("Healthy", "instance-7"));
+    Map<String, ResourceAssignment> previous = new HashMap<>();
+    previous.put("Skipped", assignment("Skipped", "instance-1"));
+    previous.put("Mover", assignment("Mover", "instance-3"));
+    OptimalAssignment optimal = Mockito.mock(OptimalAssignment.class);
+    Mockito.when(optimal.getOptimalResourceAssignment()).thenReturn(calculated);
+    Mockito.when(optimal.getSkippedResources()).thenReturn(Collections.singleton("Skipped"));
+    RebalanceAlgorithm algorithm = Mockito.mock(RebalanceAlgorithm.class);
+    ClusterModel model = Mockito.mock(ClusterModel.class);
+    ClusterContext context = Mockito.mock(ClusterContext.class);
+    Mockito.when(model.getContext()).thenReturn(context);
+    Mockito.when(model.getRebalanceScopeType()).thenReturn(ClusterModel.RebalanceScopeType.EMERGENCY);
+    Mockito.when(algorithm.calculate(model)).thenReturn(optimal);
+
+    WagedRebalanceUtil.calculateAssignment(model, algorithm, previous);
+
+    Set<String> expected = new HashSet<>();
+    expected.add("Skipped");
+    expected.add("Mover");
+    Mockito.verify(algorithm, Mockito.times(1)).onAssignmentComputed(
+        ClusterModel.RebalanceScopeType.EMERGENCY, Collections.emptySet(), expected);
+    Assert.assertEquals(optimal.getSkippedResources(), Collections.singleton("Skipped"),
+        "Final reporting must not mutate the algorithm's immutable result");
+  }
+
+  @Test
   public void testNothingChangesWhenNoResourceWasSkipped() throws Exception {
     Map<String, ResourceAssignment> calculated = new HashMap<>();
     calculated.put("Healthy", assignment("Healthy", "instance-2"));

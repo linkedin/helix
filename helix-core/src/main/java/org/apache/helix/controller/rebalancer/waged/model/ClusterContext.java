@@ -79,6 +79,7 @@ public class ClusterContext {
   // True when the WAGED algorithm should tolerate the failure of a single instance-group-tag group
   // instead of failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
+  private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
   // Reference to the data provider for accessing resource configurations
   private final ResourceControllerDataProvider _dataProvider;
   /**
@@ -118,6 +119,10 @@ public class ClusterContext {
         .entrySet()) {
       int replicas = entry.getValue().size();
       totalReplicas += replicas;
+      if (_instanceTagIsolationEnabled) {
+        _resourceInstanceGroupTags.put(entry.getKey(),
+            entry.getValue().get(0).getResourceInstanceGroupTag());
+      }
 
       int replicaCnt = Math.max(1, estimateAvgReplicaCount(replicas, instanceCount));
       _estimatedMaxPartitionByResource.put(entry.getKey(), replicaCnt);
@@ -175,6 +180,13 @@ public class ClusterContext {
    */
   public boolean isInstanceTagIsolationEnabled() {
     return _instanceTagIsolationEnabled;
+  }
+
+  /**
+   * Resource tags for the full model, including resources whose replicas are already allocated.
+   */
+  public Map<String, String> getResourceInstanceGroupTags() {
+    return Collections.unmodifiableMap(_resourceInstanceGroupTags);
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {
