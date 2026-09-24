@@ -46,10 +46,12 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -563,7 +565,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   @Path("{resourceName}/idealState")
   public Response updateResourceIdealState(@PathParam("clusterId") String clusterId,
       @PathParam("resourceName") String resourceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior is update
@@ -573,6 +576,15 @@ public class ResourceAccessor extends AbstractHelixResource {
       } catch (HelixException ex) {
         return badRequest(ex.getMessage());
       }
+    }
+
+    // force and dryRun are only honored by the 'update' command, which runs the guard rail
+    // pipeline. Reject them for any other command (e.g. delete) so a caller is never misled into
+    // thinking a delete was simulated (dryRun) or its verdict overridden (force).
+    if ((force || dryRun) && command != Command.update) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'update' command, not '%s'.",
+          commandStr));
     }
 
     ZNRecord record;
@@ -586,9 +598,35 @@ public class ResourceAccessor extends AbstractHelixResource {
     HelixAdmin helixAdmin = getHelixAdmin();
     try {
       switch (command) {
-      case update:
+      case update: {
+        // Guard rail: an ideal-state edit that leaves MIN_ACTIVE_REPLICAS greater than REPLICAS is
+        // logically inconsistent -- a partition can never have more active replicas than it has
+        // replicas -- so every partition is permanently accounted below its minimum active count,
+        // defeating delayed rebalance and min-active health guarantees. Validate the merged
+        // (post-write) ideal state, the same way the ZK write merges the incoming record into the
+        // existing one; the rule blocks only edits that introduce or worsen the inconsistency and
+        // grandfathers an already-inconsistent resource. force=true overrides; dryRun=true only
+        // reports the verdict without writing.
+        HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+        IdealState existingIdealState =
+            dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName));
+        ZNRecord mergedRecord = existingIdealState != null
+            ? new ZNRecord(existingIdealState.getRecord()) : new ZNRecord(resourceName);
+        mergedRecord.update(record);
+        GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(dataAccessor)
+            .proposedIdealState(new IdealState(mergedRecord))
+            .build();
+        GuardrailPipeline guardrailPipeline =
+            new GuardrailPipeline(new MinActiveReplicasConsistencyGuardrailRule());
+        Optional<Response> preflightResponse =
+            preflight(guardrailPipeline, guardrailContext, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         helixAdmin.updateIdealState(clusterId, resourceName, idealState);
         break;
+      }
       case delete: {
         helixAdmin.removeFromIdealState(clusterId, resourceName, idealState);
       }
