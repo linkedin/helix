@@ -21,12 +21,11 @@ package org.apache.helix.guardrail.rules;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
+import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.ReadOnlyDataAccessor;
@@ -116,7 +115,7 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
 
     List<Violation> violations = new ArrayList<>();
     int totalViolations = collectInstanceViolations(dataAccessor, keyBuilder, proposedResourceConfig,
-        clusterConfig, capacityKeys, violations);
+        clusterConfig, violations);
 
     if (violations.isEmpty()) {
       return ValidationResult.feasible();
@@ -136,18 +135,19 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   }
 
   /**
-   * Checks that every assignable instance's effective capacity map (cluster default instance capacity
-   * overridden by the instance's capacity) declares every required capacity key. This is a
-   * precondition for the proposed resource to place: WAGED builds its model from every assignable
-   * instance, so a single instance missing a key fails the whole model. Reads instance configs
-   * fail-closed so a transient read error surfaces as a rejection rather than validation against
-   * partial state. Returns the total number of violations found (which may exceed the number appended
-   * to {@code violations} once the report cap is reached).
+   * Checks every assignable instance against
+   * {@link WagedValidationUtil#validateAndGetInstanceCapacity}, the exact effective-capacity merge and
+   * required-key coverage check WAGED runs when it builds its cluster model, and records a violation
+   * for each instance that check rejects. Delegating (rather than re-deriving the merge here) keeps the
+   * guard rail from drifting from what WAGED actually enforces: a single assignable instance missing a
+   * key fails the whole model, so the proposed resource would be accepted but never place. Reads
+   * instance configs fail-closed so a transient read error surfaces as a rejection rather than
+   * validation against partial state. Returns the total number of violations found (which may exceed
+   * the number appended to {@code violations} once the report cap is reached).
    */
   private int collectInstanceViolations(ReadOnlyDataAccessor dataAccessor,
       PropertyKey.Builder keyBuilder, ResourceConfig proposedResourceConfig,
-      ClusterConfig clusterConfig, List<String> capacityKeys, List<Violation> violations) {
-    Map<String, Integer> defaultInstanceCapacity = clusterConfig.getDefaultInstanceCapacityMap();
+      ClusterConfig clusterConfig, List<Violation> violations) {
     List<InstanceConfig> instanceConfigs =
         dataAccessor.getChildValues(keyBuilder.instanceConfigs(), true);
 
@@ -162,43 +162,31 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
 
     int total = 0;
     for (InstanceConfig instanceConfig : assignableInstances) {
-      // Effective capacity = cluster default instance capacity overridden by the instance's own
-      // capacity, mirroring WagedValidationUtil#validateAndGetInstanceCapacity.
-      Map<String, Integer> effectiveCapacity = new HashMap<>(defaultInstanceCapacity);
-      effectiveCapacity.putAll(instanceConfig.getInstanceCapacityMap());
-      List<String> missing = missingKeys(capacityKeys, effectiveCapacity.keySet());
-      if (missing.isEmpty()) {
+      // Delegate the effective-capacity merge and required-key coverage check to the exact method
+      // WAGED runs at model-build time (WagedValidationUtil#validateAndGetInstanceCapacity), so this
+      // guard rail can never drift from what WAGED enforces: the HelixException it throws is precisely
+      // the model-build failure the resource add would hit on every rebalance.
+      try {
+        WagedValidationUtil.validateAndGetInstanceCapacity(clusterConfig, instanceConfig);
         continue;
+      } catch (HelixException e) {
+        total++;
+        if (violations.size() >= MAX_REPORTED_VIOLATIONS) {
+          continue;
+        }
+        violations.add(Violation.newBuilder(RULE_ID)
+            .resource(proposedResourceConfig.getResourceName())
+            .message(String.format(
+                "Instance %s is not valid for the WAGED capacity model: %s WAGED cannot build a "
+                    + "cluster model that includes it, so resource %s (and every other WAGED "
+                    + "resource) would be accepted but never place. Add the missing key(s) to the "
+                    + "instance's INSTANCE_CAPACITY_MAP or to the cluster's "
+                    + "DEFAULT_INSTANCE_CAPACITY_MAP.",
+                instanceConfig.getInstanceName(), e.getMessage(),
+                proposedResourceConfig.getResourceName()))
+            .build());
       }
-      total++;
-      if (violations.size() >= MAX_REPORTED_VIOLATIONS) {
-        continue;
-      }
-      violations.add(Violation.newBuilder(RULE_ID)
-          .resource(proposedResourceConfig.getResourceName())
-          .message(String.format(
-              "Instance %s does not declare WAGED capacity key(s) %s required by the cluster "
-                  + "(INSTANCE_CAPACITY_KEYS=%s); WAGED cannot build a model that includes it, so "
-                  + "resource %s (and every other WAGED resource) would be accepted but never place. "
-                  + "Add the missing key(s) to the instance's INSTANCE_CAPACITY_MAP or to the "
-                  + "cluster's DEFAULT_INSTANCE_CAPACITY_MAP.",
-              instanceConfig.getInstanceName(), missing, capacityKeys,
-              proposedResourceConfig.getResourceName()))
-          .build());
     }
     return total;
-  }
-
-  /**
-   * The required keys, in their cluster-declared order, that are absent from {@code presentKeys}.
-   */
-  private static List<String> missingKeys(List<String> requiredKeys, Set<String> presentKeys) {
-    List<String> missing = new ArrayList<>();
-    for (String key : requiredKeys) {
-      if (!presentKeys.contains(key)) {
-        missing.add(key);
-      }
-    }
-    return missing;
   }
 }

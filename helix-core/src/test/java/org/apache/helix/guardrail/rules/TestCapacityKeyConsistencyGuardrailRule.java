@@ -20,6 +20,7 @@
 package org.apache.helix.guardrail.rules;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -171,6 +172,26 @@ public class TestCapacityKeyConsistencyGuardrailRule {
     Assert.assertFalse(result.isFeasible());
     Assert.assertEquals(result.getViolations().size(), 1);
     Assert.assertTrue(result.getViolations().get(0).getMessage().contains("instance0"));
+  }
+
+  @Test
+  public void testViolationsCappedWithOverflowSummary() {
+    // 101 assignable instances each omit BAR. The per-instance violations are capped at
+    // MAX_REPORTED_VIOLATIONS (100) and a single trailing summary reports how many were omitted, so a
+    // pathological cluster (a key missing on every instance) cannot produce an unbounded 400 body.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    List<InstanceConfig> instanceConfigs = new ArrayList<>();
+    for (int i = 0; i < 101; i++) {
+      instanceConfigs.add(instanceConfig("instance" + i, ImmutableMap.of("FOO", 100)));
+    }
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig, instanceConfigs);
+
+    ValidationResult result = rule.validate(contextWith(dataAccessor, resourceConfig()));
+
+    Assert.assertFalse(result.isFeasible());
+    // 100 per-instance violations + 1 trailing overflow summary.
+    Assert.assertEquals(result.getViolations().size(), 101);
+    Assert.assertTrue(result.getViolations().get(100).getMessage().contains("were omitted"));
   }
 
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
