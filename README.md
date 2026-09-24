@@ -39,6 +39,23 @@ Mailing list: http://helix.apache.org/mail-lists.html
 mvn clean install -Dmaven.test.skip.exec=true
 ```
 
+### ResourceConfig rebalance strategy compatibility
+
+`REBALANCE_STRATEGY` is no longer exposed by the `RebalanceConfig` wrapper used by
+`ResourceConfig`. Its enum constant, `getRebalanceStrategy()` and
+`setRebalanceStrategy(String)` have been removed. Callers using these APIs must
+update and recompile; use `IdealState.IdealStateProperty.REBALANCE_STRATEGY` and
+`IdealState.getRebalanceStrategy()` / `setRebalanceStrategy(String)` for strategy
+selection. IdealState strategy support and controller behavior are unchanged.
+
+Existing raw `REBALANCE_STRATEGY` fields in ResourceConfig records remain opaque
+metadata: wrapping or merging a record preserves them, but the typed
+`RebalanceConfig.getConfigsMap()` output and ResourceConfig constructors/builders
+using that output no longer emit them. Generic raw-record APIs are unchanged.
+There is no automatic deletion or migration of persisted fields. Do not blindly
+copy a ResourceConfig value into IdealState: the ResourceConfig value was not
+used for strategy selection, and making it effective can change placement.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
