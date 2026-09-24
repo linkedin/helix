@@ -270,6 +270,156 @@ class InstanceTagIsolation {
   }
 
   /**
+   * Attribute a cluster wide capacity deficit to the cliques that caused it.
+   *
+   * The cluster wide check that precedes any placement is a tag blind sum, so one wildly
+   * oversubscribed clique can drag it negative while every other clique still fits comfortably on
+   * its own nodes. Throwing there would freeze the whole cluster, which is exactly what this mode
+   * exists to prevent. This walks the share blocks, sets aside the ones whose own replicas cannot
+   * fit on their own nodes, and re-evaluates the deficit on the remainder. The blocks set aside are
+   * then carried over like any other failed group.
+   *
+   * Only reachable on a path where the default mode has already decided to throw, so parity is
+   * unaffected by construction.
+   *
+   * @param deficit the failure the default mode would have thrown.
+   * @param divGuard the epsilon the algorithm adds to keep the scoring denominators above zero.
+   * @return the scoring capacity map to use for the remainder of the cluster, or null when the
+   *         deficit cannot be attributed and the caller should throw as usual.
+   */
+  Map<String, Float> absorbCapacityDeficit(HelixRebalanceException deficit, float divGuard) {
+    if (!_enabled) {
+      return null;
+    }
+    List<Set<String>> blocks = attributionBlocks();
+    // A single block spanning the cluster means nothing can be set aside on its own. That is the
+    // usual effect of an untagged resource, since it can be placed on any node and so pulls every
+    // group it meets into one block. It is not guaranteed though: a tag that no live instance
+    // carries reaches no node, so it stays a block of its own alongside the big one, and the
+    // attribution below then correctly blames that unplaceable group.
+    if (blocks.size() < 2) {
+      return null;
+    }
+    Map<String, Integer> blockOfGroup = new HashMap<>();
+    for (int i = 0; i < blocks.size(); i++) {
+      for (String group : blocks.get(i)) {
+        blockOfGroup.put(group, i);
+      }
+    }
+
+    Map<Integer, Map<String, Long>> demandByBlock = new HashMap<>();
+    // Only what still has to be assigned. In the partial, emergency and delayed overwrite scopes
+    // that is a subset of the cluster, so the already placed replicas are added back per block from
+    // the nodes below. The residual demand further down is a full cluster figure, and comparing a
+    // partial demand against a full residual is what made attribution silently impossible outside
+    // the global baseline scope: a block that was already placed looks like it demands nothing, so
+    // nothing is ever over committed and nothing is ever blamed.
+    for (AssignableReplica replica : _allReplicas) {
+      Integer block = blockOfGroup.get(groupKey(replica));
+      if (block == null) {
+        continue;
+      }
+      Map<String, Long> demand = demandByBlock.computeIfAbsent(block, key -> new HashMap<>());
+      replica.getCapacity().forEach((key, value) -> demand.merge(key, (long) value, Long::sum));
+    }
+
+    // Every group reaching a node is in that node's block by construction, so any one of them
+    // identifies the block and the node's capacity is credited exactly once. A node reachable from
+    // two blocks would have merged them, so nothing is ever counted twice.
+    Map<Integer, Map<String, Long>> capacityByBlock = new HashMap<>();
+    Map<String, String> tagByGroup = tagByGroup();
+    String untaggedGroup = tagByGroup.entrySet().stream().filter(e -> e.getValue() == null)
+        .map(Map.Entry::getKey).findFirst().orElse(null);
+    for (AssignableNode node : _nodes) {
+      Integer block = null;
+      if (untaggedGroup != null) {
+        // An untagged group can use every node, so it reaches this one and names its block. Without
+        // this the untagged block would be credited no capacity at all and would always look
+        // over committed, which would wrongly blame it and give up on the whole rebalance.
+        block = blockOfGroup.get(untaggedGroup);
+      } else {
+        for (String tag : node.getInstanceTags()) {
+          block = blockOfGroup.get(TAG_GROUP_PREFIX + tag);
+          if (block != null) {
+            break;
+          }
+        }
+      }
+      if (block == null) {
+        // No resource can be placed here, so this node's capacity belongs to no block.
+        continue;
+      }
+      Map<String, Long> capacity = capacityByBlock.computeIfAbsent(block, k -> new HashMap<>());
+      node.getMaxCapacity().forEach((key, value) -> capacity.merge(key, (long) value, Long::sum));
+
+      // What is already sitting on the node belongs to the same block as the node, so credit it as
+      // demand there. The replicas allocated before this run are loaded onto the nodes rather than
+      // left in the replica list above, so without this a block carrying a full load of already
+      // placed replicas would be measured as demanding nothing at all. Remaining capacity can go
+      // negative on an over assigned node, which correctly reports more used than the node holds.
+      Map<String, Integer> remaining = node.getRemainingCapacity();
+      Map<String, Long> placed = demandByBlock.computeIfAbsent(block, k -> new HashMap<>());
+      node.getMaxCapacity().forEach((key, max) -> placed.merge(key,
+          (long) max - remaining.getOrDefault(key, max), Long::sum));
+    }
+
+    Map<String, Long> residualCapacity =
+        new HashMap<>(_clusterModel.getContext().getClusterCapacityMap());
+    Map<String, Long> residualDemand = new HashMap<>();
+    _clusterModel.getContext().getEstimateUtilizationMap().forEach((key, remaining) -> residualDemand
+        .put(key, residualCapacity.getOrDefault(key, 0L) - remaining));
+
+    Set<Integer> deficitBlocks = new HashSet<>();
+    Set<String> deficitGroups = new TreeSet<>();
+    for (Map.Entry<Integer, Map<String, Long>> entry : demandByBlock.entrySet()) {
+      Map<String, Long> capacity =
+          capacityByBlock.getOrDefault(entry.getKey(), Collections.emptyMap());
+      boolean overCommitted = entry.getValue().entrySet().stream()
+          .anyMatch(demand -> demand.getValue() > capacity.getOrDefault(demand.getKey(), 0L));
+      if (!overCommitted) {
+        continue;
+      }
+      deficitBlocks.add(entry.getKey());
+      deficitGroups.addAll(blocks.get(entry.getKey()));
+      entry.getValue().forEach((key, value) -> residualDemand.merge(key, -value, Long::sum));
+      capacity.forEach((key, value) -> residualCapacity.merge(key, -value, Long::sum));
+    }
+    // Nothing to blame, or everything is to blame, both of which mean the default mode's verdict
+    // stands.
+    if (deficitGroups.isEmpty() || deficitBlocks.size() == blocks.size()) {
+      return null;
+    }
+
+    Map<String, Float> residualScoringCap = new HashMap<>();
+    for (Map.Entry<String, Long> entry : residualCapacity.entrySet()) {
+      long remaining = entry.getValue() - residualDemand.getOrDefault(entry.getKey(), 0L);
+      if (remaining < 0) {
+        // What is left over still does not fit, so this is a genuine cluster wide shortfall rather
+        // than one bad clique. Report it exactly as the default mode does.
+        return null;
+      }
+      // Floored so the denominator stays above zero. The default path divides by a full cluster
+      // capacity, which is always positive, but a residual can reach zero when every node belongs
+      // to a block that was set aside, and dividing by it would score Infinity or NaN and break the
+      // ordering the algorithm sorts on.
+      residualScoringCap.put(entry.getKey(),
+          Math.max((float) remaining + (entry.getValue() * divGuard), divGuard));
+    }
+
+    // Carry the groups at fault over like any other failed group, and seed the failure that a
+    // fully failed run rethrows.
+    _failedGroups.addAll(deficitGroups);
+    _firstFailure = deficit;
+    LOG.warn(
+        "Instance tag isolation attributed a cluster wide capacity deficit during the {} rebalance "
+            + "of cluster {} to group(s) {}, which cannot hold their own replicas on their own nodes. They are "
+            + "carried over and the rest of the cluster is rebalanced normally.",
+        _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+        deficitGroups, deficit);
+    return residualScoringCap;
+  }
+
+  /**
    * The isolation unit of a replica.
    *
    * A resource pinned to an instance group tag can only ever be placed on that tag's nodes, so the
