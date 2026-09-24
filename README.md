@@ -39,6 +39,27 @@ Mailing list: http://helix.apache.org/mail-lists.html
 mvn clean install -Dmaven.test.skip.exec=true
 ```
 
+### ResourceConfig state-model factory compatibility
+
+`STATE_MODEL_FACTORY_NAME` is no longer a ResourceConfig option. Its enum constant,
+getter, builder getter/setter, and constructor argument have been removed; callers
+using those APIs must update and recompile. ResourceConfig merging no longer
+copies the factory from IdealState. Existing raw fields remain readable as opaque
+metadata, but no controller or task path uses them to select a factory.
+
+Ordinary resources continue to use IdealState's factory. Task execution uses
+`DEFAULT`, as normal task scheduling already did. Task drop messages use the
+target participant/session's CurrentState factory, and task cancellations use
+the pending message's factory. An absent runtime factory name means `DEFAULT`;
+an empty or named value is preserved. If a task drop has no corresponding
+CurrentState record, the controller logs a warning and does not send it using an
+unverified factory. This replaces the old orphan-job behavior that could route
+cleanup using a ResourceConfig override or another participant's factory.
+
+IdealState, CurrentState, and Message factory APIs remain supported. There is no
+automatic deletion or migration of stored values; do not copy an ignored
+ResourceConfig value into IdealState without reviewing the intended factory.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
