@@ -5,7 +5,7 @@
 | **Authors** | LZD-PratyushBhatt         |
 | **Status**  | In Review                 |
 | **Created** | 2026-08-20                |
-| **Updated** | 2026-09-20                |
+| **Updated** | 2026-09-24                |
 | **Modules** | helix-core                |
 | **JIRA**    | N/A                       |
 
@@ -15,15 +15,18 @@
 
 ## Summary
 
-WAGED is a global rebalancer: it evaluates every replica of every WAGED managed
-resource in one pass and aborts the entire pass as soon as one replica cannot be
-placed. In a cluster partitioned into disjoint groups of instances by
-`INSTANCE_GROUP_TAG` (commonly called cliques), one unplaceable clique freezes the
-rebalance of every other clique. This design adds an opt-in cluster config flag,
+WAGED uses a **single globally ordered assignment loop**, but an individual calculation
+may contain only the replicas that need work. Without isolation, one unplaceable clique
+can fail that calculation and stop independent cliques from progressing.
+
+This design adds an **opt-in cluster config flag**,
 `WAGED_INSTANCE_TAG_ISOLATION_ENABLED` (default `false`), that contains such a failure
 to the tag group that caused it: that group is rolled back and carried over unchanged,
-while every other group still receives a freshly calculated assignment. When the flag
+while independent groups continue the work required by that rebalance phase. When the flag
 is off, behavior is byte for byte identical to today.
+
+**Isolation will cover all four rebalance scopes, not just full baseline calculations.**
+No per-clique rebalancer, assignment-store format, or ZooKeeper record will be introduced.
 
 ## Problem Statement
 
@@ -58,6 +61,8 @@ the assignment loop starts.
 
 - Contain a WAGED placement failure to the instance tag group that caused it, so the
   remaining groups still get a newly calculated assignment.
+- Apply that containment to full and incremental baselines, partial rebalance, emergency
+  recovery, and delayed min-active top-ups.
 - Exact parity when the flag is off, and full WAGED feature parity (fault zones,
   capacity constraints, delayed rebalance, evacuation) for groups still calculated when
   it is on.
@@ -78,7 +83,7 @@ the assignment loop starts.
 ## Background
 
 - `ConstraintBasedAlgorithm` (`.../rebalancer/waged/constraints/`) builds a flat,
-  globally sorted list of every `AssignableReplica` and walks it once. Its
+  globally sorted list of outstanding `AssignableReplica` objects and walks it once. Its
   `getNodeWithHighestPoints` returns `Optional.empty()` from exactly one place: when the
   hard constraint filter empties the candidate list. Soft constraints never fail a
   placement, they only rank survivors. So "a replica failed" always means every node was
@@ -93,8 +98,8 @@ the assignment loop starts.
 
 ### Core idea
 
-Keep the single global interleaved loop exactly as it is. Change only what happens when
-a placement fails.
+**Keep the single global interleaved loop and placement constraints unchanged.**
+Contain failures per share block and retry unfinished baseline work on normal baseline events.
 
 ```mermaid
 flowchart TD
@@ -115,6 +120,27 @@ After the loop, if every group failed the original exception is rethrown, so exi
 failure handling, metrics, and last known good fallback still apply. Otherwise the
 skipped resources are attached to the `OptimalAssignment`.
 
+### All four rebalance scopes
+
+**The failure boundary will be the same in every scope.** Group membership will come
+from the full cluster context, including already-allocated siblings and untagged resources,
+not just the outstanding replica list.
+
+| Scope | Failed block | Independent healthy blocks |
+|---|---|---|
+| `GLOBAL_BASELINE` | Carry forward the complete previous baseline entries | Recompute the requested baseline work, including incremental changes |
+| `PARTIAL` | Carry forward the complete previous best-possible entries | Continue moving toward the baseline |
+| `EMERGENCY` | Carry forward the complete previous best-possible entries | Replace replicas lost with inactive instances |
+| `DELAYED_REBALANCE_OVERWRITES` | Omit the block from the temporary overwrite | Continue live-instance min-active top-ups |
+
+**A baseline calculation is not necessarily a full recomputation.** A resource edit can
+leave every other resource preallocated, so failure of the only outstanding clique must
+not be mistaken for failure of the cluster.
+
+**Live-instance loss does not require a baseline calculation.** Emergency and delayed
+recovery will apply isolation directly; a resource without a previous assignment will
+be omitted rather than given a fabricated fallback.
+
 ### Why keep the interleaved loop
 
 An earlier design assigned one tag group fully, then the next. It was rejected because
@@ -125,8 +151,9 @@ with `pU=5`, and global sort order `[pA1, pU, pA2]`:
 - Global order gives `pA1 -> N1`, `pU -> N2`, `pA2 -> N1`.
 - Group sequential gives `pA1 -> N1`, `pA2 -> N2`, `pU -> N1`.
 
-Leaving the loop untouched makes parity **unconditional**: if nothing fails, the emitted
-assignment is identical for any topology, not just cleanly partitioned ones.
+Leaving the loop untouched preserves the **existing placement rules and scoring** for
+any topology. When no failed work needs retrying, the normal incremental selection will
+remain unchanged; after a failure, previously skipped resources will be retried together.
 
 ### Why the isolation unit is the tag, not the resource
 
@@ -190,7 +217,7 @@ block a group lands in.
 | One instance carries `clique_3` and `clique_7` | Those two cliques form one block. A failure in either carries **both** over together, and every other clique keeps rebalancing normally |
 | A chain, one instance carries `clique_3` and `clique_7`, another carries `clique_7` and `clique_9` | All three are one block. `clique_3` and `clique_9` share no node directly, but the chain through `clique_7` means rolling one back frees capacity the others could claim |
 | Instance also carries unrelated labels such as `ssd` or an AZ tag | No effect. Only tags that some resource is actually pinned to take part, so a tag no resource references can never join two blocks |
-| Any untagged WAGED resource exists | Its group can use every node, so everything collapses into one block and the cluster behaves exactly as it does today |
+| An untagged WAGED resource exists | Its group can use every node, connecting every node-backed group it can reach. A single shared block has no isolation boundary |
 
 The reason a block must be carried over whole is capacity, not bookkeeping. Carrying a
 group over means keeping its old placements while everything else is recalculated. That is
@@ -233,8 +260,8 @@ zero when every node belongs to a block that was set aside, and dividing by it w
 
 ### Keeping the emitted assignment complete
 
-A skipped resource must not disappear or be persisted half assigned. In the partial,
-emergency, and delayed overwrite scopes the nodes arrive pre-loaded with already
+A skipped resource must not disappear or be persisted half assigned. In incremental
+baseline, partial, emergency, and delayed overwrite calculations the nodes can arrive with
 allocated replicas, so a skipped resource could otherwise emit a partial entry.
 `WagedRebalanceUtil.calculateAssignment` gains a third parameter, the assignment the
 phase started from. For each skipped resource it replaces the entry with a deep copy of
@@ -243,9 +270,23 @@ the previous assignment, or removes it when there is none. Global baseline passe
 rebalance overwrites passes `null`, since an absent resource correctly means "no
 overwrite applied".
 
-Because the emitted map is always complete, `AssignmentMetadataStore` needs no change at
-all. Controller failover, controller crash, and flipping the flag back off are all safe:
-any controller reads a whole blob.
+**The assignment-store format will remain unchanged.** A carried-forward resource will
+retain its complete previous serialized assignment; healthy changes can still advance
+the shared metadata record's version.
+
+### Recovery and Helix controller failover
+
+**An in-memory retry set will retain unfinished baseline work.** The next normally
+triggered baseline will re-evaluate skipped resources, including allocated siblings and
+resources that yielded to carry-forward collisions.
+
+**Whole-calculation and metadata-write failures will retain the full workload for the
+next attempt.** A successful baseline, after any required write succeeds, will narrow
+the retry set to the remaining skipped resources.
+
+**Retries will not create a background loop or make node loss trigger a baseline.**
+The next Helix controller will evaluate the full workload from existing configuration
+and assignment metadata, so recovery will not depend on persisting the retry set.
 
 ### The stale carry over guard
 
@@ -262,21 +303,33 @@ This is a real regression introduced by the flag rather than a pre-existing gap.
 flag off a failed rebalance discards everything and reuses one self consistent snapshot, so
 placements from two different points in time can never be mixed.
 
-The guard checks the **result** instead of the tags, which is what makes it robust against
-cases nobody enumerated. After carrying skipped resources forward,
-`WagedRebalanceUtil.assertCarriedOverNodesAreNotReused` throws if any instance named by a
-carried over resource also received a freshly calculated replica. The caller then keeps its
-last known good assignment, exactly as the default global mode does on a failed rebalance.
-Resources are visited in sorted order so the reported conflict is stable across controller
-failovers, since the message is the operator's only clue about which retag caused it.
+The guard checks the **emitted result**, not just current tags.
+`WagedRebalanceUtil.resolveCarriedOverNodeReuse` will carry forward a freshly calculated
+resource if it claims an instance already named by a carried-forward resource.
+
+**Only resources that collide will yield their fresh result.** The check will follow
+any further collisions until none remain; unrelated groups will keep their new assignments.
 
 The check sits inside the skipped resources block, and `OptimalAssignment` leaves that set
 empty unless isolation actually skipped something. *With the feature disabled the guard is
 unreachable, not merely inert.*
 
+### Reporting partial failures
+
+**The proposed `WagedInstanceTagIsolationSkippedResourcesGauge` will count distinct
+resources skipped across all four scopes**, including collision-related carry-forward.
+Each phase will own its report; a healthy phase will not clear another phase's failure,
+and an incremental baseline will clear only resources it re-evaluates.
+
+**WARN logs will identify the cluster, scope, affected groups and resources, and failure
+reason.** Existing failure metrics will continue to report uncontained failures.
+
+**An alert on the gauge will expose partial failures.** Reports will clear on recovery,
+resource removal, feature disable, or a Helix controller monitoring reset.
+
 ### Rejected alternatives
 
-| Alternative | Why rejected |
+| Option | Why it was rejected |
 |---|---|
 | Group sequential assignment | Breaks parity even when nothing fails (counterexample above) |
 | Per tag cluster models and metadata store entries | Large blast radius, changes the metadata store contract, loses cross group capacity accounting |
@@ -302,6 +355,8 @@ public static Map<String, ResourceAssignment> calculateAssignment(ClusterModel m
 ```
 
 `OptimalAssignment` gains additive `getSkippedResources()` and `setSkippedResources(Set)`.
+`RebalanceAlgorithm` gains a default `onAssignmentComputed` observer, invoked after
+carry-forward and collision handling; existing implementations need not override it.
 The flag is settable through the existing generic path
 `POST /clusters/{cluster}/configs?command=update`, which has no field allowlist, so no
 new endpoint is needed.
@@ -314,10 +369,11 @@ new endpoint is needed.
   `ResourceChangeDetector` would not see the flag change, so turning it on would have no
   effect until an unrelated config change triggered a rebalance.
 - No change to `ASSIGNMENT_METADATA`, `IDEALSTATES`, or `EXTERNALVIEW` znodes.
+- Retry hints and phase-owned metric snapshots remain in memory. No isolation decisions
+  are persisted, and shared ZooKeeper or assignment-store outages remain global failures.
 
 ## Open Questions
 
-1. Should a dedicated JMX metric expose the count of currently skipped instance tag
-   groups, rather than relying on hard constraint failure metrics plus logs?
-2. `PartialRebalanceRunner`'s baseline divergence gauge includes carried forward skipped
-   resources. Should those be excluded so it reflects only recalculated resources?
+- Should `PartialRebalanceRunner`'s baseline divergence gauge exclude carried-forward
+  resources so it reflects only recalculated work?
+- What isolation duration should trigger an operational alert?
