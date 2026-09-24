@@ -158,6 +158,42 @@ public class TestResourceConfig {
     Assert.assertEquals(idealState.getRecord(), originalIdealState);
   }
 
+  @DataProvider
+  public Object[][] legacyFactories() {
+    return new Object[][] {{null}, {""}, {"legacyFactory"}};
+  }
+
+  @Test(dataProvider = "legacyFactories")
+  public void testLegacyFactoryIsOpaqueMetadata(String legacyFactory) {
+    ZNRecord record = new ZNRecord("resource");
+    if (legacyFactory != null) {
+      record.setSimpleField("STATE_MODEL_FACTORY_NAME", legacyFactory);
+    }
+    record.setSimpleField("applicationSetting", "applicationValue");
+    record.setListField("resource_0", Collections.singletonList("instance"));
+    record.setMapField("applicationMap", Collections.singletonMap("key", "value"));
+    ZNRecord original = new ZNRecord(record);
+    ResourceConfig resourceConfig = new ResourceConfig(record);
+    IdealState idealState = new IdealState("resource");
+    idealState.setStateModelFactoryName("idealStateFactory");
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertEquals(merged.getSimpleConfig("STATE_MODEL_FACTORY_NAME"), legacyFactory);
+    Assert.assertEquals(merged.simpleConfigContains("STATE_MODEL_FACTORY_NAME"),
+        legacyFactory != null);
+    Assert.assertEquals(merged.getRecord().getListFields(), original.getListFields());
+    Assert.assertEquals(merged.getRecord().getMapFields(), original.getMapFields());
+    Assert.assertEquals(merged.getSimpleConfig("applicationSetting"), "applicationValue");
+    Assert.assertEquals(resourceConfig.getRecord(), original);
+    Assert.assertEquals(record, original);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+    Assert.assertFalse(new ResourceConfig.Builder("resource").build()
+        .simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
+  }
+
   @Test
   public void testGetPartitionCapacityMap() throws IOException {
     Map<String, Integer> capacityDataMap = ImmutableMap.of("item1", 1,
@@ -311,9 +347,8 @@ public class TestResourceConfig {
 
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
-    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "DEFAULT",
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false,
         1, 10, "placementTag", null, null, null, null, true);
-    Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
     Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
     Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
@@ -322,7 +357,7 @@ public class TestResourceConfig {
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
-            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED"}) {
+            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED", "STATE_MODEL_FACTORY_NAME"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -359,8 +394,7 @@ public class TestResourceConfig {
         testIdealState.getInstanceGroupTag());
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testIdealState.getMaxPartitionsPerInstance());
-    Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
-        testIdealState.getStateModelFactoryName());
+    Assert.assertFalse(mergedResourceConfig.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     Assert.assertEquals(mergedResourceConfig.getMinActiveReplica(),
         testIdealState.getMinActiveReplicas());
     for (String legacyField :
@@ -373,9 +407,9 @@ public class TestResourceConfig {
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
     configBuilder.setMaxPartitionsPerInstance(2);
-    configBuilder.setStateModelFactoryName("testRCFactory");
     configBuilder.setMinActiveReplica(2);
     testConfig = configBuilder.build();
+    testConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "testRCFactory");
     testConfig.getRecord().setSimpleField("RESOURCE_GROUP_NAME", "testRCGroup");
     testConfig.getRecord().setSimpleField("RESOURCE_TYPE", "RCType");
     testConfig.getRecord().setBooleanField("GROUP_ROUTING_ENABLED", false);
@@ -385,8 +419,8 @@ public class TestResourceConfig {
         .assertEquals(mergedResourceConfig.getInstanceGroupTag(), testConfig.getInstanceGroupTag());
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testConfig.getMaxPartitionsPerInstance());
-    Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
-        testConfig.getStateModelFactoryName());
+    Assert.assertEquals(mergedResourceConfig.getSimpleConfig("STATE_MODEL_FACTORY_NAME"),
+        "testRCFactory");
     Assert
         .assertEquals(mergedResourceConfig.getMinActiveReplica(), testConfig.getMinActiveReplica());
     for (String legacyField :
