@@ -172,52 +172,74 @@ public class WagedRebalanceUtil {
       List<String> dropped) {
     Set<String> carriedResources = new LinkedHashSet<>(skippedResources);
     List<String> yielded = new ArrayList<>();
-    String colliding;
-    while ((colliding = findResourceReusingCarriedNode(assignment, carriedResources)) != null) {
-      if (carryForwardOrDrop(assignment, colliding, previousAssignment)) {
-        carriedOver.add(colliding);
-      } else {
-        dropped.add(colliding);
+
+    // Index the freshly calculated resources by the instances they name. Rebuilding the carried
+    // instance set and rescanning every resource on every round is quadratic in the resource count,
+    // which on a large cluster with a broken clique and a retag storm costs seconds of pipeline
+    // stall on every tick. The carried set only ever grows, so both it and the collisions it
+    // exposes can be maintained incrementally instead.
+    Map<String, List<String>> freshByInstance = new HashMap<>();
+    for (Map.Entry<String, ResourceAssignment> entry : assignment.entrySet()) {
+      if (carriedResources.contains(entry.getKey())) {
+        continue;
       }
-      carriedResources.add(colliding);
-      yielded.add(colliding);
+      for (String instance : instancesOf(entry.getValue())) {
+        freshByInstance.computeIfAbsent(instance, key -> new ArrayList<>()).add(entry.getKey());
+      }
+    }
+
+    // Sorted so that a cluster hitting several conflicts at once always resolves them in the same
+    // order, which keeps the emitted assignment stable across controller failovers.
+    TreeSet<String> colliding = new TreeSet<>();
+    Set<String> seenInstances = new HashSet<>();
+    for (String resource : carriedResources) {
+      collectCollisions(assignment.get(resource), freshByInstance, seenInstances, colliding,
+          carriedResources);
+    }
+
+    while (!colliding.isEmpty()) {
+      String resource = colliding.pollFirst();
+      if (carriedResources.contains(resource)) {
+        continue;
+      }
+      if (carryForwardOrDrop(assignment, resource, previousAssignment)) {
+        carriedOver.add(resource);
+      } else {
+        dropped.add(resource);
+      }
+      carriedResources.add(resource);
+      yielded.add(resource);
+      // The entry now holds the previous assignment, which names a different set of instances and
+      // can therefore expose a further collision.
+      collectCollisions(assignment.get(resource), freshByInstance, seenInstances, colliding,
+          carriedResources);
     }
     return yielded;
   }
 
   /**
-   * @return the first freshly calculated resource that names an instance some carried over resource
-   *         also names, or null when nothing collides.
+   * Add every freshly calculated resource that names an instance of the just carried resource to
+   * the pending collision set.
+   *
+   * Each instance is expanded at most once for the whole run, which is what keeps the resolution
+   * linear in the number of instance mentions rather than quadratic in the resource count.
    */
-  private static String findResourceReusingCarriedNode(Map<String, ResourceAssignment> assignment,
-      Set<String> carriedResources) {
-    Set<String> carriedInstances = new TreeSet<>();
-    for (String resource : carriedResources) {
-      ResourceAssignment carried = assignment.get(resource);
-      if (carried != null) {
-        carriedInstances.addAll(instancesOf(carried));
-      }
+  private static void collectCollisions(ResourceAssignment carried,
+      Map<String, List<String>> freshByInstance, Set<String> seenInstances,
+      Set<String> colliding, Set<String> carriedResources) {
+    if (carried == null) {
+      return;
     }
-    if (carriedInstances.isEmpty()) {
-      return null;
-    }
-    // Sorted so that a cluster hitting several conflicts at once always resolves them in the same
-    // order, which keeps the emitted assignment stable across controller failovers.
-    for (String resource : new TreeSet<>(assignment.keySet())) {
-      if (carriedResources.contains(resource)) {
+    for (String instance : instancesOf(carried)) {
+      if (!seenInstances.add(instance)) {
         continue;
       }
-      ResourceAssignment fresh = assignment.get(resource);
-      if (fresh == null) {
-        continue;
-      }
-      for (String instance : instancesOf(fresh)) {
-        if (carriedInstances.contains(instance)) {
-          return resource;
+      for (String resource : freshByInstance.getOrDefault(instance, Collections.emptyList())) {
+        if (!carriedResources.contains(resource)) {
+          colliding.add(resource);
         }
       }
     }
-    return null;
   }
 
   /**
@@ -234,8 +256,16 @@ public class WagedRebalanceUtil {
       assignment.remove(resource);
       return false;
     }
-    // Deep copy so the result never aliases the caller's previous assignment objects.
-    assignment.put(resource, new ResourceAssignment(previous.getRecord()));
+    // Deep copy so the result never aliases the caller's previous assignment objects. The ZNRecord
+    // copy constructor copies the outer partition map but shares each per partition replica map by
+    // reference, so without replacing them a write through the returned assignment would land in
+    // the caller's previous snapshot.
+    ResourceAssignment carried = new ResourceAssignment(previous.getRecord());
+    Map<String, Map<String, String>> replicaMaps = new HashMap<>();
+    carried.getRecord().getMapFields()
+        .forEach((partition, replicas) -> replicaMaps.put(partition, new HashMap<>(replicas)));
+    carried.getRecord().setMapFields(replicaMaps);
+    assignment.put(resource, carried);
     return true;
   }
 
