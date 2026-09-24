@@ -411,10 +411,11 @@ class InstanceTagIsolation {
     _failedGroups.addAll(deficitGroups);
     _firstFailure = deficit;
     LOG.warn(
-        "Instance tag isolation attributed a cluster wide capacity deficit in cluster {} to "
-            + "group(s) {}, which cannot hold their own replicas on their own nodes. They are "
+        "Instance tag isolation attributed a cluster wide capacity deficit during the {} rebalance "
+            + "of cluster {} to group(s) {}, which cannot hold their own replicas on their own nodes. They are "
             + "carried over and the rest of the cluster is rebalanced normally.",
-        _clusterModel.getContext().getClusterName(), deficitGroups, deficit);
+        _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+        deficitGroups, deficit);
     return residualScoringCap;
   }
 
