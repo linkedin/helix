@@ -185,10 +185,9 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
         "The healthy clique must be rebalanced normally rather than frozen behind clique 0");
     Assert.assertEquals(result.get("R_broken").getMappedPartitions().size(), 5,
         "The clique that caused the deficit keeps the assignment it already had, whole");
-    // It owns no replica in this run, so it never reaches the placement loop and is not "skipped"
-    // in the half assigned sense the carry forward exists to repair. Nothing to repair means
-    // nothing to carry forward.
-    Assert.assertTrue(assignment.getSkippedResources().isEmpty());
+    Assert.assertEquals(assignment.getSkippedResources(), Collections.singleton("R_broken"),
+        "Capacity attribution must report the frozen resource even when all its replicas were "
+            + "already allocated, so it is carried forward and included in the isolation gauge");
   }
 
   /**
