@@ -441,12 +441,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
       HelixException firstFailure = assertAddClusterUnauthorized(admin, clusterName, false, acl);
       Assert.assertEquals(firstFailure.getCause().getSuppressed().length, 0);
-      Assert.assertFalse(ownerClient.exists(rootPath),
-          "Deleting the empty root requires DELETE on its parent, not READ on the root");
-      assertAddClusterUnauthorized(admin, clusterName, false, acl);
-      Assert.assertFalse(ownerClient.exists(rootPath));
-
-      ownerClient.createPersistent(rootPath, false, acl);
+      Assert.assertTrue(ownerClient.exists(rootPath));
       assertAddClusterUnauthorized(admin, clusterName, false, acl);
       assertAddClusterUnauthorized(admin, clusterName, true, acl);
       Assert.assertEquals(ownerClient.getChildren(rootPath), Collections.emptyList());
@@ -515,33 +510,35 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
   @Test
   public void testAddClusterPartialCreation() {
-    for (boolean failCleanup : new boolean[] {false, true}) {
-      String namespace = "/" + getShortClassName() + "_partial_" + failCleanup;
+    for (boolean customAcl : new boolean[] {false, true}) {
+      String namespace = "/" + getShortClassName() + "_partial_" + customAcl;
       String clusterName = namespace.substring(1) + "/child";
       String rootPath = "/" + clusterName;
       String failurePath = PropertyPathBuilder.liveInstance(clusterName);
-      List<ACL> acl = Collections.singletonList(new ACL(
+      List<ACL> acl = customAcl ? Collections.singletonList(new ACL(
           ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.DELETE,
-          ZooDefs.Ids.ANYONE_ID_UNSAFE));
+          ZooDefs.Ids.ANYONE_ID_UNSAFE)) : null;
       HelixZkClient client = Mockito.spy(_gZkClient);
       ZkException failure = new ZkException("Injected metadata creation failure");
-      Mockito.doThrow(failure).when(client).createPersistent(failurePath, false, acl);
-      if (failCleanup) {
-        Mockito.doThrow(new ZkClientException("Injected cleanup failure"))
-            .when(client).delete(rootPath);
+      if (customAcl) {
+        Mockito.doThrow(failure).when(client).createPersistent(failurePath, false, acl);
+      } else {
+        Mockito.doThrow(failure).when(client).createPersistent(failurePath, false);
       }
       try {
         Assert.assertFalse(new ZKHelixAdmin(client).addCluster(clusterName, false, acl));
-        Assert.assertEquals(_gZkClient.exists(rootPath), failCleanup);
+        Assert.assertTrue(_gZkClient.exists(rootPath));
         Assert.assertTrue(_gZkClient.exists(namespace));
+        Assert.assertEquals(_gZkClient.<ZNRecord>readData(PropertyPathBuilder.clusterConfig(clusterName)),
+            new ZNRecord(clusterName));
+        Assert.assertEquals(failure.getSuppressed().length, 0);
+        Mockito.verify(client, Mockito.never()).delete(Mockito.anyString());
+        Mockito.verify(client, Mockito.never()).deleteRecursively(Mockito.anyString());
         HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
-        if (failCleanup) {
-          Assert.assertEquals(failure.getSuppressed().length, 1);
-          // A readable root is accepted even if cleanup left the metadata incomplete.
-          Assert.assertTrue(admin.addCluster(clusterName, false));
-          Assert.assertTrue(admin.addCluster(clusterName, false, acl));
-          Assert.assertFalse(_gZkClient.exists(failurePath));
-        }
+        // A readable root is accepted even if a failed creation left the metadata incomplete.
+        Assert.assertTrue(admin.addCluster(clusterName, false));
+        Assert.assertTrue(admin.addCluster(clusterName, false, acl));
+        Assert.assertFalse(_gZkClient.exists(failurePath));
         Assert.assertTrue(admin.addCluster(clusterName, true, acl));
         Assert.assertTrue(ZKUtil.isClusterSetup(clusterName, _gZkClient));
         Assert.assertTrue(admin.addCluster(clusterName, false, acl));
@@ -554,7 +551,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
-  public void testAddClusterCleanupPreservesConcurrentChildren() {
+  public void testAddClusterFailurePreservesConcurrentChildren() {
     for (boolean customAcl : new boolean[] {false, true}) {
       String clusterName = getShortClassName() + "_concurrentChildren_" + customAcl;
       String rootPath = "/" + clusterName;
@@ -586,12 +583,14 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         Assert.assertFalse(new ZKHelixAdmin(client).addCluster(clusterName, false, acl));
         Assert.assertEquals(_gZkClient.<ZNRecord>readData(concurrentPath), concurrentData);
         Assert.assertEquals(_gZkClient.<ZNRecord>readData(concurrentChildPath), concurrentData);
-        Assert.assertEquals(new HashSet<>(_gZkClient.getChildren(rootPath)),
-            new HashSet<>(Arrays.asList("CONTROLLER", "concurrent")));
-        Assert.assertEquals(_gZkClient.getChildren(PropertyPathBuilder.controller(clusterName)),
-            Collections.singletonList("HISTORY"));
-        Assert.assertEquals(failure.getSuppressed().length, 3,
-            "Non-empty history, controller, and root must be retained");
+        Assert.assertEquals(_gZkClient.<ZNRecord>readData(PropertyPathBuilder.clusterConfig(clusterName)),
+            new ZNRecord(clusterName));
+        Assert.assertEquals(
+            new HashSet<>(_gZkClient.getChildren(PropertyPathBuilder.controller(clusterName))),
+            new HashSet<>(Arrays.asList("HISTORY", "MESSAGES", "STATUSUPDATES")));
+        Assert.assertFalse(_gZkClient.exists(failurePath));
+        Assert.assertEquals(failure.getSuppressed().length, 0);
+        Mockito.verify(client, Mockito.never()).delete(Mockito.anyString());
         Mockito.verify(client, Mockito.never()).deleteRecursively(Mockito.anyString());
         Mockito.verify(client, Mockito.never()).getChildren(Mockito.anyString());
       } finally {
@@ -607,7 +606,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
-  public void testAddClusterCleanupPreservesConcurrentParents() {
+  public void testAddClusterFailurePreservesConcurrentParents() {
     for (boolean customAcl : new boolean[] {false, true}) {
       String clusterName = getShortClassName() + "_concurrentParents_" + customAcl;
       String rootPath = "/" + clusterName;
@@ -639,11 +638,13 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       try {
         Assert.assertFalse(new ZKHelixAdmin(client).addCluster(clusterName, false, acl));
         Assert.assertEquals(_gZkClient.<ZNRecord>readData(concurrentParent), concurrentData);
-        Assert.assertEquals(_gZkClient.getChildren(concurrentParent), Collections.emptyList());
-        Assert.assertEquals(_gZkClient.getChildren(rootPath), Collections.singletonList("CONFIGS"));
-        Assert.assertFalse(_gZkClient.exists(configPath));
-        Assert.assertEquals(failure.getSuppressed().length, 1,
-            "Only the root deletion should fail; existing config parents are not ours to delete");
+        Assert.assertEquals(_gZkClient.getChildren(concurrentParent),
+            Collections.singletonList(clusterName));
+        Assert.assertEquals(_gZkClient.<ZNRecord>readData(configPath), new ZNRecord(clusterName));
+        Assert.assertEquals(new HashSet<>(_gZkClient.getChildren(rootPath)),
+            new HashSet<>(Arrays.asList("CONFIGS", "IDEALSTATES", "PROPERTYSTORE")));
+        Assert.assertEquals(failure.getSuppressed().length, 0);
+        Mockito.verify(client, Mockito.never()).delete(Mockito.anyString());
         Mockito.verify(client, Mockito.never()).deleteRecursively(Mockito.anyString());
       } finally {
         try {
@@ -658,26 +659,23 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
-  public void testAddClusterCleanupPreservesAuthorizationFailure() {
-    String clusterName = getShortClassName() + "_cleanupAuthorizationFailure";
+  public void testAddClusterPreservesPartialCreationOnAuthorizationFailure() {
+    String clusterName = getShortClassName() + "_partialAuthorizationFailure";
     String rootPath = "/" + clusterName;
     String failurePath = PropertyPathBuilder.liveInstance(clusterName);
-    String retainedPath = PropertyPathBuilder.propertyStore(clusterName);
     HelixZkClient client = Mockito.spy(_gZkClient);
     ZkException failure =
         new ZkException(KeeperException.create(KeeperException.Code.NOAUTH, failurePath));
-    ZkClientException cleanupFailure = new ZkClientException("Injected cleanup failure");
     Mockito.doThrow(failure).when(client).createPersistent(failurePath, false);
-    Mockito.doThrow(cleanupFailure).when(client).delete(retainedPath);
     try {
       HelixException actual =
           assertAddClusterUnauthorized(new ZKHelixAdmin(client), clusterName, false, null);
       Assert.assertSame(actual.getCause(), failure);
-      Assert.assertEquals(failure.getSuppressed().length, 2);
-      Assert.assertSame(failure.getSuppressed()[0], cleanupFailure);
-      Assert.assertEquals(_gZkClient.getChildren(rootPath),
-          Collections.singletonList("PROPERTYSTORE"),
-          "Cleanup must continue for the other created paths after one deletion fails");
+      Assert.assertEquals(failure.getSuppressed().length, 0);
+      Assert.assertEquals(new HashSet<>(_gZkClient.getChildren(rootPath)),
+          new HashSet<>(Arrays.asList("CONFIGS", "IDEALSTATES", "PROPERTYSTORE")));
+      Mockito.verify(client, Mockito.never()).delete(Mockito.anyString());
+      Mockito.verify(client, Mockito.never()).deleteRecursively(Mockito.anyString());
     } finally {
       if (_gZkClient.exists(rootPath)) {
         _gZkClient.deleteRecursively(rootPath);
@@ -701,6 +699,59 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } finally {
       if (_gZkClient.exists(rootPath)) {
         _gZkClient.deleteRecursively(rootPath);
+      }
+    }
+  }
+
+  @Test
+  public void testAddClusterFailurePreservesRecreatedRoot() {
+    assertFailedCreationPreservesReplacement(true);
+  }
+
+  @Test
+  public void testAddClusterFailurePreservesRecreatedMetadata() {
+    assertFailedCreationPreservesReplacement(false);
+  }
+
+  private void assertFailedCreationPreservesReplacement(boolean replaceRoot) {
+    for (boolean customAcl : new boolean[] {false, true}) {
+      String clusterName = getShortClassName() + "_replaced_" + replaceRoot + "_" + customAcl;
+      String rootPath = "/" + clusterName;
+      String failurePath = PropertyPathBuilder.liveInstance(clusterName);
+      String replacementPath = replaceRoot ? rootPath : PropertyPathBuilder.clusterConfig(clusterName);
+      ZNRecord replacementData = new ZNRecord("replacement");
+      List<ACL> acl = customAcl ? ZooDefs.Ids.OPEN_ACL_UNSAFE : null;
+      HelixZkClient client = Mockito.spy(_gZkClient);
+      HelixZkClient concurrentClient = DedicatedZkClientFactory.getInstance().buildZkClient(
+          new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+          new HelixZkClient.ZkClientConfig().setZkSerializer(new ZNRecordSerializer()));
+      ZkException failure = new ZkException("Injected metadata creation failure");
+      Answer<Void> replaceNode = invocation -> {
+        concurrentClient.deleteRecursively(replacementPath);
+        concurrentClient.createPersistent(replacementPath, replacementData);
+        throw failure;
+      };
+      if (customAcl) {
+        Mockito.doAnswer(replaceNode).when(client).createPersistent(failurePath, false, acl);
+      } else {
+        Mockito.doAnswer(replaceNode).when(client).createPersistent(failurePath, false);
+      }
+      try {
+        Assert.assertFalse(new ZKHelixAdmin(client).addCluster(clusterName, false, acl));
+        Stat stat = new Stat();
+        Assert.assertEquals(concurrentClient.<ZNRecord>readData(replacementPath, stat),
+            replacementData);
+        Assert.assertEquals(stat.getVersion(), 0, "A replacement's data version resets to zero");
+        Mockito.verify(client, Mockito.never()).delete(Mockito.anyString());
+        Mockito.verify(client, Mockito.never()).deleteRecursively(Mockito.anyString());
+      } finally {
+        try {
+          if (concurrentClient.exists(rootPath)) {
+            concurrentClient.deleteRecursively(rootPath);
+          }
+        } finally {
+          concurrentClient.close();
+        }
       }
     }
   }

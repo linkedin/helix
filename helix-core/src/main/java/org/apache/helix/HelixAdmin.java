@@ -143,10 +143,11 @@ public interface HelixAdmin {
    *            The default-ACL path retains its create-then-write config initialization.
    *            Recreating an existing cluster requires {@code READ} to traverse it and {@code DELETE}
    *            on the relevant parent nodes, as granted by the existing ACLs.
-   *            Failed creation triggers best-effort, non-recursive deletion of paths successfully
-   *            created by this call, in reverse creation order. Existing paths are not tracked,
-   *            and nodes with children are left in place; an incomplete cluster may remain if
-   *            cleanup fails or another client adds children during initialization.
+   *            Creation is not transactional and failures are not rolled back: deleting a path
+   *            during cleanup could delete a replacement created concurrently by another client.
+   *            Partial metadata may remain after failure and must be inspected before explicit
+   *            cleanup or recreation. A later call with {@code recreateIfExists=false} can return
+   *            true for that incomplete cluster if its root is readable.
    *            Changing a node's ACL via {@code setACL} requires {@code ADMIN} on that node; the
    *            creator has no implicit {@code ADMIN} privilege. Grant it to a trusted identity if
    *            in-place ACL rotation is required. Deployments running a server-side ACL provider
