@@ -19,6 +19,7 @@ package org.apache.helix.controller.rebalancer.waged;
  * under the License.
  */
 
+import java.util.Set;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
@@ -40,4 +41,13 @@ public interface RebalanceAlgorithm {
    * @return An instance of {@link OptimalAssignment}
    */
   OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException;
+
+  /**
+   * Observe a successful computation after carry-forward and collision handling. A phase with no
+   * work reports empty sets. Evaluated resources distinguish an incremental baseline from a full
+   * recomputation.
+   */
+  default void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+      Set<String> evaluatedResources, Set<String> skippedResources) {
+  }
 }

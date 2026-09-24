@@ -80,6 +80,7 @@ public class WagedRebalanceUtil {
         optimalAssignment.getOptimalResourceAssignment();
     Set<String> skippedResources = optimalAssignment.getSkippedResources();
     if (!skippedResources.isEmpty()) {
+      skippedResources = new HashSet<>(skippedResources);
       // A skipped resource may still have a partial entry in the result: in the partial, emergency
       // and delayed overwrite phases the nodes are pre-loaded with the replicas that were already
       // allocated, and updateAssignments emits whatever sits on the nodes. Replace that partial
@@ -98,6 +99,7 @@ public class WagedRebalanceUtil {
       List<String> yielded =
           resolveCarriedOverNodeReuse(newAssignment, skippedResources, previousAssignment,
               carriedOver, dropped);
+      skippedResources.addAll(yielded);
       LOG.warn(
           "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
               + "Carried the previous assignment forward for {}. Left out of this phase's result: "
@@ -105,14 +107,19 @@ public class WagedRebalanceUtil {
           clusterModel.getContext().getClusterName(), carriedOver, dropped);
       if (!yielded.isEmpty()) {
         LOG.warn(
-            "Instance tag isolation also carried {} forward in cluster {} because a previously "
+            "Instance tag isolation also carried {} forward during the {} rebalance of cluster {} "
+                + "because a previously "
                 + "skipped group's assignment still names an instance that these resources were "
                 + "just assigned to. This happens when an instance is retagged out of a group while "
                 + "that group cannot be placed. Only the groups that actually collide give up their "
                 + "freshly calculated assignment; every other group keeps its own.", yielded,
+            clusterModel.getRebalanceScopeType(),
             clusterModel.getContext().getClusterName());
       }
     }
+    algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
+        clusterModel.getAssignableReplicaMap().keySet(),
+        Collections.unmodifiableSet(skippedResources));
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
     return newAssignment;
