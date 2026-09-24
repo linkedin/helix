@@ -19,6 +19,7 @@ package org.apache.helix.integration.rebalancer.WagedRebalancer;
  * under the License.
  */
 
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -28,7 +29,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import javax.management.ObjectName;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
@@ -52,6 +55,7 @@ import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -120,6 +124,8 @@ public class TestWagedRebalanceInstanceTagIsolation extends ZkTestBase {
         _gSetupTool.addInstanceToCluster(CLUSTER_NAME, node);
         _gSetupTool.getClusterManagementTool()
             .addInstanceTag(CLUSTER_NAME, node, cliqueTag(clique));
+        _gSetupTool.getClusterManagementTool()
+            .addInstanceTag(CLUSTER_NAME, node, "shared_operational_label");
         cliqueNodes.add(node);
       }
       _nodesByClique.put(clique, cliqueNodes);
@@ -309,7 +315,7 @@ public class TestWagedRebalanceInstanceTagIsolation extends ZkTestBase {
    * The headline behavior with the flag OFF: making one clique unplaceable freezes every clique, so
    * a brand new resource added afterwards never gets an assignment.
    */
-  @Test(dependsOnMethods = "testEnablingIsolationOnAHealthyClusterMovesNothing")
+  @Test(dependsOnMethods = "testNodeLossIsIsolatedAndReportedWithoutABaseline")
   public void testBrokenCliqueBlocksEverythingWhenIsolationIsOff() throws Exception {
     setIsolationEnabled(false);
     setPartitionWeight(0, UNPLACEABLE_PARTITION_WEIGHT);
@@ -338,7 +344,9 @@ public class TestWagedRebalanceInstanceTagIsolation extends ZkTestBase {
     _addedNode = addNodeToClique(FROZEN_CLIQUE);
     // Shrinking one of the clique's existing nodes below what it currently holds guarantees that a
     // working baseline calculation would have to relocate at least one replica.
-    _shrunkNode = _nodesByClique.get(FROZEN_CLIQUE).get(0);
+    _shrunkNode = _nodesByClique.get(FROZEN_CLIQUE).stream()
+        .filter(node -> replicasOn(_frozenCliqueBaselineBefore, node) > 1).findFirst()
+        .orElseThrow(() -> new AssertionError("No occupied node is available for the capacity shrink"));
     Assert.assertTrue(
         _frozenCliqueBaselineBefore.values().stream()
             .filter(states -> states.containsKey(_shrunkNode)).count() > 1,
@@ -670,5 +678,118 @@ public class TestWagedRebalanceInstanceTagIsolation extends ZkTestBase {
     setPartitionWeight(0, HEALTHY_PARTITION_WEIGHT);
     Assert.assertTrue(verifier().verifyByPolling(),
         "The cluster must converge after the drop and the repair");
+  }
+
+  @DataProvider(name = "nodeLossModes")
+  public Object[][] nodeLossModes() {
+    return new Object[][] {{false}, {true}};
+  }
+
+  @Test(dependsOnMethods = "testEnablingIsolationOnAHealthyClusterMovesNothing",
+      dataProvider = "nodeLossModes")
+  public void testNodeLossIsIsolatedAndReportedWithoutABaseline(boolean delayed) throws Exception {
+    ClusterConfig config = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    config.setDelayRebalaceEnabled(delayed);
+    config.setRebalanceDelayTime(TimeUnit.HOURS.toMillis(1));
+    _configAccessor.setClusterConfig(CLUSTER_NAME, config);
+    long beforeSetup = rebalancerMetric("GlobalBaselineCalcCounter");
+    setPartitionWeight(0, 40);
+    Assert.assertTrue(TestHelper.verify(
+        () -> rebalancerMetric("GlobalBaselineCalcCounter") > beforeSetup
+            && isolationGauge() == 0, TestHelper.WAIT_DURATION));
+    Assert.assertTrue(verifier().verifyByPolling());
+
+    String brokenVictim = _nodesByClique.get(0).get(1);
+    String healthyVictim = _nodesByClique.get(1).stream()
+        .filter(node -> namesInstanceInBestPossible(1, node)).findFirst()
+        .orElseThrow(() -> new AssertionError("The healthy clique has no assigned participant"));
+    Assert.assertTrue(namesInstanceInBestPossible(0, brokenVictim));
+    Map<String, Map<String, Map<String, String>>> baselineBefore =
+        normalize(_assignmentMetadataStore.getBaseline());
+    Map<String, Map<String, String>> brokenBefore =
+        normalize(_assignmentMetadataStore.getBestPossibleAssignment()).get(resourceName(0));
+    long baselines = rebalancerMetric("GlobalBaselineCalcCounter");
+    long overwrites = rebalancerMetric("RebalanceOverwriteCounter");
+
+    try {
+      // Six replicas of weight 40 fit on three nodes, but not on two after a live-only loss.
+      participantFor(brokenVictim).syncStop();
+      Assert.assertTrue(TestHelper.verify(() -> isolationGauge() > 0, TestHelper.WAIT_DURATION),
+          "A live-instance loss must report isolation without waiting for a config change");
+      participantFor(healthyVictim).syncStop();
+      Assert.assertTrue(TestHelper.verify(() -> {
+        ExternalView view = _gSetupTool.getClusterManagementTool()
+            .getResourceExternalView(CLUSTER_NAME, resourceName(1));
+        if (view == null || view.getPartitionSet().size() != PARTITIONS) {
+          return false;
+        }
+        for (String partition : view.getPartitionSet()) {
+          Map<String, String> states = view.getStateMap(partition);
+          long active = states.values().stream()
+              .filter(state -> state.equals("LEADER") || state.equals("STANDBY")).count();
+          if (states.containsKey(healthyVictim) || active < REPLICA) {
+            return false;
+          }
+        }
+        return isolationGauge() > 0;
+      }, TestHelper.WAIT_DURATION),
+          "The healthy clique must regain its replicas while the capacity-constrained clique "
+              + "remains isolated, including inside the delay window");
+      Assert.assertEquals(rebalancerMetric("GlobalBaselineCalcCounter"), baselines,
+          "No baseline computation may be responsible for the recovery or isolation report");
+      Assert.assertEquals(normalize(_assignmentMetadataStore.getBaseline()), baselineBefore);
+      Assert.assertEquals(
+          normalize(_assignmentMetadataStore.getBestPossibleAssignment()).get(resourceName(0)),
+          brokenBefore, "The frozen clique must retain its complete persisted assignment");
+      if (delayed) {
+        Assert.assertTrue(rebalancerMetric("RebalanceOverwriteCounter") > overwrites,
+            "The delay-window case must execute the real min-active overwrite path");
+      } else {
+        Assert.assertFalse(namesInstanceInBestPossible(1, healthyVictim),
+            "Emergency recovery must persist the healthy clique's replacement");
+      }
+
+      restartParticipant(brokenVictim);
+      Assert.assertTrue(TestHelper.verify(() -> isolationGauge() == 0, TestHelper.WAIT_DURATION),
+          "Returning capacity must clear the report without a baseline recomputation");
+      Assert.assertEquals(rebalancerMetric("GlobalBaselineCalcCounter"), baselines);
+    } finally {
+      restartParticipant(brokenVictim);
+      restartParticipant(healthyVictim);
+      setPartitionWeight(0, HEALTHY_PARTITION_WEIGHT);
+      config.setDelayRebalaceEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, config);
+    }
+    Assert.assertTrue(verifier().verifyByPolling());
+  }
+
+  private boolean namesInstanceInBestPossible(int clique, String instance) {
+    ResourceAssignment assignment =
+        _assignmentMetadataStore.getBestPossibleAssignment().get(resourceName(clique));
+    return assignment != null && assignment.getMappedPartitions().stream()
+        .anyMatch(partition -> assignment.getReplicaMap(partition).containsKey(instance));
+  }
+
+  private void restartParticipant(String instance) throws Exception {
+    MockParticipantManager old = participantFor(instance);
+    if (!old.isConnected()) {
+      MockParticipantManager replacement =
+          new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, instance);
+      replacement.syncStart();
+      _participants.remove(old);
+      _participants.add(replacement);
+    }
+  }
+
+  private long isolationGauge() throws Exception {
+    return ((Number) ManagementFactory.getPlatformMBeanServer().getAttribute(
+        new ObjectName("ClusterStatus:cluster=" + CLUSTER_NAME),
+        "WagedInstanceTagIsolationSkippedResourcesGauge")).longValue();
+  }
+
+  private long rebalancerMetric(String metric) throws Exception {
+    return ((Number) ManagementFactory.getPlatformMBeanServer().getAttribute(
+        new ObjectName("Rebalancer:ClusterName=" + CLUSTER_NAME + ", EntityName=WagedRebalancer"),
+        metric)).longValue();
   }
 }

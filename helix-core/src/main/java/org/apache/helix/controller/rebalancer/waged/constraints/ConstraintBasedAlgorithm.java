@@ -79,6 +79,9 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
       _blockingSnapshotReporter;
+  // Report after the carry-forward guard so resources yielding to stale assignments are included.
+  private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<String>>
+      _isolationSnapshotReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -107,6 +110,24 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   public void setBlockingSnapshotReporter(
       BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>> reporter) {
     _blockingSnapshotReporter = reporter;
+  }
+
+  /**
+   * Attach an observer of the final isolation outcome published by WagedRebalanceUtil.
+   * Safe to call from any thread; null disables it.
+   */
+  public void setIsolationSnapshotReporter(
+      BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> reporter) {
+    _isolationSnapshotReporter = reporter;
+  }
+
+  @Override
+  public void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+      Set<String> evaluatedResources, Set<String> skippedResources) {
+    BiConsumer<ClusterModel.RebalanceScopeType, Set<String>> reporter = _isolationSnapshotReporter;
+    if (reporter != null) {
+      reporter.accept(scope, skippedResources);
+    }
   }
 
   @Override

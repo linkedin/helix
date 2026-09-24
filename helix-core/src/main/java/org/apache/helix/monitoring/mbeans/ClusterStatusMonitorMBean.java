@@ -205,6 +205,20 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   long getWagedBaselineComputeFailingGauge();
 
   /**
+   * Reversible gauge counting the resources that WAGED instance tag ("clique") failure isolation
+   * is carrying forward or omitting in any rebalance scope. Counts the union of the four scopes'
+   * unresolved skipped sets, including resources that yielded to a carry-forward collision.
+   * A healthy phase cannot clear another phase's snapshot, and an incremental baseline only
+   * resolves resources it evaluates. Emergency and overwrite snapshots clear when no longer needed.
+   *
+   * Alert on {@code > 0} to detect partial failures that return successfully and therefore do not
+   * trigger the existing whole-rebalance failure gauges. Logs identify the scope and resources.
+   * Resets when isolation is disabled or the Helix controller's monitoring lifecycle resets.
+   * @return the number of distinct resources with an unresolved isolation report.
+   */
+  long getWagedInstanceTagIsolationSkippedResourcesGauge();
+
+  /**
    * Reversible gauge for the delayed-rebalance-overwrite phase: 1 while the most recent overwrite
    * computation failed, 0 once a later one succeeds or is not needed. Owned by the
    * DELAYED_REBALANCE_OVERWRITES phase -- its only dedicated reversible signal (it otherwise shares
