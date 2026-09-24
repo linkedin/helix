@@ -91,30 +91,14 @@ final class WagedRebalanceFeasibilityWhatIf {
   }
 
   /**
-   * The effective {@code INSTANCE_GROUP_TAG} of each of the given WAGED resources, read from the same
-   * merged (ResourceConfig-over-IdealState) view WAGED itself uses to resolve the pinning tag. WAGED
-   * merges the two via
-   * {@link ResourceConfig#mergeIdealStateWithResourceConfig(ResourceConfig, IdealState)} (see
-   * {@code AssignableReplica}), where a tag set on the {@link ResourceConfig} wins over one on the
-   * {@link IdealState}. Reading the tag off the IdealState alone would miss a resource pinned only
-   * through its ResourceConfig (e.g. a task/JobConfig resource), silently skipping exactly the
-   * resource a tag-removal guard rail must protect. Returned empty when no resource is pinned.
+   * The instance-group placement tags from the IdealStates, matching WAGED's placement constraints.
+   * Legacy ResourceConfig tags do not restrict placement.
    */
-  static Set<String> collectWagedInstanceGroupTags(ReadOnlyDataAccessor dataAccessor,
-      List<IdealState> wagedIdealStates) {
-    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
-    Map<String, ResourceConfig> resourceConfigByName = new HashMap<>();
-    for (ResourceConfig resourceConfig : dataAccessor.<ResourceConfig>getChildValues(
-        keyBuilder.resourceConfigs(), true)) {
-      if (resourceConfig != null) {
-        resourceConfigByName.put(resourceConfig.getResourceName(), resourceConfig);
-      }
-    }
+  static Set<String> collectWagedInstanceGroupTags(List<IdealState> wagedIdealStates) {
     Set<String> groupTags = new HashSet<>();
     for (IdealState idealState : wagedIdealStates) {
-      String groupTag = ResourceConfig.mergeIdealStateWithResourceConfig(
-          resourceConfigByName.get(idealState.getResourceName()), idealState).getInstanceGroupTag();
-      if (groupTag != null) {
+      String groupTag = idealState.getInstanceGroupTag();
+      if (groupTag != null && !groupTag.isEmpty()) {
         groupTags.add(groupTag);
       }
     }

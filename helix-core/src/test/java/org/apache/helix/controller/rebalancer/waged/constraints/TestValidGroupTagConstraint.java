@@ -26,8 +26,12 @@ import java.util.Collections;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.ResourceConfig;
 import org.mockito.Mockito;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import com.google.common.collect.ImmutableSet;
@@ -38,6 +42,30 @@ public class TestValidGroupTagConstraint {
   private final AssignableNode _testNode = Mockito.mock(AssignableNode.class);
   private final ClusterContext _clusterContext = Mockito.mock(ClusterContext.class);
   private final HardConstraint _constraint = new ValidGroupTagConstraint();
+
+  @DataProvider(name = "idealStateTags")
+  public Object[][] idealStateTags() {
+    return new Object[][]{{TEST_TAG, true}, {"differentTag", false}, {null, true}, {"", true}};
+  }
+
+  @Test(dataProvider = "idealStateTags")
+  public void testPlacementEnforcesOnlyIdealStateTag(String idealTag, boolean allowed) {
+    ClusterConfig cluster = new ClusterConfig("cluster");
+    cluster.setInstanceCapacityKeys(Collections.singletonList("weight"));
+    cluster.setDefaultPartitionWeightMap(Collections.singletonMap("weight", 1));
+    ResourceConfig resource = new ResourceConfig("resource");
+    resource.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyTag");
+    IdealState idealState = new IdealState("resource");
+    if (idealTag != null) {
+      idealState.setInstanceGroupTag(idealTag);
+    }
+    AssignableReplica replica =
+        new AssignableReplica(cluster, resource, idealState, "partition", "MASTER", 1);
+    AssignableNode node = Mockito.mock(AssignableNode.class);
+    when(node.getInstanceTags()).thenReturn(Collections.singleton(TEST_TAG));
+
+    Assert.assertEquals(_constraint.isAssignmentValid(node, replica, _clusterContext), allowed);
+  }
 
   @Test
   public void testConstraintValid() {

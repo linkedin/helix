@@ -39,6 +39,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.doReturn;
@@ -286,22 +287,36 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
         "message should report the replica drop: " + violation.getMessage());
   }
 
+  @DataProvider(name = "unaffectedIdealTags")
+  public Object[][] unaffectedIdealTags() {
+    return new Object[][]{{null}, {""}, {"other"}};
+  }
+
+  @Test(dataProvider = "unaffectedIdealTags")
+  public void testLegacyResourceConfigTagDoesNotTriggerSimulation(String idealTag) {
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    IdealState idealState = wagedIdealState(RESOURCE);
+    if (idealTag != null) {
+      idealState.setInstanceGroupTag(idealTag);
+    }
+    doReturn(ImmutableList.of(idealState)).when(dataAccessor)
+        .getChildValues(BUILDER.idealStates(), true);
+    doReturn(ImmutableList.of(resourceConfigWithGroupTag(RESOURCE, TAG))).when(dataAccessor)
+        .getChildValues(BUILDER.resourceConfigs(), true);
+    Assert.assertTrue(
+        rule.validate(context(dataAccessor, ImmutableList.of(TAG), PROVIDER_MUST_NOT_RUN))
+            .isFeasible());
+  }
+
   @Test
-  public void testRemoveTagInfeasibleWhenResourceConfigPinsTag() {
-    // The WAGED resource is pinned to TAG only through its ResourceConfig (INSTANCE_GROUP_TAG); its
-    // IdealState carries no group tag. WAGED resolves the pinning tag from the merged
-    // ResourceConfig-over-IdealState view, so the removal must still be caught. Guards against the
-    // pre-filter reading the tag off the IdealState alone, which would silently skip this resource.
+  public void testIdealStateTagProtectedDespiteConflictingResourceConfigTag() {
     Map<String, ResourceAssignment> baseline = ImmutableMap.of(RESOURCE, resourceAssignment(
         ImmutableMap.of(RESOURCE + "_0",
             ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE", "instance2", "SLAVE"))));
     Map<String, ResourceAssignment> candidate = ImmutableMap.of(RESOURCE, resourceAssignment(
         ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
     HelixDataAccessor dataAccessor = simulationAccessor();
-    // IdealState with no group tag; the pin comes from the ResourceConfig instead.
-    doReturn(ImmutableList.of(wagedIdealState(RESOURCE))).when(dataAccessor)
-        .getChildValues(BUILDER.idealStates(), true);
-    doReturn(ImmutableList.of(resourceConfigWithGroupTag(RESOURCE, TAG))).when(dataAccessor)
+    doReturn(ImmutableList.of(resourceConfigWithGroupTag(RESOURCE, "legacyTag"))).when(dataAccessor)
         .getChildValues(BUILDER.resourceConfigs(), true);
     ValidationResult result =
         rule.validate(context(dataAccessor, ImmutableList.of(TAG), fixedProvider(baseline, candidate)));
@@ -455,8 +470,7 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
 
   private static ResourceConfig resourceConfigWithGroupTag(String resource, String groupTag) {
     ResourceConfig resourceConfig = new ResourceConfig(resource);
-    resourceConfig.getRecord().setSimpleField(
-        ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), groupTag);
+    resourceConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", groupTag);
     return resourceConfig;
   }
 

@@ -48,7 +48,6 @@ public class ResourceConfig extends HelixProperty {
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
     MAX_PARTITIONS_PER_INSTANCE,
-    INSTANCE_GROUP_TAG,
     PARTITION_CAPACITY_MAP,
     ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
@@ -91,19 +90,19 @@ public class ResourceConfig extends HelixProperty {
   }
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
-      int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled,
-        maxPartitionsPerInstance, instanceGroupTag,
+        maxPartitionsPerInstance,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
-      int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
@@ -120,10 +119,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (maxPartitionsPerInstance >= 0) {
       _record.setIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), maxPartitionsPerInstance);
-    }
-
-    if (instanceGroupTag != null) {
-      _record.setSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), instanceGroupTag);
     }
 
     if (rebalanceConfig != null) {
@@ -231,14 +226,6 @@ public class ResourceConfig extends HelixProperty {
   public int getMaxPartitionsPerInstance() {
     return _record.getIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.toString(),
         Integer.MAX_VALUE);
-  }
-
-  /**
-   * Check for a tag that will restrict assignment to instances with a matching tag
-   * @return the group tag, or null if none is present
-   */
-  public String getInstanceGroupTag() {
-    return _record.getSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.toString());
   }
 
   /**
@@ -472,7 +459,6 @@ public class ResourceConfig extends HelixProperty {
     private String _resourceId;
     private Boolean _monitorDisabled;
     private int _maxPartitionsPerInstance = -1;
-    private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
     private StateTransitionTimeoutConfig _stateTransitionTimeoutConfig;
@@ -514,15 +500,6 @@ public class ResourceConfig extends HelixProperty {
 
     public Builder setMaxPartitionsPerInstance(int maxPartitionsPerInstance) {
       _maxPartitionsPerInstance = maxPartitionsPerInstance;
-      return this;
-    }
-
-    public String getInstanceGroupTag() {
-      return _instanceGroupTag;
-    }
-
-    public Builder setInstanceGroupTag(String instanceGroupTag) {
-      _instanceGroupTag = instanceGroupTag;
       return this;
     }
 
@@ -635,7 +612,7 @@ public class ResourceConfig extends HelixProperty {
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
           _maxPartitionsPerInstance,
-          _instanceGroupTag, _rebalanceConfig,
+          _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
     }
@@ -644,7 +621,7 @@ public class ResourceConfig extends HelixProperty {
   /**
    * For backward compatibility, propagate the critical simple fields from the IdealState to
    * the Resource Config.
-   * Eventually, Resource Config should be the only metadata node that contains the required information.
+   * Instance-group placement tags are read directly from IdealState and are not propagated here.
    *
    * Note that the config fields get updated in this method shall be fully compatible with ones in the IdealState.
    *  1. The fields shall have exactly the same meaning.
@@ -671,9 +648,6 @@ public class ResourceConfig extends HelixProperty {
     }
     // Fill the compatible Idealstate fields to the ResourceConfig if possible.
     ZNRecord mergedZNRecord = mergedResourceConfig.getRecord();
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
-            idealState.getInstanceGroupTag());
     mergedZNRecord.setIntFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
         idealState.getMaxPartitionsPerInstance());
