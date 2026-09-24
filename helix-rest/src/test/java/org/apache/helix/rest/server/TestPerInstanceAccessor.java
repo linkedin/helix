@@ -57,6 +57,7 @@ import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.ResourceConfig;
@@ -92,6 +93,55 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
       }
     }
     _instanceToDisable = _mockParticipantManagers.remove(indexToDisable);
+  }
+
+  @Test
+  public void testGetInstanceReplicaStatus() throws IOException {
+    String instanceName = INSTANCE_NAME + "_replica_status";
+    InstanceConfig instanceConfig = new InstanceConfig(instanceName);
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    admin.addInstance(CLUSTER_NAME, instanceConfig);
+    try {
+      String response =
+          new JerseyUriRequestBuilder("clusters/{}/instances/{}/replicaStatus")
+              .format(CLUSTER_NAME, instanceName).get(this);
+
+      // Deserialized into the model rather than a Map, so the published body is checked against
+      // the contract that produced it. Reading into a Map would accept a body the model itself
+      // cannot parse.
+      InstanceReplicaStatus status =
+          OBJECT_MAPPER.readValue(response, InstanceReplicaStatus.class);
+      Assert.assertEquals(status.getClusterName(), CLUSTER_NAME);
+      Assert.assertEquals(status.getInstanceName(), instanceName);
+      Assert.assertFalse(status.isLive());
+      Assert.assertTrue(status.getObservationTime() > 0);
+
+      Assert.assertEquals(status.getReplicaCoverage(),
+          InstanceReplicaStatus.CoverageStatus.COMPLETE);
+      Assert.assertEquals(status.getReplicaCount(), 0);
+      Assert.assertTrue(status.isReplicaScopeEmpty());
+      Assert.assertFalse(status.isAllOffline());
+      Assert.assertFalse(status.isAllOfflineOrError());
+      Assert.assertFalse(status.isAllError());
+      Assert.assertEquals(status.getErrorPartitionNames(), Collections.emptyList());
+
+      Assert.assertEquals(status.getDrainCoverage(),
+          InstanceReplicaStatus.CoverageStatus.COMPLETE);
+      Assert.assertTrue(status.isDrained());
+      Assert.assertEquals(status.getPendingMessageCount(), 0);
+      Assert.assertEquals(status.getBlockers(), Collections.emptyList());
+
+      Assert.assertTrue(status.areReplicasOffline(false));
+      // Compared as trees, since the test mapper pretty-prints and the server does not.
+      Assert.assertEquals(OBJECT_MAPPER.readTree(OBJECT_MAPPER.writeValueAsString(status)),
+          OBJECT_MAPPER.readTree(response));
+
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}/replicaStatus")
+          .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+          .format(CLUSTER_NAME, instanceName + "_missing").get(this);
+    } finally {
+      admin.dropInstance(CLUSTER_NAME, instanceConfig);
+    }
   }
 
   @Test
