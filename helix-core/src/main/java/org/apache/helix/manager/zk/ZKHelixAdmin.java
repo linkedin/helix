@@ -1723,12 +1723,12 @@ public class ZKHelixAdmin implements HelixAdmin {
     createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
+    String parentPath = path.substring(0, path.lastIndexOf('/'));
+    createPersistentWithParents(parentPath, root, acl);
     if (acl == null || acl.isEmpty()) {
-      createPersistentWithParents(path, root, acl);
+      createPersistent(path, false, acl);
       _zkClient.writeData(path, new ZNRecord(clusterName));
     } else {
-      String parentPath = path.substring(0, path.lastIndexOf('/'));
-      createPersistentWithParents(parentPath, root, acl);
       createPersistent(path, new ZNRecord(clusterName), acl);
     }
     path = PropertyPathBuilder.instanceConfig(clusterName);

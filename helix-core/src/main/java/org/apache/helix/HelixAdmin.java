@@ -141,6 +141,8 @@ public interface HelixAdmin {
    *            With a non-empty ACL, initial config data is supplied during creation, so
    *            {@code WRITE} is not required for initialization, but is needed for later updates.
    *            The default-ACL path retains its create-then-write config initialization.
+   *            During initialization, an existing config leaf causes a creation conflict rather
+   *            than an unconditional data write; existing config parents may be reused.
    *            Recreating an existing cluster requires {@code READ} to traverse it and {@code DELETE}
    *            on the relevant parent nodes, as granted by the existing ACLs.
    *            Creation is not transactional and failures are not rolled back: deleting a path

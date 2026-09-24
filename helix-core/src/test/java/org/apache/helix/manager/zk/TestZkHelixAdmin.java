@@ -659,6 +659,62 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
+  public void testAddClusterDoesNotOverwriteConcurrentConfig() throws Exception {
+    for (int variant = 0; variant < 4; variant++) {
+      String clusterName = getShortClassName() + "_concurrentConfig_" + variant;
+      String rootPath = "/" + clusterName;
+      String idealStatePath = PropertyPathBuilder.idealState(clusterName);
+      String configPath = PropertyPathBuilder.clusterConfig(clusterName);
+      String configParent = configPath.substring(0, configPath.lastIndexOf('/'));
+      ZNRecord concurrentData = new ZNRecord("otherCreator");
+      concurrentData.setSimpleField("createdBy", "otherCreator");
+      List<ACL> acl = variant == 2 ? Collections.emptyList()
+          : variant == 3 ? Collections.singletonList(new ACL(
+              ZooDefs.Perms.CREATE | ZooDefs.Perms.READ | ZooDefs.Perms.DELETE,
+              ZooDefs.Ids.ANYONE_ID_UNSAFE)) : null;
+      HelixZkClient client = Mockito.spy(_gZkClient);
+      HelixZkClient concurrentClient = DedicatedZkClientFactory.getInstance().buildZkClient(
+          new HelixZkClient.ZkConnectionConfig(ZK_ADDR),
+          new HelixZkClient.ZkClientConfig().setZkSerializer(new ZNRecordSerializer()));
+      Answer<Void> createConcurrentConfig = invocation -> {
+        invocation.callRealMethod();
+        concurrentClient.createPersistent(configParent, true);
+        concurrentClient.createPersistent(configPath, concurrentData);
+        return null;
+      };
+      if (variant == 3) {
+        Mockito.doAnswer(createConcurrentConfig).when(client)
+            .createPersistent(idealStatePath, false, acl);
+      } else {
+        Mockito.doAnswer(createConcurrentConfig).when(client).createPersistent(idealStatePath, false);
+      }
+      try {
+        HelixAdmin admin = new ZKHelixAdmin(client);
+        boolean created = variant == 0 ? admin.addCluster(clusterName, false)
+            : admin.addCluster(clusterName, false, acl);
+
+        Stat stat = new Stat();
+        Assert.assertEquals(concurrentClient.<ZNRecord>readData(configPath, stat), concurrentData,
+            "Initialization must not overwrite an already-created config, variant " + variant);
+        Assert.assertFalse(created);
+        Assert.assertEquals(stat.getVersion(), 0);
+        Assert.assertEquals(getAcl(configPath), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+        Assert.assertFalse(concurrentClient.exists(PropertyPathBuilder.instanceConfig(clusterName)));
+        Mockito.verify(client, Mockito.never())
+            .writeData(Mockito.eq(configPath), Mockito.any(ZNRecord.class));
+      } finally {
+        try {
+          if (concurrentClient.exists(rootPath)) {
+            concurrentClient.deleteRecursively(rootPath);
+          }
+        } finally {
+          concurrentClient.close();
+        }
+      }
+    }
+  }
+
+  @Test
   public void testAddClusterPreservesPartialCreationOnAuthorizationFailure() {
     String clusterName = getShortClassName() + "_partialAuthorizationFailure";
     String rootPath = "/" + clusterName;
