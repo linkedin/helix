@@ -26,7 +26,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
+import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.ValidationResult;
+import org.apache.helix.guardrail.Violation;
+import org.apache.helix.guardrail.rules.RetiredClusterConfigGuardrailRule;
 import org.apache.helix.manager.zk.GenericZkHelixApiBuilder;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.CloudConfig;
@@ -60,6 +66,8 @@ public class ConfigAccessor {
   private static Logger LOG = LoggerFactory.getLogger(ConfigAccessor.class);
 
   private static final StringTemplate template = new StringTemplate();
+  private static final GuardrailPipeline CLUSTER_CONFIG_GUARDRAILS =
+      new GuardrailPipeline(new RetiredClusterConfigGuardrailRule());
 
   static {
     // @formatter:off
@@ -275,6 +283,7 @@ public class ConfigAccessor {
    * @deprecated replaced by {@link #set(HelixConfigScope, Map<String, String>)}
    * @param scope
    * @param keyValueMap
+   * @throws IllegalArgumentException if a cluster-scoped write adds or changes a retired property
    */
   @Deprecated
   public void set(ConfigScope scope, Map<String, String> keyValueMap) {
@@ -318,7 +327,11 @@ public class ConfigAccessor {
         update.getMapField(splits[1]).put(key, value);
       }
     }
-    ZKUtil.createOrMerge(_zkClient, splits[0], update, true, true);
+    if (scope.getScope() == ConfigScopeProperty.CLUSTER) {
+      writeClusterConfig(clusterName, splits[0], update, false);
+    } else {
+      ZKUtil.createOrMerge(_zkClient, splits[0], update, true, true);
+    }
   }
 
   /**
@@ -327,6 +340,7 @@ public class ConfigAccessor {
    *          (e.g. cluster, resource, participant, etc.)
    * @param key the identifier of the configuration entry
    * @param value the configuration
+   * @throws IllegalArgumentException if a cluster-scoped write adds or changes a retired property
    */
   public void set(HelixConfigScope scope, String key, String value) {
     Map<String, String> map = new TreeMap<String, String>();
@@ -339,6 +353,7 @@ public class ConfigAccessor {
    * @param scope scope specification of the entity set to query
    *          (e.g. cluster, resource, participant, etc.)
    * @param keyValueMap configurations organized by their identifiers
+   * @throws IllegalArgumentException if a cluster-scoped write adds or changes a retired property
    */
   public void set(HelixConfigScope scope, Map<String, String> keyValueMap) {
     if (scope == null || scope.getType() == null || !scope.isFullKey()) {
@@ -369,7 +384,11 @@ public class ConfigAccessor {
       update.setMapField(mapKey, keyValueMap);
     }
 
-    ZKUtil.createOrMerge(_zkClient, zkPath, update, true, true);
+    if (scope.getType() == ConfigScopeProperty.CLUSTER) {
+      writeClusterConfig(clusterName, zkPath, update, false);
+    } else {
+      ZKUtil.createOrMerge(_zkClient, zkPath, update, true, true);
+    }
   }
 
   /**
@@ -770,10 +789,12 @@ public class ConfigAccessor {
   /**
    * Set ClusterConfig of the given cluster.
    * The current Cluster config will be replaced with the given clusterConfig.
+   * Retired properties may be retained unchanged or removed, but not added or changed.
    * WARNING: This is not thread-safe or concurrent updates safe.
    *
    * @param clusterName
    * @param clusterConfig
+   * @throws IllegalArgumentException if the write adds or changes a retired property
    *
    * @return
    */
@@ -787,12 +808,14 @@ public class ConfigAccessor {
    * presents. If there is new field in given config but not in current config, the field will be added into
    * the current config..
    * The list fields and map fields will be replaced as a single entry.
+   * Retired properties may be retained unchanged, but not added or changed.
    *
    * The current Cluster config will be replaced with the given clusterConfig.
    * WARNING: This is not thread-safe or concurrent updates safe.
    *
    * @param clusterName
    * @param clusterConfig
+   * @throws IllegalArgumentException if the write adds or changes a retired property
    *
    * @return
    */
@@ -810,11 +833,30 @@ public class ConfigAccessor {
         new HelixConfigScopeBuilder(ConfigScopeProperty.CLUSTER).forCluster(clusterName).build();
     String zkPath = scope.getZkPath();
 
-    if (overwrite) {
-      ZKUtil.createOrReplace(_zkClient, zkPath, clusterConfig.getRecord(), true);
-    } else {
-      ZKUtil.createOrUpdate(_zkClient, zkPath, clusterConfig.getRecord(), true, true);
-    }
+    writeClusterConfig(clusterName, zkPath, clusterConfig.getRecord(), overwrite);
+  }
+
+  private void writeClusterConfig(String clusterName, String zkPath, ZNRecord record,
+      boolean overwrite) {
+    // Cluster setup requires this znode. Validate on every version-checked retry, not against a
+    // separate preflight read; ZKUtil's catch-and-retry helpers would swallow validation failures.
+    _zkClient.<ZNRecord>updateDataSerialized(zkPath, current -> {
+      ZNRecord proposed = new ZNRecord(overwrite || current == null ? record : current);
+      if (!overwrite && current != null) {
+        proposed.update(record);
+      }
+      ValidationResult result = CLUSTER_CONFIG_GUARDRAILS.validate(
+          GuardrailContext.newBuilder(clusterName)
+              .currentClusterConfig(current == null ? null : new ClusterConfig(current))
+              .proposedClusterConfig(new ClusterConfig(proposed)).build());
+      if (!result.isFeasible()) {
+        String message = result.getViolations().stream().map(Violation::getMessage)
+            .collect(Collectors.joining("; "));
+        LOG.warn("Rejected cluster config update for {}: {}", clusterName, message);
+        throw new IllegalArgumentException(message);
+      }
+      return proposed;
+    });
   }
 
   /**

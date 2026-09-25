@@ -175,7 +175,7 @@ public class TestStateTransitionThrottle extends ZkTestBase {
 
     // Update cluster config to tolerate error partition, so load balance transition will be done
     clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
-    clusterConfig.setErrorPartitionThresholdForLoadBalance(1);
+    clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(1);
     accessor.setProperty(keyBuilder.clusterConfig(), clusterConfig);
 
     _gSetupTool.rebalanceResource(clusterName, resourceName, 3);

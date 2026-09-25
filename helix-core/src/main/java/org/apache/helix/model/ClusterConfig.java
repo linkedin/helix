@@ -95,15 +95,9 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
-    @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
-    // precedence if it is set
-    ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance state
-    // transition if the number of partitons that need
-    // recovery exceeds this limitation
-    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance
-    // state transition if the number of
-    // partitons that need recovery or in
-    // error exceeds this limitation
+    // Restrict load balance to downward transitions when the number of error partitions exceeds
+    // this threshold. Recovery partitions are not counted.
+    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -204,11 +198,7 @@ public class ClusterConfig extends HelixProperty {
   }
 
   private final static int DEFAULT_MAX_CONCURRENT_TASK_PER_INSTANCE = 40;
-  // By default, no load balance if any error partition
-  @Deprecated
-  private final static int DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = 0;
-  // By default, no load balance if any error or recovery partition. -1 implies that the threshold
-  // is not set and will be given a default value of 1
+  // -1 means unset; the controller uses an effective error-partition threshold of 1.
   private final static int DEFAULT_ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = -1;
   private static final String IDEAL_STATE_RULE_PREFIX = "IdealStateRule!";
 
@@ -921,35 +911,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Get maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @return the maximum allowed error partition count
-   */
-  public int getErrorPartitionThresholdForLoadBalance() {
-    return _record.getIntField(
-        ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-            DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE);
-  }
-
-  /**
-   * Set maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @param errorPartitionThreshold the maximum allowed error partition count
-   */
-  public void setErrorPartitionThresholdForLoadBalance(int errorPartitionThreshold) {
-    _record.setIntField(ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-        errorPartitionThreshold);
-  }
-
-  /**
-   * Get the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @return the threshold
+   * Get the error-partition threshold for load balancing. Despite the property name, recovery
+   * partitions are not counted. If the number of error partitions exceeds the effective threshold,
+   * load balance is restricted to downward transitions.
+   * @return the configured threshold, or -1 when unset; the controller uses 1 for -1
    */
   public int getErrorOrRecoveryPartitionThresholdForLoadBalance() {
     return _record.getIntField(
@@ -958,12 +923,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @param recoveryPartitionThreshold
+   * Set the error-partition threshold for load balancing. Zero allows no error partitions before
+   * restricting load balance to downward transitions; -1 selects the controller default of 1.
+   * Recovery transitions are not blocked by this threshold.
+   * @param recoveryPartitionThreshold the error-partition threshold
    */
   public void setErrorOrRecoveryPartitionThresholdForLoadBalance(int recoveryPartitionThreshold) {
     _record.setIntField(

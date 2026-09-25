@@ -215,7 +215,7 @@ public class TestReplicaLevelThrottling extends BaseStageTest {
             StateTransitionThrottleConfig.ThrottleScope.INSTANCE, Entry.instanceThrottleRecovery.name(),
             throttleConfigs, inMap);
         clusterConfig.setStateTransitionThrottleConfigs(throttleConfigs);
-        clusterConfig.setErrorPartitionThresholdForLoadBalance(Integer.parseInt(
+        clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(Integer.parseInt(
             (String) inMap.getOrDefault(Entry.errorThreshold.name(), DEFAULT_ERROR_THRESHOLD)));
 
         Map<String, Object> cacheMap = new HashMap<>();
