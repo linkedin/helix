@@ -105,7 +105,6 @@ public class TestP2PNoDuplicatedMessage extends ZkTestBase {
     }
 
     enableDelayRebalanceInCluster(_gZkClient, CLUSTER_NAME, true);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     for (int i = 0; i < DB_COUNT; i++) {
       createResourceWithDelayedRebalance(CLUSTER_NAME, "TestDB_" + i,

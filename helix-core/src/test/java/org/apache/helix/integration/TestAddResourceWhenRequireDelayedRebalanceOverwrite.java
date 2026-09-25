@@ -42,7 +42,6 @@ public class TestAddResourceWhenRequireDelayedRebalanceOverwrite extends ZkTestB
   public void beforeClass() throws Exception {
     System.out.println("START " + CLASS_NAME + " at " + new Date(System.currentTimeMillis()));
     _gSetupTool.addCluster(CLUSTER_NAME, true);
-    enablePersistIntermediateAssignment(_gZkClient, CLUSTER_NAME, true);
 
     ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
     ClusterConfig clusterConfig = configAccessor.getClusterConfig(CLUSTER_NAME);
