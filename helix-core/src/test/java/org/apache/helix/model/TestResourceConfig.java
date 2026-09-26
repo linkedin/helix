@@ -26,12 +26,86 @@ import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.api.config.RebalanceConfig;
+import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.CrushRebalanceStrategy;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 public class TestResourceConfig {
   private static final ObjectMapper _objectMapper = new ObjectMapper();
+  private static final String LEGACY_REBALANCE_STRATEGY = "REBALANCE_STRATEGY";
+
+  @Test
+  public void testLegacyStrategyPreservedInRecordButNotRebuilt() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setSimpleField(LEGACY_REBALANCE_STRATEGY, CrushEdRebalanceStrategy.class.getName());
+    record.setLongField("REBALANCE_TIMER_PERIOD", 3000L);
+    record.setSimpleField("applicationSetting", "applicationValue");
+    record.setListField("resource_0", Collections.singletonList("instance"));
+    record.setMapField("applicationMap", Collections.singletonMap("key", "value"));
+    ZNRecord original = new ZNRecord(record);
+
+    ResourceConfig wrapped = new ResourceConfig(record);
+    RebalanceConfig rebalanceConfig = wrapped.getRebalanceConfig();
+    ResourceConfig rebuilt = new ResourceConfig.Builder("resource")
+        .setRebalanceConfig(rebalanceConfig)
+        .setStateModelFactoryName("customFactory")
+        .build();
+
+    Assert.assertEquals(wrapped.getRecord(), original);
+    Assert.assertEquals(rebalanceConfig.getConfigsMap(),
+        ImmutableMap.of("REBALANCE_MODE", "NONE", "REBALANCE_TIMER_PERIOD", "3000"));
+    Assert.assertFalse(rebuilt.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(rebuilt.getRebalanceConfig().getRebalanceTimerPeriod(), 3000L);
+    Assert.assertEquals(rebuilt.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(record, original);
+  }
+
+  @Test
+  public void testConstructorDoesNotWriteLegacyStrategy() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setSimpleField(LEGACY_REBALANCE_STRATEGY, CrushEdRebalanceStrategy.class.getName());
+    record.setLongField("REBALANCE_TIMER_PERIOD", 3000L);
+
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "customFactory",
+        1, 10, "placementTag", new RebalanceConfig(record), null, null, null, true);
+
+    Assert.assertFalse(
+        resourceConfig.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(resourceConfig.getRebalanceConfig().getRebalanceTimerPeriod(), 3000L);
+    Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(record.getSimpleField(LEGACY_REBALANCE_STRATEGY),
+        CrushEdRebalanceStrategy.class.getName());
+  }
+
+  @Test
+  public void testMergeDoesNotMigrateOrOverrideStrategy() {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    resourceConfig.putSimpleConfig(LEGACY_REBALANCE_STRATEGY,
+        CrushEdRebalanceStrategy.class.getName());
+    IdealState idealState = new IdealState("resource");
+    idealState.setRebalanceStrategy(CrushRebalanceStrategy.class.getName());
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertEquals(merged.getSimpleConfig(LEGACY_REBALANCE_STRATEGY),
+        CrushEdRebalanceStrategy.class.getName());
+    Assert.assertFalse(merged.getRebalanceConfig().getConfigsMap()
+        .containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(idealState.getRebalanceStrategy(), CrushRebalanceStrategy.class.getName());
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+
+    ResourceConfig fromIdealState = ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+    Assert.assertFalse(
+        fromIdealState.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
 
   @Test
   public void testGetPartitionCapacityMap() throws IOException {

@@ -29,7 +29,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Resource's rebalance configurations
+ * Resource's rebalance configurations. Rebalance strategy selection is configured through
+ * {@link org.apache.helix.model.IdealState}, not this ResourceConfig wrapper.
  */
 public class RebalanceConfig {
   /**
@@ -39,8 +40,7 @@ public class RebalanceConfig {
     REBALANCE_DELAY,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
-    REBALANCE_TIMER_PERIOD,
-    REBALANCE_STRATEGY
+    REBALANCE_TIMER_PERIOD
   }
 
   /**
@@ -63,7 +63,6 @@ public class RebalanceConfig {
   private long _rebalanceDelay = DEFAULT_REBALANCE_DELAY;
   private RebalanceMode _rebalanceMode;
   private String _rebalancerClassName;
-  private String _rebalanceStrategy;
   private long _rebalanceTimerPeriod = -1;  /* in milliseconds */
 
   private static final Logger _logger = LoggerFactory.getLogger(RebalanceConfig.class.getName());
@@ -80,7 +79,6 @@ public class RebalanceConfig {
             RebalanceMode.NONE);
     _rebalancerClassName =
         znRecord.getSimpleField(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name());
-    _rebalanceStrategy = znRecord.getSimpleField(RebalanceConfigProperty.REBALANCE_STRATEGY.name());
     _rebalanceTimerPeriod =
         znRecord.getLongField(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(), -1);
   }
@@ -127,26 +125,6 @@ public class RebalanceConfig {
   }
 
   /**
-   * Get the rebalance strategy for this resource.
-   *
-   * @return rebalance strategy, or null if not specified.
-   */
-  public String getRebalanceStrategy() {
-    return _rebalanceStrategy;
-  }
-
-  /**
-   * Specify the strategy for Helix to use to compute the partition-instance assignment,
-   * i,e, the custom rebalance strategy that implements {@link org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy}
-   *
-   * @param rebalanceStrategy
-   * @return
-   */
-  public void setRebalanceStrategy(String rebalanceStrategy) {
-    this._rebalanceStrategy = rebalanceStrategy;
-  }
-
-  /**
    * Get the frequency with which to rebalance
    * @return the rebalancing timer period
    */
@@ -180,9 +158,6 @@ public class RebalanceConfig {
     if (_rebalancerClassName != null) {
       simpleFieldMap.put(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name(), _rebalancerClassName);
     }
-    if (_rebalanceStrategy != null) {
-      simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_STRATEGY.name(), _rebalanceStrategy);
-    }
     if (_rebalanceTimerPeriod > 0) {
       simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_TIMER_PERIOD.name(),
           String.valueOf(_rebalanceTimerPeriod));
@@ -195,4 +170,3 @@ public class RebalanceConfig {
     return true;
   }
 }
-
