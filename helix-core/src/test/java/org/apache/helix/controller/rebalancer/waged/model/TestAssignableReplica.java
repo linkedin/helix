@@ -28,9 +28,11 @@ import java.util.Map;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestAssignableReplica {
@@ -54,8 +56,9 @@ public class TestAssignableReplica {
     testClusterConfig.setInstanceCapacityKeys(new ArrayList<>(capacityDataMapResource1.keySet()));
 
     String partitionName = partitionNamePrefix + 1;
+    IdealState idealState = new IdealState(resourceName);
     AssignableReplica replica =
-        new AssignableReplica(testClusterConfig, testResourceConfigResource, partitionName,
+        new AssignableReplica(testClusterConfig, testResourceConfigResource, idealState, partitionName,
             masterState, masterPriority);
     Assert.assertEquals(replica.getResourceName(), resourceName);
     Assert.assertEquals(replica.getPartitionName(), partitionName);
@@ -85,19 +88,18 @@ public class TestAssignableReplica {
     // 2. update instance group tag and max partitions per instance
     String group = "DEFAULT";
     int maxPartition = 10;
-    testResourceConfigResource.getRecord()
-        .setSimpleField(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.toString(), group);
+    idealState.setInstanceGroupTag(group);
     testResourceConfigResource.getRecord()
         .setIntField(ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
             maxPartition);
 
-    replica = new AssignableReplica(testClusterConfig, testResourceConfigResource, partitionName,
+    replica = new AssignableReplica(testClusterConfig, testResourceConfigResource, idealState, partitionName,
         masterState, masterPriority);
     Assert.assertEquals(replica.getCapacity(), capacityDataMapResource1);
     Assert.assertEquals(replica.getResourceInstanceGroupTag(), group);
     Assert.assertEquals(replica.getResourceMaxPartitionsPerInstance(), maxPartition);
 
-    replica = new AssignableReplica(testClusterConfig, testResourceConfigResource, partitionName2,
+    replica = new AssignableReplica(testClusterConfig, testResourceConfigResource, idealState, partitionName2,
         slaveState, slavePriority);
     Assert.assertEquals(replica.getResourceName(), resourceName);
     Assert.assertEquals(replica.getPartitionName(), partitionName2);
@@ -126,7 +128,7 @@ public class TestAssignableReplica {
 
     ResourceConfig testResourceConfigResource = new ResourceConfig(resourceName);
     AssignableReplica replica = new AssignableReplica(testClusterConfig, testResourceConfigResource,
-        partitionNamePrefix + 1, masterState, masterPriority);
+        new IdealState(resourceName), partitionNamePrefix + 1, masterState, masterPriority);
 
     Assert.assertEquals(replica.getCapacity().size(), defaultWeightDataMapResource.size());
     Assert.assertEquals(replica.getCapacity(), defaultWeightDataMapResource);
@@ -152,7 +154,7 @@ public class TestAssignableReplica {
 
     try {
       new AssignableReplica(testClusterConfig, testResourceConfigResource,
-          partitionNamePrefix + 1, masterState, masterPriority);
+          new IdealState(resourceName), partitionNamePrefix + 1, masterState, masterPriority);
       Assert.fail("Creating new replica should fail because of incomplete partition weight.");
     } catch (HelixException ex) {
       // expected
@@ -165,9 +167,39 @@ public class TestAssignableReplica {
     testClusterConfig.setDefaultPartitionWeightMap(defaultCapacityDataMap);
 
     AssignableReplica replica = new AssignableReplica(testClusterConfig, testResourceConfigResource,
-        partitionNamePrefix + 1, masterState, masterPriority);
+        new IdealState(resourceName), partitionNamePrefix + 1, masterState, masterPriority);
     Assert.assertTrue(replica.getCapacity().keySet().containsAll(requiredCapacityKeys));
     Assert.assertEquals(replica.getCapacity().get(newCapacityKey).intValue(), 0);
     Assert.assertFalse(replica.getCapacity().containsKey(unnecessaryCapacityKey));
+  }
+
+  @DataProvider(name = "placementTags")
+  public Object[][] placementTags() {
+    return new Object[][]{{"idealTag", null}, {"idealTag", "legacyTag"},
+        {null, "legacyTag"}, {"", "legacyTag"}};
+  }
+
+  @Test(dataProvider = "placementTags")
+  public void testPlacementTagComesOnlyFromIdealState(String idealTag, String legacyTag) {
+    ClusterConfig clusterConfig = new ClusterConfig("cluster");
+    clusterConfig.setInstanceCapacityKeys(Collections.singletonList("weight"));
+    clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap("weight", 1));
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    if (legacyTag != null) {
+      resourceConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", legacyTag);
+    }
+    IdealState idealState = new IdealState(resourceName);
+    if (idealTag != null) {
+      idealState.setInstanceGroupTag(idealTag);
+    }
+
+    AssignableReplica replica = new AssignableReplica(clusterConfig, resourceConfig, idealState,
+        partitionNamePrefix + 1, masterState, masterPriority);
+
+    Assert.assertEquals(replica.getResourceInstanceGroupTag(), idealTag);
+    Assert.assertEquals(replica.hasResourceInstanceGroupTag(),
+        idealTag != null && !idealTag.isEmpty());
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"), legacyTag);
+    Assert.assertEquals(idealState.getInstanceGroupTag(), idealTag);
   }
 }

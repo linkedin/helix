@@ -74,3 +74,25 @@ Helix UI has been tested to run well on these versions of node and yarn:
     "yarn": "^1.22.18"
   },
 ```
+
+## Resource instance-group tag compatibility
+
+Set ordinary-resource placement tags with `IdealState.setInstanceGroupTag`.
+`ResourceConfig.INSTANCE_GROUP_TAG` support is removed: its property enum entry,
+getter, builder getter/setter, and the tag parameter in the multi-argument
+constructor are no longer available. `AssignableReplica` construction now
+requires the resource's `IdealState` after the `ResourceConfig` argument.
+Direct callers must update their code and rebuild before upgrading.
+
+WAGED placement, delayed-rebalance replicas, and tag-removal feasibility checks
+now use only the IdealState tag. A legacy ResourceConfig tag no longer overrides
+it or imposes a restriction when the IdealState has no tag. Existing raw fields
+are preserved as opaque metadata; Helix neither deletes them nor migrates them
+automatically. If a deployment relied on the ResourceConfig override, explicitly
+configure the intended IdealState tag before upgrading and review the resulting
+placement.
+
+JobConfig's separate, case-sensitive `InstanceGroupTag` setting and builder API
+remain supported for task placement and task-resource tags without IdealState.
+The retired uppercase field on workflow configs no longer sets a resource tag.
+IdealState and ExternalView tag APIs are unchanged.
