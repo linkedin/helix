@@ -120,6 +120,34 @@ public class TestHelixPropoertyTimmer {
   }
 
   @Test
+  public void testFactoryChangesOnlyMatterInIdealState() {
+    ResourceConfig resourceConfig = _resourceConfigMap.get(RESOURCE_NAME);
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    resourceConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "legacyFactory");
+    idealState.setStateModelFactoryName("idealStateFactory");
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    resourceConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "changedLegacyFactory");
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG),
+        Collections.emptySet());
+    Assert.assertFalse(ResourceConfigTrimmer.getInstance().trimProperty(resourceConfig)
+        .simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
+    Assert.assertEquals(resourceConfig.getSimpleConfig("STATE_MODEL_FACTORY_NAME"),
+        "changedLegacyFactory");
+
+    idealState.setStateModelFactoryName("changedIdealStateFactory");
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
+    Assert.assertEquals(IdealStateTrimmer.getInstance().trimProperty(idealState)
+        .getStateModelFactoryName(), "changedIdealStateFactory");
+  }
+
+  @Test
   public void testDetectNonTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
     ResourceChangeDetector detector = new ResourceChangeDetector(true);

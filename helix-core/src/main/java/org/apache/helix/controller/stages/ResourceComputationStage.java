@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.helix.HelixConstants;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
@@ -254,7 +255,7 @@ public class ResourceComputationStage extends AbstractBaseStage {
     Resource resource = new Resource(resourceName, clusterConfig, resourceConfig);
     resourceMap.put(resourceName, resource);
     resource.setStateModelDefRef(TaskConstants.STATE_MODEL_NAME);
-    resource.setStateModelFactoryName(resourceConfig.getStateModelFactoryName());
+    resource.setStateModelFactoryName(HelixConstants.DEFAULT_STATE_MODEL_FACTORY);
     boolean batchMessageMode = resourceConfig.getBatchMessageMode();
     if (clusterConfig != null) {
       batchMessageMode |= clusterConfig.getBatchMessageMode();
