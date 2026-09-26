@@ -21,6 +21,7 @@ package org.apache.helix.controller.rebalancer.waged.model;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -41,6 +42,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
@@ -224,45 +226,35 @@ public class TestClusterContext extends AbstractTestClusterModel {
         .addPartitionToFaultZone(_testFaultZoneId, _resourceNames.get(0), _partitionNames.get(0));
   }
 
-  @DataProvider(name = "preferredScoringKeys")
-  public static Object[][] preferredScoringKeys() {
-    return new Object[][]{
-            {Collections.singletonList("item1")},//valid key
-            {Collections.singletonList("item3")},//valid key
-            {Collections.singletonList("item-x")},//invalid key
-            {null}
+  @DataProvider
+  public static Object[][] legacyScoringKeys() {
+    return new Object[][] {
+        {null},
+        {Collections.emptyList()},
+        {Collections.singletonList("item1")},
+        {Collections.singletonList("item3")},
+        {Collections.singletonList("item-x")},
+        {Arrays.asList("item3", "item-x")},
+        {Arrays.asList("item2", "item1")}
     };
   }
 
-  @Test(dataProvider = "preferredScoringKeys")
-  public void testEstimateMaxUtilization(List<String> preferredScoringKeys) throws IOException {
+  @Test(dataProvider = "legacyScoringKeys")
+  public void testEstimateMaxUtilizationIgnoresLegacyScoringKeys(List<String> legacyKeys)
+      throws IOException {
     ResourceControllerDataProvider testCache = setupClusterDataCache();
     Set<AssignableReplica> assignmentSet = generateReplicas(testCache);
     ClusterConfig clusterConfig = testCache.getClusterConfig();
-    clusterConfig.setPreferredScoringKeys(preferredScoringKeys);
-    ClusterContext context =
-            new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
-                    new HashMap<>(), clusterConfig);
-    /**
-     * Total Capacity and Total Usage values calculated from nodeSet and replicaSet above are as follows:
-     * TotalCapacity : {"item1",20, "item2",40, "item3",30}
-     * TotalUsage : {"item1",16, "item2",32, "item3",0}
-     * Using these values to validate the results of estimateMaxUtilization.
-     */
-
-    validateResult(ImmutableMap.of("item1", 20, "item2", 40, "item3", 30),
-            ImmutableMap.of("item1", 16, "item2", 32, "item3", 0),
-            preferredScoringKeys, context.getEstimatedMaxUtilization());
-  }
-
-  private void validateResult(Map<String, Integer> totalCapacity, Map<String, Integer> totalUsage,
-                              List<String> preferredScoringKeys, float actualEstimatedMaxUtilization) {
-    if (preferredScoringKeys == null || preferredScoringKeys.size() == 0 || !totalCapacity.keySet().contains(preferredScoringKeys.get(0))) {
-      //estimatedMaxUtilization calculated from all capacity keys
-      Assert.assertEquals(actualEstimatedMaxUtilization, 0.8f);
-      return;
+    if (legacyKeys != null) {
+      clusterConfig.getRecord().setListField("PREFERRED_SCORING_KEYS", legacyKeys);
     }
-    //estimatedMaxUtilization calculated using preferredScoringKey only.
-    Assert.assertEquals(actualEstimatedMaxUtilization, (float) totalUsage.get(preferredScoringKeys.get(0)) / totalCapacity.get(preferredScoringKeys.get(0)));
+    ZNRecord originalRecord = new ZNRecord(clusterConfig.getRecord());
+    ClusterContext context =
+        new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+            new HashMap<>(), clusterConfig);
+
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0.8f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0.4f);
+    Assert.assertEquals(clusterConfig.getRecord(), originalRecord);
   }
 }
