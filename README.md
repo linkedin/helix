@@ -74,3 +74,27 @@ Helix UI has been tested to run well on these versions of node and yarn:
     "yarn": "^1.22.18"
   },
 ```
+
+## ResourceConfig rebalance configuration compatibility
+
+`REBALANCE_DELAY`, `REBALANCE_MODE`, and `REBALANCER_CLASS_NAME` are no longer
+supported by `org.apache.helix.api.config.RebalanceConfig`, the rebalance settings
+wrapper used by `ResourceConfig`. Their enum constants, backing fields, and
+getters/setters have been removed. They were not consumed from ResourceConfig by
+Helix's rebalancers.
+
+Configure resource rebalancing through `IdealState.setRebalanceDelay`,
+`IdealState.setRebalanceMode`, and `IdealState.setRebalancerClassName` instead.
+The IdealState properties, serialized names, defaults, and runtime behavior are
+unchanged. Code referencing the removed RebalanceConfig enum constants or
+accessors must migrate and be rebuilt before upgrading Helix; already-compiled
+references are not binary compatible. The legacy `RebalanceConfig.RebalanceMode`
+enum remains available, deprecated, for callers that only use its mode names;
+new callers should use `IdealState.RebalanceMode`.
+
+The ResourceConfig rebalance wrapper and its strategy/timer settings remain.
+Building a ResourceConfig from a RebalanceConfig no longer writes the three
+retired fields, including the previously synthesized `REBALANCE_MODE=NONE`.
+Existing raw ResourceConfig fields remain opaque metadata: reading or merging
+a ResourceConfig does not delete or migrate them. Do not automatically copy
+these ignored values into IdealState, where they would affect rebalancing.
