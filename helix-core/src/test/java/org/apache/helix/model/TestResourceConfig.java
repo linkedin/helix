@@ -28,6 +28,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestResourceConfig {
@@ -197,7 +198,7 @@ public class TestResourceConfig {
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
-            "EXTERNAL_VIEW_DISABLED"}) {
+            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -242,9 +243,8 @@ public class TestResourceConfig {
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
       Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
-    Assert.assertEquals(Boolean.valueOf(mergedResourceConfig
-        .getSimpleConfig(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name()))
-        .booleanValue(), testIdealState.isDelayRebalanceEnabled());
+    Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
     // Test priority, Resource Config field has higher priority.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
@@ -270,5 +270,60 @@ public class TestResourceConfig {
       Assert.assertEquals(mergedResourceConfig.getRecord().getSimpleField(legacyField),
           testConfig.getRecord().getSimpleField(legacyField));
     }
+  }
+
+  @DataProvider(name = "idealStateDelayRebalanceEnabled")
+  public Object[][] idealStateDelayRebalanceEnabled() {
+    return new Object[][]{{null}, {true}, {false}};
+  }
+
+  @Test(dataProvider = "idealStateDelayRebalanceEnabled")
+  public void testMergeDoesNotCopyDelayRebalanceEnabled(Boolean enabled) {
+    IdealState idealState = new IdealState("resource");
+    if (enabled != null) {
+      idealState.setDelayRebalanceEnabled(enabled);
+    }
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+
+    ResourceConfig mergedWithoutConfig =
+        ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+    ResourceConfig mergedWithConfig =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertFalse(mergedWithoutConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+    Assert.assertFalse(mergedWithConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+  }
+
+  @DataProvider(name = "legacyDelayRebalanceValues")
+  public Object[][] legacyDelayRebalanceValues() {
+    return new Object[][]{{"true"}, {"false"}, {"legacy-value"}};
+  }
+
+  @Test(dataProvider = "legacyDelayRebalanceValues")
+  public void testMergePreservesLegacyDelayRebalanceMetadata(String value) {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    resourceConfig.putSimpleConfig("DELAY_REBALANCE_ENABLED", value);
+    IdealState idealState = new IdealState("resource");
+    idealState.setDelayRebalanceEnabled("false".equals(value));
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertEquals(merged.getSimpleConfig("DELAY_REBALANCE_ENABLED"), value);
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testDelayRebalanceEnabledIsNotResourceConfigProperty() {
+    ResourceConfig.ResourceConfigProperty.valueOf("DELAY_REBALANCE_ENABLED");
   }
 }

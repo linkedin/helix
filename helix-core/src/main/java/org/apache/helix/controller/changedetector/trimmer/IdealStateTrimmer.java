@@ -42,7 +42,7 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
    * REBALANCE_TIMER_PERIOD,
    * EXTERNAL_VIEW_DISABLED,
    * HELIX_ENABLED,
-   * ResourceConfigProperty.DELAY_REBALANCE_ENABLED
+   * DELAY_REBALANCE_ENABLED
    */
   private static final Map<FieldType, Set<String>> STATIC_TOPOLOGY_RELATED_FIELD_MAP = ImmutableMap
       .of(FieldType.SIMPLE_FIELD, ImmutableSet.of(

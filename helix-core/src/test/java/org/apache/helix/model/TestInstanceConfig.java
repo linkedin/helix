@@ -28,9 +28,39 @@ import com.google.common.collect.ImmutableMap;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestInstanceConfig {
+  @Test
+  public void testDelayRebalanceEnabledByDefault() {
+    InstanceConfig instanceConfig = new InstanceConfig("instance");
+    Assert.assertTrue(instanceConfig.isDelayRebalanceEnabled());
+    Assert.assertFalse(instanceConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+  }
+
+  @DataProvider(name = "delayRebalanceEnabled")
+  public Object[][] delayRebalanceEnabled() {
+    return new Object[][]{{true}, {false}};
+  }
+
+  @Test(dataProvider = "delayRebalanceEnabled")
+  public void testDelayRebalanceEnabledLegacyRecordAndRoundTrip(boolean enabled) {
+    ZNRecord legacyRecord = new ZNRecord("instance");
+    legacyRecord.setSimpleField("DELAY_REBALANCE_ENABLED", Boolean.toString(enabled));
+    InstanceConfig instanceConfig = new InstanceConfig(legacyRecord);
+    Assert.assertEquals(instanceConfig.isDelayRebalanceEnabled(), enabled);
+
+    instanceConfig.setDelayRebalanceEnabled(!enabled);
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField("DELAY_REBALANCE_ENABLED"),
+        Boolean.toString(!enabled));
+    Assert.assertEquals(new InstanceConfig(instanceConfig.getRecord()).isDelayRebalanceEnabled(),
+        !enabled);
+    Assert.assertEquals(legacyRecord.getSimpleField("DELAY_REBALANCE_ENABLED"),
+        Boolean.toString(enabled));
+  }
+
   @Test
   public void testNotCheckingHostPortExistence() {
     InstanceConfig config = new InstanceConfig("node_0");
