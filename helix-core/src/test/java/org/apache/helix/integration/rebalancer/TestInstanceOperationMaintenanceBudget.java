@@ -23,6 +23,7 @@ import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.management.InstanceNotFoundException;
 import javax.management.ObjectName;
 
@@ -303,8 +304,13 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
    * InstancesUnderInstanceOperationMaintenanceGauge, computed from the instance configs it already
    * caches each pipeline run. Expired markers do not count and clearing a marker lowers the gauge.
    * Every instance stays live, so this test never touches Maintenance Mode.
+   *
+   * <p>It depends on the Maintenance Mode tests only to pin when it runs. TestNG can defer a
+   * method without dependencies until other classes have run their setup, and
+   * ZkTestBase#beforeClass unregisters every MBean, including this controller's ClusterStatus
+   * bean, which is registered only when the controller gains leadership.
    */
-  @Test
+  @Test(dependsOnMethods = "testUnmarkedEvacuatingInstanceHoldsMMUntilCleared")
   public void testMarkerGaugeTracksValidMarkers() throws Exception {
     String h0 = _participants.get(0).getInstanceName();
     String h1 = _participants.get(1).getInstanceName();
@@ -313,21 +319,30 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
       long now = System.currentTimeMillis();
       setMarker(h0, now + ONE_HOUR_MS);
       setMarker(h1, now + ONE_HOUR_MS);
-      Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 2L, TestHelper.WAIT_DURATION),
-          "Gauge must count both valid markers");
+      awaitMarkerGauge(2L, "Gauge must count both valid markers");
 
       // Write an expired marker, then clear a valid one. A correct gauge settles at 1. A gauge that
       // counted expired markers or never went down would stay at 2 or more throughout, so it cannot
       // pass this check even transiently while the two writes are being picked up.
       setMarker(h2, System.currentTimeMillis() - 1L);
       clearMarker(h0);
-      Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 1L, TestHelper.WAIT_DURATION),
+      awaitMarkerGauge(1L,
           "Gauge must drop to 1: the cleared marker leaves and the expired one never counts");
     } finally {
       restoreClusterState();
     }
-    Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 0L, TestHelper.WAIT_DURATION),
-        "Gauge must return to 0 once every marker is cleared");
+    awaitMarkerGauge(0L, "Gauge must return to 0 once every marker is cleared");
+  }
+
+  private void awaitMarkerGauge(long expected, String message) throws Exception {
+    AtomicLong lastRead = new AtomicLong();
+    boolean reached = TestHelper.verify(() -> {
+      lastRead.set(readMarkerGauge());
+      return lastRead.get() == expected;
+    }, TestHelper.WAIT_DURATION);
+    long last = lastRead.get();
+    Assert.assertTrue(reached, message + "; last read: "
+        + (last < 0 ? "ClusterStatus bean not registered" : String.valueOf(last)));
   }
 
   private long readMarkerGauge() throws Exception {
@@ -338,7 +353,7 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
       return (Long) ManagementFactory.getPlatformMBeanServer()
           .getAttribute(clusterBean, "InstancesUnderInstanceOperationMaintenanceGauge");
     } catch (InstanceNotFoundException e) {
-      // Not registered yet: return a value no assertion expects, so the caller keeps polling.
+      // Not registered: return a value no assertion expects, so the caller keeps polling.
       return -1L;
     }
   }
