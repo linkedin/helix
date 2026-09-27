@@ -19,9 +19,12 @@ package org.apache.helix.integration.rebalancer;
  * under the License.
  */
 
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import javax.management.InstanceNotFoundException;
+import javax.management.ObjectName;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
@@ -35,6 +38,8 @@ import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MaintenanceSignal;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
+import org.apache.helix.monitoring.mbeans.MonitorDomainNames;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.ZkHelixClusterVerifier;
 import org.testng.Assert;
@@ -47,7 +52,8 @@ import org.testng.annotations.Test;
  * from the cluster-wide offline budget that drives auto Maintenance Mode -- at both entry
  * (MAX_OFFLINE_INSTANCES_ALLOWED) and exit (NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT) -- while
  * preserving the trigger for unplanned losses. Also covers the EVACUATE auto-exit path,
- * which previously diverged from entry and could oscillate the cluster in and out of MM.
+ * which previously diverged from entry and could oscillate the cluster in and out of MM, and
+ * the controller's cluster-level gauge of instances under a valid marker.
  */
 public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
   private static final int NUM_NODE = 6;
@@ -290,6 +296,51 @@ public class TestInstanceOperationMaintenanceBudget extends ZkTestBase {
         "MM must auto-exit once the EVACUATE op clears and the offline budget drops to 0");
 
     restoreClusterState();
+  }
+
+  /**
+   * The controller publishes the number of instances under a valid marker as the cluster-level
+   * InstancesUnderInstanceOperationMaintenanceGauge, computed from the instance configs it already
+   * caches each pipeline run. Expired markers do not count and clearing a marker lowers the gauge.
+   * Every instance stays live, so this test never touches Maintenance Mode.
+   */
+  @Test
+  public void testMarkerGaugeTracksValidMarkers() throws Exception {
+    String h0 = _participants.get(0).getInstanceName();
+    String h1 = _participants.get(1).getInstanceName();
+    String h2 = _participants.get(2).getInstanceName();
+    try {
+      long now = System.currentTimeMillis();
+      setMarker(h0, now + ONE_HOUR_MS);
+      setMarker(h1, now + ONE_HOUR_MS);
+      Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 2L, TestHelper.WAIT_DURATION),
+          "Gauge must count both valid markers");
+
+      // Write an expired marker, then clear a valid one. A correct gauge settles at 1. A gauge that
+      // counted expired markers or never went down would stay at 2 or more throughout, so it cannot
+      // pass this check even transiently while the two writes are being picked up.
+      setMarker(h2, System.currentTimeMillis() - 1L);
+      clearMarker(h0);
+      Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 1L, TestHelper.WAIT_DURATION),
+          "Gauge must drop to 1: the cleared marker leaves and the expired one never counts");
+    } finally {
+      restoreClusterState();
+    }
+    Assert.assertTrue(TestHelper.verify(() -> readMarkerGauge() == 0L, TestHelper.WAIT_DURATION),
+        "Gauge must return to 0 once every marker is cleared");
+  }
+
+  private long readMarkerGauge() throws Exception {
+    ObjectName clusterBean = new ObjectName(String.format("%s:%s=%s",
+        MonitorDomainNames.ClusterStatus.name(), ClusterStatusMonitor.CLUSTER_DN_KEY,
+        _clusterName));
+    try {
+      return (Long) ManagementFactory.getPlatformMBeanServer()
+          .getAttribute(clusterBean, "InstancesUnderInstanceOperationMaintenanceGauge");
+    } catch (InstanceNotFoundException e) {
+      // Not registered yet: return a value no assertion expects, so the caller keeps polling.
+      return -1L;
+    }
   }
 
   private void setMarker(String instanceName, long expiresAtMillis) {

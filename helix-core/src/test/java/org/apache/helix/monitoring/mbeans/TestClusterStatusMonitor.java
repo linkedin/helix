@@ -987,6 +987,61 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testInstancesUnderInstanceOperationMaintenanceGauge() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestMaintenanceMarkerGaugeCluster");
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 0L);
+
+    long now = System.currentTimeMillis();
+    long oneHourMs = 3_600_000L;
+    Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
+    // A valid marker counts whether the instance is live or not and whatever its operation is,
+    // because that is how the budget it is checked against counts it.
+    instanceConfigMap.put("markedLive", configWithMarker("markedLive", now + oneHourMs));
+    InstanceConfig markedDisabled = configWithMarker("markedDisabledOffline", now + oneHourMs);
+    markedDisabled.setInstanceOperation(
+        org.apache.helix.constants.InstanceConstants.InstanceOperation.DISABLE);
+    instanceConfigMap.put("markedDisabledOffline", markedDisabled);
+    // An expired marker is still on the config but exempts nothing, so it must not count.
+    instanceConfigMap.put("expired", configWithMarker("expired", now - 1L));
+    instanceConfigMap.put("unmarked", new InstanceConfig("unmarked"));
+    Set<String> liveInstances =
+        new HashSet<>(ImmutableList.of("markedLive", "expired", "unmarked"));
+
+    updateInstanceStatus(monitor, liveInstances, instanceConfigMap);
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 2L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName,
+        "InstancesUnderInstanceOperationMaintenanceGauge"), 2L);
+
+    // A gauge, not a counter: clearing a marker lowers it on the next refresh.
+    instanceConfigMap.get("markedLive").setInstanceOperationMaintenanceUntilMs(
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    updateInstanceStatus(monitor, liveInstances, instanceConfigMap);
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 1L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName,
+        "InstancesUnderInstanceOperationMaintenanceGauge"), 1L);
+
+    // A new leader must not inherit the previous leadership period's count.
+    monitor.reset();
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 0L);
+  }
+
+  private static InstanceConfig configWithMarker(String instanceName, long untilMs) {
+    InstanceConfig config = new InstanceConfig(instanceName);
+    config.setInstanceOperationMaintenanceUntilMs(untilMs);
+    return config;
+  }
+
+  private static void updateInstanceStatus(ClusterStatusMonitor monitor, Set<String> liveInstances,
+      Map<String, InstanceConfig> instanceConfigMap) {
+    monitor.setClusterInstanceStatus(new HashSet<>(liveInstances),
+        new HashSet<>(instanceConfigMap.keySet()), Collections.emptySet(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceConfigMap,
+        Collections.emptyMap());
+  }
+
+  @Test
   public void testWagedFailureCategoryCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedCategoriesCluster");
     Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 0L);
