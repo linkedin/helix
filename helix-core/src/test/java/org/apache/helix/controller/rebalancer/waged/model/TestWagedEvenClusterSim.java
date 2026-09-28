@@ -26,6 +26,8 @@ package org.apache.helix.controller.rebalancer.waged.model;
  *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S1-S7
  *   mvn -o -pl helix-core test -Dtest='TestWagedEvenClusterSim#highSkewFix' \
  *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S8
+ *   mvn -o -pl helix-core test -Dtest='TestWagedEvenClusterSim#syntheticHighSkew' \
+ *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S9 (genuine >=1.5x)
  */
 
 import java.io.FileWriter;
@@ -565,6 +567,45 @@ public class TestWagedEvenClusterSim {
     System.out.println("  => preferredScoringKeys=[CU] targets the RIGHT dimension and FIXES CU leader skew (config-only,");
     System.out.println("     no data movement); DISK stays within its HARD cap. Trade-off: DISK leader spread is no");
     System.out.println("     longer optimized. Use the dimension your leaders are bottlenecked on (CU for a fan-out pool).");
+  }
+
+  // ---------- Experiment 9: fix on a SYNTHETIC LB=1.0 multi-dim workload tuned to genuinely reach >=1.5x ----------
+  // Two anti-correlated groups (CU-heavy/DISK-light with heterogeneous CU, and DISK-heavy/CU-light).
+  // Sweep the DISK-heavy weight (conflict strength); at each, report default vs pref=[CU]+TS=6.
+  @Test
+  public void syntheticHighSkew() throws Exception {
+    System.out.println("\n########### SYNTHETIC LB=1.0 multi-dim, tuned for >=1.5x: does pref=[CU]+TS=6 fix it? ###########");
+    System.out.printf("  %-10s %-16s %-11s %-11s %-9s %-9s%n", "diskConflict", "config", "leaderCU", "leaderDISK", "cuUtil", "dkUtil");
+    int NN = 30;
+    for (int diskB : new int[]{150, 280, 380, 430, 470}) {
+      for (Object[] v : new Object[][]{{"default(TS=3)", null, 3f}, {"pref=[CU],TS=6", java.util.Collections.singletonList("CU"), 6f}}) {
+        preferredKeys = (java.util.List<String>) v[1]; tsWeight = (Float) v[2];
+        nZones = 0; useDisk = true; capCU = 14000; capDisk = 14000; evn = 1; lm = 2;
+        instanceConfigs.clear(); hosts.clear(); resources.clear(); resParts.clear(); partW.clear(); partDisk.clear();
+        freshClusterConfig();
+        for (int i = 0; i < NN; i++) addHost();
+        long tcu = 0, tdk = 0;
+        // Group A: CU-heavy (heterogeneous 120..410, all < per-node fair share), DISK-light
+        int[] cuTiers = {120, 160, 220, 280, 340, 410};
+        for (int r = 0; r < 12; r++) { String rn = "A" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+          int cu = cuTiers[r % cuTiers.length];
+          for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, cu); partDisk.put(pn, 60); tcu += cu; tdk += 60; }
+          resParts.put(rn, ps); }
+        // Group B: DISK-heavy (weight = diskB), CU-light
+        for (int r = 0; r < 12; r++) { String rn = "B" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+          for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, 70); partDisk.put(pn, diskB); tcu += 70; tdk += diskB; }
+          resParts.put(rn, ps); }
+        String out;
+        try { Map<String, ResourceAssignment> a = place(new HashSet<>(resources), null, false);
+          out = String.format("%8.3fx    %8.3fx   %5.2f     %5.2f",
+              maxMean(leaderCU(a).values()), maxMean(leaderDisk(a).values()),
+              tcu * 3.0 / (NN * capCU), tdk * 3.0 / (NN * capDisk)); }
+        catch (HelixRebalanceException e) { out = "CAPACITY_DEFICIT"; }
+        System.out.printf("  %-10d %-16s %s%n", diskB, (String) v[0], out);
+      }
+    }
+    preferredKeys = null; tsWeight = 3f; setTopStateWeight(3f); useDisk = false;
+    System.out.println("  => wherever default reaches >=1.5x (strong DISK conflict), the fix should still flatten leader CU.");
   }
 
   private Map<String, ResourceAssignment> buildAndPlace(int nHosts, int cCU, int cDisk, boolean disk, int[][] res)
