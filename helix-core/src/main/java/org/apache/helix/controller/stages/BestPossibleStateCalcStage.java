@@ -46,7 +46,6 @@ import org.apache.helix.controller.rebalancer.MaintenanceRebalancer;
 import org.apache.helix.controller.rebalancer.Rebalancer;
 import org.apache.helix.controller.rebalancer.SemiAutoRebalancer;
 import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
-import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -379,40 +378,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     Map<String, Resource> remainingResourceMap = new HashMap<>(resourceMap);
     remainingResourceMap.keySet().removeAll(calculatedResourceMap.keySet());
 
-    // Resources that use the global per-instance partition limit (GreedyRebalanceStrategy with an
-    // active capacity scoreboard) share a single mutable CapacityNode set
-    // (ResourceControllerDataProvider#getSimpleCapacitySet). Computing them in parallel is
-    // non-deterministic: the order in which threads reserve capacity varies run-to-run, producing a
-    // different (though still valid) assignment each pipeline round and causing perpetual rebalance
-    // churn (and previously ConcurrentModificationException). They must be computed sequentially in
-    // a stable order so the assignment is deterministic across rounds.
-    List<Resource> globalCapacityResources = new ArrayList<>();
-    List<Resource> parallelResources = new ArrayList<>();
-    for (Resource resource : remainingResourceMap.values()) {
-      if (usesGlobalCapacityScoreboard(resource, cache)) {
-        globalCapacityResources.add(resource);
-      } else {
-        parallelResources.add(resource);
-      }
-    }
-
     if (logger.isDebugEnabled()) {
       LogUtil.logDebug(logger, _eventId, String.format(
-          "Computing best possible state: %d global-capacity resource(s) sequentially, "
-              + "%d resource(s) in parallel.", globalCapacityResources.size(),
-          parallelResources.size()));
+          "Computing best possible state for %d resource(s) in parallel.",
+          remainingResourceMap.size()));
     }
 
-    // Sequential, deterministic-order computation for the shared global-capacity resources.
-    globalCapacityResources.sort(Comparator.comparing(Resource::getResourceName));
-    for (Resource resource : globalCapacityResources) {
-      computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
-          output, failureResources);
-    }
-
-    // Parallel computation for the remaining resources.
     List<Callable<Void>> computeBestPossibleStateTasks = new ArrayList<>();
-    for (Resource resource : parallelResources) {
+    for (Resource resource : remainingResourceMap.values()) {
       computeBestPossibleStateTasks.add(() -> {
         computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
             output, failureResources);
@@ -439,25 +412,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   }
 
   /**
-   * A resource participates in the global per-instance partition-limit computation when the
-   * cluster-wide capacity scoreboard is active and the resource uses {@link GreedyRebalanceStrategy}.
-   * Such resources share a single mutable {@code CapacityNode} set and therefore must be computed
-   * sequentially and in a deterministic order to avoid non-deterministic assignments and churn.
-   */
-  private boolean usesGlobalCapacityScoreboard(Resource resource,
-      ResourceControllerDataProvider cache) {
-    if (cache.getSimpleCapacitySet() == null) {
-      return false;
-    }
-    IdealState idealState = cache.getIdealState(resource.getResourceName());
-    return idealState != null && GreedyRebalanceStrategy.class.getName()
-        .equals(idealState.getRebalanceStrategy());
-  }
-
-  /**
    * Computes the best possible state for a single resource and records the resource as failed (in
-   * {@code failureResources}) when the computation does not succeed. Shared by the sequential
-   * global-capacity path and the parallel path.
+   * {@code failureResources}) when the computation does not succeed.
    */
   private void computeAndRecordSingleResourceBestPossibleState(ClusterEvent event,
       ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput, Resource resource,

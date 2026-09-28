@@ -68,6 +68,15 @@ Helix is a generic cluster management framework used for automatic management of
 
 ## LinkedIn fork compatibility
 
+`GreedyRebalanceStrategy` and its cluster config
+`GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE` have been removed from this fork.
+Before upgrading, migrate any resource whose IdealState `REBALANCE_STRATEGY` names
+that class to an explicitly chosen supported strategy. There is no automatic
+fallback: an obsolete selector fails assignment calculation. Existing raw copies
+of the retired cluster key are preserved but ignored and no longer impose a cap.
+The separate `MAX_PARTITIONS_PER_INSTANCE` settings and WAGED capacity constraints
+are unchanged; they are not automatic replacements for Greedy's global count cap.
+
 The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, including
 `JobConfig.Builder.setMaxForcedReassignmentsPerTask(int)`,
 `JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
