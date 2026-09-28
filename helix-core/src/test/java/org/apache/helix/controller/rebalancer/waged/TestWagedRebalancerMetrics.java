@@ -59,6 +59,7 @@ import org.apache.helix.monitoring.mbeans.InstanceMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
+import org.apache.helix.monitoring.metrics.model.LatencyMetric;
 import org.apache.helix.monitoring.metrics.model.RatioMetric;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
@@ -204,6 +205,26 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
     Assert.assertEquals((long) metricCollector.getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceCounter.name(),
         CountMetric.class).getLastEmittedMetricValue(), 1L);
+
+    // O1: both the build and solve sub-phase latencies were measured for the baseline and the
+    // partial rebalance (a measured gauge reports >= 0; an unmeasured one would still be -1).
+    Assert.assertTrue((long) metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcBuildLatencyGauge
+            .name(), LatencyMetric.class).getLastEmittedMetricValue() >= 0L);
+    Assert.assertTrue((long) metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.GlobalBaselineCalcSolveLatencyGauge
+            .name(), LatencyMetric.class).getLastEmittedMetricValue() >= 0L);
+    Assert.assertTrue((long) metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceBuildLatencyGauge
+            .name(), LatencyMetric.class).getLastEmittedMetricValue() >= 0L);
+    Assert.assertTrue((long) metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceSolveLatencyGauge
+            .name(), LatencyMetric.class).getLastEmittedMetricValue() >= 0L);
+
+    // O2: the from-scratch assignment moved replicas, so the partial movement counter is positive.
+    Assert.assertTrue((long) metricCollector.getMetric(
+        WagedRebalancerMetricCollector.WagedRebalancerMetricNames.PartialRebalanceReplicaMovementCounter
+            .name(), CountMetric.class).getLastEmittedMetricValue() > 0L);
 
     // Wait for asyncReportBaselineDivergenceGauge to complete and verify.
     Assert.assertTrue(TestHelper.verify(() -> (double) metricCollector.getMetric(
