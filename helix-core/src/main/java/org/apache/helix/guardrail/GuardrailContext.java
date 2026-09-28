@@ -51,6 +51,7 @@ public class GuardrailContext {
   private final List<String> proposedRemovedInstanceTags;
   private final ClusterConfig currentClusterConfig;
   private final ClusterConfig proposedClusterConfig;
+  private final MinActiveReplicaChecker minActiveReplicaChecker;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -64,6 +65,7 @@ public class GuardrailContext {
     this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
     this.currentClusterConfig = builder.currentClusterConfig;
     this.proposedClusterConfig = builder.proposedClusterConfig;
+    this.minActiveReplicaChecker = builder.minActiveReplicaChecker;
   }
 
   public String getClusterName() {
@@ -150,6 +152,17 @@ public class GuardrailContext {
     return proposedClusterConfig;
   }
 
+  /**
+   * A read-only seam for evaluating whether an instance can stop serving its partitions without
+   * pushing any of them below {@code minActiveReplicas}, or {@code null} if the endpoint did not
+   * supply one. Rules call through this so the {@link org.apache.helix.HelixDataAccessor} the
+   * underlying check needs stays in the REST layer and the rule remains a pure, unit-testable
+   * function. See {@link MinActiveReplicaChecker}.
+   */
+  public MinActiveReplicaChecker getMinActiveReplicaChecker() {
+    return minActiveReplicaChecker;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -166,6 +179,7 @@ public class GuardrailContext {
     private List<String> proposedRemovedInstanceTags;
     private ClusterConfig currentClusterConfig;
     private ClusterConfig proposedClusterConfig;
+    private MinActiveReplicaChecker minActiveReplicaChecker;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -219,6 +233,11 @@ public class GuardrailContext {
 
     public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
       this.proposedClusterConfig = proposedClusterConfig;
+      return this;
+    }
+
+    public Builder minActiveReplicaChecker(MinActiveReplicaChecker minActiveReplicaChecker) {
+      this.minActiveReplicaChecker = minActiveReplicaChecker;
       return this;
     }
 
