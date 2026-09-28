@@ -44,7 +44,6 @@ import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.HelixManagerProperty;
 import org.apache.helix.InstanceType;
 import org.apache.helix.TestHelper;
-import org.apache.helix.api.config.RebalanceConfig;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
@@ -561,9 +560,9 @@ public class TestMultiZkConnectionConfig extends MultiZkTestBase {
         // Update IdealState fields with ZkBaseDataAccessor
         String resourcePath = "/" + cluster + "/IDEALSTATES/" + resource;
         ZNRecord is = dataAccessorZkAddr.get(resourcePath, null, AccessOption.PERSISTENT);
-        is.setSimpleField(RebalanceConfig.RebalanceConfigProperty.REBALANCER_CLASS_NAME.name(),
+        is.setSimpleField(IdealState.IdealStateProperty.REBALANCER_CLASS_NAME.name(),
             DelayedAutoRebalancer.class.getName());
-        is.setSimpleField(RebalanceConfig.RebalanceConfigProperty.REBALANCE_STRATEGY.name(),
+        is.setSimpleField(IdealState.IdealStateProperty.REBALANCE_STRATEGY.name(),
             CrushEdRebalanceStrategy.class.getName());
         dataAccessorZkAddr.set(resourcePath, is, AccessOption.PERSISTENT);
         idealStateMap.computeIfAbsent(cluster, recordList -> new HashMap<>())

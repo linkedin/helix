@@ -67,6 +67,27 @@ public class TestIdealState {
   }
 
   @Test
+  public void testRebalanceSettingsRetainDefaultsAndRoundTrip() {
+    IdealState idealState = new IdealState("resource");
+    Assert.assertEquals(idealState.getRebalanceDelay(), -1L);
+    Assert.assertEquals(idealState.getRebalanceMode(), RebalanceMode.SEMI_AUTO);
+    Assert.assertNull(idealState.getRebalancerClassName());
+
+    idealState.setRebalanceDelay(1000L);
+    idealState.setRebalanceMode(RebalanceMode.USER_DEFINED);
+    idealState.setRebalancerClassName("active.Rebalancer");
+    Assert.assertEquals(idealState.getRecord().getSimpleField("REBALANCE_DELAY"), "1000");
+    Assert.assertEquals(idealState.getRecord().getSimpleField("REBALANCE_MODE"), "USER_DEFINED");
+    Assert.assertEquals(idealState.getRecord().getSimpleField("REBALANCER_CLASS_NAME"),
+        "active.Rebalancer");
+
+    IdealState restored = new IdealState(new ZNRecord(idealState.getRecord()));
+    Assert.assertEquals(restored.getRebalanceDelay(), 1000L);
+    Assert.assertEquals(restored.getRebalanceMode(), RebalanceMode.USER_DEFINED);
+    Assert.assertEquals(restored.getRebalancerClassName(), "active.Rebalancer");
+  }
+
+  @Test
   public void testGetInstanceSet() {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
