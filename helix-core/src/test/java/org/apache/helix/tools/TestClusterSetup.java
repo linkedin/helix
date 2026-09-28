@@ -483,14 +483,11 @@ public class TestClusterSetup extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    List<String> sourceList = new ArrayList<String>();
-    sourceList.add("TestURL");
-    cloudConfigInitBuilder.setCloudInfoSources(sourceList);
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
 
+    // Since CloudInfoSources is missing, building this CUSTOMIZED config throws an exception
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 
-    // Since setCloudInfoProcessorName is missing, this add cluster call will throw an exception
     _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
   }
 
@@ -535,14 +532,11 @@ public class TestClusterSetup extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    List<String> sourceList = new ArrayList<String>();
-    sourceList.add("TestURL");
-    cloudConfigInitBuilder.setCloudInfoSources(sourceList);
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
 
+    // Since CloudInfoSources is missing, building this CUSTOMIZED config throws an exception
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 
-    // Since setCloudInfoProcessorName is missing, this add cluster call will throw an exception
     _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
   }
 
