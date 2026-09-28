@@ -690,6 +690,30 @@ public class TestWagedEvenClusterSim {
     }
   }
 
+  // ---------- Diagnostic: dimension symmetry — is the CU<->DISK trade symmetric, and why? ----------
+  @Test
+  public void dimensionSymmetryDiag() throws Exception {
+    System.out.println("\n########### DIMENSION SYMMETRY DIAG (from-scratch; utils + each scoring mode) ###########");
+    System.out.printf("  %-11s %-12s %-6s %-6s | %-9s %-9s %-9s %-9s%n",
+        "workload", "scoreDim", "cuU", "dkU", "leaderCU", "totalCU", "leaderDK", "totalDK");
+    for (String wl : new String[]{"synthetic", "prodB", "prodC"}) {
+      for (java.util.List<String> pref : java.util.Arrays.asList(
+          null, java.util.Collections.singletonList("CU"), java.util.Collections.singletonList("DISK"))) {
+        if (wl.equals("synthetic")) buildSyntheticWorkload(30, 14000, 14000, 430); else buildResourceWorkload(wl);
+        preferredKeys = pref; tsWeight = 6f; freshClusterConfig();
+        long tcu = 0, tdk = 0; for (String p : partW.keySet()) { tcu += partW.get(p); tdk += partDisk.getOrDefault(p, 0); }
+        double cuU = tcu * 3.0 / (hosts.size() * (double) capCU), dkU = tdk * 3.0 / (hosts.size() * (double) capDisk);
+        Map<String, ResourceAssignment> a = place(new HashSet<>(resources), null, false);
+        System.out.printf("  %-11s %-12s %-6.2f %-6.2f | %8.3fx %8.3fx %8.3fx %8.3fx%n",
+            wl, pref == null ? "max(default)" : pref.get(0), cuU, dkU,
+            maxMean(leaderCU(a).values()), maxMean(allCU(a).values()),
+            maxMean(leaderDisk(a).values()), maxMean(allDisk(a).values()));
+      }
+    }
+    preferredKeys = null; tsWeight = 3f; setTopStateWeight(3f); useDisk = false;
+    System.out.println("  => pref=[CU] skews DISK by how much vs pref=[DISK] skews CU? (symmetry); note which dim util is higher.");
+  }
+
   private Map<String, ResourceAssignment> buildAndPlace(int nHosts, int cCU, int cDisk, boolean disk, int[][] res)
       throws HelixRebalanceException {
     nZones = 0; useDisk = disk; capCU = cCU; capDisk = cDisk; evn = 1; lm = 2; tsWeight = 3f;
