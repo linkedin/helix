@@ -49,7 +49,6 @@ public class ResourceConfig extends HelixProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
     STATE_MODEL_FACTORY_NAME,
     MIN_ACTIVE_REPLICAS,
-    MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
@@ -95,20 +94,20 @@ public class ResourceConfig extends HelixProperty {
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int minActiveReplica, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled, stateModelFactoryName,
-        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag,
+        minActiveReplica, instanceGroupTag,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
       String stateModelFactoryName,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int minActiveReplica, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
@@ -129,10 +128,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (minActiveReplica >= 0) {
       _record.setIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), minActiveReplica);
-    }
-
-    if (maxPartitionsPerInstance >= 0) {
-      _record.setIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), maxPartitionsPerInstance);
     }
 
     if (instanceGroupTag != null) {
@@ -256,11 +251,6 @@ public class ResourceConfig extends HelixProperty {
           ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(),
           String.join(ACTIVE_STATES_DELIMITER, activeStates));
     }
-  }
-
-  public int getMaxPartitionsPerInstance() {
-    return _record.getIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.toString(),
-        Integer.MAX_VALUE);
   }
 
   /**
@@ -503,7 +493,6 @@ public class ResourceConfig extends HelixProperty {
     private Boolean _monitorDisabled;
     private String _stateModelFactoryName;
     private int _minActiveReplica = -1;
-    private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
@@ -555,15 +544,6 @@ public class ResourceConfig extends HelixProperty {
 
     public Builder setMinActiveReplica(int minActiveReplica) {
       _minActiveReplica = minActiveReplica;
-      return this;
-    }
-
-    public int getMaxPartitionsPerInstance() {
-      return _maxPartitionsPerInstance;
-    }
-
-    public Builder setMaxPartitionsPerInstance(int maxPartitionsPerInstance) {
-      _maxPartitionsPerInstance = maxPartitionsPerInstance;
       return this;
     }
 
@@ -684,7 +664,7 @@ public class ResourceConfig extends HelixProperty {
       // validate();
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
-          _stateModelFactoryName, _minActiveReplica, _maxPartitionsPerInstance,
+          _stateModelFactoryName, _minActiveReplica,
           _instanceGroupTag, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
@@ -724,9 +704,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord
         .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
             idealState.getInstanceGroupTag());
-    mergedZNRecord.setIntFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-        idealState.getMaxPartitionsPerInstance());
     mergedZNRecord.setSimpleFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
         idealState.getStateModelFactoryName());

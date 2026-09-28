@@ -676,7 +676,8 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
 
   static class MockAssignableReplica extends AssignableReplica {
     MockAssignableReplica(ResourceConfig resourceConfig, String partition, String replicaState) {
-      super(new ClusterConfig("testCluster"), resourceConfig, partition, replicaState, 1);
+      super(new ClusterConfig("testCluster"), resourceConfig, partition, replicaState, 1,
+          Integer.MAX_VALUE);
     }
   }
 
