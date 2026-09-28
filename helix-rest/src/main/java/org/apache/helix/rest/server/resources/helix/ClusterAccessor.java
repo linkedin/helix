@@ -719,7 +719,11 @@ public class ClusterAccessor extends AbstractHelixResource {
       switch (command) {
         case update:
           validateClusterConfigChange(clusterId, configAccessor, config, command);
-          configAccessor.updateClusterConfig(clusterId, config);
+          try {
+            configAccessor.updateClusterConfig(clusterId, config);
+          } catch (IllegalArgumentException ex) {
+            return badRequest(ex.getMessage());
+          }
           break;
         case delete: {
           validateClusterConfigChange(clusterId, configAccessor, config, command);

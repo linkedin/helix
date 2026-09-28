@@ -40,6 +40,7 @@ import com.sun.research.ws.wadl.HTTPMethods;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
@@ -89,6 +90,58 @@ public class TestClusterAccessor extends AbstractTestClass {
     for (String cluster : _clusters) {
       ClusterConfig clusterConfig = createClusterConfig(cluster);
       _configAccessor.setClusterConfig(cluster, clusterConfig);
+    }
+  }
+
+  @Test
+  public void testRetiredClusterConfigWriteGuard() throws IOException {
+    String cluster = "RetiredClusterConfigWriteGuard";
+    String retiredKey = "ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE";
+    _gSetupTool.addCluster(cluster, true);
+    try {
+      for (String oldValue : Arrays.asList(null, "3")) {
+        ClusterConfig stored = new ClusterConfig(cluster);
+        stored.setErrorOrRecoveryPartitionThresholdForLoadBalance(100);
+        if (oldValue != null) {
+          stored.getRecord().setSimpleField(retiredKey, oldValue);
+        }
+        _gZkClient.writeData(PropertyPathBuilder.clusterConfig(cluster), stored.getRecord());
+        ClusterConfig proposal = new ClusterConfig(stored.getRecord());
+        proposal.getRecord().setSimpleField(retiredKey, "5");
+        proposal.getRecord().setSimpleField("customKey", "must-not-be-written");
+        try (Response response = post("clusters/" + cluster + "/configs",
+            ImmutableMap.of("command", Command.update.name()),
+            Entity.entity(OBJECT_MAPPER.writeValueAsString(proposal.getRecord()),
+                MediaType.APPLICATION_JSON_TYPE),
+            Response.Status.BAD_REQUEST.getStatusCode(), true)) {
+          String body = response.readEntity(String.class);
+          Assert.assertTrue(body.contains(retiredKey));
+          Assert.assertTrue(body.contains("Use ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE"));
+        }
+        Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord(), stored.getRecord());
+      }
+
+      ClusterConfig roundTrip = _configAccessor.getClusterConfig(cluster);
+      roundTrip.getRecord().setSimpleField("customKey", "updated");
+      roundTrip.setErrorOrRecoveryPartitionThresholdForLoadBalance(101);
+      updateClusterConfigFromRest(cluster, roundTrip, Command.update);
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord(), roundTrip.getRecord());
+
+      ClusterConfig delta = new ClusterConfig(cluster);
+      delta.getRecord().setSimpleField("customKey", "unrelated");
+      updateClusterConfigFromRest(cluster, delta, Command.update);
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord()
+          .getSimpleField(retiredKey), "3");
+
+      ClusterConfig removal = new ClusterConfig(cluster);
+      removal.getRecord().setSimpleField(retiredKey, "");
+      updateClusterConfigFromRest(cluster, removal, Command.delete);
+      Assert.assertFalse(_configAccessor.getClusterConfig(cluster).getRecord().getSimpleFields()
+          .containsKey(retiredKey));
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster)
+          .getErrorOrRecoveryPartitionThresholdForLoadBalance(), 101);
+    } finally {
+      deleteTestCluster(cluster);
     }
   }
 
