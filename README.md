@@ -61,6 +61,18 @@ of the retired cluster key are preserved but ignored and no longer impose a cap.
 The separate `MAX_PARTITIONS_PER_INSTANCE` settings and WAGED capacity constraints
 are unchanged; they are not automatic replacements for Greedy's global count cap.
 
+The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, including
+`JobConfig.Builder.setMaxForcedReassignmentsPerTask(int)`,
+`JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
+Remove downstream API references and rebuild/release those callers before upgrading
+them to this Helix version. `MaxAttemptsPerTask` continues to control task attempts;
+retry, assignment, and `TerminalStateExpiry` behavior are unchanged.
+
+New job configurations and job-ID copies no longer emit the retired key. Legacy raw
+records may still contain it: reading them does not rewrite them, and rebuilding
+them through the typed builder ignores the key. No stored-record migration is
+required, and this change does not add rejection of unknown fields to generic APIs.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 

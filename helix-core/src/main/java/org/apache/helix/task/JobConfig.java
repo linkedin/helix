@@ -93,11 +93,6 @@ public class JobConfig extends ResourceConfig {
      * The maximum number of times the task rebalancer may attempt to execute a task.
      */
     MaxAttemptsPerTask,
-    @Deprecated
-    /**
-     * The maximum number of times Helix will intentionally move a failing task
-     */
-    MaxForcedReassignmentsPerTask,
     /**
      * The number of concurrent tasks that are allowed to run on an instance.
      */
@@ -164,7 +159,6 @@ public class JobConfig extends ResourceConfig {
   public static final int DEFAULT_MAX_ATTEMPTS_PER_TASK = 10;
   public static final int DEFAULT_NUM_CONCURRENT_TASKS_PER_INSTANCE = 1;
   public static final int DEFAULT_FAILURE_THRESHOLD = 0;
-  public static final int DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK = 0;
   public static final boolean DEFAULT_IGNORE_DEPENDENT_JOB_FAILURE = false;
   public static final int DEFAULT_NUMBER_OF_TASKS = 0;
   public static final long DEFAULT_JOB_EXECUTION_START_TIME = -1L;
@@ -184,8 +178,8 @@ public class JobConfig extends ResourceConfig {
         jobConfig.getTargetPartitionStates(), jobConfig.getCommand(),
         jobConfig.getJobCommandConfigMap(), jobConfig.getTimeout(), jobConfig.getTimeoutPerTask(),
         jobConfig.getNumConcurrentTasksPerInstance(), jobConfig.getMaxAttemptsPerTask(),
-        jobConfig.getMaxAttemptsPerTask(), jobConfig.getFailureThreshold(),
-        jobConfig.getTaskRetryDelay(), jobConfig.isIgnoreDependentJobFailure(),
+        jobConfig.getFailureThreshold(), jobConfig.getTaskRetryDelay(),
+        jobConfig.isIgnoreDependentJobFailure(),
         jobConfig.getTaskConfigMap(), jobConfig.getJobType(), jobConfig.getInstanceGroupTag(),
         jobConfig.getExecutionDelay(),
         jobConfig.getExecutionStart(), jobId, jobConfig.getExpiry(),
@@ -195,8 +189,7 @@ public class JobConfig extends ResourceConfig {
   private JobConfig(String workflow, String targetResource, List<String> targetPartitions,
       Set<String> targetPartitionStates, String command, Map<String, String> jobCommandConfigMap,
       long timeout, long timeoutPerTask, int numConcurrentTasksPerInstance, int maxAttemptsPerTask,
-      int maxForcedReassignmentsPerTask, int failureThreshold, long retryDelay,
-      boolean ignoreDependentJobFailure,
+      int failureThreshold, long retryDelay, boolean ignoreDependentJobFailure,
       Map<String, TaskConfig> taskConfigMap, String jobType, String instanceGroupTag,
       long executionDelay, long executionStart, String jobId, long expiry, long terminalStateExpiry,
       boolean rebalanceRunningTask) {
@@ -237,8 +230,6 @@ public class JobConfig extends ResourceConfig {
     }
     getRecord().setLongField(JobConfigProperty.TimeoutPerPartition.name(), timeoutPerTask);
     getRecord().setIntField(JobConfigProperty.MaxAttemptsPerTask.name(), maxAttemptsPerTask);
-    getRecord().setIntField(JobConfigProperty.MaxForcedReassignmentsPerTask.name(),
-        maxForcedReassignmentsPerTask);
     getRecord().setIntField(JobConfigProperty.FailureThreshold.name(), failureThreshold);
     getRecord().setIntField(JobConfigProperty.ConcurrentTasksPerInstance.name(),
         numConcurrentTasksPerInstance);
@@ -449,7 +440,6 @@ public class JobConfig extends ResourceConfig {
     private long _timeoutPerTask = DEFAULT_TIMEOUT_PER_TASK;
     private int _numConcurrentTasksPerInstance = DEFAULT_NUM_CONCURRENT_TASKS_PER_INSTANCE;
     private int _maxAttemptsPerTask = DEFAULT_MAX_ATTEMPTS_PER_TASK;
-    private int _maxForcedReassignmentsPerTask = DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK;
     private int _failureThreshold = DEFAULT_FAILURE_THRESHOLD;
     private long _retryDelay = DEFAULT_TASK_RETRY_DELAY;
     private long _executionStart = DEFAULT_JOB_EXECUTION_START_TIME;
@@ -476,7 +466,7 @@ public class JobConfig extends ResourceConfig {
 
       return new JobConfig(_workflow, _targetResource, _targetPartitions, _targetPartitionStates,
           _command, _commandConfig, _timeout, _timeoutPerTask, _numConcurrentTasksPerInstance,
-          _maxAttemptsPerTask, _maxForcedReassignmentsPerTask, _failureThreshold, _retryDelay,
+          _maxAttemptsPerTask, _failureThreshold, _retryDelay,
           _ignoreDependentJobFailure, _taskConfigMap, _jobType,
           _instanceGroupTag, _executionDelay, _executionStart, _jobId, _expiry,
           _terminalStateExpiry, _rebalanceRunningTask);
@@ -627,13 +617,6 @@ public class JobConfig extends ResourceConfig {
       return this;
     }
 
-    // This field will be ignored by Helix
-    @Deprecated
-    public Builder setMaxForcedReassignmentsPerTask(int v) {
-      _maxForcedReassignmentsPerTask = v;
-      return this;
-    }
-
     public Builder setFailureThreshold(int v) {
       _failureThreshold = v;
       return this;
@@ -752,10 +735,6 @@ public class JobConfig extends ResourceConfig {
         throw new IllegalArgumentException(String
             .format("Job %s, %s has invalid value %s", _jobId, JobConfigProperty.MaxAttemptsPerTask,
                 _maxAttemptsPerTask));
-      }
-      if (_maxForcedReassignmentsPerTask < 0) {
-        throw new IllegalArgumentException(String.format("Job %s, %s has invalid value %s", _jobId,
-            JobConfigProperty.MaxForcedReassignmentsPerTask, _maxForcedReassignmentsPerTask));
       }
       if (_failureThreshold < 0) {
         throw new IllegalArgumentException(String
