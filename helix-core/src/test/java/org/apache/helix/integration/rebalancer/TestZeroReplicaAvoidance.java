@@ -113,7 +113,6 @@ public class TestZeroReplicaAvoidance extends ZkTestBase
     manager.connect();
     manager.addExternalViewChangeListener(this);
     manager.addIdealStateChangeListener(this);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // Start half number of nodes.
     int i = 0;
@@ -154,7 +153,6 @@ public class TestZeroReplicaAvoidance extends ZkTestBase
     manager.connect();
     manager.addExternalViewChangeListener(this);
     manager.addIdealStateChangeListener(this);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // Start half number of nodes.
     int i = 0;

@@ -142,7 +142,6 @@ public class TestStateTransitionCancellation extends TaskTestBase {
     // Enable cancellation
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
     clusterConfig.stateTransitionCancelEnabled(true);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
 
     // Reenable resource

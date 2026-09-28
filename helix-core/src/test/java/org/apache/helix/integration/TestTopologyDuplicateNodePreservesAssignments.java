@@ -95,7 +95,6 @@ public class TestTopologyDuplicateNodePreservesAssignments extends ZkTestBase {
     clusterConfig.setFaultZoneType("zone");
     clusterConfig.setTopology("/zone");
     clusterConfig.setTopologyAwareEnabled(true);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
 
     // Start controller

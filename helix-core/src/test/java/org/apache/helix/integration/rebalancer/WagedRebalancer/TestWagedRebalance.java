@@ -107,7 +107,6 @@ public class TestWagedRebalance extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // It's a hacky way to workaround the package restriction. Note that we still want to hide the
     // AssignmentMetadataStore constructor to prevent unexpected update to the assignment records.
