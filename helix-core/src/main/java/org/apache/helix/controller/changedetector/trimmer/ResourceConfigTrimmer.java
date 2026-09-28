@@ -49,8 +49,7 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
       .of(FieldType.SIMPLE_FIELD, ImmutableSet
               .of(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
                   ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-                  ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-                  ResourceConfigProperty.INSTANCE_GROUP_TAG.name()),
+                  ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name()),
           FieldType.MAP_FIELD, ImmutableSet
               .of(ResourceConfigProperty.PARTITION_CAPACITY_MAP.name()));
 

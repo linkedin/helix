@@ -20,6 +20,7 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,11 +36,44 @@ import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Resource;
+import org.apache.helix.task.JobConfig;
+import org.apache.helix.task.WorkflowConfig;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.testng.AssertJUnit;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 public class TestResourceComputationStage extends BaseStageTest {
+  @Test
+  public void testJobTagRetainedWithoutIdealState() throws Exception {
+    WorkflowConfig workflow = new WorkflowConfig.Builder("workflow").build();
+    workflow.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyWorkflowTag");
+    JobConfig job = new JobConfig.Builder().setWorkflow("workflow")
+        .setTargetResource("target").setCommand("command").setInstanceGroupTag("jobTag").build();
+    job.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyJobTag");
+    WorkflowControllerDataProvider cache = mock(WorkflowControllerDataProvider.class);
+    when(cache.getWorkflowConfigMap()).thenReturn(Collections.singletonMap("workflow", workflow));
+    when(cache.getJobConfigMap()).thenReturn(Collections.singletonMap("job", job));
+    when(cache.getIdealStates()).thenReturn(Collections.emptyMap());
+    when(cache.getLiveInstances()).thenReturn(Collections.emptyMap());
+    ClusterEvent taskEvent = new ClusterEvent(ClusterEventType.Unknown);
+    taskEvent.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+
+    new ResourceComputationStage().process(taskEvent);
+
+    Map<String, Resource> resources = taskEvent.getAttribute(AttributeName.RESOURCES.name());
+    AssertJUnit.assertEquals(resources.size(), 2);
+    AssertJUnit.assertEquals(resources.get("job").getResourceTag(), "jobTag");
+    AssertJUnit.assertEquals(resources.get("job").getStateModelDefRef(), "Task");
+    AssertJUnit.assertNull(resources.get("workflow").getResourceTag());
+    AssertJUnit.assertEquals(job.getInstanceGroupTag(), "jobTag");
+    AssertJUnit.assertEquals(job.getRecord().getSimpleField("INSTANCE_GROUP_TAG"), "legacyJobTag");
+    AssertJUnit.assertEquals(workflow.getRecord().getSimpleField("INSTANCE_GROUP_TAG"),
+        "legacyWorkflowTag");
+  }
+
   /**
    * Case where we have one resource in IdealState
    * @throws Exception

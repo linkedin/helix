@@ -23,6 +23,7 @@ import java.util.Map;
 
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.slf4j.Logger;
@@ -54,18 +55,19 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
   /**
    * @param clusterConfig  The cluster config.
    * @param resourceConfig The resource config for the resource which contains the replication.
+   * @param idealState     The resource ideal state, which owns the instance-group placement tag.
    * @param partitionName  The replication's partition name.
    * @param replicaState   The state of the replication.
    * @param statePriority  The priority of the replication's state.
    */
   public AssignableReplica(ClusterConfig clusterConfig, ResourceConfig resourceConfig,
-      String partitionName, String replicaState, int statePriority) {
+      IdealState idealState, String partitionName, String replicaState, int statePriority) {
     _partitionName = partitionName;
     _replicaState = replicaState;
     _statePriority = statePriority;
     _resourceName = resourceConfig.getResourceName();
     _capacityUsage = WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
-    _resourceInstanceGroupTag = resourceConfig.getInstanceGroupTag();
+    _resourceInstanceGroupTag = idealState.getInstanceGroupTag();
     _resourceMaxPartitionsPerInstance = resourceConfig.getMaxPartitionsPerInstance();
     _replicaKey = generateReplicaKey(_resourceName, _partitionName,_replicaState);
   }

@@ -251,7 +251,25 @@ public class TestHelixPropoertyTimmer {
       Assert.assertEquals(resourceConfig.getRecord().getSimpleField(legacyField), "legacyValue");
     }
     Assert.assertEquals(trimmedIdealState.getInstanceGroupTag(), "placementTag");
-    Assert.assertEquals(trimmedResourceConfig.getInstanceGroupTag(), "placementTag");
+    Assert.assertFalse(trimmedResourceConfig.getRecord().getSimpleFields()
+        .containsKey("INSTANCE_GROUP_TAG"));
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"),
+        "placementTag");
+  }
+
+  @Test
+  public void testOnlyIdealStateTagChangesAffectTopology() {
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+    _resourceConfigMap.get(RESOURCE_NAME).getRecord()
+        .setSimpleField("INSTANCE_GROUP_TAG", "legacyTag");
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG).isEmpty());
+
+    _idealStateMap.get(RESOURCE_NAME).setInstanceGroupTag("placementTag");
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
   }
 
   private void modifyListMapfieldKeysAndVerifyDetector(HelixProperty helixProperty,
