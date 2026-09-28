@@ -25,6 +25,8 @@ import java.util.Optional;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.SharedMetricRegistries;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
@@ -141,6 +143,7 @@ public class AbstractHelixResource extends AbstractResource {
   protected Optional<Response> preflight(GuardrailPipeline pipeline, GuardrailContext context,
       boolean force, boolean dryRun) {
     ValidationResult result = pipeline.validate(context);
+    recordGuardrailMetrics(pipeline, result, force, dryRun);
     if (dryRun) {
       return Optional.of(verdictResponse(result, Response.Status.OK));
     }
@@ -153,6 +156,21 @@ public class AbstractHelixResource extends AbstractResource {
       return Optional.empty();
     }
     return Optional.of(verdictResponse(result, Response.Status.BAD_REQUEST));
+  }
+
+  /**
+   * Increment per-rule guard rail counters for this evaluation so operators can track how often each
+   * rule blocked an unsafe mutation. Metric emission is best-effort and must never break the request
+   * path, so any failure here is swallowed.
+   */
+  private void recordGuardrailMetrics(GuardrailPipeline pipeline, ValidationResult result,
+      boolean force, boolean dryRun) {
+    try {
+      MetricRegistry metrics = SharedMetricRegistries.getOrCreate(getNamespace());
+      GuardrailMetrics.record(metrics, pipeline.getRuleIds(), result, force, dryRun);
+    } catch (Exception e) {
+      LOG.warn("Failed to record guard rail metrics", e);
+    }
   }
 
   private Response verdictResponse(ValidationResult result, Response.Status status) {
