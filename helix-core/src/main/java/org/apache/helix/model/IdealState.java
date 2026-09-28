@@ -32,7 +32,6 @@ import java.util.TreeSet;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixProperty;
 import org.apache.helix.controller.rebalancer.Rebalancer;
-import org.apache.helix.model.ResourceConfig.ResourceConfigProperty;
 import org.apache.helix.task.JobRebalancer;
 import org.apache.helix.task.TaskRebalancer;
 import org.apache.helix.task.WorkflowRebalancer;
@@ -56,6 +55,7 @@ public class IdealState extends HelixProperty {
     REPLICAS,
     MIN_ACTIVE_REPLICAS,
     REBALANCE_DELAY,
+    DELAY_REBALANCE_ENABLED,
     @Deprecated
     IDEAL_STATE_MODE,
     REBALANCE_MODE,
@@ -225,7 +225,7 @@ public class IdealState extends HelixProperty {
    * @param enabled
    */
   public void setDelayRebalanceEnabled(boolean enabled) {
-    _record.setBooleanField(ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(), enabled);
+    _record.setBooleanField(IdealStateProperty.DELAY_REBALANCE_ENABLED.name(), enabled);
   }
 
   /**
@@ -233,7 +233,7 @@ public class IdealState extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalanceEnabled() {
-    return _record.getBooleanField(ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
+    return _record.getBooleanField(IdealStateProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**

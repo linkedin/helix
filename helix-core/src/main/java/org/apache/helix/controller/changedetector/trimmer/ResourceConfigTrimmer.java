@@ -42,7 +42,6 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
    * STATE_MODEL_DEF_REF,
    * REPLICAS,
    * EXTERNAL_VIEW_DISABLED,
-   * DELAY_REBALANCE_ENABLED,
    * HELIX_ENABLED
    */
   private static final Map<FieldType, Set<String>> STATIC_NON_TRIMMABLE_FIELD_MAP = ImmutableMap
