@@ -28,6 +28,8 @@ package org.apache.helix.controller.rebalancer.waged.model;
  *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S8
  *   mvn -o -pl helix-core test -Dtest='TestWagedEvenClusterSim#syntheticHighSkew' \
  *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S9 (genuine >=1.5x)
+ *   mvn -o -pl helix-core test -Dtest='TestWagedEvenClusterSim#applyFixToSkewed' \
+ *       -Dcheckstyle.skip=true -DfailIfNoTests=false -Dsurefire.useFile=false            # S10 (anchored/live)
  */
 
 import java.io.FileWriter;
@@ -257,6 +259,17 @@ public class TestWagedEvenClusterSim {
     for (ResourceAssignment ra : a.values()) for (Partition p : ra.getMappedPartitions()) { long w = partDisk.getOrDefault(p.getPartitionName(), 0);
       for (Map.Entry<String, String> e : ra.getReplicaMap(p).entrySet()) if (prio(e.getValue()) == 1) m.merge(e.getKey(), w, Long::sum); }
     return m;
+  }
+  private Map<String, String> masterHost(Map<String, ResourceAssignment> a) {
+    Map<String, String> o = new HashMap<>();
+    for (ResourceAssignment ra : a.values()) for (Partition p : ra.getMappedPartitions())
+      for (Map.Entry<String, String> e : ra.getReplicaMap(p).entrySet()) if (prio(e.getValue()) == 1) o.put(p.getPartitionName(), e.getKey());
+    return o;
+  }
+  private int churn(Map<String, ResourceAssignment> a, Map<String, ResourceAssignment> b) {
+    Map<String, String> ma = masterHost(a), mb = masterHost(b); int mv = 0;
+    for (Map.Entry<String, String> e : ma.entrySet()) { String nb = mb.get(e.getKey()); if (nb != null && !e.getValue().equals(nb)) mv++; }
+    return mv;
   }
   private static double mean(java.util.Collection<Long> v) { return v.stream().mapToLong(i -> i).average().orElse(0); }
   private static double maxMean(java.util.Collection<Long> v) { double mn = mean(v); long mx = v.stream().mapToLong(i -> i).max().orElse(0); return mn == 0 ? 0 : mx / mn; }
@@ -606,6 +619,45 @@ public class TestWagedEvenClusterSim {
     }
     preferredKeys = null; tsWeight = 3f; setTopStateWeight(3f); useDisk = false;
     System.out.println("  => wherever default reaches >=1.5x (strong DISK conflict), the fix should still flatten leader CU.");
+  }
+
+  // ---------- Experiment 10: apply the fix to a CURRENTLY-SKEWED cluster (anchored, live config change) ----------
+  // Unlike S1-S9 (each config computed FROM SCRATCH/memory-less), this STARTS from the skewed default
+  // assignment and recomputes with pref=[CU]+TS=6 ANCHORED to it (as a production config-change global
+  // rebalance would, with PartitionMovement resisting churn), and reports how much leadership moves.
+  @Test
+  public void applyFixToSkewed() throws HelixRebalanceException {
+    System.out.println("\n########### APPLY FIX TO A CURRENTLY-SKEWED CLUSTER (anchored; models a live config change) ###########");
+    int NN = 30, diskB = 430;
+    preferredKeys = null; tsWeight = 3f; nZones = 0; useDisk = true; capCU = 14000; capDisk = 14000; evn = 1; lm = 2;
+    instanceConfigs.clear(); hosts.clear(); resources.clear(); resParts.clear(); partW.clear(); partDisk.clear();
+    freshClusterConfig();
+    for (int i = 0; i < NN; i++) addHost();
+    int[] cuTiers = {120, 160, 220, 280, 340, 410};
+    for (int r = 0; r < 12; r++) { String rn = "A" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+      int cu = cuTiers[r % cuTiers.length];
+      for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, cu); partDisk.put(pn, 60); }
+      resParts.put(rn, ps); }
+    for (int r = 0; r < 12; r++) { String rn = "B" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+      for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, 70); partDisk.put(pn, diskB); }
+      resParts.put(rn, ps); }
+    // 1) 'current' skewed assignment (default config, from scratch)
+    Map<String, ResourceAssignment> skewed = place(new HashSet<>(resources), null, false);
+    double skew0 = maxMean(leaderCU(skewed).values());
+    // 2) change the 2 configs, recompute ANCHORED to the skewed assignment (live global rebalance)
+    preferredKeys = java.util.Collections.singletonList("CU"); tsWeight = 6f; freshClusterConfig();
+    Map<String, ResourceAssignment> anchored = place(new HashSet<>(resources), skewed, true);
+    double skewA = maxMean(leaderCU(anchored).values());
+    int moves = churn(skewed, anchored), totalParts = partW.size();
+    // 3) reference: same config from scratch (de-anchored)
+    Map<String, ResourceAssignment> fresh = place(new HashSet<>(resources), null, false);
+    double skewF = maxMean(leaderCU(fresh).values());
+    System.out.printf("  current skewed (default, from scratch)      leader CU = %.3fx%n", skew0);
+    System.out.printf("  after fix, ANCHORED to skewed (live change) leader CU = %.3fx  (leader moves %d/%d = %.0f%%)%n",
+        skewA, moves, totalParts, 100.0 * moves / totalParts);
+    System.out.printf("  fix from scratch (de-anchored reference)    leader CU = %.3fx%n", skewF);
+    preferredKeys = null; tsWeight = 3f; setTopStateWeight(3f); useDisk = false;
+    System.out.println("  => applying the 2 configs to a skewed cluster re-evens it; the % is the leadership-movement cost.");
   }
 
   private Map<String, ResourceAssignment> buildAndPlace(int nHosts, int cCU, int cDisk, boolean disk, int[][] res)
