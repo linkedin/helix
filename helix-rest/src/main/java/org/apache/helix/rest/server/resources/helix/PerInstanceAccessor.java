@@ -484,7 +484,6 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @QueryParam("instanceOperation") InstanceConstants.InstanceOperation instanceOperation,
       @QueryParam("instanceOperationSource") InstanceConstants.InstanceOperationSource instanceOperationSource,
       @QueryParam("reason") String reason,
-      @Deprecated @QueryParam("instanceDisabledType") String disabledType,
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
@@ -509,14 +508,6 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           admin.enableInstance(clusterId, instanceName, true);
           break;
         case disable: {
-          InstanceConstants.InstanceDisabledType disabledTypeEnum = null;
-          if (disabledType != null) {
-            try {
-              disabledTypeEnum = InstanceConstants.InstanceDisabledType.valueOf(disabledType);
-            } catch (IllegalArgumentException ex) {
-              return badRequest("Invalid instanceDisabledType!");
-            }
-          }
           // Guard rail: block (or simulate) a disable that would push a partition this instance
           // currently hosts below its minActiveReplicas on the remaining instances. Disabling drains
           // the instance's replicas, so an unchecked disable can silently reduce availability or lose
@@ -548,7 +539,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                     + "instance {} in cluster {} (reason: {}); force overrides the verdict, so the "
                     + "min-active what-if is skipped.", instanceName, clusterId, disabledReason);
           }
-          admin.enableInstance(clusterId, instanceName, false, disabledTypeEnum, disabledReason);
+          admin.enableInstance(clusterId, instanceName, false, disabledReason);
           break;
         }
 
