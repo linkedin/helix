@@ -36,9 +36,12 @@ import org.apache.helix.HelixException;
 import org.apache.helix.task.beans.JobBean;
 import org.apache.helix.task.beans.WorkflowBean;
 import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 import org.yaml.snakeyaml.inspector.TagInspector;
+import org.yaml.snakeyaml.introspector.MissingProperty;
+import org.yaml.snakeyaml.introspector.Property;
 import org.yaml.snakeyaml.nodes.Tag;
 
 /**
@@ -129,6 +132,8 @@ public class Workflow {
    *     command : AnotherTask
    *     ...
    * </pre>
+   * The retired job-level {@code disableExternalView} field is accepted and ignored.
+   * Other unrecognized YAML fields are still rejected.
    * @param yaml A YAML string of the above form
    * @return A {@link Workflow} object.
    */
@@ -148,7 +153,16 @@ public class Workflow {
       }
     };
     options.setTagInspector(tagInspector);
-    Yaml yaml = new Yaml(new Constructor(WorkflowBean.class, options));
+    Constructor constructor = new Constructor(WorkflowBean.class, options);
+    // Accept legacy job YAML without retaining an obsolete JobBean property.
+    constructor.addTypeDescription(new TypeDescription(JobBean.class) {
+      @Override
+      public Property getProperty(String name) {
+        return "disableExternalView".equals(name) ? new MissingProperty(name)
+            : super.getProperty(name);
+      }
+    });
+    Yaml yaml = new Yaml(constructor);
     WorkflowBean wf = (WorkflowBean) yaml.load(reader);
     Builder workflowBuilder = new Builder(wf.name);
 
