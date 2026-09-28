@@ -38,6 +38,7 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
   /**
    * The following fields are considered as non-topology related.
    * MONITORING_DISABLED,
+   * NUM_PARTITIONS,
    * STATE_MODEL_DEF_REF,
    * REPLICAS,
    * MAX_PARTITIONS_PER_INSTANCE,
@@ -47,8 +48,7 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
    */
   private static final Map<FieldType, Set<String>> STATIC_NON_TRIMMABLE_FIELD_MAP = ImmutableMap
       .of(FieldType.SIMPLE_FIELD, ImmutableSet
-              .of(ResourceConfigProperty.NUM_PARTITIONS.name(),
-                  ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
+              .of(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
                   ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
                   ResourceConfigProperty.INSTANCE_GROUP_TAG.name()),
           FieldType.MAP_FIELD, ImmutableSet

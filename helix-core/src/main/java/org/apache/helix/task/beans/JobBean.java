@@ -47,7 +47,6 @@ public class JobBean {
   public long taskRetryDelay = JobConfig.DEFAULT_TASK_RETRY_DELAY;
   public long executionDelay = JobConfig.DEFAULT_Job_EXECUTION_DELAY_TIME;
   public long executionStart = JobConfig.DEFAULT_JOB_EXECUTION_START_TIME;
-  public boolean disableExternalView = JobConfig.DEFAULT_DISABLE_EXTERNALVIEW;
   public boolean ignoreDependentJobFailure = JobConfig.DEFAULT_IGNORE_DEPENDENT_JOB_FAILURE;
   public int numberOfTasks = JobConfig.DEFAULT_NUMBER_OF_TASKS;
   public boolean rebalanceRunningTask = JobConfig.DEFAULT_REBALANCE_RUNNING_TASK;

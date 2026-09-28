@@ -186,19 +186,17 @@ public class TestResourceConfig {
 
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
-    ResourceConfig resourceConfig = new ResourceConfig("resource", false, 2, "DEFAULT",
-        1, "placementTag", true, false, null, null, null, null, true);
-    Assert.assertEquals(resourceConfig.getNumPartitions(), 2);
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "DEFAULT",
+        1, "placementTag", null, null, null, null, true);
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "DEFAULT");
     Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
     Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
-    Assert.assertTrue(resourceConfig.isEnabled());
     Assert.assertFalse(resourceConfig.isMonitoringDisabled());
-    Assert.assertFalse(resourceConfig.isExternalViewDisabled());
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
-            "STATE_MODEL_DEF_REF", "REPLICAS", "MAX_PARTITIONS_PER_INSTANCE"}) {
+            "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
+            "EXTERNAL_VIEW_DISABLED", "MAX_PARTITIONS_PER_INSTANCE"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -233,30 +231,23 @@ public class TestResourceConfig {
         ResourceConfig.mergeIdealStateWithResourceConfig(null, testIdealState);
     Assert.assertEquals(mergedResourceConfig.getInstanceGroupTag(),
         testIdealState.getInstanceGroupTag());
-    Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testIdealState.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testIdealState.getStateModelFactoryName());
     Assert.assertEquals(mergedResourceConfig.getMinActiveReplica(),
         testIdealState.getMinActiveReplicas());
-    Assert
-        .assertEquals(mergedResourceConfig.isEnabled().booleanValue(), testIdealState.isEnabled());
     for (String legacyField :
-        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
+        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
+            "MAX_PARTITIONS_PER_INSTANCE"}) {
       Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
-    Assert.assertEquals(mergedResourceConfig.isExternalViewDisabled().booleanValue(),
-        testIdealState.isExternalViewDisabled());
     Assert.assertEquals(Boolean.valueOf(mergedResourceConfig
         .getSimpleConfig(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name()))
         .booleanValue(), testIdealState.isDelayRebalanceEnabled());
     // Test priority, Resource Config field has higher priority.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
-    configBuilder.setNumPartitions(2);
     configBuilder.setStateModelFactoryName("testRCFactory");
     configBuilder.setMinActiveReplica(2);
-    configBuilder.setHelixEnabled(false);
-    configBuilder.setExternalViewDisabled(true);
     testConfig = configBuilder.build();
     testConfig.getRecord().setSimpleField("RESOURCE_GROUP_NAME", "testRCGroup");
     testConfig.getRecord().setSimpleField("RESOURCE_TYPE", "RCType");
@@ -265,18 +256,14 @@ public class TestResourceConfig {
         ResourceConfig.mergeIdealStateWithResourceConfig(testConfig, testIdealState);
     Assert
         .assertEquals(mergedResourceConfig.getInstanceGroupTag(), testConfig.getInstanceGroupTag());
-    Assert.assertEquals(mergedResourceConfig.getNumPartitions(), testConfig.getNumPartitions());
     Assert.assertEquals(mergedResourceConfig.getStateModelFactoryName(),
         testConfig.getStateModelFactoryName());
     Assert
         .assertEquals(mergedResourceConfig.getMinActiveReplica(), testConfig.getMinActiveReplica());
-    Assert.assertEquals(mergedResourceConfig.isEnabled(), testConfig.isEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
       Assert.assertEquals(mergedResourceConfig.getRecord().getSimpleField(legacyField),
           testConfig.getRecord().getSimpleField(legacyField));
     }
-    Assert.assertEquals(mergedResourceConfig.isExternalViewDisabled(),
-        testConfig.isExternalViewDisabled());
   }
 }

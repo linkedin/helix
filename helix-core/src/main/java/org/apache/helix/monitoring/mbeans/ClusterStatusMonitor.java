@@ -182,6 +182,9 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
       new ConcurrentHashMap<>();
 
+  // Cluster-level count of instances under a valid instance-operation maintenance marker
+  private final AtomicLong _instancesUnderInstanceOperationMaintenance = new AtomicLong(0L);
+
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, InstanceMonitor> _instanceMonitorMap =
@@ -337,6 +340,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         InstanceConstants.InstanceOperation.UNKNOWN, new AtomicLong(0L)).get();
   }
 
+  @Override
+  public long getInstancesUnderInstanceOperationMaintenanceGauge() {
+    return _instancesUnderInstanceOperationMaintenance.get();
+  }
+
   private void register(Object bean, ObjectName name) {
     try {
       if (_beanServer.isRegistered(name)) {
@@ -373,7 +381,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param disabledPartitions a map of instance name to the set of partitions disabled on it
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
-   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation tracking)
+   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation and
+   *          instance-operation maintenance marker tracking)
    * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
@@ -513,6 +522,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         count.set(0L);
       }
 
+      // Counted into a local and published once, so a concurrent read never sees a partial count.
+      long instancesUnderMaintenance = 0L;
       if (instanceConfigMap != null) {
         for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
           InstanceConfig config = entry.getValue();
@@ -530,8 +541,13 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
             // If operation is not in the map (shouldn't happen), default to ENABLE
             _perOperationInstanceCount.get(InstanceConstants.InstanceOperation.ENABLE).incrementAndGet();
           }
+
+          if (config != null && config.isUnderInstanceOperationMaintenance(now)) {
+            instancesUnderMaintenance++;
+          }
         }
       }
+      _instancesUnderInstanceOperationMaintenance.set(instancesUnderMaintenance);
 
       // Apply the CurrentState-derived actual partition gauges while still holding the lock,
       // so that bean registration and gauge population are observed together. Registered instances
@@ -1000,6 +1016,43 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  /**
+   * Records capacity rejections observed during one mapping-calculation pass.
+   * <p>
+   * The attribution is split across the two MBeans that already exist rather than emitting one
+   * attribute per (resource, instance) pair: {@code ResourceMonitor} answers "this resource is
+   * being refused" and {@code InstanceMonitor} answers "this instance is refusing placements".
+   * That keeps both halves of the attribution at R + I attributes instead of R x I, and avoids
+   * adding unbounded, never-decaying instance-named attributes to every resource MBean.
+   *
+   * @param rejectionsByResource Resource name to (instance name to rejection count for this pass)
+   */
+  public void recordMappingCapacityRejections(
+      Map<String, Map<String, Long>> rejectionsByResource) {
+    Map<String, Long> perInstanceTotals = new HashMap<>();
+    for (Map.Entry<String, Map<String, Long>> resourceEntry : rejectionsByResource.entrySet()) {
+      long resourceTotal = 0L;
+      for (Map.Entry<String, Long> instanceEntry : resourceEntry.getValue().entrySet()) {
+        long count = instanceEntry.getValue();
+        resourceTotal += count;
+        perInstanceTotals.merge(instanceEntry.getKey(), count, Long::sum);
+      }
+      ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceEntry.getKey());
+      if (resourceMonitor != null) {
+        resourceMonitor.incrementMappingCapacityRejectionCounter(resourceTotal);
+      }
+    }
+
+    for (Map.Entry<String, Long> entry : perInstanceTotals.entrySet()) {
+      // Instance monitors are registered from the live instance list, so an instance that just
+      // left the cluster may have no monitor. Skipping it is correct: nothing is left to report.
+      InstanceMonitor instanceMonitor = _instanceMonitorMap.get(entry.getKey());
+      if (instanceMonitor != null) {
+        instanceMonitor.incrementMappingCapacityRejectionCounter(entry.getValue());
+      }
+    }
+  }
+
   private ResourceMonitor getOrCreateResourceMonitor(String resourceName) {
     try {
       if (!_resourceMonitorMap.containsKey(resourceName)) {
@@ -1055,6 +1108,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _disabledInstances.clear();
       _disabledPartitions.clear();
       _oldDisabledPartitions.clear();
+      _instancesUnderInstanceOperationMaintenance.set(0L);
       _rebalanceFailure = false;
       _maxInstanceMsgQueueSize.set(0L);
       _totalPastDueMsgSize.set(0L);

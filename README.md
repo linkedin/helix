@@ -50,6 +50,20 @@ Helix is a generic cluster management framework used for automatic management of
 5. Pluggable distributed state machine to manage the state of a resource via state transitions
 6. Automatic load balancing and throttling of transitions 
 
+## LinkedIn fork compatibility
+
+The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, including
+`JobConfig.Builder.setMaxForcedReassignmentsPerTask(int)`,
+`JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
+Remove downstream API references and rebuild/release those callers before upgrading
+them to this Helix version. `MaxAttemptsPerTask` continues to control task attempts;
+retry, assignment, and `TerminalStateExpiry` behavior are unchanged.
+
+New job configurations and job-ID copies no longer emit the retired key. Legacy raw
+records may still contain it: reading them does not rewrite them, and rebuilding
+them through the typed builder ignores the key. No stored-record migration is
+required, and this change does not add rejection of unknown fields to generic APIs.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 
