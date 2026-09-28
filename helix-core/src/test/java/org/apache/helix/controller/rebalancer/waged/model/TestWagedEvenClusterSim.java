@@ -279,6 +279,7 @@ public class TestWagedEvenClusterSim {
   }
   private static double mean(java.util.Collection<Long> v) { return v.stream().mapToLong(i -> i).average().orElse(0); }
   private static double maxMean(java.util.Collection<Long> v) { double mn = mean(v); long mx = v.stream().mapToLong(i -> i).max().orElse(0); return mn == 0 ? 0 : mx / mn; }
+  private static double maxNodeUtilPct(Map<String, Long> nodeUsage, int cap) { long mx = nodeUsage.values().stream().mapToLong(l -> l).max().orElse(0); return cap == 0 ? 0 : 100.0 * mx / cap; }
   private static double median(java.util.Collection<Long> v) { List<Long> s = new ArrayList<>(v); Collections.sort(s); int n = s.size(); return n == 0 ? 0 : (n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2.0); }
   private static double maxMedian(java.util.Collection<Long> v) { double md = median(v); long mx = v.stream().mapToLong(i -> i).max().orElse(0); return md == 0 ? 0 : mx / md; }
 
@@ -674,6 +675,23 @@ public class TestWagedEvenClusterSim {
       resParts.put(rn, ps); }
   }
 
+  // CU-saturated mirror: same lumpy CU (Group A 120-410) but CU is now the near-capacity dimension
+  // (capCU tightened) and DISK is cool. Isolates the saturation flip from the CU lumpiness.
+  private void buildSynthCUhot() {
+    nZones = 0; useDisk = true; capCU = 9300; capDisk = 14000; evn = 1; lm = 2; preferredKeys = null; tsWeight = 3f;
+    instanceConfigs.clear(); hosts.clear(); resources.clear(); resParts.clear(); partW.clear(); partDisk.clear();
+    freshClusterConfig();
+    for (int i = 0; i < 30; i++) addHost();
+    int[] cuTiers = {120, 160, 220, 280, 340, 410};
+    for (int r = 0; r < 12; r++) { String rn = "A" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+      int cu = cuTiers[r % cuTiers.length];
+      for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, cu); partDisk.put(pn, 60); }
+      resParts.put(rn, ps); }
+    for (int r = 0; r < 12; r++) { String rn = "B" + r; resources.add(rn); List<String> ps = new ArrayList<>();
+      for (int p = 0; p < 22; p++) { String pn = rn + "_" + p; ps.add(pn); partW.put(pn, 70); partDisk.put(pn, 200); }
+      resParts.put(rn, ps); }
+  }
+
   private void buildResourceWorkload(String cl) throws Exception {
     java.io.InputStream in = getClass().getClassLoader().getResourceAsStream("waged-sim/cluster_structures.json");
     com.fasterxml.jackson.databind.JsonNode c = new com.fasterxml.jackson.databind.ObjectMapper().readTree(in).get(cl);
@@ -690,28 +708,30 @@ public class TestWagedEvenClusterSim {
     }
   }
 
-  // ---------- Diagnostic: dimension symmetry — is the CU<->DISK trade symmetric, and why? ----------
+  // ---------- Diagnostic: dimension symmetry + max single-node util% (does saturation protect a dim?) ----------
   @Test
   public void dimensionSymmetryDiag() throws Exception {
-    System.out.println("\n########### DIMENSION SYMMETRY DIAG (from-scratch; utils + each scoring mode) ###########");
-    System.out.printf("  %-11s %-12s %-6s %-6s | %-9s %-9s %-9s %-9s%n",
-        "workload", "scoreDim", "cuU", "dkU", "leaderCU", "totalCU", "leaderDK", "totalDK");
-    for (String wl : new String[]{"synthetic", "prodB", "prodC"}) {
+    System.out.println("\n########### DIMENSION SYMMETRY DIAG (avg util, MAX single-node util%, each scoring mode) ###########");
+    System.out.printf("  %-12s %-12s %-6s %-6s %-7s %-7s | %-9s %-9s%n",
+        "workload", "scoreDim", "avgCU%", "avgDK%", "maxCU%", "maxDK%", "leaderCU", "leaderDK");
+    for (String wl : new String[]{"synth-DKhot", "synth-CUhot", "prodB"}) {
       for (java.util.List<String> pref : java.util.Arrays.asList(
           null, java.util.Collections.singletonList("CU"), java.util.Collections.singletonList("DISK"))) {
-        if (wl.equals("synthetic")) buildSyntheticWorkload(30, 14000, 14000, 430); else buildResourceWorkload(wl);
+        if (wl.equals("synth-DKhot")) buildSyntheticWorkload(30, 14000, 14000, 430);
+        else if (wl.equals("synth-CUhot")) buildSynthCUhot();
+        else buildResourceWorkload(wl);
         preferredKeys = pref; tsWeight = 6f; freshClusterConfig();
         long tcu = 0, tdk = 0; for (String p : partW.keySet()) { tcu += partW.get(p); tdk += partDisk.getOrDefault(p, 0); }
-        double cuU = tcu * 3.0 / (hosts.size() * (double) capCU), dkU = tdk * 3.0 / (hosts.size() * (double) capDisk);
+        double cuU = tcu * 3.0 / (hosts.size() * (double) capCU) * 100, dkU = tdk * 3.0 / (hosts.size() * (double) capDisk) * 100;
         Map<String, ResourceAssignment> a = place(new HashSet<>(resources), null, false);
-        System.out.printf("  %-11s %-12s %-6.2f %-6.2f | %8.3fx %8.3fx %8.3fx %8.3fx%n",
+        System.out.printf("  %-12s %-12s %-6.0f %-6.0f %-7.0f %-7.0f | %8.3fx %8.3fx%n",
             wl, pref == null ? "max(default)" : pref.get(0), cuU, dkU,
-            maxMean(leaderCU(a).values()), maxMean(allCU(a).values()),
-            maxMean(leaderDisk(a).values()), maxMean(allDisk(a).values()));
+            maxNodeUtilPct(allCU(a), capCU), maxNodeUtilPct(allDisk(a), capDisk),
+            maxMean(leaderCU(a).values()), maxMean(leaderDisk(a).values()));
       }
     }
     preferredKeys = null; tsWeight = 3f; setTopStateWeight(3f); useDisk = false;
-    System.out.println("  => pref=[CU] skews DISK by how much vs pref=[DISK] skews CU? (symmetry); note which dim util is higher.");
+    System.out.println("  => the SATURATED dim (maxNode% near 100) resists skew whichever it is; the SLACK dim skews when unscored.");
   }
 
   private Map<String, ResourceAssignment> buildAndPlace(int nHosts, int cCU, int cDisk, boolean disk, int[][] res)
