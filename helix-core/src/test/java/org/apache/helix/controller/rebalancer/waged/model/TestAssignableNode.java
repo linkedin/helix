@@ -35,6 +35,7 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.when;
@@ -170,6 +171,35 @@ public class TestAssignableNode extends AbstractTestClusterModel {
             expectedTopStateAssignmentSet2);
     Assert.assertEquals(assignableNode.getAssignedTopStatePartitionsCount(),
         expectedTopStateAssignmentSet1.size() + expectedTopStateAssignmentSet2.size());
+  }
+
+  @DataProvider
+  public Object[][] projectedCapacityUsage() {
+    return new Object[][] {
+        {Collections.emptyMap(), 0.8f, 0.4f},
+        {Collections.singletonMap("item1", 4), 1.0f, 0.6f},
+        {Collections.singletonMap("item2", 8), 1.0f, 0.6f},
+        {Collections.singletonMap("item3", 27), 0.9f, 0.9f},
+        {Collections.singletonMap("item2", 10), 1.05f, 0.65f}
+    };
+  }
+
+  @Test(dataProvider = "projectedCapacityUsage")
+  public void testProjectedUtilizationAcrossAllCapacities(Map<String, Integer> additionalUsage,
+      float expectedGeneral, float expectedTopState) throws IOException {
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    testCache.getClusterConfig().getRecord()
+        .setListField("PREFERRED_SCORING_KEYS", Collections.singletonList("item3"));
+    AssignableNode node = new AssignableNode(testCache.getClusterConfig(),
+        testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+    node.assignInitBatch(generateReplicas(testCache));
+    Map<String, Integer> remainingCapacity = new HashMap<>(node.getRemainingCapacity());
+
+    Assert.assertEquals(node.getGeneralProjectedHighestUtilization(additionalUsage),
+        expectedGeneral);
+    Assert.assertEquals(node.getTopStateProjectedHighestUtilization(additionalUsage),
+        expectedTopState);
+    Assert.assertEquals(node.getRemainingCapacity(), remainingCapacity);
   }
 
   @Test
