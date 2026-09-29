@@ -20,9 +20,7 @@ package org.apache.helix.model;
  */
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,9 +30,7 @@ import java.util.TreeSet;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixProperty;
 import org.apache.helix.controller.rebalancer.Rebalancer;
-import org.apache.helix.task.JobRebalancer;
 import org.apache.helix.task.TaskRebalancer;
-import org.apache.helix.task.WorkflowRebalancer;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,6 +40,8 @@ import org.slf4j.LoggerFactory;
  * Periodic rebalance is configured only through
  * {@link ClusterConfig#setRebalanceTimePeriod(long)}. Legacy resource-level
  * {@code REBALANCE_TIMER_PERIOD} fields are ignored and are not rewritten on read.
+ * Rebalance mode is configured only through {@code REBALANCE_MODE}; legacy
+ * {@code IDEAL_STATE_MODE} metadata is ignored and is not rewritten.
  */
 public class IdealState extends HelixProperty {
   /**
@@ -59,8 +57,6 @@ public class IdealState extends HelixProperty {
     MIN_ACTIVE_REPLICAS,
     REBALANCE_DELAY,
     DELAY_REBALANCE_ENABLED,
-    @Deprecated
-    IDEAL_STATE_MODE,
     REBALANCE_MODE,
     REBALANCER_CLASS_NAME,
     REBALANCE_STRATEGY,
@@ -73,9 +69,6 @@ public class IdealState extends HelixProperty {
   }
 
   public static final String QUERY_LIST = "PREFERENCE_LIST_QUERYS";
-  public static final Set<String> LEGACY_TASK_REBALANCERS =
-      new HashSet<>(Arrays.asList("org.apache.helix.task.GenericTaskRebalancer",
-          "org.apache.helix.task.FixedTargetTaskRebalancer"));
 
   /**
    * Deprecated, use ResourceConfig.ResourceConfigConstants instead
@@ -83,17 +76,6 @@ public class IdealState extends HelixProperty {
   @Deprecated
   public enum IdealStateConstants {
     ANY_LIVEINSTANCE
-  }
-
-  /**
-   * Deprecated.
-   * @see {@link RebalanceMode}
-   */
-  @Deprecated
-  public enum IdealStateModeProperty {
-    AUTO,
-    CUSTOMIZED,
-    AUTO_REBALANCE
   }
 
   /**
@@ -138,24 +120,11 @@ public class IdealState extends HelixProperty {
   }
 
   /**
-   * Set the rebalance mode of the ideal state
-   * @param mode {@link IdealStateModeProperty}
-   */
-  @Deprecated
-  public void setIdealStateMode(String mode) {
-    _record.setSimpleField(IdealStateProperty.IDEAL_STATE_MODE.toString(), mode);
-    RebalanceMode rebalanceMode = normalizeRebalanceMode(IdealStateModeProperty.valueOf(mode));
-    _record.setEnumField(IdealStateProperty.REBALANCE_MODE.toString(), rebalanceMode);
-  }
-
-  /**
    * Set the rebalance mode of the resource
    * @param rebalancerType
    */
   public void setRebalanceMode(RebalanceMode rebalancerType) {
     _record.setEnumField(IdealStateProperty.REBALANCE_MODE.toString(), rebalancerType);
-    IdealStateModeProperty idealStateMode = denormalizeRebalanceMode(rebalancerType);
-    _record.setEnumField(IdealStateProperty.IDEAL_STATE_MODE.toString(), idealStateMode);
   }
 
   /**
@@ -277,28 +246,13 @@ public class IdealState extends HelixProperty {
   }
 
   /**
-   * Get the rebalancing mode on this resource
-   * @return {@link IdealStateModeProperty}
-   */
-  @Deprecated
-  public IdealStateModeProperty getIdealStateMode() {
-    return _record.getEnumField(IdealStateProperty.IDEAL_STATE_MODE.toString(),
-        IdealStateModeProperty.class, IdealStateModeProperty.AUTO);
-  }
-
-  /**
-   * Get the rebalancing mode on this resource
+   * Get the rebalancing mode without modifying the record. Missing or invalid modern values
+   * default to SEMI_AUTO; explicit NONE is preserved. Legacy mode metadata is ignored.
    * @return {@link RebalanceMode}
    */
   public RebalanceMode getRebalanceMode() {
-    RebalanceMode property =
-        _record.getEnumField(IdealStateProperty.REBALANCE_MODE.toString(), RebalanceMode.class,
-            RebalanceMode.NONE);
-    if (property == RebalanceMode.NONE) {
-      property = normalizeRebalanceMode(getIdealStateMode());
-      setRebalanceMode(property);
-    }
-    return property;
+    return _record.getEnumField(IdealStateProperty.REBALANCE_MODE.toString(), RebalanceMode.class,
+        RebalanceMode.SEMI_AUTO);
   }
 
   /**
@@ -652,80 +606,20 @@ public class IdealState extends HelixProperty {
     return _record.getSimpleField(IdealStateProperty.INSTANCE_GROUP_TAG.toString());
   }
 
-  private RebalanceMode normalizeRebalanceMode(IdealStateModeProperty mode) {
-    RebalanceMode property;
-    switch (mode) {
-    case AUTO_REBALANCE:
-      property = RebalanceMode.FULL_AUTO;
-      break;
-    case AUTO:
-      property = RebalanceMode.SEMI_AUTO;
-      break;
-    case CUSTOMIZED:
-      property = RebalanceMode.CUSTOMIZED;
-      break;
-    default:
-      String rebalancerName = getRebalancerClassName();
-      if (rebalancerName != null) {
-        if (rebalancerName.equals(JobRebalancer.class.getName())
-            || rebalancerName.equals(WorkflowRebalancer.class.getName())) {
-          property = RebalanceMode.TASK;
-        } else {
-          if (LEGACY_TASK_REBALANCERS.contains(rebalancerName)) {
-            // Print a warning message if legacy TASK rebalancer is used
-            // Since legacy rebalancers have been removed, it is not safe just running legacy jobs and jobs/workflows
-            //with current task assignment strategy.
-            logger.warn("The rebalancer {} is not supported anymore. Setting rebalance mode to USER_DEFINED.",
-                rebalancerName);
-          }
-          property = RebalanceMode.USER_DEFINED;
-        }
-      } else {
-        property = RebalanceMode.SEMI_AUTO;
-      }
-      break;
-    }
-    return property;
-  }
-
-  private IdealStateModeProperty denormalizeRebalanceMode(RebalanceMode rebalancerType) {
-    IdealStateModeProperty property;
-    switch (rebalancerType) {
-    case FULL_AUTO:
-      property = IdealStateModeProperty.AUTO_REBALANCE;
-      break;
-    case SEMI_AUTO:
-      property = IdealStateModeProperty.AUTO;
-      break;
-    case CUSTOMIZED:
-      property = IdealStateModeProperty.CUSTOMIZED;
-      break;
-    default:
-      property = IdealStateModeProperty.AUTO;
-      break;
-    }
-    return property;
-  }
-
   /**
-   * Parse a RebalanceMode from a string. It can also understand IdealStateModeProperty values.
+   * Parse a modern RebalanceMode. Legacy AUTO and AUTO_REBALANCE aliases are not supported.
    * @param mode string containing a RebalanceMode value
    * @param defaultMode the mode to use if the string is not valid
    * @return converted RebalanceMode value
    */
   public RebalanceMode rebalanceModeFromString(String mode, RebalanceMode defaultMode) {
-    RebalanceMode rebalanceMode = defaultMode;
     try {
-      rebalanceMode = RebalanceMode.valueOf(mode);
-    } catch (Exception rebalanceModeException) {
-      try {
-        IdealStateModeProperty oldMode = IdealStateModeProperty.valueOf(mode);
-        rebalanceMode = normalizeRebalanceMode(oldMode);
-      } catch (Exception e) {
-        logger.error(e.toString());
-      }
+      return RebalanceMode.valueOf(mode);
+    } catch (IllegalArgumentException | NullPointerException e) {
+      logger.error("Invalid rebalance mode {} for resource {}; using default {}", mode,
+          getResourceName(), defaultMode);
+      return defaultMode;
     }
-    return rebalanceMode;
   }
 
   /**

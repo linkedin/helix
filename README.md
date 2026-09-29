@@ -85,6 +85,47 @@ Helix is a generic cluster management framework used for automatic management of
 
 ## LinkedIn fork compatibility
 
+**IdealState rebalance mode**
+
+`IDEAL_STATE_MODE`, `IdealState.IdealStateModeProperty`,
+`IdealState.setIdealStateMode(String)`, and `IdealState.getIdealStateMode()` have
+been removed. Use `REBALANCE_MODE` and `IdealState.setRebalanceMode` instead.
+The obsolete `IdealState.LEGACY_TASK_REBALANCERS` normalization constant is also
+removed. These API removals are source- and binary-incompatible; rebuild and
+release downstream callers before upgrading Helix.
+
+The modern setter writes only `REBALANCE_MODE`. The getter does not mutate records,
+does not infer a mode from legacy metadata or a rebalancer class, and preserves
+the effective `SEMI_AUTO` default for missing or invalid modern values. Invalid
+values retain the standard enum-parser warning. Explicit modern values, including
+`NONE`, are now respected without fallback. `NONE` does not select an operational
+rebalancer; replace it with the intended mode before upgrading if the resource
+previously depended on fallback.
+
+`rebalanceModeFromString` accepts modern enum names only. Invalid inputs (including
+the retired `AUTO` and `AUTO_REBALANCE` aliases) are logged and return the caller's
+default. Consequently, admin/CLI calls using obsolete aliases must migrate too.
+Use this mapping for legacy-only records and callers:
+
+| Legacy mode | Modern mode |
+|---|---|
+| `AUTO` | `SEMI_AUTO` |
+| `AUTO_REBALANCE` | `FULL_AUTO` |
+| `CUSTOMIZED` | `CUSTOMIZED` |
+
+Existing raw legacy fields remain opaque metadata: they are not deleted, migrated,
+or synchronized by reads or setters, and changing them no longer affects topology
+change detection. The UI shows only the modern rebalance mode. Generic raw-record
+APIs still accept unknown fields.
+
+Before merging or deploying this retirement, release the downstream reader/API
+migrations, then migrate legacy-only persisted records and any `IdealStateRule!`
+filters that reference the old key. Deploy tolerant readers before writers stop
+emitting the legacy field. Never overwrite a valid modern mode from stale legacy
+metadata; in particular, the legacy `AUTO` value can also accompany `TASK` and
+`USER_DEFINED`. This PR does not perform a live migration. Historical versioned
+website content and generated documentation snapshots describe earlier releases.
+
 `GreedyRebalanceStrategy` and its cluster config
 `GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE` have been removed from this fork.
 Before upgrading, migrate any resource whose IdealState `REBALANCE_STRATEGY` names
@@ -127,8 +168,9 @@ Helix's rebalancers.
 
 Configure resource rebalancing through `IdealState.setRebalanceDelay`,
 `IdealState.setRebalanceMode`, and `IdealState.setRebalancerClassName` instead.
-The IdealState properties, serialized names, defaults, and runtime behavior are
-unchanged. Code referencing the removed RebalanceConfig enum constants or
+Removing these ResourceConfig copies does not change their authoritative
+IdealState settings. The separate legacy IdealState mode retirement is described
+above. Code referencing the removed RebalanceConfig enum constants or
 accessors must migrate and be rebuilt before upgrading Helix; already-compiled
 references are not binary compatible. The legacy `RebalanceConfig.RebalanceMode`
 enum remains available, deprecated, for callers that only use its mode names;

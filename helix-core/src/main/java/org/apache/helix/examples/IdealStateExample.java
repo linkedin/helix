@@ -63,7 +63,7 @@ import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
  * "listFields" : {
  * },
  * "simpleFields" : {
- *   "IDEAL_STATE_MODE" : "CUSTOMIZED",
+ *   "REBALANCE_MODE" : "CUSTOMIZED",
  *   "NUM_PARTITIONS" : "4",
  *   "REPLICAS" : "3",
  *   "STATE_MODEL_DEF_REF" : "MasterSlave",
@@ -78,7 +78,7 @@ public class IdealStateExample {
   public static void main(String[] args) throws Exception {
     if (args.length < 3) {
       System.err
-          .println("USAGE: IdealStateExample zkAddress clusterName idealStateMode (FULL_AUTO, SEMI_AUTO, or CUSTOMIZED) idealStateJsonFile (required for CUSTOMIZED mode)");
+          .println("USAGE: IdealStateExample zkAddress clusterName rebalanceMode (FULL_AUTO, SEMI_AUTO, or CUSTOMIZED) idealStateJsonFile (required for CUSTOMIZED mode)");
       System.exit(1);
     }
 
