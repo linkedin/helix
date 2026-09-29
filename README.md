@@ -55,6 +55,23 @@ upgrading Helix. Already-compiled references to the removed enum constant are no
 binary compatible. Do not copy an old ResourceConfig value into IdealState as part of
 this cleanup: doing so could activate a previously ignored setting.
 
+### ResourceConfig rebalance strategy compatibility
+
+`REBALANCE_STRATEGY` is no longer exposed by the `RebalanceConfig` wrapper used by
+`ResourceConfig`. Its enum constant, `getRebalanceStrategy()` and
+`setRebalanceStrategy(String)` have been removed. Callers using these APIs must
+update and recompile; use `IdealState.IdealStateProperty.REBALANCE_STRATEGY` and
+`IdealState.getRebalanceStrategy()` / `setRebalanceStrategy(String)` for strategy
+selection. IdealState strategy support and controller behavior are unchanged.
+
+Existing raw `REBALANCE_STRATEGY` fields in ResourceConfig records remain opaque
+metadata: wrapping or merging a record preserves them, but the typed
+`RebalanceConfig.getConfigsMap()` output and ResourceConfig constructors/builders
+using that output no longer emit them. Generic raw-record APIs are unchanged.
+There is no automatic deletion or migration of persisted fields. Do not blindly
+copy a ResourceConfig value into IdealState: the ResourceConfig value was not
+used for strategy selection, and making it effective can change placement.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
@@ -117,7 +134,8 @@ references are not binary compatible. The legacy `RebalanceConfig.RebalanceMode`
 enum remains available, deprecated, for callers that only use its mode names;
 new callers should use `IdealState.RebalanceMode`.
 
-The ResourceConfig rebalance wrapper and its strategy setting remain.
+The ResourceConfig rebalance wrapper and its legacy enum types remain for compatibility,
+but no supported settings remain in the wrapper; `getConfigsMap()` returns an empty map.
 Periodic rebalance is configured through `ClusterConfig.setRebalanceTimePeriod`;
 the resource-level timer has been removed separately.
 Building a ResourceConfig from a RebalanceConfig no longer writes the three

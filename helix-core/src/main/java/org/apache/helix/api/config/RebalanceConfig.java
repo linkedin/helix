@@ -21,6 +21,7 @@ package org.apache.helix.api.config;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.helix.model.IdealState;
 import org.apache.helix.task.TaskRebalancer;
@@ -29,18 +30,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Rebalance strategy settings exposed through ResourceConfig.
- * Rebalance delay, mode, and rebalancer class are configured through {@link IdealState}.
+ * Compatibility wrapper for retired ResourceConfig rebalance settings.
+ * Rebalance delay, mode, rebalancer class, and strategy are configured through {@link IdealState}.
  * Periodic rebalance is configured through
  * {@link org.apache.helix.model.ClusterConfig#setRebalanceTimePeriod(long)}, not per resource.
- * Legacy resource timer fields are ignored and are not emitted by {@link #getConfigsMap()}.
+ * Legacy fields are ignored and {@link #getConfigsMap()} emits no fields.
  */
 public class RebalanceConfig {
   /**
-   * Configurable rebalance options of a resource
+   * Legacy property type retained for compatibility; no supported properties remain.
    */
   public enum RebalanceConfigProperty {
-    REBALANCE_STRATEGY
   }
 
   /**
@@ -63,37 +63,15 @@ public class RebalanceConfig {
     NONE
   }
 
-  private String _rebalanceStrategy;
-
   private static final Logger _logger = LoggerFactory.getLogger(RebalanceConfig.class.getName());
 
   /**
-   * Instantiate from an znRecord
+   * Retained constructor for callers wrapping legacy records; no settings are read.
    *
    * @param znRecord
    */
   public RebalanceConfig(ZNRecord znRecord) {
-    _rebalanceStrategy = znRecord.getSimpleField(RebalanceConfigProperty.REBALANCE_STRATEGY.name());
-  }
-
-  /**
-   * Get the rebalance strategy for this resource.
-   *
-   * @return rebalance strategy, or null if not specified.
-   */
-  public String getRebalanceStrategy() {
-    return _rebalanceStrategy;
-  }
-
-  /**
-   * Specify the strategy for Helix to use to compute the partition-instance assignment,
-   * i,e, the custom rebalance strategy that implements {@link org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy}
-   *
-   * @param rebalanceStrategy
-   * @return
-   */
-  public void setRebalanceStrategy(String rebalanceStrategy) {
-    this._rebalanceStrategy = rebalanceStrategy;
+    Objects.requireNonNull(znRecord, "znRecord");
   }
 
   /**
@@ -102,12 +80,7 @@ public class RebalanceConfig {
    * @return
    */
   public Map<String, String> getConfigsMap() {
-    Map<String, String> simpleFieldMap = new HashMap<String, String>();
-
-    if (_rebalanceStrategy != null) {
-      simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_STRATEGY.name(), _rebalanceStrategy);
-    }
-    return simpleFieldMap;
+    return new HashMap<String, String>();
   }
 
   public boolean isValid() {
