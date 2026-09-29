@@ -120,6 +120,24 @@ public class TestHelixPropoertyTimmer {
   }
 
   @Test
+  public void testLegacyIdealStateModeIsNotTopology() {
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    IdealStateTrimmer trimmer = IdealStateTrimmer.getInstance();
+    IdealState original = trimmer.trimProperty(idealState);
+    for (String legacy : new String[]{"AUTO", "AUTO_REBALANCE", "CUSTOMIZED", "invalid"}) {
+      idealState.getRecord().setSimpleField("IDEAL_STATE_MODE", legacy);
+      IdealState trimmed = trimmer.trimProperty(idealState);
+      Assert.assertEquals(trimmed.getRecord(), original.getRecord());
+      Assert.assertFalse(trimmed.getRecord().getSimpleFields().containsKey("IDEAL_STATE_MODE"));
+      Assert.assertEquals(idealState.getRecord().getSimpleField("IDEAL_STATE_MODE"), legacy);
+    }
+    idealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
+    Assert.assertEquals(trimmer.trimProperty(idealState).getRecord()
+        .getSimpleField("REBALANCE_MODE"), "SEMI_AUTO");
+    Assert.assertFalse(trimmer.trimProperty(idealState).getRecord().equals(original.getRecord()));
+  }
+
+  @Test
   public void testDetectNonTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
     ResourceChangeDetector detector = new ResourceChangeDetector(true);

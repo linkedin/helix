@@ -50,7 +50,6 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
           IdealStateProperty.STATE_MODEL_FACTORY_NAME.name(),
           IdealStateProperty.REPLICAS.name(),
           IdealStateProperty.MIN_ACTIVE_REPLICAS.name(),
-          IdealStateProperty.IDEAL_STATE_MODE.name(),
           IdealStateProperty.REBALANCE_MODE.name(),
           IdealStateProperty.REBALANCER_CLASS_NAME.name(),
           IdealStateProperty.REBALANCE_STRATEGY.name(),

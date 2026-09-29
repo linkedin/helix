@@ -110,7 +110,6 @@ public class IdealStateResource extends ServerResource {
    * jsonParameters={"command":"addIdealState"}&newIdealState={
    *  "id" : "{MyDB}",
    *  "simpleFields" : {
-   *    "IDEAL_STATE_MODE" : "AUTO",
    *    "NUM_PARTITIONS" : "{8}",
    *    "REBALANCE_MODE" : "SEMI_AUTO",
    *    "REPLICAS" : "0",

@@ -263,8 +263,6 @@ public class TestFixedTargetedTaskAssignmentCalculator {
     ZNRecord recordDB = new ZNRecord(TARGET_RESOURCES);
     recordDB.setSimpleField(IdealState.IdealStateProperty.REPLICAS.name(), "3");
     recordDB.setSimpleField(IdealState.IdealStateProperty.REBALANCE_MODE.name(), "FULL_AUTO");
-    recordDB.setSimpleField(IdealState.IdealStateProperty.IDEAL_STATE_MODE.name(),
-        "AUTO_REBALANCE");
     recordDB.setSimpleField(IdealState.IdealStateProperty.STATE_MODEL_DEF_REF.name(),
         "MasterSlave");
     recordDB.setSimpleField(IdealState.IdealStateProperty.STATE_MODEL_DEF_REF.name(),

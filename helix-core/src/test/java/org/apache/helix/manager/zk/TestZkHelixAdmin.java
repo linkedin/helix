@@ -1265,6 +1265,32 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     return manager;
   }
 
+  @Test
+  public void testAddResourceWritesOnlyModernRebalanceMode() {
+    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    HelixAdmin tool = new ZKHelixAdmin(_gZkClient);
+    tool.addCluster(clusterName, true);
+    try {
+      tool.addStateModelDef(clusterName, "MasterSlave",
+          new StateModelDefinition(StateModelConfigGenerator.generateConfigForMasterSlave()));
+      for (IdealState.RebalanceMode mode : IdealState.RebalanceMode.values()) {
+        String resourceName = "resource_" + mode.name();
+        tool.addResource(clusterName, resourceName, 4, "MasterSlave", mode.name());
+        ZNRecord stored = _gZkClient.readData(
+            new PropertyKey.Builder(clusterName).idealStates(resourceName).getPath());
+        Assert.assertEquals(stored.getSimpleField("REBALANCE_MODE"), mode.name());
+        Assert.assertFalse(stored.getSimpleFields().containsKey("IDEAL_STATE_MODE"));
+      }
+      tool.addResource(clusterName, "defaultResource", 4, "MasterSlave");
+      ZNRecord stored = _gZkClient.readData(
+          new PropertyKey.Builder(clusterName).idealStates("defaultResource").getPath());
+      Assert.assertEquals(stored.getSimpleField("REBALANCE_MODE"), "SEMI_AUTO");
+      Assert.assertFalse(stored.getSimpleFields().containsKey("IDEAL_STATE_MODE"));
+    } finally {
+      tool.dropCluster(clusterName);
+    }
+  }
+
   // drop resource should drop corresponding resource-level config also
   @Test
   public void testDropResource() {

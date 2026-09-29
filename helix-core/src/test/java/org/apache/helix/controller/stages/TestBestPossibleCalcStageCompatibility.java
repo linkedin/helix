@@ -28,7 +28,7 @@ import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.IdealState;
-import org.apache.helix.model.IdealState.IdealStateModeProperty;
+import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.testng.AssertJUnit;
@@ -37,7 +37,7 @@ import org.testng.annotations.Test;
 @SuppressWarnings("deprecation")
 /**
  * These tests ensure that BestPossibleStateCalcStage correctly recognizes the mode and follows
- * appropriate code paths, even though the old method of setting rebalance mode is used.
+ * appropriate code paths using only the modern rebalance mode.
  */
 public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
   @Test
@@ -48,7 +48,7 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
     String[] resources = new String[] {
       "testResourceName"
     };
-    setupIdealStateDeprecated(5, resources, 10, 1, IdealStateModeProperty.AUTO);
+    setupIdealStateWithMode(5, resources, 10, 1, RebalanceMode.SEMI_AUTO);
     setupStateModel();
     setupInstances(5);
     setupLiveInstances(5);
@@ -86,7 +86,7 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
     String[] resources = new String[] {
       "testResourceName"
     };
-    setupIdealStateDeprecated(5, resources, 10, 1, IdealStateModeProperty.CUSTOMIZED);
+    setupIdealStateWithMode(5, resources, 10, 1, RebalanceMode.CUSTOMIZED);
     setupLiveInstances(5);
     setupStateModel();
 
@@ -115,8 +115,8 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
         + new Date(System.currentTimeMillis()));
   }
 
-  protected List<IdealState> setupIdealStateDeprecated(int nodes, String[] resources,
-      int partitions, int replicas, IdealStateModeProperty mode) {
+  protected List<IdealState> setupIdealStateWithMode(int nodes, String[] resources,
+      int partitions, int replicas, RebalanceMode mode) {
     List<IdealState> idealStates = new ArrayList<IdealState>();
     List<String> instances = new ArrayList<String>();
     for (int i = 0; i < nodes; i++) {
@@ -135,7 +135,8 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
       }
       IdealState idealState = new IdealState(record);
       idealState.setStateModelDefRef("MasterSlave");
-      idealState.setIdealStateMode(mode.toString());
+      idealState.setRebalanceMode(mode);
+      AssertJUnit.assertFalse(idealState.getRecord().getSimpleFields().containsKey("IDEAL_STATE_MODE"));
       idealState.setNumPartitions(partitions);
       idealStates.add(idealState);
 
