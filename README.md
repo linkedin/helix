@@ -85,6 +85,15 @@ Helix is a generic cluster management framework used for automatic management of
 
 ## LinkedIn fork compatibility
 
+`GreedyRebalanceStrategy` and its cluster config
+`GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE` have been removed from this fork.
+Before upgrading, migrate any resource whose IdealState `REBALANCE_STRATEGY` names
+that class to an explicitly chosen supported strategy. There is no automatic
+fallback: an obsolete selector fails assignment calculation. Existing raw copies
+of the retired cluster key are preserved but ignored and no longer impose a cap.
+The separate `MAX_PARTITIONS_PER_INSTANCE` settings and WAGED capacity constraints
+are unchanged; they are not automatic replacements for Greedy's global count cap.
+
 The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, including
 `JobConfig.Builder.setMaxForcedReassignmentsPerTask(int)`,
 `JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
@@ -107,3 +116,30 @@ Helix UI has been tested to run well on these versions of node and yarn:
     "yarn": "^1.22.18"
   },
 ```
+
+## ResourceConfig rebalance configuration compatibility
+
+`REBALANCE_DELAY`, `REBALANCE_MODE`, and `REBALANCER_CLASS_NAME` are no longer
+supported by `org.apache.helix.api.config.RebalanceConfig`, the rebalance settings
+wrapper used by `ResourceConfig`. Their enum constants, backing fields, and
+getters/setters have been removed. They were not consumed from ResourceConfig by
+Helix's rebalancers.
+
+Configure resource rebalancing through `IdealState.setRebalanceDelay`,
+`IdealState.setRebalanceMode`, and `IdealState.setRebalancerClassName` instead.
+The IdealState properties, serialized names, defaults, and runtime behavior are
+unchanged. Code referencing the removed RebalanceConfig enum constants or
+accessors must migrate and be rebuilt before upgrading Helix; already-compiled
+references are not binary compatible. The legacy `RebalanceConfig.RebalanceMode`
+enum remains available, deprecated, for callers that only use its mode names;
+new callers should use `IdealState.RebalanceMode`.
+
+The ResourceConfig rebalance wrapper and its legacy enum types remain for compatibility,
+but no supported settings remain in the wrapper; `getConfigsMap()` returns an empty map.
+Periodic rebalance is configured through `ClusterConfig.setRebalanceTimePeriod`;
+the resource-level timer has been removed separately.
+Building a ResourceConfig from a RebalanceConfig no longer writes the three
+retired fields, including the previously synthesized `REBALANCE_MODE=NONE`.
+Existing raw ResourceConfig fields remain opaque metadata: reading or merging
+a ResourceConfig does not delete or migrate them. Do not automatically copy
+these ignored values into IdealState, where they would affect rebalancing.

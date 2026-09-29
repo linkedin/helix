@@ -56,10 +56,11 @@ public class TestResourceConfig {
         .build();
 
     Assert.assertEquals(wrapped.getRecord(), original);
-    Assert.assertEquals(rebalanceConfig.getConfigsMap(),
-        ImmutableMap.of("REBALANCE_MODE", "NONE", "REBALANCE_DELAY", "3000"));
+    Assert.assertEquals(rebalanceConfig.getConfigsMap(), Collections.emptyMap());
     Assert.assertFalse(rebuilt.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
-    Assert.assertEquals(rebuilt.getRebalanceConfig().getRebalanceDelay(), 3000L);
+    Assert.assertEquals(rebuilt.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_DELAY"));
+    Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_MODE"));
     Assert.assertEquals(rebuilt.getStateModelFactoryName(), "customFactory");
     Assert.assertEquals(record, original);
   }
@@ -75,7 +76,9 @@ public class TestResourceConfig {
 
     Assert.assertFalse(
         resourceConfig.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
-    Assert.assertEquals(resourceConfig.getRebalanceConfig().getRebalanceDelay(), 3000L);
+    Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_DELAY"));
+    Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_MODE"));
     Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "customFactory");
     Assert.assertEquals(record.getSimpleField(LEGACY_REBALANCE_STRATEGY),
         CrushEdRebalanceStrategy.class.getName());
@@ -105,6 +108,53 @@ public class TestResourceConfig {
     ResourceConfig fromIdealState = ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
     Assert.assertFalse(
         fromIdealState.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
+
+  @Test
+  public void testRebalanceConfigBuilderOmitsRetiredFields() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setLongField("REBALANCE_DELAY", 1000L);
+    record.setSimpleField("REBALANCE_MODE", "FULL_AUTO");
+    record.setSimpleField("REBALANCER_CLASS_NAME", "legacy.Rebalancer");
+    record.setSimpleField("REBALANCE_STRATEGY", "retained.Strategy");
+    record.setLongField("REBALANCE_TIMER_PERIOD", 2000L);
+    ZNRecord original = new ZNRecord(record);
+    Map<String, String> retained = Collections.emptyMap();
+
+    ResourceConfig resourceConfig = new ResourceConfig.Builder("resource")
+        .setRebalanceConfig(new RebalanceConfig(record)).build();
+
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleFields(), retained);
+    Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), retained);
+    Assert.assertEquals(record, original);
+  }
+
+  @Test
+  public void testLegacyRebalanceFieldsRemainOpaqueAfterMerge() {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    Map<String, String> legacy = ImmutableMap.of("REBALANCE_DELAY", "not-a-delay",
+        "REBALANCE_MODE", "not-a-mode", "REBALANCER_CLASS_NAME", "legacy.Rebalancer");
+    resourceConfig.putSimpleConfigs(legacy);
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    IdealState idealState = new IdealState("resource");
+    idealState.setRebalanceDelay(1000L);
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setRebalancerClassName("active.Rebalancer");
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+    ResourceConfig fromIdealState =
+        ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+
+    Assert.assertEquals(merged.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertEquals(fromIdealState.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    for (Map.Entry<String, String> entry : legacy.entrySet()) {
+      Assert.assertEquals(merged.getSimpleConfig(entry.getKey()), entry.getValue());
+      Assert.assertFalse(fromIdealState.simpleConfigContains(entry.getKey()));
+    }
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
     Assert.assertEquals(idealState.getRecord(), originalIdealState);
   }
 

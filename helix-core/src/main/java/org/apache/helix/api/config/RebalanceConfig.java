@@ -21,28 +21,26 @@ package org.apache.helix.api.config;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.controller.rebalancer.Rebalancer;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.task.TaskRebalancer;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Resource's rebalance configurations. Rebalance strategy selection is configured through
- * {@link org.apache.helix.model.IdealState}, not this ResourceConfig wrapper.
+ * Compatibility wrapper for retired ResourceConfig rebalance settings.
+ * Rebalance delay, mode, rebalancer class, and strategy are configured through {@link IdealState}.
  * Periodic rebalance is configured through
  * {@link org.apache.helix.model.ClusterConfig#setRebalanceTimePeriod(long)}, not per resource.
- * Legacy resource timer fields are ignored and are not emitted by {@link #getConfigsMap()}.
+ * Legacy fields are ignored and {@link #getConfigsMap()} emits no fields.
  */
 public class RebalanceConfig {
   /**
-   * Configurable rebalance options of a resource
+   * Legacy property type retained for compatibility; no supported properties remain.
    */
   public enum RebalanceConfigProperty {
-    REBALANCE_DELAY,
-    REBALANCE_MODE,
-    REBALANCER_CLASS_NAME
   }
 
   /**
@@ -50,7 +48,12 @@ public class RebalanceConfig {
    * assignment, SEMI_AUTO only does the latter, and CUSTOMIZED does neither. USER_DEFINED
    * uses a Rebalancer implementation plugged in by the user. TASK designates that a
    * {@link TaskRebalancer} instance should be used to rebalance this resource.
+   *
+   * This type is retained for compatibility with callers using the mode names; it no longer
+   * configures a ResourceConfig property.
+   * @deprecated Use {@link IdealState.RebalanceMode}.
    */
+  @Deprecated
   public enum RebalanceMode {
     FULL_AUTO,
     SEMI_AUTO,
@@ -60,67 +63,15 @@ public class RebalanceConfig {
     NONE
   }
 
-  private static final int DEFAULT_REBALANCE_DELAY = -1;
-
-  private long _rebalanceDelay = DEFAULT_REBALANCE_DELAY;
-  private RebalanceMode _rebalanceMode;
-  private String _rebalancerClassName;
-
   private static final Logger _logger = LoggerFactory.getLogger(RebalanceConfig.class.getName());
 
   /**
-   * Instantiate from an znRecord
+   * Retained constructor for callers wrapping legacy records; no settings are read.
    *
    * @param znRecord
    */
   public RebalanceConfig(ZNRecord znRecord) {
-    _rebalanceDelay = znRecord.getLongField(RebalanceConfigProperty.REBALANCE_DELAY.name(), -1);
-    _rebalanceMode = znRecord
-        .getEnumField(RebalanceConfigProperty.REBALANCE_MODE.name(), RebalanceMode.class,
-            RebalanceMode.NONE);
-    _rebalancerClassName =
-        znRecord.getSimpleField(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name());
-  }
-
-  /**
-   * Get rebalance delay (in milliseconds), default is -1 is not set.
-   * @return
-   */
-  public long getRebalanceDelay() {
-    return _rebalanceDelay;
-  }
-
-  /**
-   * Set the delay time (in ms) that Helix should move the partition after an instance goes offline.
-   * This option only takes effects when delay rebalance is enabled.
-   * @param rebalanceDelay
-   */
-  public void setRebalanceDelay(long rebalanceDelay) {
-    this._rebalanceDelay = rebalanceDelay;
-  }
-
-  public RebalanceMode getRebalanceMode() {
-    return _rebalanceMode;
-  }
-
-  public void setRebalanceMode(RebalanceMode rebalanceMode) {
-    this._rebalanceMode = rebalanceMode;
-  }
-
-  /**
-   * Get the name of the user-defined rebalancer associated with this resource
-   * @return the rebalancer class name, or null if none is being used
-   */
-  public String getRebalanceClassName() {
-    return _rebalancerClassName;
-  }
-
-  /**
-   * Define a custom rebalancer that implements {@link Rebalancer}
-   * @param rebalancerClassName the name of the custom rebalancing class
-   */
-  public void setRebalanceClassName(String rebalancerClassName) {
-    this._rebalancerClassName = rebalancerClassName;
+    Objects.requireNonNull(znRecord, "znRecord");
   }
 
   /**
@@ -129,19 +80,7 @@ public class RebalanceConfig {
    * @return
    */
   public Map<String, String> getConfigsMap() {
-    Map<String, String> simpleFieldMap = new HashMap<String, String>();
-
-    if (_rebalanceDelay >= 0) {
-      simpleFieldMap
-          .put(RebalanceConfigProperty.REBALANCE_DELAY.name(), String.valueOf(_rebalanceDelay));
-    }
-    if (_rebalanceMode != null) {
-      simpleFieldMap.put(RebalanceConfigProperty.REBALANCE_MODE.name(), _rebalanceMode.name());
-    }
-    if (_rebalancerClassName != null) {
-      simpleFieldMap.put(RebalanceConfigProperty.REBALANCER_CLASS_NAME.name(), _rebalancerClassName);
-    }
-    return simpleFieldMap;
+    return new HashMap<String, String>();
   }
 
   public boolean isValid() {
