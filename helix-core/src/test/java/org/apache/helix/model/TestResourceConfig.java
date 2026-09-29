@@ -52,7 +52,7 @@ public class TestResourceConfig {
     RebalanceConfig rebalanceConfig = wrapped.getRebalanceConfig();
     ResourceConfig rebuilt = new ResourceConfig.Builder("resource")
         .setRebalanceConfig(rebalanceConfig)
-        .setStateModelFactoryName("customFactory")
+        .setInstanceGroupTag("placementTag")
         .build();
 
     Assert.assertEquals(wrapped.getRecord(), original);
@@ -61,7 +61,8 @@ public class TestResourceConfig {
     Assert.assertEquals(rebuilt.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
     Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_DELAY"));
     Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_MODE"));
-    Assert.assertEquals(rebuilt.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(rebuilt.getInstanceGroupTag(), "placementTag");
+    Assert.assertFalse(rebuilt.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     Assert.assertEquals(record, original);
   }
 
@@ -71,7 +72,7 @@ public class TestResourceConfig {
     record.setSimpleField(LEGACY_REBALANCE_STRATEGY, CrushEdRebalanceStrategy.class.getName());
     record.setLongField("REBALANCE_DELAY", 3000L);
 
-    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "customFactory",
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false,
         1, 10, "placementTag", new RebalanceConfig(record), null, null, null, true);
 
     Assert.assertFalse(
@@ -79,7 +80,8 @@ public class TestResourceConfig {
     Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
     Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_DELAY"));
     Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_MODE"));
-    Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
+    Assert.assertFalse(resourceConfig.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     Assert.assertEquals(record.getSimpleField(LEGACY_REBALANCE_STRATEGY),
         CrushEdRebalanceStrategy.class.getName());
   }
