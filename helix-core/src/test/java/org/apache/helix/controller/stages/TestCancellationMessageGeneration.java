@@ -27,7 +27,6 @@ import java.util.Map;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
-import org.apache.helix.api.exceptions.HelixManagerNotConnectedException;
 import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
@@ -55,31 +54,13 @@ public class TestCancellationMessageGeneration extends MessageGenerationPhase {
    */
   @Test
   public void TestOFFLINEToDROPPED() throws Exception {
-    Partition partition = mock(Partition.class);
-    ClusterEvent event = createOfflineToDroppedEvent(partition, mock(HelixManager.class));
-    process(event);
-    MessageOutput output = event.getAttribute(AttributeName.MESSAGES_ALL.name());
-    Assert.assertEquals(output.getMessages(TEST_RESOURCE, partition).size(), 1);
-  }
 
-  /*
-   * A lost ZooKeeper connection must fail the stage rather than silently skip the resource, so the
-   * controller knows to rerun the pipeline once reconnected.
-   */
-  @Test(expectedExceptions = HelixManagerNotConnectedException.class)
-  public void testConnectionLossFailsTheStage() throws Exception {
-    HelixManager manager = mock(HelixManager.class);
-    when(manager.getSessionId())
-        .thenThrow(new HelixManagerNotConnectedException("HelixManager is not connected"));
-    process(createOfflineToDroppedEvent(mock(Partition.class), manager));
-  }
-
-  private ClusterEvent createOfflineToDroppedEvent(Partition partition, HelixManager manager) {
     ClusterEvent event = new ClusterEvent(TEST_CLUSTER, ClusterEventType.Unknown);
 
 
     // Set current state to event
     CurrentStateOutput currentStateOutput = mock(CurrentStateOutput.class);
+    Partition partition = mock(Partition.class);
     when(partition.getPartitionName()).thenReturn(TEST_PARTITION);
     when(currentStateOutput.getCurrentState(TEST_RESOURCE, partition, TEST_INSTANCE)).thenReturn(null);
     Message message = mock(Message.class);
@@ -90,7 +71,7 @@ public class TestCancellationMessageGeneration extends MessageGenerationPhase {
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
 
     // Set helix manager to event
-    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.helixmanager.name(), mock(HelixManager.class));
 
     // Set controller data provider to event
     BaseControllerDataProvider cache = mock(BaseControllerDataProvider.class);
@@ -128,7 +109,9 @@ public class TestCancellationMessageGeneration extends MessageGenerationPhase {
     bestPossibleStateOutput.setState(TEST_RESOURCE, partition, instanceStateMap);
 
     event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossibleStateOutput);
-    return event;
+    process(event);
+    MessageOutput output = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    Assert.assertEquals(output.getMessages(TEST_RESOURCE, partition).size(), 1);
   }
 
   /*

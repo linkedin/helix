@@ -32,13 +32,10 @@ import java.util.TimerTask;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -50,7 +47,6 @@ import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.SystemPropertyKeys;
-import org.apache.helix.api.exceptions.HelixManagerNotConnectedException;
 import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.api.listeners.ClusterConfigChangeListener;
 import org.apache.helix.api.listeners.ControllerChangeListener;
@@ -195,26 +191,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private long _continuousRebalanceFailureCount = 0;
   private long _continuousResourceRebalanceFailureCount = 0;
   private long _continuousTaskRebalanceFailureCount = 0;
-
-  /*
-   * Recovery for pipeline events dropped while the ZooKeeper connection is lost. A same-session
-   * reconnect does not refire any watch, so without this nothing re-runs the pipeline and the
-   * leader silently stops rebalancing until some unrelated change happens to arrive.
-   */
-  static final long CONNECTION_LOSS_RETRY_INITIAL_DELAY_MS = 500L;
-  static final long CONNECTION_LOSS_RETRY_MAX_DELAY_MS = 5000L;
-  // Must be registered in every pipeline registry, or the rerun would execute no stages.
-  static final ClusterEventType CONNECTION_LOSS_RETRY_EVENT_TYPE =
-      ClusterEventType.OnDemandRebalance;
-  // At most one retry chain waits for the connection at a time, however many events were dropped.
-  private final AtomicBoolean _connectionLossRetryPending = new AtomicBoolean(false);
-  // Bumped on every controller change. A pending retry chain stops once leadership has moved on,
-  // since onControllerChange already re-ran the pipeline or relinquished leadership.
-  private final AtomicLong _controllerChangeEpoch = new AtomicLong(0);
-  // Controller change epoch of the latest retry request, so a request made after a controller
-  // change is not cancelled together with an older chain.
-  private final AtomicLong _connectionLossRetryEpoch = new AtomicLong(-1);
-  private final AtomicLong _connectionLossRetryRequestCount = new AtomicLong(0);
 
   /**
    * The executor that periodically runs the rebalancing pipeline when enabled in ClusterConfig.
@@ -406,6 +382,14 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
   }
 
+  /**
+   * Rerun the pipeline after the manager reconnects to ZooKeeper on the same session. Events
+   * handled while it was disconnected were dropped and nothing else would rerun them.
+   */
+  public void onReconnected(HelixManager manager) {
+    forceRebalance(manager, ClusterEventType.OnDemandRebalance);
+  }
+
   /* Trigger a rebalance pipeline */
   private void forceRebalance(HelixManager manager, ClusterEventType eventType) {
     NotificationContext changeContext = new NotificationContext(manager);
@@ -542,7 +526,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
   }
 
-  static PipelineRegistry createDefaultRegistry(String pipelineName) {
+  private static PipelineRegistry createDefaultRegistry(String pipelineName) {
     logger.info("createDefaultRegistry");
     synchronized (GenericHelixController.class) {
       PipelineRegistry registry = new PipelineRegistry();
@@ -631,7 +615,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
   }
 
-  static PipelineRegistry createTaskRegistry(String pipelineName) {
+  private static PipelineRegistry createTaskRegistry(String pipelineName) {
     logger.info("createTaskRegistry");
     synchronized (GenericHelixController.class) {
       PipelineRegistry registry = new PipelineRegistry();
@@ -685,7 +669,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
   }
 
-  static PipelineRegistry createManagementModeRegistry(String pipelineName) {
+  private static PipelineRegistry createManagementModeRegistry(String pipelineName) {
     logger.info("Creating management mode registry");
     synchronized (GenericHelixController.class) {
       // cluster data cache refresh
@@ -866,16 +850,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       logger.info("Event {} does not have event session attribute", event.getEventId());
     } else {
       eventSessionId = event.getAttribute(AttributeName.EVENT_SESSION.name());
-      String managerSessionId;
-      try {
-        managerSessionId = manager.getSessionId();
-      } catch (HelixManagerNotConnectedException e) {
-        logger.warn("Controller pipeline is not invoked because the ZooKeeper connection is lost. "
-                + "Will rerun it once reconnected. Event type: {}, id: {}, cluster: {}",
-            event.getEventType(), event.getEventId(), manager.getClusterName());
-        scheduleRetryAfterConnectionLoss(manager);
-        return;
-      }
+      String managerSessionId = manager.getSessionId();
 
       // If manager session changes, no need to run pipeline for the stale event.
       if (!eventSessionId.isPresent() || !eventSessionId.get().equals(managerSessionId)) {
@@ -983,11 +958,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             }
             logger.info("Retry rebalance pipeline with delay " + delay + "ms for cluster: " + _clusterName);
           }
-        } else if (isConnectionLoss(e, manager)) {
-          dataProvider.requireFullRefresh();
-          logger.warn("Rebalance pipeline failed due to lost zookeeper connection, cluster: {}. "
-              + "Will rerun it once reconnected.", _clusterName);
-          scheduleRetryAfterConnectionLoss(manager);
         }
         _clusterStatusMonitor.reportRebalanceFailure();
         updateContinuousRebalancedFailureCount(isTaskFrameworkPipeline, false /*resetToZero*/);
@@ -1097,85 +1067,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
     long backoff = (long) (Math.pow(2, failCount - lowLimit) * 10);
     return Math.min(backoff, 1000);
-  }
-
-  private static boolean isConnectionLoss(Throwable failure, HelixManager manager) {
-    for (Throwable t = failure; t != null; t = t.getCause()) {
-      if (t instanceof HelixManagerNotConnectedException) {
-        return true;
-      }
-      if (t.getCause() == t) {
-        break;
-      }
-    }
-    return !manager.isConnected();
-  }
-
-  /**
-   * Make sure a pipeline run that was dropped because the ZooKeeper connection was lost is rerun
-   * once the connection is back. Waits for the connection with a capped backoff, then forces a full
-   * cache refresh and an on-demand rebalance on every pipeline.
-   */
-  private void scheduleRetryAfterConnectionLoss(HelixManager manager) {
-    _connectionLossRetryRequestCount.incrementAndGet();
-    _connectionLossRetryEpoch.accumulateAndGet(_controllerChangeEpoch.get(), Math::max);
-    if (_connectionLossRetryPending.compareAndSet(false, true)) {
-      scheduleConnectionLossRetry(manager, CONNECTION_LOSS_RETRY_INITIAL_DELAY_MS);
-    }
-  }
-
-  private void scheduleConnectionLossRetry(HelixManager manager, long delayMs) {
-    try {
-      _asyncTasksThreadPool.schedule(() -> runConnectionLossRetry(manager, delayMs), delayMs,
-          TimeUnit.MILLISECONDS);
-    } catch (RejectedExecutionException e) {
-      // The controller is shutting down.
-      _connectionLossRetryPending.set(false);
-    }
-  }
-
-  private void runConnectionLossRetry(HelixManager manager, long lastDelayMs) {
-    long nextDelayMs = Math.min(lastDelayMs * 2, CONNECTION_LOSS_RETRY_MAX_DELAY_MS);
-    if (_connectionLossRetryEpoch.get() != _controllerChangeEpoch.get()) {
-      logger.info("Leadership changed for cluster {}, dropping the pending connection-loss retry",
-          _clusterName);
-      _connectionLossRetryPending.set(false);
-      // A request made after the controller change may have been folded into this stale chain.
-      if (_connectionLossRetryEpoch.get() == _controllerChangeEpoch.get()) {
-        scheduleRetryAfterConnectionLoss(manager);
-      }
-      return;
-    }
-    boolean connected;
-    try {
-      connected = manager.isConnected();
-    } catch (Throwable t) {
-      connected = false;
-    }
-    if (!connected) {
-      scheduleConnectionLossRetry(manager, nextDelayMs);
-      return;
-    }
-    // Clear before pushing, so a rerun that fails on a new disconnect can arm a new chain.
-    _connectionLossRetryPending.set(false);
-    try {
-      requestDataProvidersFullRefresh();
-      forceRebalance(manager, CONNECTION_LOSS_RETRY_EVENT_TYPE);
-    } catch (Throwable t) {
-      logger.warn("Failed to trigger the connection-loss retry for cluster {}, will try again",
-          _clusterName, t);
-      if (_connectionLossRetryPending.compareAndSet(false, true)) {
-        scheduleConnectionLossRetry(manager, nextDelayMs);
-      }
-    }
-  }
-
-  boolean isConnectionLossRetryPending() {
-    return _connectionLossRetryPending.get();
-  }
-
-  long getConnectionLossRetryRequestCount() {
-    return _connectionLossRetryRequestCount.get();
   }
 
   @Override
@@ -1499,7 +1390,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   public void onControllerChange(NotificationContext changeContext) {
     logger.info("START: GenericClusterController.onControllerChange() for cluster " + _clusterName);
 
-    _controllerChangeEpoch.incrementAndGet();
     requestDataProvidersFullRefresh();
 
     boolean controllerIsLeader;

@@ -59,7 +59,6 @@ import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.PropertyType;
 import org.apache.helix.SystemPropertyKeys;
-import org.apache.helix.api.exceptions.HelixManagerNotConnectedException;
 import org.apache.helix.api.listeners.ClusterConfigChangeListener;
 import org.apache.helix.api.listeners.ConfigChangeListener;
 import org.apache.helix.api.listeners.ControllerChangeListener;
@@ -413,7 +412,7 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     if (!isConnected) {
       LOG.error("zkClient is not connected after waiting " + timeout + "ms."
           + ", clusterName: " + _clusterName + ", zkAddress: " + getZkConnectionInfo());
-      throw new HelixManagerNotConnectedException(
+      throw new HelixException(
           "HelixManager is not connected within retry timeout for cluster " + _clusterName);
     }
   }
@@ -1551,6 +1550,18 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
       LOG.info("KeeperState:" + state + ", SessionId: " + _lastQueuedSessionID + ", instance: "
           + _instanceName + ", type: " + _instanceType);
       break;
+    }
+  }
+
+  @Override
+  public void handleStateChanged(KeeperState prevState, KeeperState curState) {
+    handleStateChanged(curState);
+    // Same-session reconnect. ZK replays the watches, but the pipeline events dropped while
+    // disconnected are lost, so rerun the pipeline once.
+    GenericHelixController controller = _controller;
+    if (controller != null && prevState == KeeperState.Disconnected
+        && curState == KeeperState.SyncConnected && isLeader()) {
+      controller.onReconnected(this);
     }
   }
 

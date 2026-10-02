@@ -34,7 +34,6 @@ import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
-import org.apache.helix.api.exceptions.HelixManagerNotConnectedException;
 import org.apache.helix.controller.LogUtil;
 import org.apache.helix.controller.common.ResourcesStateMap;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
@@ -105,10 +104,6 @@ public class MessageGenerationPhase extends AbstractBaseStage {
       try {
         generateMessage(resource, cache, bestPossibleStateOutput, currentStateOutput, manager,
             sessionIdMap, event.getEventType(), output, messagesToCleanUp);
-      } catch (HelixManagerNotConnectedException ex) {
-        // Fail the pipeline so the controller reruns it after reconnecting, instead of skipping
-        // this resource and letting the run look successful.
-        throw ex;
       } catch (HelixException ex) {
         LogUtil.logError(logger, _eventId,
             "Failed to generate message for resource " + resource.getResourceName(), ex);
