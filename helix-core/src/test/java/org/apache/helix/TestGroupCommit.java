@@ -21,9 +21,14 @@ package org.apache.helix;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.helix.mock.MockBaseDataAccessor;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.testng.Assert;
+import org.testng.annotations.Test;
 
 
 public class TestGroupCommit {
@@ -39,6 +44,79 @@ public class TestGroupCommit {
     Thread.sleep(10000);
     System.out.println(accessor.get("test", null, 0));
     System.out.println(accessor.get("test", null, 0).getSimpleFields().size());
+  }
+
+  /**
+   * An interrupted commit returns false, so its change must not be written later by another
+   * thread that drains the same queue.
+   */
+  @Test(timeOut = 30000)
+  public void testInterruptedCommitIsNotWrittenLater() throws Exception {
+    final String key = "/CLUSTER/INSTANCES/localhost_12918/CURRENTSTATES/session/resource";
+    final CountDownLatch holderInSet = new CountDownLatch(1);
+    final CountDownLatch releaseHolder = new CountDownLatch(1);
+    final AtomicBoolean blockNextSet = new AtomicBoolean(true);
+    final BaseDataAccessor<ZNRecord> accessor = new MockBaseDataAccessor() {
+      @Override
+      public boolean set(String path, ZNRecord record, int options) {
+        if (blockNextSet.compareAndSet(true, false)) {
+          holderInSet.countDown();
+          try {
+            releaseHolder.await();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+          }
+        }
+        return super.set(path, record, options);
+      }
+    };
+    final GroupCommit commit = new GroupCommit();
+    final ZNRecord holderRecord = recordWithField("holder");
+    final ZNRecord staleRecord = recordWithField("stale");
+    final AtomicBoolean holderResult = new AtomicBoolean(false);
+    final AtomicBoolean staleResult = new AtomicBoolean(true);
+
+    // The holder owns the queue and blocks in set(), like a write waiting on a lost ZK connection.
+    Thread holder =
+        new Thread(() -> holderResult.set(commit.commit(accessor, 0, key, holderRecord)));
+    // The stale commit waits behind the holder and is then interrupted.
+    Thread stale = new Thread(() -> staleResult.set(commit.commit(accessor, 0, key, staleRecord)));
+    try {
+      holder.start();
+      Assert.assertTrue(holderInSet.await(10, TimeUnit.SECONDS));
+      stale.start();
+      waitForTimedWaiting(stale);
+      stale.interrupt();
+      stale.join(10000);
+      Assert.assertFalse(stale.isAlive());
+      Assert.assertFalse(staleResult.get());
+    } finally {
+      releaseHolder.countDown();
+    }
+    holder.join(10000);
+    Assert.assertTrue(holderResult.get());
+
+    Assert.assertTrue(commit.commit(accessor, 0, key, recordWithField("later")));
+    ZNRecord stored = accessor.get(key, null, 0);
+    Assert.assertEquals(stored.getSimpleField("holder"), "holder");
+    Assert.assertEquals(stored.getSimpleField("later"), "later");
+    Assert.assertNull(stored.getSimpleField("stale"),
+        "A commit that returned false was written by a later commit");
+  }
+
+  private static ZNRecord recordWithField(String field) {
+    ZNRecord record = new ZNRecord("resource");
+    record.setSimpleField(field, field);
+    return record;
+  }
+
+  private static void waitForTimedWaiting(Thread thread) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 10000;
+    while (thread.getState() != Thread.State.TIMED_WAITING) {
+      Assert.assertTrue(System.currentTimeMillis() < deadline, "Commit never waited in the queue");
+      Thread.sleep(1);
+    }
   }
 }
 

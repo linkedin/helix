@@ -179,8 +179,10 @@ public class GroupCommit {
           try {
             entry.wait(10);
           } catch (InterruptedException e) {
-            LOG.error("Interrupted while committing change, key: " + key + ", record: " + record,
-                e);
+            // The caller treats this change as failed, so no other thread may write it later.
+            boolean removed = queue._pending.remove(entry);
+            LOG.error("Interrupted while committing change, key: " + key + ", record: " + record
+                + ", removed from queue: " + removed, e);
             // Restore interrupt status
             Thread.currentThread().interrupt();
             return false;
