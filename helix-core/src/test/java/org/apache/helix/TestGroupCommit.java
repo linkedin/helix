@@ -19,6 +19,7 @@ package org.apache.helix;
  * under the License.
  */
 
+import java.lang.reflect.Method;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
@@ -55,22 +56,7 @@ public class TestGroupCommit {
     final String key = "/CLUSTER/INSTANCES/localhost_12918/CURRENTSTATES/session/resource";
     final CountDownLatch holderInSet = new CountDownLatch(1);
     final CountDownLatch releaseHolder = new CountDownLatch(1);
-    final AtomicBoolean blockNextSet = new AtomicBoolean(true);
-    final BaseDataAccessor<ZNRecord> accessor = new MockBaseDataAccessor() {
-      @Override
-      public boolean set(String path, ZNRecord record, int options) {
-        if (blockNextSet.compareAndSet(true, false)) {
-          holderInSet.countDown();
-          try {
-            releaseHolder.await();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-          }
-        }
-        return super.set(path, record, options);
-      }
-    };
+    final BaseDataAccessor<ZNRecord> accessor = blockFirstSet(holderInSet, releaseHolder);
     final GroupCommit commit = new GroupCommit();
     final ZNRecord holderRecord = recordWithField("holder");
     final ZNRecord staleRecord = recordWithField("stale");
@@ -105,6 +91,42 @@ public class TestGroupCommit {
         "A commit that returned false was written by a later commit");
   }
 
+  /**
+   * The same holds when the later commit is for another key on the same queue: the interrupted
+   * change must not be written to its own path, recreating it if it was deleted meanwhile, as
+   * carry-over deletes a participant's old session folder.
+   */
+  @Test(timeOut = 30000)
+  public void testInterruptedCommitIsNotWrittenForAnotherKey() throws Exception {
+    final String staleKey = "/CLUSTER/INSTANCES/localhost_12918/CURRENTSTATES/oldSession/resource";
+    final CountDownLatch holderInSet = new CountDownLatch(1);
+    final CountDownLatch releaseHolder = new CountDownLatch(1);
+    final BaseDataAccessor<ZNRecord> accessor = blockFirstSet(holderInSet, releaseHolder);
+    final GroupCommit commit = new GroupCommit();
+    final String laterKey = keyInSameQueue(commit, staleKey);
+    final AtomicBoolean staleResult = new AtomicBoolean(true);
+
+    Thread holder = new Thread(() -> commit.commit(accessor, 0, staleKey, recordWithField("holder")));
+    Thread stale =
+        new Thread(() -> staleResult.set(commit.commit(accessor, 0, staleKey, recordWithField("stale"))));
+    try {
+      holder.start();
+      Assert.assertTrue(holderInSet.await(10, TimeUnit.SECONDS));
+      stale.start();
+      waitForTimedWaiting(stale);
+      stale.interrupt();
+      stale.join(10000);
+      Assert.assertFalse(staleResult.get());
+    } finally {
+      releaseHolder.countDown();
+    }
+    holder.join(10000);
+    accessor.remove(staleKey, 0);
+
+    Assert.assertTrue(commit.commit(accessor, 0, laterKey, recordWithField("later")));
+    Assert.assertNull(accessor.get(staleKey, null, 0), "An interrupted commit recreated a deleted path");
+  }
+
   private static ZNRecord recordWithField(String field) {
     ZNRecord record = new ZNRecord("resource");
     record.setSimpleField(field, field);
@@ -116,6 +138,37 @@ public class TestGroupCommit {
     while (thread.getState() != Thread.State.TIMED_WAITING) {
       Assert.assertTrue(System.currentTimeMillis() < deadline, "Commit never waited in the queue");
       Thread.sleep(1);
+    }
+  }
+
+  private static BaseDataAccessor<ZNRecord> blockFirstSet(CountDownLatch inSet, CountDownLatch release) {
+    final AtomicBoolean blockNextSet = new AtomicBoolean(true);
+    return new MockBaseDataAccessor() {
+      @Override
+      public boolean set(String path, ZNRecord record, int options) {
+        if (blockNextSet.compareAndSet(true, false)) {
+          inSet.countDown();
+          try {
+            release.await();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+          }
+        }
+        return super.set(path, record, options);
+      }
+    };
+  }
+
+  private static String keyInSameQueue(GroupCommit commit, String key) throws Exception {
+    Method getQueue = GroupCommit.class.getDeclaredMethod("getQueue", String.class);
+    getQueue.setAccessible(true);
+    Object queue = getQueue.invoke(commit, key);
+    for (int i = 0; ; i++) {
+      String candidate = key + "-other" + i;
+      if (getQueue.invoke(commit, candidate) == queue) {
+        return candidate;
+      }
     }
   }
 }
