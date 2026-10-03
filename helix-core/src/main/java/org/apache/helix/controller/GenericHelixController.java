@@ -382,6 +382,14 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
   }
 
+  /**
+   * Rerun the pipeline after the manager reconnects to ZooKeeper on the same session. Events
+   * handled while it was disconnected were dropped and nothing else would rerun them.
+   */
+  public void onReconnected(HelixManager manager) {
+    forceRebalance(manager, ClusterEventType.OnDemandRebalance);
+  }
+
   /* Trigger a rebalance pipeline */
   private void forceRebalance(HelixManager manager, ClusterEventType eventType) {
     NotificationContext changeContext = new NotificationContext(manager);
