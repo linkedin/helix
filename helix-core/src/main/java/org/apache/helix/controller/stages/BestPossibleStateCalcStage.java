@@ -111,6 +111,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, StateModelDefinition> stateModelDefMap = cache.getStateModelDefMap();
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
+    final CurrentStateOutput currentStateIncludingUnknown =
+        event.getAttribute(AttributeName.CURRENT_STATE.name());
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
     // Capture capacity rejection data from this pipeline run and clear for next run
     final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
@@ -133,8 +135,20 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
               continue;
             }
             IdealState is = idealStateMap.get(resourceName);
+            ExternalView ev = externalViewMap.get(resourceName);
+            // The cached external view is updated asynchronously and can lag this run, leaving
+            // the gauges stale until the next run. Build the view from this run's current state
+            // instead, the same way ExternalViewComputeStage does.
+            if (resourceMap.containsKey(resourceName) && currentStateIncludingUnknown != null
+                && !is.isExternalViewDisabled()) {
+              ev = new ExternalView(resourceName);
+              for (Map.Entry<Partition, Map<String, String>> entry : currentStateIncludingUnknown
+                  .getCurrentStateMap(resourceName).entrySet()) {
+                ev.setStateMap(entry.getKey().getPartitionName(), entry.getValue());
+              }
+            }
             reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
-                externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
+                ev, stateModelDefMap.get(is.getStateModelDefRef()));
           }
 
           // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing

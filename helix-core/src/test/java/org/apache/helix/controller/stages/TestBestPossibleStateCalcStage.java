@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -33,11 +34,14 @@ import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.TestAbstractRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
+import org.apache.helix.monitoring.mbeans.ResourceMonitor;
 import org.apache.helix.util.StageThreadPoolHelper;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
@@ -530,6 +534,54 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
         Assert.assertEquals(cache.getClusterConfig().getRecord().getSimpleField(retiredKey), "1");
       }
     }
+  }
+
+  /**
+   * The cached external view can lag the pipeline run, so the resource state gauges must follow
+   * this run's current state, including replicas on instances with an UNKNOWN operation.
+   */
+  @Test
+  public void testResourceStateGaugesUseThisRunsCurrentState() {
+    String resourceName = "testResourceName";
+    setupIdealState(3, new String[]{resourceName}, 1, 1, RebalanceMode.SEMI_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    setupLiveInstances(3);
+    setupStateModel();
+    setupInstances(3);
+
+    // The partition already has its MASTER, but the cached external view still shows a SLAVE.
+    Partition partition = new Partition(resourceName + "_0");
+    ExternalView staleExternalView = new ExternalView(resourceName);
+    staleExternalView.setState(partition.getPartitionName(), HOSTNAME_PREFIX + 1, "SLAVE");
+    CurrentStateOutput currentStateExcludingUnknown = new CurrentStateOutput();
+    currentStateExcludingUnknown.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1,
+        "MASTER");
+    // The external view also has a replica on an instance with an UNKNOWN operation.
+    CurrentStateOutput currentState = new CurrentStateOutput();
+    currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1, "MASTER");
+    currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 2, "SLAVE");
+
+    Map<String, Resource> resourceMap = getResourceMap(new String[]{resourceName}, 1,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentState);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(),
+        currentStateExcludingUnknown);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    runStage(event, new ReadClusterDataStage());
+    cache.updateExternalViews(Arrays.asList(staleExternalView));
+    // Run the async gauge task inline, so the gauges are final once the stage returns.
+    cache.setAsyncTasksThreadPool(MoreExecutors.newDirectExecutorService());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    // The stale SLAVE would be a missing top state, and the UNKNOWN replica is a difference.
+    ResourceMonitor resourceMonitor = monitor.getResourceMonitor(resourceName);
+    Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), 0);
+    Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(), 1);
   }
 
   /**
