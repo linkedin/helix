@@ -845,11 +845,7 @@ public class TaskUtil {
     }
     long jobFinishTime = jobContext.getFinishTime();
     long expiry = jobConfig.getExpiry();
-    long terminalStateExpiry = jobConfig.getTerminalStateExpiry();
-    return jobState == TaskState.COMPLETED && System.currentTimeMillis() >= jobFinishTime + expiry
-        || (jobState == TaskState.FAILED || jobState == TaskState.TIMED_OUT)
-        && terminalStateExpiry > 0
-        && System.currentTimeMillis() >= jobFinishTime + terminalStateExpiry;
+    return jobState == TaskState.COMPLETED && System.currentTimeMillis() >= jobFinishTime + expiry;
   }
 
   /**
