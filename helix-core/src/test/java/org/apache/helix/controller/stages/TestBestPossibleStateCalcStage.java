@@ -20,6 +20,7 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -670,6 +671,27 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     newerRun.get(30, TimeUnit.SECONDS);
     awaitPool(pool);
     assertResourceStateGauges(monitor, 0, 0);
+  }
+
+  /**
+   * An older run's gauge task must not report a resource that a newer run no longer has, or it
+   * would recreate the monitor of a deleted resource.
+   */
+  @Test
+  public void testOlderRunDoesNotReportDeletedResource() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    BestPossibleStateCalcStage stage = setUpGaugeRuns(monitor);
+    CountDownLatch gate = new CountDownLatch(1);
+    ExecutorService pool = gatedPool(gate);
+    runGaugePass(stage, "SLAVE", pool);
+    // The resource is deleted before the newer run.
+    ResourceControllerDataProvider cache =
+        event.getAttribute(AttributeName.ControllerDataProvider.name());
+    cache.setIdealStates(Collections.emptyList());
+    runGaugePass(stage, "SLAVE", MoreExecutors.newDirectExecutorService());
+    gate.countDown();
+    awaitPool(pool);
+    Assert.assertNull(monitor.getResourceMonitor(GAUGE_RESOURCE));
   }
 
   /**

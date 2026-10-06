@@ -79,9 +79,11 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   // names. A cluster-wide shortage can produce thousands of distinct pairs.
   private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
   // Gauge tasks of consecutive runs share a thread pool and can finish out of order. Keep the
-  // latest run that reported each resource, so an older run never overwrites a newer report.
+  // latest run that reported each resource, so an older run never overwrites a newer report,
+  // and the newest run's resources, so an older run does not report a resource deleted since.
   private final AtomicLong _latestRun = new AtomicLong();
   private final Map<String, Long> _reportedRuns = new HashMap<>();
+  private volatile Set<String> _latestResources = Collections.emptySet();
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -122,6 +124,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
         cache.getAndClearCapacityRejections();
     final long run = _latestRun.incrementAndGet();
+    _latestResources = idealStateMap.keySet();
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
@@ -153,17 +156,16 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
               }
             }
             synchronized (_reportedRuns) {
-              if (_reportedRuns.merge(resourceName, run, Math::max) == run) {
+              if (_latestResources.contains(resourceName)
+                  && _reportedRuns.merge(resourceName, run, Math::max) == run) {
                 reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName,
                     is, ev, stateModelDefMap.get(is.getStateModelDefRef()));
               }
             }
           }
-          // Forget deleted resources. Only the latest run knows which resources are gone.
+          // Forget the resources that the newest run no longer has.
           synchronized (_reportedRuns) {
-            if (run == _latestRun.get()) {
-              _reportedRuns.keySet().retainAll(idealStateMap.keySet());
-            }
+            _reportedRuns.keySet().retainAll(_latestResources);
           }
 
           // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing
