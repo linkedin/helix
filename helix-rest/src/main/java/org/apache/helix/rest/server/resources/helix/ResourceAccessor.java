@@ -51,9 +51,12 @@ import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
+import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -63,6 +66,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.util.HelixUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.slf4j.Logger;
@@ -642,26 +646,41 @@ public class ResourceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
       case update: {
-        // Guard rail: an ideal-state edit that leaves MIN_ACTIVE_REPLICAS greater than REPLICAS is
-        // logically inconsistent -- a partition can never have more active replicas than it has
-        // replicas -- so every partition is permanently accounted below its minimum active count,
-        // defeating delayed rebalance and min-active health guarantees. Validate the merged
-        // (post-write) ideal state, the same way the ZK write merges the incoming record into the
-        // existing one; the rule blocks only edits that introduce or worsen the inconsistency and
-        // grandfathers an already-inconsistent resource. force=true overrides; dryRun=true only
-        // reports the verdict without writing.
+        // Guard rails on the merged (post-write) ideal state. (1) MinActiveReplicasConsistency is a
+        // cheap, always-on field check: an edit that leaves MIN_ACTIVE_REPLICAS greater than
+        // REPLICAS is logically inconsistent -- a partition can never have more active replicas than
+        // it has replicas -- so every partition is permanently below its minimum active count,
+        // defeating delayed rebalance and min-active health guarantees. (2) IdealStateRebalance-
+        // Feasibility is an always-on WAGED what-if: it blocks an edit (e.g. a replica-count increase)
+        // that the live instances cannot actually place. Both validate the merged record, the same
+        // way the ZK write merges the incoming record into the existing one; each blocks only edits
+        // that introduce or worsen a problem and grandfathers an already-bad resource. force=true
+        // overrides; dryRun=true only reports the verdict without writing.
         HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
         IdealState existingIdealState =
             dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName));
         ZNRecord mergedRecord = existingIdealState != null
             ? new ZNRecord(existingIdealState.getRecord()) : new ZNRecord(resourceName);
         mergedRecord.update(record);
+        // The WAGED feasibility rule runs a (relatively expensive) read-only WAGED what-if. Only
+        // wire its provider seam when the verdict can matter: on a real force write the feasibility
+        // verdict is overridden anyway, so leave the provider null and let that rule self-certify
+        // feasible without simulating; the cheap min-active rule still runs. A dryRun still computes
+        // the verdict (even together with force) so it can be previewed.
+        WagedAssignmentProvider wagedAssignmentProvider = (dryRun || !force)
+            ? (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                    liveInstances, idealStates, resourceConfigs)
+            : null;
         GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
             .dataAccessor(dataAccessor)
             .proposedIdealState(new IdealState(mergedRecord))
+            .wagedAssignmentProvider(wagedAssignmentProvider)
             .build();
         GuardrailPipeline guardrailPipeline =
-            new GuardrailPipeline(new MinActiveReplicasConsistencyGuardrailRule());
+            new GuardrailPipeline(new MinActiveReplicasConsistencyGuardrailRule(),
+                new IdealStateRebalanceFeasibilityGuardrailRule());
         Optional<Response> preflightResponse =
             preflight(guardrailPipeline, guardrailContext, force, dryRun);
         if (preflightResponse.isPresent()) {

@@ -45,8 +45,11 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
+import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
+import org.apache.helix.integration.manager.ClusterControllerManager;
+import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -55,6 +58,8 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.builder.FullAutoModeISBuilder;
 import org.apache.helix.rest.server.resources.helix.ResourceAccessor;
+import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
+import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -986,6 +991,111 @@ public class TestResourceAccessor extends AbstractTestClass {
   private int storedDefaultWeight(String resourceName, String dimension) throws IOException {
     return _configAccessor.getResourceConfig(CLUSTER_NAME, resourceName).getPartitionCapacityMap()
         .get(ResourceConfig.DEFAULT_PARTITION_KEY).get(dimension);
+  }
+
+  /**
+   * Always-on WAGED rebalance-feasibility guard rail on {@code updateResourceIdealState?command=update}.
+   * Uses a self-contained WAGED cluster whose replica count already equals the assignable-instance
+   * count, so raising {@code REPLICAS} beyond it is a deterministic placement deficit (no instance can
+   * hold a second replica of a partition). Verifies enforcement (400 + verdict, nothing written),
+   * dry-run (200 + verdict, nothing written), that a legitimate replica <em>decrease</em> is not
+   * falsely flagged, and force bypass.
+   */
+  @Test(dependsOnMethods = "testAddWagedResourceWeightGuardrail")
+  public void testUpdateIdealStateRebalanceFeasibilityGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterIdealStateWagedGuardrail";
+    String resource = "TestDB_WAGED";
+    String capacityKey = "CU";
+    int numNodes = 3;
+    int numPartitions = 3;
+    int replica = 3;
+    try {
+      _gSetupTool.addCluster(cluster, true);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList(capacityKey));
+      clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(capacityKey, 100));
+      clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(capacityKey, 1));
+      _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+      for (int i = 0; i < numNodes; i++) {
+        String instance = cluster + "_localhost_" + (14100 + i);
+        _gSetupTool.addInstanceToCluster(cluster, instance);
+        MockParticipantManager participant =
+            new MockParticipantManager(ZK_ADDR, cluster, instance);
+        participant.syncStart();
+        _mockParticipantManagers.add(participant);
+      }
+      _clusterControllerManagers.add(startController(cluster));
+
+      _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+      IdealState idealState =
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+      idealState.setMinActiveReplicas(1);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+      _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+      try (BestPossibleExternalViewVerifier verifier =
+          new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+        Assert.assertTrue(verifier.verifyByPolling(),
+            "cluster should converge before exercising the guard rail");
+      }
+
+      String endpoint = "clusters/{}/resources/{}/idealState?command=update";
+
+      // 1. Enforcement: raising REPLICAS to 4 is unplaceable on 3 instances -> 400 + verdict, and the
+      //    ideal state is not written.
+      Response blocked = new JerseyUriRequestBuilder(endpoint)
+          .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .format(cluster, resource).post(this, replicaUpdateEntity(resource, 4));
+      Assert.assertTrue(
+          blocked.readEntity(String.class)
+              .contains(IdealStateRebalanceFeasibilityGuardrailRule.RULE_ID),
+          "blocked verdict should carry the rule id");
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getReplicas(), String.valueOf(replica),
+          "a blocked replica increase must not be written");
+
+      // 2. dryRun: 200 with the infeasible verdict, still nothing written.
+      Response dryRun = new JerseyUriRequestBuilder(endpoint + "&dryRun=true").format(cluster, resource)
+          .post(this, replicaUpdateEntity(resource, 4));
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(IdealStateRebalanceFeasibilityGuardrailRule.RULE_ID));
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getReplicas(), String.valueOf(replica), "dryRun must not write");
+
+      // 3. A legitimate replica decrease (3 -> 2) is placeable, so the guard rail must allow it.
+      new JerseyUriRequestBuilder(endpoint).format(cluster, resource)
+          .post(this, replicaUpdateEntity(resource, 2));
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getReplicas(), "2", "a feasible replica decrease should be written");
+
+      // 4. force: an operator override bypasses the verdict and writes the (infeasible) increase.
+      new JerseyUriRequestBuilder(endpoint + "&force=true").format(cluster, resource)
+          .post(this, replicaUpdateEntity(resource, 4));
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getReplicas(), "4", "force=true should write the replica increase");
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // An ideal-state "update" body carrying only a new REPLICAS count; the endpoint merges it into the
+  // existing (WAGED) ideal state, so the guard rail sees the proposed replica count.
+  private static Entity replicaUpdateEntity(String resource, int replicas) throws IOException {
+    IdealState update = new IdealState(resource);
+    update.setReplicas(String.valueOf(replicas));
+    return Entity.entity(OBJECT_MAPPER.writeValueAsString(update.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
   }
 
   private Response putWagedResource(String resourceName, ResourceConfig resourceConfig,
