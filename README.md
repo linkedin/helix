@@ -106,6 +106,24 @@ records may still contain it: reading them does not rewrite them, and rebuilding
 them through the typed builder ignores the key. No stored-record migration is
 required, and this change does not add rejection of unknown fields to generic APIs.
 
+The job option `RebalanceRunningTask` has also been retired. Its JobConfig enum,
+default constant, getter, builder setter and `JobBean.rebalanceRunningTask` field
+have been removed. Remove downstream Java references and rebuild callers before
+upgrading; this is a source and binary compatibility break.
+
+Scheduling preserves the former `false` behavior. Generic running tasks are not
+moved just to balance load; failure recovery and retries remain supported.
+Targeted tasks still follow changed target assignments after live-instance,
+current-state or message changes. Only the extra opt-in relocation path has been
+removed. Applications relying on `true` for targeted jobs must review that behavior
+before upgrading; there is no replacement knob.
+
+New typed job configurations and job-ID copies omit `RebalanceRunningTask`.
+Existing raw records remain readable without being rewritten; the old field is
+ignored even if it contains `true`. Job-level YAML `rebalanceRunningTask` is also
+accepted and ignored, using the existing narrowly scoped legacy-property handling.
+Unknown YAML properties and properties at the wrong scope remain rejected.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 

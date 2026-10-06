@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
@@ -50,7 +51,9 @@ public class TestJobAccessor extends AbstractTestClass {
   private final static String JOB_NAME = WORKFLOW_NAME + "_" + JOB_PREFIX + 0;
   private final static String TEST_JOB_NAME = "TestJob";
   private final static String JOB_INPUT =
-      "{\"id\":\"TestJob\",\"simpleFields\":{\"JobID\":\"Job2\"," + "\"WorkflowID\":\"Workflow1\"},\"mapFields\":{\"Task1\":{\"TASK_ID\":\"Task1\","
+      "{\"id\":\"TestJob\",\"simpleFields\":{\"JobID\":\"Job2\","
+          + "\"WorkflowID\":\"Workflow1\",\"RebalanceRunningTask\":\"true\"},"
+          + "\"mapFields\":{\"Task1\":{\"TASK_ID\":\"Task1\","
           + "\"TASK_COMMAND\":\"Backup\",\"TASK_TARGET_PARTITION\":\"p1\"},\"Task2\":{\"TASK_ID\":"
           + "\"Task2\",\"TASK_COMMAND\":\"ReIndex\"}},\"listFields\":{}}";
 
@@ -136,6 +139,14 @@ public class TestJobAccessor extends AbstractTestClass {
     String jobName = TaskUtil.getNamespacedJobName(TEST_QUEUE_NAME, TEST_JOB_NAME);
     JobConfig jobConfig = driver.getJobConfig(jobName);
     Assert.assertNotNull(jobConfig);
+    Assert.assertFalse(jobConfig.getRecord().getSimpleFields().containsKey("RebalanceRunningTask"));
+    Assert.assertEquals(jobConfig.getTaskConfigMap().size(), 2);
+    Set<String> commands = new HashSet<>();
+    for (Map<String, String> task : jobConfig.getRecord().getMapFields().values()) {
+      commands.add(task.get("TASK_COMMAND"));
+    }
+    Assert.assertTrue(commands.contains("Backup"));
+    Assert.assertTrue(commands.contains("ReIndex"));
 
     WorkflowConfig workflowConfig = driver.getWorkflowConfig(TEST_QUEUE_NAME);
     Assert.assertTrue(workflowConfig.getJobDag().getAllNodes().contains(jobName));

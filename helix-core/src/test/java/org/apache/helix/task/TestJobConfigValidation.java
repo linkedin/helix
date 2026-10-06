@@ -182,6 +182,55 @@ public class TestJobConfigValidation {
   }
 
   @DataProvider
+  public Object[][] legacyRunningTaskFlags() {
+    return new Object[][] {
+        {false, null}, {false, "false"}, {false, "true"}, {false, "invalid"},
+        {true, null}, {true, "false"}, {true, "true"}, {true, "invalid"}
+    };
+  }
+
+  @Test(dataProvider = "legacyRunningTaskFlags")
+  public void testLegacyRunningTaskFlagIgnored(boolean targeted, String legacyValue) {
+    JobConfig.Builder builder = new JobConfig.Builder().setWorkflow("workflow").setJobId("job")
+        .setCommand("Dummy").setTimeoutPerTask(1000L).setTaskRetryDelay(50L)
+        .setMaxAttemptsPerTask(3).setExpiry(2000L).setTerminalStateExpiry(3000L);
+    if (targeted) {
+      builder.setTargetResource("database")
+          .setTargetPartitions(Collections.singletonList("database_0"))
+          .setTargetPartitionStates(Collections.singleton("SLAVE"));
+    } else {
+      builder.setNumberOfTasks(2);
+    }
+    JobConfig expected = builder.build();
+    String retiredKey = "RebalanceRunningTask";
+    Assert.assertFalse(expected.getRecord().getSimpleFields().containsKey(retiredKey));
+
+    ZNRecord legacyRecord = new ZNRecord(expected.getRecord());
+    if (legacyValue != null) {
+      legacyRecord.setSimpleField(retiredKey, legacyValue);
+    }
+    ZNRecord originalRecord = new ZNRecord(legacyRecord);
+    JobConfig.Builder parsedBuilder = JobConfig.Builder.fromMap(legacyRecord.getSimpleFields())
+        .addTaskConfigMap(expected.getTaskConfigMap());
+    JobConfig parsed = parsedBuilder.build();
+    Assert.assertEquals(parsed.getRecord(), expected.getRecord());
+    Assert.assertEquals(TaskUtil.isGenericTaskJob(parsed), !targeted);
+
+    JobConfig wrapped = new JobConfig(new HelixProperty(legacyRecord));
+    Assert.assertEquals(wrapped.getRecord(), originalRecord);
+    JobConfig copied = new JobConfig("copy", wrapped);
+    Assert.assertEquals(copied.getRecord(), new JobConfig("copy", expected).getRecord());
+    Assert.assertFalse(copied.getRecord().getSimpleFields().containsKey(retiredKey));
+    Assert.assertEquals(legacyRecord, originalRecord, "Reading legacy records must not rewrite them");
+
+    Workflow workflow = new Workflow.Builder("workflow").addJob("job", parsedBuilder).build();
+    Assert.assertEquals(workflow.getJobConfigs().get("workflow_job"),
+        new Workflow.Builder("workflow").addJob("job", builder).build()
+            .getJobConfigs().get("workflow_job"));
+    Assert.assertFalse(workflow.getJobConfigs().get("workflow_job").containsKey(retiredKey));
+  }
+
+  @DataProvider
   public Object[][] invalidMaxAttempts() {
     return new Object[][] {{0}, {-1}};
   }
