@@ -193,7 +193,7 @@ public class TestJobConfigValidation {
   public void testLegacyRunningTaskFlagIgnored(boolean targeted, String legacyValue) {
     JobConfig.Builder builder = new JobConfig.Builder().setWorkflow("workflow").setJobId("job")
         .setCommand("Dummy").setTimeoutPerTask(1000L).setTaskRetryDelay(50L)
-        .setMaxAttemptsPerTask(3).setExpiry(2000L).setTerminalStateExpiry(3000L);
+        .setMaxAttemptsPerTask(3).setExpiry(2000L);
     if (targeted) {
       builder.setTargetResource("database")
           .setTargetPartitions(Collections.singletonList("database_0"))
