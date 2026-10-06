@@ -570,6 +570,9 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     CurrentStateOutput currentState = new CurrentStateOutput();
     currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1, "MASTER");
     currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 2, "SLAVE");
+    // A partition the resource no longer has stays out of the view, as in the external view.
+    currentState.setCurrentState(resourceName, new Partition(resourceName + "_1"),
+        HOSTNAME_PREFIX + 1, "SLAVE");
 
     Map<String, Resource> resourceMap = getResourceMap(new String[]{resourceName}, 1,
         BuiltInStateModelDefinitions.MasterSlave.name());
@@ -592,6 +595,7 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     ResourceMonitor resourceMonitor = monitor.getResourceMonitor(resourceName);
     Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), 0);
     Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(), 1);
+    Assert.assertEquals(resourceMonitor.getExternalViewPartitionGauge(), 1);
   }
 
   /**

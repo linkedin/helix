@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
@@ -124,7 +125,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
         cache.getAndClearCapacityRejections();
     final long run = _latestRun.incrementAndGet();
-    _latestResources = idealStateMap.keySet();
+    _latestResources = new HashSet<>(idealStateMap.keySet());
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
@@ -150,9 +151,12 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
             if (resourceMap.containsKey(resourceName) && currentStateIncludingUnknown != null
                 && !is.isExternalViewDisabled()) {
               ev = new ExternalView(resourceName);
-              for (Map.Entry<Partition, Map<String, String>> entry : currentStateIncludingUnknown
-                  .getCurrentStateMap(resourceName).entrySet()) {
-                ev.setStateMap(entry.getKey().getPartitionName(), entry.getValue());
+              for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
+                Map<String, String> stateMap =
+                    currentStateIncludingUnknown.getCurrentStateMap(resourceName, partition);
+                if (stateMap != null && !stateMap.isEmpty()) {
+                  ev.setStateMap(partition.getPartitionName(), new TreeMap<>(stateMap));
+                }
               }
             }
             synchronized (_reportedRuns) {
