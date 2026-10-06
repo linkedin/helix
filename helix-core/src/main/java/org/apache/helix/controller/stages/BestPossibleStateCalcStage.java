@@ -78,8 +78,10 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   // Upper bound on how many (resource, instance) pairs the aggregated capacity-rejection line
   // names. A cluster-wide shortage can produce thousands of distinct pairs.
   private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
-  // The gauge reports run on a thread pool, so an older run must not report after a newer one.
+  // Gauge tasks of consecutive runs share a thread pool and can finish out of order. Keep the
+  // latest run that reported each resource, so an older run never overwrites a newer report.
   private final AtomicLong _latestRun = new AtomicLong();
+  private final Map<String, Long> _reportedRuns = new HashMap<>();
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -150,12 +152,17 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
                 ev.setStateMap(entry.getKey().getPartitionName(), entry.getValue());
               }
             }
-            synchronized (_latestRun) {
-              if (run != _latestRun.get()) {
-                break;
+            synchronized (_reportedRuns) {
+              if (_reportedRuns.merge(resourceName, run, Math::max) == run) {
+                reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName,
+                    is, ev, stateModelDefMap.get(is.getStateModelDefRef()));
               }
-              reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
-                  ev, stateModelDefMap.get(is.getStateModelDefRef()));
+            }
+          }
+          // Forget deleted resources. Only the latest run knows which resources are gone.
+          synchronized (_reportedRuns) {
+            if (run == _latestRun.get()) {
+              _reportedRuns.keySet().retainAll(idealStateMap.keySet());
             }
           }
 
