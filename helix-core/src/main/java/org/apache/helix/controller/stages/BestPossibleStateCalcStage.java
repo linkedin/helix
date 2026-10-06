@@ -78,6 +78,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   // Upper bound on how many (resource, instance) pairs the aggregated capacity-rejection line
   // names. A cluster-wide shortage can produce thousands of distinct pairs.
   private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
+  // The gauge reports run on a thread pool, so an older run must not report after a newer one.
+  private final AtomicLong _latestRun = new AtomicLong();
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -117,6 +119,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     // Capture capacity rejection data from this pipeline run and clear for next run
     final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
         cache.getAndClearCapacityRejections();
+    final long run = _latestRun.incrementAndGet();
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
@@ -147,8 +150,13 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
                 ev.setStateMap(entry.getKey().getPartitionName(), entry.getValue());
               }
             }
-            reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
-                ev, stateModelDefMap.get(is.getStateModelDefRef()));
+            synchronized (_latestRun) {
+              if (run != _latestRun.get()) {
+                break;
+              }
+              reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
+                  ev, stateModelDefMap.get(is.getStateModelDefRef()));
+            }
           }
 
           // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing

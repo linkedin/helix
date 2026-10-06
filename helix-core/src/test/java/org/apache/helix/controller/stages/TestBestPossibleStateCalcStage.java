@@ -25,6 +25,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.helix.HelixConstants;
@@ -582,6 +586,61 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     ResourceMonitor resourceMonitor = monitor.getResourceMonitor(resourceName);
     Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), 0);
     Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(), 1);
+  }
+
+  /**
+   * The gauge tasks of consecutive runs share a thread pool, so an older run's task can finish
+   * last. It must not overwrite the gauges reported by the newer run.
+   */
+  @Test
+  public void testOlderRunDoesNotOverwriteResourceStateGauges() throws Exception {
+    String resourceName = "testResourceName";
+    setupIdealState(3, new String[]{resourceName}, 1, 1, RebalanceMode.SEMI_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    setupLiveInstances(3);
+    setupStateModel();
+    setupInstances(3);
+    Partition partition = new Partition(resourceName + "_0");
+    CurrentStateOutput slave = new CurrentStateOutput();
+    slave.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1, "SLAVE");
+    CurrentStateOutput master = new CurrentStateOutput();
+    master.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1, "MASTER");
+
+    Map<String, Resource> resourceMap = getResourceMap(new String[]{resourceName}, 1,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    runStage(event, new ReadClusterDataStage());
+    BestPossibleStateCalcStage stage = new BestPossibleStateCalcStage();
+
+    // The older run still sees a SLAVE, and its gauge task waits behind a gate.
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    CountDownLatch gate = new CountDownLatch(1);
+    pool.submit(() -> {
+      gate.await();
+      return null;
+    });
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), slave);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), slave);
+    cache.setAsyncTasksThreadPool(pool);
+    runStage(event, stage);
+
+    // The newer run sees the MASTER and reports first.
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), master);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), master);
+    cache.setAsyncTasksThreadPool(MoreExecutors.newDirectExecutorService());
+    runStage(event, stage);
+    gate.countDown();
+    pool.shutdown();
+    Assert.assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+
+    ResourceMonitor resourceMonitor = monitor.getResourceMonitor(resourceName);
+    Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), 0);
+    Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(), 0);
   }
 
   /**
