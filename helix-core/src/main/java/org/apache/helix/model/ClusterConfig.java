@@ -156,6 +156,56 @@ public class ClusterConfig extends HelixProperty {
     // Default to be true.
     GLOBAL_REBALANCE_ASYNC_MODE,
 
+    /**
+     * Enable instance-tag (a.k.a. "clique") isolation inside the WAGED rebalance algorithm.
+     *
+     * WAGED is a global rebalancer: it evaluates every replica of every WAGED managed resource in a
+     * single pass and aborts the whole pass as soon as one replica cannot be placed. In a cluster
+     * that is carved into disjoint cliques (each instance carries one instance tag, and each
+     * resource is pinned to exactly one tag through INSTANCE_GROUP_TAG), that means one unplaceable
+     * clique freezes the rebalance of every other clique, including the ones that are perfectly
+     * healthy.
+     *
+     * When this is enabled the algorithm still builds one global cluster model and still walks the
+     * one globally sorted replica list, so nothing about how a placement is chosen changes. Besides
+     * the capacity check described below, the only difference is what happens when a replica cannot
+     * be placed: instead of aborting the whole cluster's rebalance, the algorithm releases
+     * everything it already placed for that replica's isolation group and for every group
+     * connected to it through shared nodes (see below), skips the rest of them, and carries on
+     * with the other groups. The isolation group is the resource's instance group tag, so every
+     * resource sharing a tag is carried over together: rolling back only the broken resource would
+     * free capacity that its healthy siblings would immediately consume, and the emitted result
+     * (recalculated siblings plus the carried over broken resource) could overcommit the clique's
+     * nodes. Skipped resources keep their previous assignment, or are left out when they have
+     * none, so the assignment metadata store never holds a half assigned resource.
+     *
+     * A group is never isolated alone: it is carried over together with every group it shares a
+     * node with, followed transitively, so nothing still being calculated can take the capacity
+     * the carried groups free. Disjoint cliques, the case this mode targets, form one such block
+     * each, and an instance carrying two clique tags joins those two cliques into one block. An
+     * untagged resource can go anywhere, so a calculation that includes it pulls every group it
+     * meets into one cluster wide block, and a failure there fails that calculation exactly as the
+     * default mode does. The baseline, the emergency rebalance and the delayed rebalance overwrite
+     * include a newly added untagged resource from the start, although the last two place none of
+     * its replicas. The partial rebalance leaves out a resource the baseline does not hold yet, as
+     * the default mode does, so the new resource merges the groups there only once the baseline
+     * places it. The mode is therefore never worse than the default one.
+     *
+     * Isolation only acts once the default mode would already have failed, so a rebalance in which
+     * nothing fails produces exactly the same assignment as when this is disabled. That parity
+     * holds for any topology, not only for cleanly partitioned ones.
+     *
+     * The cluster wide capacity check that runs before any placement is tag blind, so one wildly
+     * oversubscribed clique can drag it negative while every other clique still fits on its own
+     * nodes. When this is enabled that deficit is attributed to the cliques that cannot hold their
+     * own replicas on their own nodes, which are then carried over like any other failed group,
+     * and the check is re-evaluated on what is left. A genuine cluster wide shortfall still fails
+     * the whole rebalance.
+     *
+     * Default to be false, which gives the all-or-nothing global behavior.
+     */
+    WAGED_INSTANCE_TAG_ISOLATION_ENABLED,
+
     // The target size of task thread pools for each participant. If participants specify their
     // individual pool sizes in their InstanceConfig's, this value will NOT be used; if participants
     // don't specify their individual pool sizes, this value will be used for all participants; if
@@ -212,6 +262,7 @@ public class ClusterConfig extends HelixProperty {
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
+  public final static boolean DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED = false;
   public final static boolean DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   private static final int GLOBAL_TARGET_TASK_THREAD_POOL_SIZE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
@@ -1271,6 +1322,27 @@ public class ClusterConfig extends HelixProperty {
   public boolean isGlobalRebalanceAsyncModeEnabled() {
     return _record.getBooleanField(ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(),
         DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED);
+  }
+
+  /**
+   * Enable or disable instance-tag ("clique") isolation for the WAGED rebalance algorithm.
+   * See {@link ClusterConfigProperty#WAGED_INSTANCE_TAG_ISOLATION_ENABLED}.
+   * @param enabled true to isolate rebalance failures to the failing instance tag group and every
+   *        group connected to it through shared nodes.
+   */
+  public void setWagedInstanceTagIsolationEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
+        enabled);
+  }
+
+  /**
+   * @return true if WAGED should isolate rebalance failures to the failing instance-group-tag group
+   *         and every group connected to it through shared nodes. Default false.
+   */
+  public boolean isWagedInstanceTagIsolationEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
+            DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
   }
 
   /**
