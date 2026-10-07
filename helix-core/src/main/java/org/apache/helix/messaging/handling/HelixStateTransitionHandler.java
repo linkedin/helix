@@ -213,6 +213,22 @@ public class HelixStateTransitionHandler extends MessageHandler {
     updateZKCurrentState();
   }
 
+  /**
+   * Checks whether this instance is still a registered member of the cluster, i.e. its
+   * InstanceConfig has not been removed.
+   * <p>
+   * The underlying ZK data accessor recursively recreates any missing parent znodes as a side
+   * effect of a current state write. If an instance is cleanly dropped from the cluster
+   * (InstanceConfig and /INSTANCES/{instance} removed, e.g. during a hardware swap) while this
+   * process is still alive and in the middle of completing a state transition, simply persisting
+   * the current state would silently resurrect the dropped instance's ZK subtree as an orphan
+   * node that no longer has a live instance or InstanceConfig backing it. Guard against that race
+   * by skipping the ZK write entirely once the instance is no longer registered.
+   */
+  private boolean isInstanceRegistered(HelixDataAccessor accessor, String instanceName) {
+    return accessor.getPropertyStat(accessor.keyBuilder().instanceConfig(instanceName)) != null;
+  }
+
   // Update the ZK current state of the node
   private void updateZKCurrentState(){
     HelixDataAccessor accessor = _manager.getHelixDataAccessor();
@@ -222,6 +238,14 @@ public class HelixStateTransitionHandler extends MessageHandler {
     String instanceName = _manager.getInstanceName();
 
     try {
+      if (!isInstanceRegistered(accessor, instanceName)) {
+        logger.warn(
+            "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                + "Skipping current state ZK update for resource {} partition {} to avoid "
+                + "resurrecting a dropped instance's ZK node.", instanceName, resource,
+            partitionKey);
+        return;
+      }
       // We did not update _stateModel for DROPPED state, so it won't match _stateModel.
       if (!_stateModel.getCurrentState().equals(_currentStateDelta.getState(partitionKey))
           && !_currentStateDelta.getState(partitionKey)
