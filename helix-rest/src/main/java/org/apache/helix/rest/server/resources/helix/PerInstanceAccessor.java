@@ -59,7 +59,6 @@ import org.apache.helix.guardrail.MinActiveReplicaChecker;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
-import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -588,21 +587,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
           // dryRun still computes the verdict (even together with force) so it can be previewed.
           if (dryRun || !force) {
-            WagedAssignmentProvider wagedAssignmentProvider =
-                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
-                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                        liveInstances, idealStates, resourceConfigs);
-            GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
-                .dataAccessor(getDataAccssor(clusterId))
-                .instanceName(instanceName)
-                .proposedInstanceOperation(instanceOperation)
-                .wagedAssignmentProvider(wagedAssignmentProvider)
-                .build();
-            GuardrailPipeline setInstanceOperationPipeline =
-                new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
-            Optional<Response> setInstanceOperationPreflight =
-                preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
+            Optional<Response> setInstanceOperationPreflight = preflightInstanceOperation(
+                clusterId, Collections.singletonList(instanceName), instanceOperation, force,
+                dryRun);
             if (setInstanceOperationPreflight.isPresent()) {
               return setInstanceOperationPreflight.get();
             }

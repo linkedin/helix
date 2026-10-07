@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Optional;
 
 import javax.ws.rs.core.MediaType;
@@ -31,15 +32,20 @@ import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.ValidationResult;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.server.ServerContext;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.task.TaskDriver;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.util.HelixUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
@@ -156,6 +162,29 @@ public class AbstractHelixResource extends AbstractResource {
       return Optional.empty();
     }
     return Optional.of(verdictResponse(result, Response.Status.BAD_REQUEST));
+  }
+
+  /**
+   * {@link #preflight} for setting {@code operation} on every instance at once: blocks an operation
+   * that would leave WAGED partitions unable to place all their replicas.
+   */
+  protected Optional<Response> preflightInstanceOperation(String clusterId,
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
+      boolean force, boolean dryRun) {
+    WagedAssignmentProvider wagedAssignmentProvider =
+        (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+            .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                liveInstances, idealStates, resourceConfigs);
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .instanceNames(instanceNames)
+        .proposedInstanceOperation(operation)
+        .wagedAssignmentProvider(wagedAssignmentProvider)
+        .build();
+    return preflight(
+        new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule()), context,
+        force, dryRun);
   }
 
   /**
