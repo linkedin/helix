@@ -613,6 +613,19 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     Assert.assertEquals(response.getStatus(), expectedReturnStatus);
   }
 
+  protected Response delete(String uri, Map<String, String> queryParams,
+      int expectedReturnStatus) {
+    WebTarget webTarget = target(uri);
+    if (queryParams != null) {
+      for (Map.Entry<String, String> entry : queryParams.entrySet()) {
+        webTarget = webTarget.queryParam(entry.getKey(), entry.getValue());
+      }
+    }
+    Response response = webTarget.request().delete();
+    Assert.assertEquals(response.getStatus(), expectedReturnStatus);
+    return response;
+  }
+
   protected TaskDriver getTaskDriver(String clusterName) {
     return new TaskDriver(_gZkClient, clusterName);
   }
