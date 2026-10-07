@@ -22,6 +22,7 @@ package org.apache.helix.guardrail.rules;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
@@ -40,8 +41,10 @@ import org.apache.helix.model.ResourceConfig;
  * {@code INSTANCE_CAPACITY_KEYS} unsatisfiable &mdash; i.e. when some assignable instance does not
  * declare a value for every capacity dimension (key) the cluster requires. It runs on two write
  * paths that can introduce such a gap: adding a WAGED resource (validated against the committed
- * cluster config) and changing the cluster config's capacity keys (validated against the proposed,
- * not-yet-written config, so a newly-added key is checked before it is persisted).
+ * cluster config) and changing the cluster config's capacity keys or default capacity map (validated
+ * against the proposed, not-yet-written config, and only when that change actually alters the
+ * capacity contract, so a newly-added key is checked before it is persisted while an unrelated edit
+ * is not).
  * <p>
  * WAGED accounts for capacity along the fixed set of keys declared once in
  * {@link ClusterConfig#getInstanceCapacityKeys()}. To build its cluster model it requires that
@@ -72,11 +75,15 @@ import org.apache.helix.model.ResourceConfig;
  * instance's capacity is never consulted, so a gap there cannot break placement.
  * <p>
  * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request and every
- * cluster-config update that changes the capacity keys; it is not gated behind a cluster config
- * toggle. It is a no-op for a cluster that does not use the WAGED capacity model (empty
- * {@code INSTANCE_CAPACITY_KEYS}), returning feasible before reading any instance config, so only a
- * cluster that actually declares capacity keys is exposed to the fail-closed instance-config scan
- * below. {@code force=true} overrides the verdict; {@code dryRun=true} reports it without writing.
+ * cluster-config update; it is not gated behind a cluster config toggle. On the cluster-config path
+ * it enforces only when the update actually changes the capacity contract &mdash; its
+ * {@code INSTANCE_CAPACITY_KEYS} or {@code DEFAULT_INSTANCE_CAPACITY_MAP} &mdash; so an unrelated
+ * cluster-config edit is never rejected for a pre-existing capacity gap it does not touch (mirroring
+ * {@link RetiredClusterConfigGuardrailRule}). It is a no-op for a cluster that does not use the WAGED
+ * capacity model (empty {@code INSTANCE_CAPACITY_KEYS}), returning feasible before reading any
+ * instance config, so only a cluster that actually declares capacity keys is exposed to the
+ * fail-closed instance-config scan below. {@code force=true} overrides the verdict;
+ * {@code dryRun=true} reports it without writing.
  */
 public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "WAGED_INSTANCE_CAPACITY_KEY_MISSING";
@@ -99,6 +106,25 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
     if (proposedResourceConfig == null && proposedClusterConfig == null) {
       // Neither a resource-scoped add nor a cluster-config change; nothing for this rule to certify.
       return ValidationResult.feasible();
+    }
+
+    // Cluster-config path: enforce only when the change actually touches the WAGED capacity contract.
+    // The instance-side coverage check below is an invariant over the cluster's INSTANCE_CAPACITY_KEYS
+    // and DEFAULT_INSTANCE_CAPACITY_MAP; an update that leaves both unchanged cannot create or widen a
+    // coverage gap, so re-running the full scan would only re-litigate a pre-existing gap and reject
+    // unrelated cluster-config edits until it is fixed or forced. Mirrors
+    // RetiredClusterConfigGuardrailRule, which fires only when the retired key actually changes. The
+    // resource-add path has no committed-vs-proposed delta and is unaffected. A missing current config
+    // (brand-new cluster) cannot be proven unchanged, so it falls through and is enforced.
+    if (proposedClusterConfig != null) {
+      ClusterConfig currentClusterConfig = context.getCurrentClusterConfig();
+      if (currentClusterConfig != null
+          && Objects.equals(currentClusterConfig.getInstanceCapacityKeys(),
+              proposedClusterConfig.getInstanceCapacityKeys())
+          && Objects.equals(currentClusterConfig.getDefaultInstanceCapacityMap(),
+              proposedClusterConfig.getDefaultInstanceCapacityMap())) {
+        return ValidationResult.feasible();
+      }
     }
 
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();

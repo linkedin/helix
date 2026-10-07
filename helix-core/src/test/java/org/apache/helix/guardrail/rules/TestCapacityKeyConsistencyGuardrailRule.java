@@ -28,9 +28,11 @@ import java.util.Map;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
+import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.ClusterConfig;
@@ -40,6 +42,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -239,6 +242,77 @@ public class TestCapacityKeyConsistencyGuardrailRule {
         contextWithClusterConfig(dataAccessor, new ClusterConfig(CLUSTER))).isFeasible());
   }
 
+  @Test
+  public void testClusterConfigCapacityUnchangedGrandfathersPreexistingGap() {
+    // instance0 omits BAR, so the cluster already has a capacity gap. This update leaves
+    // INSTANCE_CAPACITY_KEYS and DEFAULT_INSTANCE_CAPACITY_MAP unchanged (it touches some other
+    // field), so it cannot create or widen the gap; re-litigating it would reject an unrelated edit.
+    // The rule certifies it (feasible) instead of blocking on the pre-existing gap.
+    ClusterConfig current = clusterConfig("FOO", "BAR");
+    ClusterConfig proposed = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(current,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    Assert.assertTrue(
+        rule.validate(contextWithClusterConfigs(dataAccessor, current, proposed)).isFeasible());
+  }
+
+  @Test
+  public void testClusterConfigCapacityKeysChangedEnforces() {
+    // The update adds BAR to INSTANCE_CAPACITY_KEYS, which instance0 does not declare: the change
+    // itself introduces the gap, so the rule must still block it even though a current config exists.
+    ClusterConfig current = clusterConfig("FOO");
+    ClusterConfig proposed = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(current,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ValidationResult result =
+        rule.validate(contextWithClusterConfigs(dataAccessor, current, proposed));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("instance0"));
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("BAR"));
+  }
+
+  @Test
+  public void testClusterConfigDefaultCapacityMapChangeEnforces() {
+    // INSTANCE_CAPACITY_KEYS is unchanged ([FOO, BAR]) but the update removes the cluster default
+    // that was covering instance0's missing BAR, so the change re-opens the gap. Diffing the keys
+    // alone would miss this; the rule also diffs DEFAULT_INSTANCE_CAPACITY_MAP and so enforces.
+    ClusterConfig current = clusterConfig("FOO", "BAR");
+    current.setDefaultInstanceCapacityMap(ImmutableMap.of("BAR", 100));
+    ClusterConfig proposed = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(current,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ValidationResult result =
+        rule.validate(contextWithClusterConfigs(dataAccessor, current, proposed));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("instance0"));
+  }
+
+  @Test
+  public void testInstanceConfigReadErrorFailsClosed() {
+    // The rule reads instance configs fail-closed (getChildValues(..., true)); a transient read
+    // error must surface as a (forceable) rejection rather than silently validating against partial
+    // state. Routed through the pipeline -- which converts a throwing rule into an infeasible verdict,
+    // exactly as the REST preflight does before force=true can override it -- the read error yields a
+    // violation attributed to this rule rather than a false feasible verdict.
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+    doReturn(clusterConfig("FOO", "BAR")).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    doThrow(new HelixException("ZooKeeper read failed"))
+        .when(dataAccessor).getChildValues(BUILDER.instanceConfigs(), true);
+
+    ValidationResult result =
+        new GuardrailPipeline(rule).validate(contextWith(dataAccessor, resourceConfig()));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().get(0).getRuleId(),
+        CapacityKeyConsistencyGuardrailRule.RULE_ID);
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -251,6 +325,15 @@ public class TestCapacityKeyConsistencyGuardrailRule {
       ClusterConfig proposedClusterConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
         .dataAccessor(dataAccessor)
+        .proposedClusterConfig(proposedClusterConfig)
+        .build();
+  }
+
+  private GuardrailContext contextWithClusterConfigs(HelixDataAccessor dataAccessor,
+      ClusterConfig currentClusterConfig, ClusterConfig proposedClusterConfig) {
+    return GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .currentClusterConfig(currentClusterConfig)
         .proposedClusterConfig(proposedClusterConfig)
         .build();
   }

@@ -220,8 +220,10 @@ public class TestClusterAccessor extends AbstractTestClass {
    * stop placing. This is the cluster-config write-path complement to the addWagedResource capacity
    * key guard rail. Verifies enforcement (400 + verdict naming the starved instance, nothing
    * written), dry-run (200 + the same infeasible verdict, nothing written), force bypass (written
-   * despite the gap), and the fully-covered happy path (written). Uses a dedicated cluster so it does
-   * not perturb the other tests that share {@link #TEST_CLUSTER}.
+   * despite the gap), that an unrelated cluster-config edit is grandfathered past a pre-existing gap
+   * (the guard fires only when the capacity contract actually changes), and the fully-covered happy
+   * path (written). Uses a dedicated cluster so it does not perturb the other tests that share
+   * {@link #TEST_CLUSTER}.
    */
   @Test
   public void testUpdateClusterConfigCapacityKeyGuardrail() throws Exception {
@@ -272,6 +274,25 @@ public class TestClusterAccessor extends AbstractTestClass {
       post("clusters/" + clusterName + "/configs",
           ImmutableMap.of("command", Command.update.name(), "force", "true"), entity,
           Response.Status.OK.getStatusCode());
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+
+      // 3b) Diff-gate: the capacity gap is now committed (keys=[FOO, BAR] while the starved instance
+      //     still omits BAR). An unrelated cluster-config update that does not touch
+      //     INSTANCE_CAPACITY_KEYS/DEFAULT_INSTANCE_CAPACITY_MAP must not be rejected for that
+      //     pre-existing gap: the guard fires only when the capacity contract actually changes, so an
+      //     edit that leaves it alone sails through even though the cluster is already uncovered.
+      ClusterConfig unrelatedDelta = new ClusterConfig(clusterName);
+      unrelatedDelta.setPersistBestPossibleAssignment(true);
+      Entity unrelatedEntity = Entity.entity(
+          OBJECT_MAPPER.writeValueAsString(unrelatedDelta.getRecord()),
+          MediaType.APPLICATION_JSON_TYPE);
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), unrelatedEntity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).isPersistBestPossibleAssignment());
+      // The committed capacity keys are untouched by the unrelated edit; the gap is still present.
       Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
           Arrays.asList("FOO", "BAR"));
 

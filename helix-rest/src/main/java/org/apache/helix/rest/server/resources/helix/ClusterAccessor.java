@@ -740,13 +740,16 @@ public class ClusterAccessor extends AbstractHelixResource {
           // into the existing cluster config, so a change to INSTANCE_CAPACITY_KEYS (or the
           // DEFAULT_INSTANCE_CAPACITY_MAP that backs it) can require a capacity key that some
           // assignable instance does not declare. WAGED could then no longer build a cluster model,
-          // so every WAGED resource would silently stop placing. Validate the merged (proposed)
-          // config the same way validateClusterConfigChange computes it. force=true overrides;
-          // dryRun=true reports the verdict without writing.
+          // so every WAGED resource would silently stop placing. Pass both the committed (current)
+          // and the merged (proposed) config so the rule enforces only when the capacity contract
+          // actually changes, leaving unrelated cluster-config edits untouched by a pre-existing gap.
+          // force=true overrides; dryRun=true reports the verdict without writing.
+          ClusterConfig currentClusterConfig = configAccessor.getClusterConfig(clusterId);
           ClusterConfig proposedClusterConfig = configAccessor.getClusterConfig(clusterId);
           proposedClusterConfig.getRecord().update(config.getRecord());
           GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
               .dataAccessor(getDataAccssor(clusterId))
+              .currentClusterConfig(currentClusterConfig)
               .proposedClusterConfig(proposedClusterConfig)
               .build();
           GuardrailPipeline guardrailPipeline =
