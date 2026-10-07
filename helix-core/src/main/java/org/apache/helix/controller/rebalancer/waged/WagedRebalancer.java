@@ -680,7 +680,10 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       // use the "real" live and enabled instances for calculation
       ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(
           clusterData, resourceMap, enabledLiveInstances, currentResourceAssignment);
-      Map<String, ResourceAssignment> assignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+      // Pass no fallback: a resource skipped by instance tag isolation must stay out of the
+      // overwrite result, which leaves its current assignment untouched by the merge below.
+      Map<String, ResourceAssignment> assignment =
+          WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, null);
       // keep only the resource entries requiring changes for minActiveReplica
       assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
       DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
@@ -753,7 +756,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
             HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
-      newAssignment = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+      newAssignment = WagedRebalanceUtil
+          .calculateAssignment(clusterModel, algorithm, currentBestPossibleAssignment);
     } else {
       newAssignment = currentBestPossibleAssignment;
     }
