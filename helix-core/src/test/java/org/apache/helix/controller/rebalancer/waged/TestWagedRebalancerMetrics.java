@@ -21,6 +21,7 @@ package org.apache.helix.controller.rebalancer.waged;
 
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -28,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import javax.management.AttributeNotFoundException;
 import javax.management.JMException;
@@ -60,12 +62,18 @@ import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
 import org.apache.helix.monitoring.metrics.model.RatioMetric;
+import org.mockito.InOrder;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
@@ -109,6 +117,228 @@ public class TestWagedRebalancerMetrics extends AbstractTestClusterModel {
     // Check that there exists a non-zero value in the metrics
     Assert.assertTrue(_metricCollector.getMetricMap().values().stream()
         .anyMatch(metric -> ((Number) metric.getLastEmittedMetricValue()).longValue() > 0L));
+  }
+
+  @Test
+  public void testIsolationSnapshotIncludesEveryScope() throws Exception {
+    String testName = "TestIsolationEveryScope";
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new MockRebalanceAlgorithm(), Optional.of(new WagedRebalancerMetricCollector(testName)));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+      RebalanceAlgorithm reporting = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, Collections.singleton("broken"));
+      for (ClusterModel.RebalanceScopeType scope : ClusterModel.RebalanceScopeType.values()) {
+        reporting.onAssignmentComputed(scope, Collections.singleton("broken"),
+            Collections.singleton("broken"));
+        Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L,
+            "Isolation in " + scope + " must be visible without a baseline computation");
+        reporting.onAssignmentComputed(scope, Collections.singleton("broken"),
+            Collections.emptySet());
+        Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+      }
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  @Test
+  public void testHealthyScopeCannotEraseAnotherScopesIsolation() throws Exception {
+    String testName = "TestIsolationScopeOwnership";
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new MockRebalanceAlgorithm(), Optional.of(new WagedRebalancerMetricCollector(testName)));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+      RebalanceAlgorithm reporting = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, Collections.singleton("broken"));
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.EMERGENCY,
+          Collections.singleton("broken"),
+          Collections.singleton("broken"));
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE,
+          Collections.singleton("broken"),
+          Collections.emptySet());
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.PARTIAL,
+          Collections.emptySet(),
+          Collections.emptySet());
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L,
+          "Healthy baseline and partial passes cannot hide a failed node-loss recovery");
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  @Test
+  public void testDisabledAndResetRebalancerRejectsInFlightIsolationReports() throws Exception {
+    String testName = "TestIsolationReportingLifecycle";
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new MockRebalanceAlgorithm(), Optional.of(new WagedRebalancerMetricCollector(testName)));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+      Set<String> resources = Collections.singleton("broken");
+      RebalanceAlgorithm old = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, resources);
+      old.onAssignmentComputed(ClusterModel.RebalanceScopeType.PARTIAL, resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+      rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(), false, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+      old.onAssignmentComputed(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE,
+          resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+
+      RebalanceAlgorithm current = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, resources);
+      old.onAssignmentComputed(ClusterModel.RebalanceScopeType.PARTIAL, resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
+          "Re-enabling must not accept a completion from before disable");
+      current.onAssignmentComputed(ClusterModel.RebalanceScopeType.PARTIAL, resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+      rebalancer.reset();
+      current.onAssignmentComputed(ClusterModel.RebalanceScopeType.EMERGENCY, resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
+          "Reset must invalidate all previously scheduled reports");
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  /**
+   * Reset clears the assignment metadata store and replaces the retry set before it clears the
+   * isolation gauges, so the gauges are the last thing a reset touches.
+   */
+  @Test
+  public void testResetClearsTheIsolationGaugesLast() throws Exception {
+    AssignmentMetadataStore store = mock(AssignmentMetadataStore.class);
+    ClusterStatusMonitor monitor = mock(ClusterStatusMonitor.class);
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(store, new MockRebalanceAlgorithm(), Optional.empty());
+    try {
+      rebalancer.setClusterStatusMonitor(monitor);
+      AtomicReference<Set<String>> retries = retrySet(rebalancer);
+      Set<String> before = retries.get();
+      AtomicReference<Set<String>> seenByGaugeReset = new AtomicReference<>();
+      doAnswer(invocation -> {
+        seenByGaugeReset.set(retries.get());
+        return null;
+      }).when(monitor).resetWagedInstanceTagIsolation();
+
+      rebalancer.reset();
+
+      InOrder order = inOrder(store, monitor);
+      order.verify(store).reset();
+      order.verify(monitor).resetWagedInstanceTagIsolation();
+      Assert.assertNotNull(seenByGaugeReset.get());
+      Assert.assertNotSame(seenByGaugeReset.get(), before,
+          "The retry set must be replaced before the gauges are cleared");
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  /**
+   * The isolation gauges are cleared even when the store reset fails, and the failure propagates.
+   */
+  @Test
+  public void testResetClearsTheIsolationGaugesWhenTheStoreResetFails() throws Exception {
+    AssignmentMetadataStore store = mock(AssignmentMetadataStore.class);
+    ClusterStatusMonitor monitor = mock(ClusterStatusMonitor.class);
+    IllegalStateException failure = new IllegalStateException("store reset failed");
+    doThrow(failure).when(store).reset();
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(store, new MockRebalanceAlgorithm(), Optional.empty());
+    try {
+      rebalancer.setClusterStatusMonitor(monitor);
+      try {
+        rebalancer.reset();
+        Assert.fail("The store failure must propagate");
+      } catch (IllegalStateException e) {
+        Assert.assertSame(e, failure);
+      }
+      verify(monitor).resetWagedInstanceTagIsolation();
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static AtomicReference<Set<String>> retrySet(WagedRebalancer rebalancer)
+      throws ReflectiveOperationException {
+    Field runner = WagedRebalancer.class.getDeclaredField("_globalRebalanceRunner");
+    runner.setAccessible(true);
+    Field retries = GlobalRebalanceRunner.class.getDeclaredField("_isolationResourcesToRetry");
+    retries.setAccessible(true);
+    return (AtomicReference<Set<String>>) retries.get(runner.get(rebalancer));
+  }
+
+  @Test
+  public void testDisablingIsolationClearsReportsBeforeInputValidation() throws Exception {
+    String testName = "TestIsolationDisabledInvalidInput";
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new MockRebalanceAlgorithm(), Optional.of(new WagedRebalancerMetricCollector(testName)));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+      ResourceControllerDataProvider data = setupClusterDataCache();
+      String resourceName = data.getIdealStates().keySet().iterator().next();
+      Set<String> resources = Collections.singleton(resourceName);
+      RebalanceAlgorithm old = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, resources);
+      old.onAssignmentComputed(ClusterModel.RebalanceScopeType.PARTIAL, resources, resources);
+      data.getClusterConfig().setWagedInstanceTagIsolationEnabled(false);
+      data.getIdealState(resourceName).setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
+      try {
+        rebalancer.computeNewIdealStates(data,
+            Collections.singletonMap(resourceName, new Resource(resourceName)),
+            new CurrentStateOutput());
+        Assert.fail("The invalid resource must still fail validation");
+      } catch (HelixRebalanceException expected) {
+        Assert.assertEquals(expected.getFailureType(), HelixRebalanceException.Type.INVALID_INPUT);
+      }
+      old.onAssignmentComputed(ClusterModel.RebalanceScopeType.EMERGENCY, resources, resources);
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
+          "Disabling the feature must clear reports even if the next rebalance fails validation");
+    } finally {
+      rebalancer.close();
+    }
+  }
+
+  @Test
+  public void testBypassedRecoveryScopesClearOnlyTheirOwnReports() throws Exception {
+    String testName = "TestIsolationIdleScopes";
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new MockRebalanceAlgorithm(), Optional.of(new WagedRebalancerMetricCollector(testName)));
+    try {
+      ClusterStatusMonitor monitor = new ClusterStatusMonitor(testName);
+      rebalancer.setClusterStatusMonitor(monitor);
+      ResourceControllerDataProvider data = setupClusterDataCache();
+      data.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+      Map<String, Resource> resourceMap = data.getIdealStates().entrySet().stream()
+          .collect(Collectors.toMap(Map.Entry::getKey, entry -> {
+            Resource resource = new Resource(entry.getKey());
+            entry.getValue().getPartitionSet().forEach(resource::addPartition);
+            return resource;
+          }));
+      rebalancer.computeNewIdealStates(data, resourceMap, new CurrentStateOutput());
+      Set<String> broken = Collections.singleton(resourceMap.keySet().iterator().next());
+      RebalanceAlgorithm reporting = rebalancer.withIsolationReporting(new MockRebalanceAlgorithm(),
+          true, resourceMap.keySet());
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.EMERGENCY, broken, broken);
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES,
+          broken, broken);
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE,
+          broken, broken);
+      rebalancer.computeNewIdealStates(data, resourceMap, new CurrentStateOutput());
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L,
+          "Idle recovery phases must not erase a baseline isolation report");
+      reporting.onAssignmentComputed(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, broken,
+          Collections.emptySet());
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L,
+          "Emergency and delayed-overwrite snapshots must clear on their real no-op paths");
+    } finally {
+      rebalancer.close();
+    }
   }
 
   @Test
