@@ -173,7 +173,7 @@ public class AssignableNode implements Comparable<AssignableNode> {
   /**
    * @return A set of all assigned replicas on the node.
    */
-  Set<AssignableReplica> getAssignedReplicas() {
+  public Set<AssignableReplica> getAssignedReplicas() {
     return _currentAssignedReplicaMap.values().stream()
         .flatMap(replicaMap -> replicaMap.values().stream()).collect(Collectors.toSet());
   }
