@@ -297,6 +297,79 @@ curl http://localhost:12345/admin/v2/clusters/myCluster/resources/myResource/Ide
     * **POST** - add a new state model definition with {statemodeldef}
     * **DELETE** - delete the state model definition
 
+* **"/clusters/{clusterName}/constraints/{constraintType}"**
+    * Represents all constraint items of one type for a cluster. {constraintType} is either `MESSAGE_CONSTRAINT` or `STATE_CONSTRAINT`. Message constraints throttle the state transition messages the controller sends, so a constraint value of 1 means at most one matching transition is in flight at a time.
+    * **GET** - list every constraint item of this type.
+
+    ```
+    $curl http://localhost:1234/admin/v2/clusters/myCluster/constraints/MESSAGE_CONSTRAINT
+    {
+      "id" : "MESSAGE_CONSTRAINT",
+      "simpleFields" : {
+      },
+      "listFields" : {
+      },
+      "mapFields" : {
+        "limitBootstrapPerInstance" : {
+          "MESSAGE_TYPE" : "STATE_TRANSITION",
+          "TRANSITION" : "OFFLINE-BOOTSTRAP",
+          "INSTANCE" : ".*",
+          "CONSTRAINT_VALUE" : "1"
+        }
+      }
+    }
+    ```
+
+    * **PUT** - create or overwrite several constraint items in one atomic write. The body maps each constraint id to its attribute map. Every item is validated before any of them is written, so either the whole batch lands or none of it does.
+
+    ```
+    $curl -X PUT -H "Content-Type: application/json" \
+        -d '{
+              "limitBootstrapPerInstance": {
+                "MESSAGE_TYPE": "STATE_TRANSITION",
+                "TRANSITION": "OFFLINE-BOOTSTRAP",
+                "INSTANCE": ".*",
+                "CONSTRAINT_VALUE": "1"
+              },
+              "limitBootstrapPerResource": {
+                "MESSAGE_TYPE": "STATE_TRANSITION",
+                "TRANSITION": "OFFLINE-BOOTSTRAP",
+                "RESOURCE": "myDB",
+                "CONSTRAINT_VALUE": "5"
+              }
+            }' \
+        http://localhost:1234/admin/v2/clusters/myCluster/constraints/MESSAGE_CONSTRAINT
+    ```
+
+* **"/clusters/{clusterName}/constraints/{constraintType}/{constraintId}"**
+    * Represents a single constraint item. {constraintId} is an arbitrary label you choose to name the constraint.
+    * Attribute keys must be one of `MESSAGE_TYPE`, `TRANSITION`, `RESOURCE`, `PARTITION`, `INSTANCE`, `STATE` or `CONSTRAINT_VALUE`. Every value except `CONSTRAINT_VALUE` is treated as a regular expression when the controller matches a message against the constraint, which is why `.*` works as a wildcard. `CONSTRAINT_VALUE` must be a non-negative integer or `ANY`. An unknown attribute, a missing value, a negative constraint value, an unknown message type, or an uncompilable regex is rejected with 400 and nothing is written.
+    * **GET** - return the attributes of a single constraint item.
+
+    ```
+    $curl http://localhost:1234/admin/v2/clusters/myCluster/constraints/MESSAGE_CONSTRAINT/limitBootstrapPerInstance
+    {
+      "MESSAGE_TYPE" : "STATE_TRANSITION",
+      "TRANSITION" : "OFFLINE-BOOTSTRAP",
+      "INSTANCE" : ".*",
+      "CONSTRAINT_VALUE" : "1"
+    }
+    ```
+
+    * **PUT** - create or overwrite one constraint item.
+
+    ```
+    $curl -X PUT -H "Content-Type: application/json" \
+        -d '{"MESSAGE_TYPE":"STATE_TRANSITION","TRANSITION":"OFFLINE-BOOTSTRAP","INSTANCE":".*","CONSTRAINT_VALUE":"1"}' \
+        http://localhost:1234/admin/v2/clusters/myCluster/constraints/MESSAGE_CONSTRAINT/limitBootstrapPerInstance
+    ```
+
+    * **DELETE** - remove the constraint item.
+
+    ```
+    $curl -X DELETE http://localhost:1234/admin/v2/clusters/myCluster/constraints/MESSAGE_CONSTRAINT/limitBootstrapPerInstance
+    ```
+
 
 #### Helix "Resource" and its sub-resources
 
