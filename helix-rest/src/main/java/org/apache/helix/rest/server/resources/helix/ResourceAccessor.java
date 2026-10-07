@@ -56,6 +56,7 @@ import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
+import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -472,7 +473,24 @@ public class ResourceAccessor extends AbstractHelixResource {
   @DELETE
   @Path("{resourceName}")
   public Response deleteResource(@PathParam("clusterId") String clusterId,
-      @PathParam("resourceName") String resourceName) {
+      @PathParam("resourceName") String resourceName,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+    // Guard rail: block (or simulate) dropping a resource that is still in use -- its external view
+    // still has replicas placed (in any state other than DROPPED), so the drop would tear down a
+    // live assignment. Unlike an instance drop, the admin layer (ZKHelixAdmin.dropResource) performs
+    // no such check, so this preflight is the only safety gate. force=true overrides the verdict;
+    // dryRun=true only reports it without dropping.
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .resourceName(resourceName)
+        .build();
+    GuardrailPipeline pipeline = new GuardrailPipeline(new ResourceInUseGuardrailRule());
+    Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+    if (preflightResponse.isPresent()) {
+      return preflightResponse.get();
+    }
+
     HelixAdmin admin = getHelixAdmin();
     try {
       admin.dropResource(clusterId, resourceName);

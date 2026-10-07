@@ -48,6 +48,7 @@ import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
+import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
@@ -1337,6 +1338,95 @@ public class TestResourceAccessor extends AbstractTestClass {
         ImmutableMap.of("command", "validateWeight"), Response.Status.OK.getStatusCode(), true);
     JsonNode node = OBJECT_MAPPER.readTree(body);
     Assert.assertEquals(node.get(resourceToValidate).toString(), "true");
+  }
+
+  /**
+   * Verifies the {@link ResourceInUseGuardrailRule} wired into the resource-delete path:
+   * a resource whose external view still has serving (non-OFFLINE, non-DROPPED) replicas cannot be
+   * dropped unless the caller forces it, while a resource that is empty, all-DROPPED, or drained to
+   * all-OFFLINE drops normally. The admin drop path performs no such safety check, so this preflight
+   * is the only gate.
+   */
+  @Test(dependsOnMethods = "testResourceHealth")
+  public void testDeleteResourceInUseGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestCluster_1";
+    String idleResource = clusterName + "_db_delguard_idle";
+    String offlineResource = clusterName + "_db_delguard_offline";
+    String inUseResource = clusterName + "_db_delguard_inuse";
+
+    Map<String, String> idealStateParams = new HashMap<>();
+    idealStateParams.put("MinActiveReplicas", "2");
+    idealStateParams.put("StateModelDefRef", "MasterSlave");
+    idealStateParams.put("MaxPartitionsPerInstance", "3");
+    idealStateParams.put("Replicas", "3");
+    idealStateParams.put("NumPartitions", "3");
+
+    // Disable the cluster so the controller neither removes the external views created below nor
+    // places new replicas while the guard rail is being exercised.
+    _gSetupTool.getClusterManagementTool().enableCluster(clusterName, false);
+    try {
+      // A resource whose every replica is DROPPED is not in use: the drop is certified feasible.
+      Map<String, List<String>> idleStates = new LinkedHashMap<>();
+      idleStates.put("p0", Arrays.asList("DROPPED", "DROPPED", "DROPPED"));
+      createDummyMapping(clusterName, idleResource, idealStateParams, idleStates);
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(idleResource));
+
+      delete("clusters/" + clusterName + "/resources/" + idleResource, Collections.emptyMap(),
+          Response.Status.OK.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(idleResource), "A resource with no placed replicas should drop normally");
+
+      // A resource whose replicas have all drained to OFFLINE (e.g. it was disabled) is not in use:
+      // the standard "disable, let it drain, then drop" path is certified feasible without force.
+      Map<String, List<String>> offlineStates = new LinkedHashMap<>();
+      offlineStates.put("p0", Arrays.asList("OFFLINE", "OFFLINE", "OFFLINE"));
+      createDummyMapping(clusterName, offlineResource, idealStateParams, offlineStates);
+      delete("clusters/" + clusterName + "/resources/" + offlineResource, Collections.emptyMap(),
+          Response.Status.OK.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(offlineResource),
+          "A drained (all-OFFLINE) resource should drop without force");
+
+      // A resource with placed (non-DROPPED) replicas is in use.
+      Map<String, List<String>> inUseStates = new LinkedHashMap<>();
+      inUseStates.put("p0", Arrays.asList("MASTER", "SLAVE", "SLAVE"));
+      createDummyMapping(clusterName, inUseResource, idealStateParams, inUseStates);
+
+      // 1) Enforcement: blocked with 400 + an infeasible verdict naming the rule; nothing dropped.
+      Response blocked = delete("clusters/" + clusterName + "/resources/" + inUseResource,
+          Collections.emptyMap(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(blockedVerdict.toString().contains(ResourceInUseGuardrailRule.RULE_ID));
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(inUseResource),
+          "An in-use resource must not be dropped when the guard rail blocks the delete");
+
+      // 2) Dry-run: 200 with the same infeasible verdict, still nothing dropped.
+      Response dryRun = delete("clusters/" + clusterName + "/resources/" + inUseResource,
+          ImmutableMap.of("dryRun", "true"), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(inUseResource), "dryRun must not drop the resource");
+
+      // 3) force=true overrides the guard rail: the in-use resource is actually dropped.
+      delete("clusters/" + clusterName + "/resources/" + inUseResource,
+          ImmutableMap.of("force", "true"), Response.Status.OK.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(clusterName)
+          .contains(inUseResource), "force=true must override the guard rail and drop the resource");
+    } finally {
+      for (String resource : Arrays.asList(idleResource, offlineResource, inUseResource)) {
+        try {
+          _gSetupTool.getClusterManagementTool().dropResource(clusterName, resource);
+        } catch (Exception ignored) {
+        }
+      }
+      _gSetupTool.getClusterManagementTool().enableCluster(clusterName, true);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   /**
