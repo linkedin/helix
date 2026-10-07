@@ -110,6 +110,21 @@ public class BatchMessageHandler extends MessageHandler {
     if (csUpdateMap != null) {
       Map<PropertyKey, CurrentState> csUpdate = mergeCurStateUpdate(csUpdateMap);
 
+      // All of the batched sub-messages were targeted at this same local instance. Re-validate
+      // cluster membership immediately before the real (deferred) ZK write: the instance may
+      // have been cleanly dropped (InstanceConfig + /INSTANCES/{instance} removed) at any point
+      // while the batch's sub-messages were executing, and this is the only place that
+      // persistence for batched current-state updates actually happens (see
+      // HelixStateTransitionHandler#updateZKCurrentState()). Skipping the write here avoids
+      // silently resurrecting a dropped instance's ZK subtree as an orphan node.
+      if (!isInstanceRegistered(accessor, manager.getInstanceName())) {
+        LOG.warn(
+            "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                + "Skipping {} batched current state ZK update(s) to avoid resurrecting a "
+                + "dropped instance's ZK node.", manager.getInstanceName(), csUpdate.size());
+        return;
+      }
+
       // TODO: change to use asyncSet
       for (PropertyKey key : csUpdate.keySet()) {
         // logger.info("updateCS: " + key);
@@ -212,6 +227,17 @@ public class BatchMessageHandler extends MessageHandler {
     for (MessageHandler handler : _subMessageHandlers) {
       handler.onError(e, code, type);
     }
+  }
+
+  /**
+   * Checks whether this instance is still a registered member of the cluster, i.e. its
+   * InstanceConfig has not been removed. See
+   * {@code HelixStateTransitionHandler#isInstanceRegistered} for the full rationale; this is
+   * duplicated here (rather than shared) since it guards the deferred batch current-state write
+   * below, which is a distinct, later ZK operation from any per-sub-message check.
+   */
+  private boolean isInstanceRegistered(HelixDataAccessor accessor, String instanceName) {
+    return accessor.getPropertyStat(accessor.keyBuilder().instanceConfig(instanceName)) != null;
   }
 
   // TODO: optimize this based on the fact that each cs update is for a
