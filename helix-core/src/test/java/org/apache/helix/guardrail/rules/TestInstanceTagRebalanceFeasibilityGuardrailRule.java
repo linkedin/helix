@@ -377,8 +377,76 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // WAGED instance tag isolation: the what-if carries a clique it cannot place forward on its
+  // previous assignment instead of failing, so the assignment can still name the target.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testIsolationCarriedAssignmentStillNamingTheTargetIsInfeasible() {
+    // Removing the tag leaves the clique unplaceable, so both simulations return the same carried
+    // assignment, which still names instance0. Its replica must stop counting once instance0 no
+    // longer carries the resource's tag.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(
+            RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"),
+            RESOURCE + "_1", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(true)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    ValidationResult result = rule.validate(
+        context(dataAccessor, ImmutableList.of(TAG), fixedProvider(carried, carried)));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getPartitionName(), RESOURCE + "_0");
+    Assert.assertTrue(violation.getMessage().contains("from 2 to 1"),
+        "message should report the replica drop: " + violation.getMessage());
+  }
+
+  @Test
+  public void testIsolationResolvesTheTagFromTheResourceConfig() {
+    // The resource is pinned only through its ResourceConfig, the same merged view WAGED uses.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(true)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    doReturn(ImmutableList.of(wagedIdealState(RESOURCE))).when(dataAccessor)
+        .getChildValues(BUILDER.idealStates(), true);
+    doReturn(ImmutableList.of(resourceConfigWithGroupTag(RESOURCE, TAG))).when(dataAccessor)
+        .getChildValues(BUILDER.resourceConfigs(), true);
+    ValidationResult result = rule.validate(
+        context(dataAccessor, ImmutableList.of(TAG), fixedProvider(carried, carried)));
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().get(0).getPartitionName(), RESOURCE + "_0");
+  }
+
+  @Test
+  public void testWithoutIsolationEveryNonDroppedReplicaCounts() {
+    // With isolation off every non DROPPED entry counts, on any instance. Stock never sees
+    // this pair: without isolation an unplaceable clique fails the what-if outright.
+    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(isolationClusterConfig(false)).when(dataAccessor)
+        .getProperty(BUILDER.clusterConfig());
+    Assert.assertTrue(rule.validate(
+        context(dataAccessor, ImmutableList.of(TAG), fixedProvider(carried, carried)))
+        .isFeasible());
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
+
+  private static ClusterConfig isolationClusterConfig(boolean isolation) {
+    ClusterConfig clusterConfig = enabledClusterConfig();
+    clusterConfig.setWagedInstanceTagIsolationEnabled(isolation);
+    return clusterConfig;
+  }
 
   private GuardrailContext context(HelixDataAccessor dataAccessor, List<String> removedTags,
       WagedAssignmentProvider provider) {
