@@ -23,13 +23,16 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.slf4j.Logger;
@@ -93,15 +96,137 @@ public class WagedRebalanceUtil {
           dropped.add(resource);
         }
       }
+      List<String> yielded =
+          resolveCarriedOverNodeReuse(newAssignment, skippedResources, previousAssignment,
+              carriedOver, dropped);
       LOG.warn(
           "Instance tag isolation skipped {} resource(s) during the {} rebalance of cluster {}. "
               + "Carried the previous assignment forward for {}. Left out of this phase's result: "
               + "{}.", skippedResources.size(), clusterModel.getRebalanceScopeType(),
           clusterModel.getContext().getClusterName(), carriedOver, dropped);
+      if (!yielded.isEmpty()) {
+        LOG.warn(
+            "Instance tag isolation also carried {} forward in cluster {} because a previously "
+                + "skipped resource's assignment still names an instance that these resources were "
+                + "just assigned to. This happens when an instance is retagged out of a group "
+                + "while that group is skipped. Only the resources that actually collide give up "
+                + "their freshly calculated assignment; every other resource keeps its "
+                + "own.", yielded,
+            clusterModel.getContext().getClusterName());
+      }
     }
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getClass().getSimpleName(), System.currentTimeMillis() - startTime);
     return newAssignment;
+  }
+
+  /**
+   * Carry a resource forward as well when it was just assigned an instance that an already carried
+   * over resource still names, and repeat until nothing collides.
+   *
+   * The share block partition in InstanceTagIsolation proves that no group outside a failed block
+   * can reach the block's nodes, but it reasons about the tags instances carry now, while the
+   * carried over assignment reflects where replicas were placed before. If an instance is retagged
+   * out of a group in a failed block, the group's previous assignment still names it, and the group
+   * that now owns it would be free to place there. Persisting both would overcommit the instance,
+   * which is exactly what the partition exists to prevent.
+   *
+   * The colliding resource is therefore carried forward too, which is the same mechanism the mode
+   * already uses, rather than failing the whole rebalance, and the collision is resolved by giving
+   * up one resource's fresh result instead of every resource's. Its previous assignment usually
+   * predates the retag and so does not name the disputed instance. When it does, for example
+   * because the instance already carried this resource's tag before the retag, or because that
+   * entry was itself filled in or carried over, the two carried over entries are left as they are
+   * (see below). Resources that do not collide keep their freshly calculated assignment and keep
+   * converging.
+   *
+   * Carrying one resource forward can expose a second collision, when another instance moved
+   * between two other groups, so the check repeats. Every round moves at least one more resource
+   * into the carried over set and never moves one back, so it terminates. In the worst case every
+   * resource ends up carried forward, which keeps the previous assignment, much as the default
+   * mode keeps its last known good assignment when a calculation fails.
+   *
+   * This compares emitted instance names rather than tags, so it also covers divergences the
+   * partition cannot see, such as a retagged resource or a carried entry filled in from current
+   * states. A shared name is treated as a conflict even when the instance had room
+   * for both, which is deliberately conservative: in the tag partitioned deployments this mode is
+   * for, an instance is owned by one group, so a shared name is a real overcommit. If a topology
+   * shares instances widely enough for that to cascade, the worst case is that every resource ends
+   * up carried forward, which reproduces the previous assignment, so no newly calculated placement
+   * is persisted.
+   *
+   * Only carried against fresh is resolved here, never carried against carried, and the carried
+   * entries are not one snapshot. The callers take the persisted baseline or best possible
+   * assignment and fill in current states for the resources it does not hold yet (see
+   * AssignmentManager). The persisted entries were computed together and fit together, and a filled
+   * in entry is what the participants are running now, so carrying either kind forward moves no
+   * replica. Two carried entries can still name one instance for more than it holds, for example
+   * when what is running has not caught up with the persisted assignment, or when a capacity
+   * changed since either was written. That is accepted because it is no worse than the default
+   * mode, which fails the whole rebalance in the same situation: the served best possible only
+   * keeps replicas where they already run or where the Helix controller was already driving them,
+   * every freshly calculated placement still passes the node capacity constraint, and no instance a
+   * carried entry names is left to a fresh placement. In the global baseline scope the worst case
+   * is a persisted baseline that overcommits an instance. The partial rebalance treats the baseline
+   * as a soft goal, so it never places past capacity to reach it, and the next baseline calculation
+   * replaces it.
+   *
+   * @return the resources that gave up their freshly calculated assignment, in the order they did.
+   */
+  private static List<String> resolveCarriedOverNodeReuse(
+      Map<String, ResourceAssignment> assignment, Set<String> skippedResources,
+      Map<String, ResourceAssignment> previousAssignment, List<String> carriedOver,
+      List<String> dropped) {
+    Set<String> carriedResources = new LinkedHashSet<>(skippedResources);
+    List<String> yielded = new ArrayList<>();
+    String colliding;
+    while ((colliding = findResourceReusingCarriedNode(assignment, carriedResources)) != null) {
+      if (carryForwardOrDrop(assignment, colliding, previousAssignment)) {
+        carriedOver.add(colliding);
+      } else {
+        dropped.add(colliding);
+      }
+      carriedResources.add(colliding);
+      yielded.add(colliding);
+    }
+    return yielded;
+  }
+
+  /**
+   * @return the first freshly calculated resource that names an instance some carried over resource
+   *         also names, or null when nothing collides.
+   */
+  private static String findResourceReusingCarriedNode(Map<String, ResourceAssignment> assignment,
+      Set<String> carriedResources) {
+    Set<String> carriedInstances = new TreeSet<>();
+    for (String resource : carriedResources) {
+      ResourceAssignment carried = assignment.get(resource);
+      if (carried != null) {
+        carriedInstances.addAll(instancesOf(carried));
+      }
+    }
+    if (carriedInstances.isEmpty()) {
+      return null;
+    }
+    // The carried set this converges to does not depend on the order, because carrying a resource
+    // only adds instances that a freshly calculated resource must not name. Sorting only keeps
+    // the yielded list, and the warnings that print it, in the same order on every run,
+    // including after a Helix controller failover.
+    for (String resource : new TreeSet<>(assignment.keySet())) {
+      if (carriedResources.contains(resource)) {
+        continue;
+      }
+      ResourceAssignment fresh = assignment.get(resource);
+      if (fresh == null) {
+        continue;
+      }
+      for (String instance : instancesOf(fresh)) {
+        if (carriedInstances.contains(instance)) {
+          return resource;
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -130,6 +255,14 @@ public class WagedRebalanceUtil {
     carried.getRecord().setMapFields(replicaMaps);
     assignment.put(resource, carried);
     return true;
+  }
+
+  private static Set<String> instancesOf(ResourceAssignment resourceAssignment) {
+    Set<String> instances = new TreeSet<>();
+    for (Partition partition : resourceAssignment.getMappedPartitions()) {
+      instances.addAll(resourceAssignment.getReplicaMap(partition).keySet());
+    }
+    return instances;
   }
 
   /**
