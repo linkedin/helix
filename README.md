@@ -99,7 +99,7 @@ The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, includ
 `JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
 Remove downstream API references and rebuild/release those callers before upgrading
 them to this Helix version. `MaxAttemptsPerTask` continues to control task attempts;
-retry, assignment, and `TerminalStateExpiry` behavior are unchanged.
+retry and assignment behavior are unchanged.
 
 New job configurations and job-ID copies no longer emit the retired key. Legacy raw
 records may still contain it: reading them does not rewrite them, and rebuilding
@@ -123,6 +123,25 @@ Existing raw records remain readable without being rewritten; the old field is
 ignored even if it contains `true`. Job-level YAML `rebalanceRunningTask` is also
 accepted and ignored, using the existing narrowly scoped legacy-property handling.
 Unknown YAML properties and properties at the wrong scope remain rejected.
+
+The job setting `TerminalStateExpiry` has been retired, including its JobConfig
+enum entry, default constant, getter and builder setter. Remove downstream Java
+references and rebuild before upgrading; this is a source and binary compatibility
+break.
+
+Failed and timed-out jobs no longer become eligible for automatic job expiry
+based on their age. This preserves the former default (`-1`, disabled).
+Successful-job `Expiry`, explicit queue/job cleanup, missing-config cleanup and
+whole-workflow expiry/deletion remain supported. `Expiry` is not a replacement for
+the retired setting: it still applies only to successfully completed jobs.
+Applications that previously set a positive `TerminalStateExpiry` must review
+their failed-job retention and queue-capacity management before upgrading.
+
+Existing raw records remain readable without being rewritten. The legacy field,
+including positive or malformed values, is ignored by typed reconstruction, and
+new typed job configurations and job-ID copies omit it. There is no automatic
+stored-record migration. JobBean YAML did not expose this setting; unknown YAML
+properties remain rejected.
 
 ## Dependencies
 

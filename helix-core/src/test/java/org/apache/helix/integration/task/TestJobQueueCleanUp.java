@@ -23,10 +23,12 @@ import java.util.HashSet;
 import java.util.Set;
 
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.task.JobConfig;
 import org.apache.helix.task.JobContext;
 import org.apache.helix.task.JobQueue;
+import org.apache.helix.task.TaskConstants;
 import org.apache.helix.task.TaskState;
 import org.apache.helix.task.TaskUtil;
 import org.apache.helix.task.WorkflowConfig;
@@ -36,6 +38,9 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 public class TestJobQueueCleanUp extends TaskTestBase {
+  private static final long LEGACY_TERMINAL_EXPIRY = 200L;
+  private static final long JOB_PURGE_INTERVAL = 1000L;
+
   @BeforeClass
   public void beforeClass() throws Exception {
     setSingleTestEnvironment();
@@ -129,23 +134,25 @@ public class TestJobQueueCleanUp extends TaskTestBase {
   }
 
   @Test(dependsOnMethods = "testJobQueueAutoCleanUp")
-  public void testJobQueueFailedCleanUp() throws Exception {
+  public void testJobQueueFailedJobsRetainedUntilExplicitCleanup() throws Exception {
     int capacity = 10;
     String queueName = TestHelper.getTestMethodName();
     JobQueue.Builder builder = TaskTestUtil.buildJobQueue(queueName, capacity);
     WorkflowConfig.Builder cfgBuilder = new WorkflowConfig.Builder(builder.getWorkflowConfig());
-    cfgBuilder.setJobPurgeInterval(1000);
+    cfgBuilder.setJobPurgeInterval(JOB_PURGE_INTERVAL);
     builder.setWorkflowConfig(cfgBuilder.build());
 
     JobConfig.Builder jobBuilder =
         new JobConfig.Builder().setTargetResource(WorkflowGenerator.DEFAULT_TGT_DB)
             .setCommand(MockTask.TASK_COMMAND).setMaxAttemptsPerTask(2).setJobCommandConfigMap(
             ImmutableMap.of(MockTask.SUCCESS_COUNT_BEFORE_FAIL, "0"))
-            .setExpiry(200L).setTerminalStateExpiry(200L);
+            .setExpiry(200L);
     for (int i = 0; i < capacity; i++) {
       builder.enqueueJob("JOB" + i, jobBuilder);
     }
     _driver.start(builder.build());
+    assertJobsRetainedWithLegacyExpiry(queueName, capacity, TaskState.FAILED);
+    _driver.cleanupQueue(queueName);
 
     Assert.assertTrue(TestHelper.verify(() -> {
       WorkflowConfig config = _driver.getWorkflowConfig(queueName);
@@ -156,27 +163,32 @@ public class TestJobQueueCleanUp extends TaskTestBase {
       WorkflowContext context = _driver.getWorkflowContext(queueName);
       return context.getJobStates().isEmpty();
     }, TestHelper.WAIT_DURATION));
+    assertJobRecordsRemoved(queueName, capacity);
   }
 
 
-  @Test(dependsOnMethods = "testJobQueueFailedCleanUp")
-  public void testJobQueueTimedOutCleanUp() throws Exception {
+  @Test(dependsOnMethods = "testJobQueueFailedJobsRetainedUntilExplicitCleanup")
+  public void testJobQueueTimedOutJobsRetainedUntilExplicitDeletion() throws Exception {
     int capacity = 10;
     String queueName = TestHelper.getTestMethodName();
     JobQueue.Builder builder = TaskTestUtil.buildJobQueue(queueName, capacity);
     WorkflowConfig.Builder cfgBuilder = new WorkflowConfig.Builder(builder.getWorkflowConfig());
-    cfgBuilder.setJobPurgeInterval(1000);
+    cfgBuilder.setJobPurgeInterval(JOB_PURGE_INTERVAL);
     builder.setWorkflowConfig(cfgBuilder.build());
 
     JobConfig.Builder jobBuilder =
         new JobConfig.Builder().setTargetResource(WorkflowGenerator.DEFAULT_TGT_DB)
             .setCommand(MockTask.TASK_COMMAND).setMaxAttemptsPerTask(2).setTimeout(100)
-            .setJobCommandConfigMap(ImmutableMap.of(MockTask.JOB_DELAY, "10000"))
-            .setTerminalStateExpiry(200L);
+            .setJobCommandConfigMap(ImmutableMap.of(MockTask.JOB_DELAY, "10000"));
     for (int i = 0; i < capacity; i++) {
       builder.enqueueJob("JOB" + i, jobBuilder);
     }
     _driver.start(builder.build());
+    assertJobsRetainedWithLegacyExpiry(queueName, capacity, TaskState.TIMED_OUT);
+    _driver.waitToStop(queueName, TestHelper.WAIT_DURATION);
+    for (int i = 0; i < capacity; i++) {
+      _driver.deleteJob(queueName, "JOB" + i);
+    }
 
     Assert.assertTrue(TestHelper.verify(() -> {
       WorkflowConfig config = _driver.getWorkflowConfig(queueName);
@@ -187,5 +199,44 @@ public class TestJobQueueCleanUp extends TaskTestBase {
       WorkflowContext context = _driver.getWorkflowContext(queueName);
       return context.getJobStates().isEmpty();
     }, TestHelper.WAIT_DURATION));
+    assertJobRecordsRemoved(queueName, capacity);
+  }
+
+  private void assertJobsRetainedWithLegacyExpiry(String queueName, int jobCount,
+      TaskState firstJobState) throws Exception {
+    Set<String> jobs = new HashSet<>();
+    HelixDataAccessor accessor = _manager.getHelixDataAccessor();
+    for (int i = 0; i < jobCount; i++) {
+      String job = TaskUtil.getNamespacedJobName(queueName, "JOB" + i);
+      jobs.add(job);
+      JobConfig config = _driver.getJobConfig(job);
+      config.getRecord().setLongField("TerminalStateExpiry", LEGACY_TERMINAL_EXPIRY);
+      Assert.assertTrue(accessor.setProperty(accessor.keyBuilder().resourceConfig(job), config));
+    }
+    _driver.pollForJobState(queueName, TaskUtil.getNamespacedJobName(queueName, "JOB0"),
+        firstJobState);
+    Assert.assertTrue(TestHelper.verify(() -> {
+      WorkflowContext context = _driver.getWorkflowContext(queueName);
+      return jobs.stream().allMatch(job -> TaskConstants.FINAL_STATES.contains(context.getJobState(job)));
+    }, TestHelper.WAIT_DURATION));
+
+    long checkUntil = System.currentTimeMillis() + LEGACY_TERMINAL_EXPIRY + 2 * JOB_PURGE_INTERVAL;
+    Assert.assertTrue(TestHelper.verify(() -> {
+      Assert.assertEquals(_driver.getWorkflowConfig(queueName).getJobDag().getAllNodes(), jobs);
+      for (String job : jobs) {
+        Assert.assertEquals(_driver.getJobConfig(job).getRecord()
+            .getSimpleField("TerminalStateExpiry"), Long.toString(LEGACY_TERMINAL_EXPIRY));
+      }
+      Assert.assertNotNull(_driver.getJobContext(TaskUtil.getNamespacedJobName(queueName, "JOB0")));
+      return System.currentTimeMillis() >= checkUntil;
+    }, TestHelper.WAIT_DURATION));
+  }
+
+  private void assertJobRecordsRemoved(String queueName, int jobCount) {
+    for (int i = 0; i < jobCount; i++) {
+      String job = TaskUtil.getNamespacedJobName(queueName, "JOB" + i);
+      Assert.assertNull(_driver.getJobConfig(job));
+      Assert.assertNull(_driver.getJobContext(job));
+    }
   }
 }

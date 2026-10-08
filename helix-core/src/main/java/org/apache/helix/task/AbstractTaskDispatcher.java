@@ -952,8 +952,6 @@ public abstract class AbstractTaskDispatcher {
       workflowContext.setFinishTime(currentTime);
       updateWorkflowMonitor(workflowContext, workflowConfig);
     }
-    scheduleJobCleanUp(jobConfigMap.get(jobName).getTerminalStateExpiry(), workflowConfig,
-        currentTime);
   }
 
   protected void scheduleJobCleanUp(long expiry, WorkflowConfig workflowConfig,

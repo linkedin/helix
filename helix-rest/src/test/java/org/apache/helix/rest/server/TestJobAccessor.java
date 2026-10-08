@@ -41,7 +41,9 @@ import org.apache.helix.task.TaskDriver;
 import org.apache.helix.task.TaskPartitionState;
 import org.apache.helix.task.TaskUtil;
 import org.apache.helix.task.WorkflowConfig;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestJobAccessor extends AbstractTestClass {
@@ -184,6 +186,40 @@ public class TestJobAccessor extends AbstractTestClass {
     contentStore = OBJECT_MAPPER.readValue(body, new TypeReference<Map<String, String>>() {});
     Assert.assertEquals(contentStore, map1);
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @DataProvider
+  public Object[][] legacyTerminalStateExpiries() {
+    return new Object[][] {{null}, {"-1"}, {"0"}, {"200"}, {"invalid"}};
+  }
+
+  @Test(dataProvider = "legacyTerminalStateExpiries")
+  public void testCreateJobIgnoresLegacyTerminalStateExpiry(String legacyValue) throws Exception {
+    TaskDriver driver = getTaskDriver(CLUSTER_NAME);
+    String queueName = "LegacyTerminalExpiry_" + legacyValue;
+    driver.start(new JobQueue.Builder(queueName).build());
+    try {
+      ZNRecord input = OBJECT_MAPPER.readValue(JOB_INPUT, ZNRecord.class);
+      input.setSimpleField("Expiry", "60000");
+      if (legacyValue != null) {
+        input.setSimpleField("TerminalStateExpiry", legacyValue);
+      }
+      Entity<String> entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(input),
+          MediaType.APPLICATION_JSON_TYPE);
+      put("clusters/" + CLUSTER_NAME + "/workflows/" + queueName + "/jobs/" + TEST_JOB_NAME,
+          null, entity, Response.Status.OK.getStatusCode());
+
+      JobConfig config = driver.getJobConfig(TaskUtil.getNamespacedJobName(queueName, TEST_JOB_NAME));
+      Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("TerminalStateExpiry"));
+      Assert.assertEquals(config.getExpiry().longValue(), 60000L);
+      Assert.assertEquals(config.getTaskConfigMap().size(), 2);
+      Assert.assertTrue(config.getTaskConfigMap().values().stream()
+          .anyMatch(task -> "Backup".equals(task.getCommand())));
+      Assert.assertTrue(config.getTaskConfigMap().values().stream()
+          .anyMatch(task -> "ReIndex".equals(task.getCommand())));
+    } finally {
+      driver.deleteAndWaitForCompletion(queueName, TestHelper.WAIT_DURATION);
+    }
   }
 
   @Test(dependsOnMethods = "testGetAddJobContent")

@@ -21,6 +21,7 @@ package org.apache.helix.guardrail;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -49,6 +50,20 @@ public class GuardrailPipeline {
 
   public GuardrailPipeline(GuardrailRule... rules) {
     this(Arrays.asList(rules));
+  }
+
+  /**
+   * The IDs of the rules in this pipeline, in evaluation order (duplicates preserved). Exposed so
+   * callers such as metric emitters can attribute a per-rule outcome even for the rules that
+   * produced no violation &mdash; e.g. an "evaluated" counter that serves as the denominator for a
+   * per-rule "how often did this rule block a write" ratio.
+   */
+  public List<String> getRuleIds() {
+    List<String> ids = new ArrayList<>(rules.size());
+    for (GuardrailRule rule : rules) {
+      ids.add(rule.getId());
+    }
+    return Collections.unmodifiableList(ids);
   }
 
   /**

@@ -140,12 +140,6 @@ public class JobConfig extends ResourceConfig {
      * completed, the job will be purged
      */
     Expiry,
-
-    /**
-     * The expiration time for the job if it's failed or timed out; once the expiry is reached and
-     * the job has failed or timed out, the job will be purged
-     */
-    TerminalStateExpiry,
   }
 
   // Default property values
@@ -158,7 +152,6 @@ public class JobConfig extends ResourceConfig {
   public static final int DEFAULT_NUMBER_OF_TASKS = 0;
   public static final long DEFAULT_JOB_EXECUTION_START_TIME = -1L;
   public static final long DEFAULT_Job_EXECUTION_DELAY_TIME = -1L;
-  public static final long DEFAULT_TERMINAL_STATE_EXPIRY = -1L; // do not purge
 
   // Cache TaskConfig objects for targeted jobs' tasks to reduce object creation/GC overload
   private Map<String, TaskConfig> _targetedTaskConfigMap = new HashMap<>();
@@ -176,8 +169,7 @@ public class JobConfig extends ResourceConfig {
         jobConfig.isIgnoreDependentJobFailure(),
         jobConfig.getTaskConfigMap(), jobConfig.getJobType(), jobConfig.getInstanceGroupTag(),
         jobConfig.getExecutionDelay(),
-        jobConfig.getExecutionStart(), jobId, jobConfig.getExpiry(),
-        jobConfig.getTerminalStateExpiry());
+        jobConfig.getExecutionStart(), jobId, jobConfig.getExpiry());
   }
 
   private JobConfig(String workflow, String targetResource, List<String> targetPartitions,
@@ -185,7 +177,7 @@ public class JobConfig extends ResourceConfig {
       long timeout, long timeoutPerTask, int numConcurrentTasksPerInstance, int maxAttemptsPerTask,
       int failureThreshold, long retryDelay, boolean ignoreDependentJobFailure,
       Map<String, TaskConfig> taskConfigMap, String jobType, String instanceGroupTag,
-      long executionDelay, long executionStart, String jobId, long expiry, long terminalStateExpiry) {
+      long executionDelay, long executionStart, String jobId, long expiry) {
     super(jobId);
     putSimpleConfig(JobConfigProperty.WorkflowID.name(), workflow);
     putSimpleConfig(JobConfigProperty.JobID.name(), jobId);
@@ -241,9 +233,6 @@ public class JobConfig extends ResourceConfig {
     }
     if (expiry > 0) {
       getRecord().setLongField(JobConfigProperty.Expiry.name(), expiry);
-    }
-    if (terminalStateExpiry > 0) {
-      getRecord().setLongField(JobConfigProperty.TerminalStateExpiry.name(), terminalStateExpiry);
     }
     putSimpleConfig(ResourceConfigProperty.MONITORING_DISABLED.toString(),
         String.valueOf(WorkflowConfig.DEFAULT_MONITOR_DISABLE));
@@ -398,10 +387,6 @@ public class JobConfig extends ResourceConfig {
     return getRecord().getLongField(JobConfigProperty.Expiry.name(), WorkflowConfig.DEFAULT_EXPIRY);
   }
 
-  public Long getTerminalStateExpiry() {
-    return getRecord().getLongField(JobConfigProperty.TerminalStateExpiry.name(), DEFAULT_TERMINAL_STATE_EXPIRY);
-  }
-
   public static JobConfig fromHelixProperty(HelixProperty property)
       throws IllegalArgumentException {
     Map<String, String> configs = property.getRecord().getSimpleFields();
@@ -431,7 +416,6 @@ public class JobConfig extends ResourceConfig {
     private long _executionStart = DEFAULT_JOB_EXECUTION_START_TIME;
     private long _executionDelay = DEFAULT_Job_EXECUTION_DELAY_TIME;
     private long _expiry = WorkflowConfig.DEFAULT_EXPIRY;
-    private long _terminalStateExpiry = DEFAULT_TERMINAL_STATE_EXPIRY;
     private boolean _ignoreDependentJobFailure = DEFAULT_IGNORE_DEPENDENT_JOB_FAILURE;
     private int _numberOfTasks = DEFAULT_NUMBER_OF_TASKS;
     private boolean _enableCompression = TaskConstants.DEFAULT_TASK_ENABLE_COMPRESSION;
@@ -453,8 +437,7 @@ public class JobConfig extends ResourceConfig {
           _command, _commandConfig, _timeout, _timeoutPerTask, _numConcurrentTasksPerInstance,
           _maxAttemptsPerTask, _failureThreshold, _retryDelay,
           _ignoreDependentJobFailure, _taskConfigMap, _jobType,
-          _instanceGroupTag, _executionDelay, _executionStart, _jobId, _expiry,
-          _terminalStateExpiry);
+          _instanceGroupTag, _executionDelay, _executionStart, _jobId, _expiry);
     }
 
     /**
@@ -526,10 +509,6 @@ public class JobConfig extends ResourceConfig {
       }
       if (cfg.containsKey(JobConfigProperty.Expiry.name())) {
         b.setExpiry(Long.valueOf(cfg.get(JobConfigProperty.Expiry.name())));
-      }
-      if (cfg.containsKey(JobConfigProperty.TerminalStateExpiry.name())) {
-        b.setTerminalStateExpiry(
-            Long.valueOf(cfg.get(JobConfigProperty.TerminalStateExpiry.name())));
       }
       if (cfg.containsKey(ZNRecord.ENABLE_COMPRESSION_BOOLEAN_FIELD)) {
         b.setEnableCompression(
@@ -649,11 +628,6 @@ public class JobConfig extends ResourceConfig {
 
     public Builder setExpiry(Long expiry) {
       _expiry = expiry;
-      return this;
-    }
-
-    public Builder setTerminalStateExpiry(Long terminalStateExpiry) {
-      _terminalStateExpiry = terminalStateExpiry;
       return this;
     }
 

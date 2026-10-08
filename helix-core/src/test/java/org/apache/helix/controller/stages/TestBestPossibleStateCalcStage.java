@@ -20,12 +20,21 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -33,17 +42,22 @@ import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.TestAbstractRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
+import org.apache.helix.monitoring.mbeans.ResourceMonitor;
 import org.apache.helix.util.StageThreadPoolHelper;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 public class TestBestPossibleStateCalcStage extends BaseStageTest {
+  private static final String GAUGE_RESOURCE = "testResourceName";
 
   @AfterMethod
   public void afterMethod() {
@@ -530,6 +544,215 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
         Assert.assertEquals(cache.getClusterConfig().getRecord().getSimpleField(retiredKey), "1");
       }
     }
+  }
+
+  /**
+   * The cached external view can lag the pipeline run, so the resource state gauges must follow
+   * this run's current state, including replicas on instances with an UNKNOWN operation.
+   */
+  @Test
+  public void testResourceStateGaugesUseThisRunsCurrentState() {
+    String resourceName = "testResourceName";
+    setupIdealState(3, new String[]{resourceName}, 1, 1, RebalanceMode.SEMI_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    setupLiveInstances(3);
+    setupStateModel();
+    setupInstances(3);
+
+    // The partition already has its MASTER, but the cached external view still shows a SLAVE.
+    Partition partition = new Partition(resourceName + "_0");
+    ExternalView staleExternalView = new ExternalView(resourceName);
+    staleExternalView.setState(partition.getPartitionName(), HOSTNAME_PREFIX + 1, "SLAVE");
+    CurrentStateOutput currentStateExcludingUnknown = new CurrentStateOutput();
+    currentStateExcludingUnknown.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1,
+        "MASTER");
+    // The external view also has a replica on an instance with an UNKNOWN operation.
+    CurrentStateOutput currentState = new CurrentStateOutput();
+    currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 1, "MASTER");
+    currentState.setCurrentState(resourceName, partition, HOSTNAME_PREFIX + 2, "SLAVE");
+    // A partition the resource no longer has stays out of the view, as in the external view.
+    currentState.setCurrentState(resourceName, new Partition(resourceName + "_1"),
+        HOSTNAME_PREFIX + 1, "SLAVE");
+
+    Map<String, Resource> resourceMap = getResourceMap(new String[]{resourceName}, 1,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentState);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(),
+        currentStateExcludingUnknown);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    runStage(event, new ReadClusterDataStage());
+    cache.updateExternalViews(Arrays.asList(staleExternalView));
+    // Run the async gauge task inline, so the gauges are final once the stage returns.
+    cache.setAsyncTasksThreadPool(MoreExecutors.newDirectExecutorService());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    // The stale SLAVE would be a missing top state, and the UNKNOWN replica is a difference.
+    ResourceMonitor resourceMonitor = monitor.getResourceMonitor(resourceName);
+    Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), 0);
+    Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(), 1);
+    Assert.assertEquals(resourceMonitor.getExternalViewPartitionGauge(), 1);
+  }
+
+  /**
+   * The gauge tasks of consecutive runs share a thread pool, so an older run's task can finish
+   * last. It must not overwrite the gauges reported by the newer run.
+   */
+  @Test
+  public void testOlderRunDoesNotOverwriteResourceStateGauges() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    BestPossibleStateCalcStage stage = setUpGaugeRuns(monitor);
+    // The older run still sees a SLAVE, and its gauge task waits behind a gate.
+    CountDownLatch gate = new CountDownLatch(1);
+    ExecutorService pool = gatedPool(gate);
+    runGaugePass(stage, "SLAVE", pool);
+    // The newer run sees the MASTER and reports first.
+    runGaugePass(stage, "MASTER", MoreExecutors.newDirectExecutorService());
+    gate.countDown();
+    awaitPool(pool);
+    assertResourceStateGauges(monitor, 0, 0);
+  }
+
+  /**
+   * A run that a newer run has overtaken still reports the resources the newer run has not
+   * reported yet, so a burst of runs cannot starve the gauges.
+   */
+  @Test
+  public void testOvertakenRunStillReportsResourceStateGauges() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    BestPossibleStateCalcStage stage = setUpGaugeRuns(monitor);
+    // Both gauge tasks queue behind a gate, so the older one runs after the newer run started.
+    CountDownLatch gate = new CountDownLatch(1);
+    ExecutorService pool = gatedPool(gate);
+    runGaugePass(stage, "SLAVE", pool);
+    Future<Long> olderReport = pool.submit(
+        () -> monitor.getResourceMonitor(GAUGE_RESOURCE).getMissingTopStatePartitionGauge());
+    runGaugePass(stage, "MASTER", pool);
+    gate.countDown();
+    Assert.assertEquals(olderReport.get(30, TimeUnit.SECONDS).longValue(), 1L);
+    awaitPool(pool);
+    assertResourceStateGauges(monitor, 0, 0);
+  }
+
+  /**
+   * A newer run waits while an older run writes a resource's gauges, so the older write cannot
+   * land last.
+   */
+  @Test
+  public void testNewerRunWaitsForOlderGaugeWrite() throws Exception {
+    CountDownLatch paused = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    // The first gauge write, which comes from the older run, pauses until it is released.
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName) {
+      @Override
+      public void setResourceState(String resourceName, ExternalView externalView,
+          IdealState idealState, StateModelDefinition stateModelDef) {
+        if (paused.getCount() > 0) {
+          paused.countDown();
+          Uninterruptibles.awaitUninterruptibly(release, 30, TimeUnit.SECONDS);
+        }
+        super.setResourceState(resourceName, externalView, idealState, stateModelDef);
+      }
+    };
+    BestPossibleStateCalcStage stage = setUpGaugeRuns(monitor);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    runGaugePass(stage, "SLAVE", pool);
+    Assert.assertTrue(paused.await(30, TimeUnit.SECONDS));
+
+    // The newer run sees the MASTER and has to wait until the older write is done.
+    FutureTask<Void> newerRun = new FutureTask<>(
+        () -> runGaugePass(stage, "MASTER", MoreExecutors.newDirectExecutorService()), null);
+    Thread newer = new Thread(newerRun);
+    newer.start();
+    while (newer.isAlive() && newer.getState() != Thread.State.BLOCKED) {
+      Thread.sleep(1);
+    }
+    release.countDown();
+    newerRun.get(30, TimeUnit.SECONDS);
+    awaitPool(pool);
+    assertResourceStateGauges(monitor, 0, 0);
+  }
+
+  /**
+   * An older run's gauge task must not report a resource that a newer run no longer has, or it
+   * would recreate the monitor of a deleted resource.
+   */
+  @Test
+  public void testOlderRunDoesNotReportDeletedResource() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    BestPossibleStateCalcStage stage = setUpGaugeRuns(monitor);
+    CountDownLatch gate = new CountDownLatch(1);
+    ExecutorService pool = gatedPool(gate);
+    runGaugePass(stage, "SLAVE", pool);
+    // The resource is deleted before the newer run.
+    ResourceControllerDataProvider cache =
+        event.getAttribute(AttributeName.ControllerDataProvider.name());
+    cache.setIdealStates(Collections.emptyList());
+    runGaugePass(stage, "SLAVE", MoreExecutors.newDirectExecutorService());
+    gate.countDown();
+    awaitPool(pool);
+    Assert.assertNull(monitor.getResourceMonitor(GAUGE_RESOURCE));
+  }
+
+  /**
+   * Sets up one SEMI_AUTO resource with a single replica on localhost_1, and returns the stage
+   * that the gauge tests run repeatedly.
+   */
+  private BestPossibleStateCalcStage setUpGaugeRuns(ClusterStatusMonitor monitor) {
+    setupIdealState(3, new String[]{GAUGE_RESOURCE}, 1, 1, RebalanceMode.SEMI_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    setupLiveInstances(3);
+    setupStateModel();
+    setupInstances(3);
+    Map<String, Resource> resourceMap = getResourceMap(new String[]{GAUGE_RESOURCE}, 1,
+        BuiltInStateModelDefinitions.MasterSlave.name());
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    runStage(event, new ReadClusterDataStage());
+    return new BestPossibleStateCalcStage();
+  }
+
+  /** Runs the stage once, with the replica in the given state and the gauge task on the pool. */
+  private void runGaugePass(BestPossibleStateCalcStage stage, String state, ExecutorService pool) {
+    CurrentStateOutput currentState = new CurrentStateOutput();
+    currentState.setCurrentState(GAUGE_RESOURCE, new Partition(GAUGE_RESOURCE + "_0"),
+        HOSTNAME_PREFIX + 1, state);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentState);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentState);
+    ResourceControllerDataProvider cache =
+        event.getAttribute(AttributeName.ControllerDataProvider.name());
+    cache.setAsyncTasksThreadPool(pool);
+    runStage(event, stage);
+  }
+
+  /** Returns a single thread pool whose queued tasks wait until the gate opens. */
+  private static ExecutorService gatedPool(CountDownLatch gate) {
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    pool.submit(() -> {
+      gate.await();
+      return null;
+    });
+    return pool;
+  }
+
+  private static void awaitPool(ExecutorService pool) throws InterruptedException {
+    pool.shutdown();
+    Assert.assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+  }
+
+  private static void assertResourceStateGauges(ClusterStatusMonitor monitor,
+      long missingTopState, long differenceWithIdealState) {
+    ResourceMonitor resourceMonitor = monitor.getResourceMonitor(GAUGE_RESOURCE);
+    Assert.assertEquals(resourceMonitor.getMissingTopStatePartitionGauge(), missingTopState);
+    Assert.assertEquals(resourceMonitor.getDifferenceWithIdealStateGauge(),
+        differenceWithIdealState);
   }
 
   /**
