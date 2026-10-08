@@ -242,13 +242,8 @@ public class MessageThrottleProcessor {
    * Get error partition threshold from cluster config.
    */
   public static int getErrorThreshold(ClusterConfig config) {
-    if (config.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
-      return config.getErrorOrRecoveryPartitionThresholdForLoadBalance();
-    }
-    if (config.getErrorPartitionThresholdForLoadBalance() != 0) {
-      return config.getErrorPartitionThresholdForLoadBalance();
-    }
-    return 1;
+    int threshold = config.getErrorOrRecoveryPartitionThresholdForLoadBalance();
+    return threshold == -1 ? 1 : threshold;
   }
 
   /**
@@ -390,4 +385,3 @@ public class MessageThrottleProcessor {
     }
   }
 }
-

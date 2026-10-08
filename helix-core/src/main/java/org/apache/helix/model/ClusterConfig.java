@@ -35,8 +35,6 @@ import org.apache.helix.api.config.HelixConfigProperty;
 import org.apache.helix.api.config.StateTransitionThrottleConfig;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
 import org.apache.helix.api.config.ViewClusterSourceConfig;
-import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
@@ -72,10 +70,6 @@ public class ClusterConfig extends HelixProperty {
 
     // The following concerns maintenance mode
     MAX_PARTITIONS_PER_INSTANCE,
-    // The maximum number of partitions that an instance can serve in this cluster.
-    // This only works for GreedyRebalanceStrategy.
-    // TODO: if we want to support this for other rebalancers, we need to implement that logic
-    GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE,
     // The following two include offline AND disabled instances
     // TODO: At some point we should rename this to something like MAX_INSTANCES_UNABLE_TO_TAKE_ACCEPT_REPLICAS
     //     to make it clear that it includes both offline and non-assignable instances
@@ -97,18 +91,9 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
-    @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
-    // precedence if it is set
-    ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance state
-    // transition if the number of partitons that need
-    // recovery exceeds this limitation
-    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance
-    // state transition if the number of
-    // partitons that need recovery or in
-    // error exceeds this limitation
-    @Deprecated // TODO: Remove in Helix 2.0
-    DISABLED_INSTANCES_WITH_INFO,
-    // disabled instances with info is for storing batch disabled instances (cloud event handling).
+    // Restrict load balance to downward transitions when the number of error partitions exceeds
+    // this threshold. Recovery partitions are not counted.
+    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -178,12 +163,6 @@ public class ClusterConfig extends HelixProperty {
     // TaskConstants.DEFAULT_TASK_THREAD_POOL_SIZE will be used to create pool sizes.
     GLOBAL_TARGET_TASK_THREAD_POOL_SIZE,
 
-    // The following 3 keywords are for metadata in batch disabled instance
-    HELIX_ENABLED_DISABLE_TIMESTAMP,
-    HELIX_DISABLED_REASON,
-    // disabled type should be a enum of org.apache.helix.constants.InstanceConstants.InstanceDisabledType
-    HELIX_DISABLED_TYPE,
-
     // The last time when the on-demand rebalance is triggered.
     LAST_ON_DEMAND_REBALANCE_TIMESTAMP,
 
@@ -191,9 +170,6 @@ public class ClusterConfig extends HelixProperty {
     PREFERRED_SCORING_KEYS,
     // How long offline nodes will stay in the cluster before they are automatically purged, in milliseconds
     PARTICIPANT_DEREGISTRATION_TIMEOUT,
-
-    // Allow disabled partitions to remain OFFLINE instead of being reassigned in WAGED rebalancer
-    RELAXED_DISABLED_PARTITION_CONSTRAINT,
 
     // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
     // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
@@ -218,11 +194,7 @@ public class ClusterConfig extends HelixProperty {
   }
 
   private final static int DEFAULT_MAX_CONCURRENT_TASK_PER_INSTANCE = 40;
-  // By default, no load balance if any error partition
-  @Deprecated
-  private final static int DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = 0;
-  // By default, no load balance if any error or recovery partition. -1 implies that the threshold
-  // is not set and will be given a default value of 1
+  // -1 means unset; the controller uses an effective error-partition threshold of 1.
   private final static int DEFAULT_ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = -1;
   private static final String IDEAL_STATE_RULE_PREFIX = "IdealStateRule!";
 
@@ -550,26 +522,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public int getMaxPartitionsPerInstance() {
     return _record.getIntField(ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), -1);
-  }
-
-  /**
-   * Set the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @param globalMaxPartitionAllowedPerInstance the maximum number of partitions allowed
-   */
-  public void setGlobalMaxPartitionAllowedPerInstance(int globalMaxPartitionAllowedPerInstance) {
-    _record.setIntField(ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(),
-        globalMaxPartitionAllowedPerInstance);
-  }
-
-  /**
-   * Get the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @return the maximum number of partitions allowed, or Integer.MAX_VALUE
-   */
-  public int getGlobalMaxPartitionAllowedPerInstance() {
-    return _record.getIntField(
-        ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(), -1);
   }
 
   /**
@@ -935,35 +887,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Get maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @return the maximum allowed error partition count
-   */
-  public int getErrorPartitionThresholdForLoadBalance() {
-    return _record.getIntField(
-        ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-            DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE);
-  }
-
-  /**
-   * Set maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @param errorPartitionThreshold the maximum allowed error partition count
-   */
-  public void setErrorPartitionThresholdForLoadBalance(int errorPartitionThreshold) {
-    _record.setIntField(ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-        errorPartitionThreshold);
-  }
-
-  /**
-   * Get the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @return the threshold
+   * Get the error-partition threshold for load balancing. Despite the property name, recovery
+   * partitions are not counted. If the number of error partitions exceeds the effective threshold,
+   * load balance is restricted to downward transitions.
+   * @return the configured threshold, or -1 when unset; the controller uses 1 for -1
    */
   public int getErrorOrRecoveryPartitionThresholdForLoadBalance() {
     return _record.getIntField(
@@ -972,12 +899,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @param recoveryPartitionThreshold
+   * Set the error-partition threshold for load balancing. Zero allows no error partitions before
+   * restricting load balance to downward transitions; -1 selects the controller default of 1.
+   * Recovery transitions are not blocked by this threshold.
+   * @param recoveryPartitionThreshold the error-partition threshold
    */
   public void setErrorOrRecoveryPartitionThresholdForLoadBalance(int recoveryPartitionThreshold) {
     _record.setIntField(
@@ -1029,27 +954,6 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the disabled instance list with concatenated Info
-   */
-  public void setDisabledInstancesWithInfo(Map<String, String> disabledInstancesWithInfo) {
-    _record.setMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name(),
-        disabledInstancesWithInfo);
-  }
-
-  /**
-   * Get current disabled instance map of
-   * <instance, disabledReason = "res, disabledType = typ, disabledTimeStamp = time">
-   * @deprecated Please use InstanceConfig for enabling and disabling instances
-   * @return a non-null map of disabled instances in cluster config
-   */
-  @Deprecated
-  public Map<String, String> getDisabledInstancesWithInfo() {
-    Map<String, String> disabledInstances =
-        _record.getMapField(ClusterConfigProperty.DISABLED_INSTANCES_WITH_INFO.name());
-    return disabledInstances == null ? Collections.emptyMap() : disabledInstances;
-  }
-
-  /**
    * Whether the P2P state transition message is enabled for all resources in this cluster. By
    * default it is disabled if not set.
    * @return
@@ -1067,27 +971,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public void enableP2PMessage(boolean enabled) {
     _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), enabled);
-  }
-
-  /**
-   * Whether the relaxed disabled partition constraint is enabled for this cluster.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE
-   * instead of being immediately reassigned, making behavior consistent with CrushEd.
-   * By default it is disabled if not set.
-   * @return true if relaxed disabled partition constraint is enabled, false otherwise
-   */
-  public boolean isRelaxedDisabledPartitionConstraintEnabled() {
-    return _record.getBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), false);
-  }
-
-  /**
-   * Enable/disable relaxed disabled partition constraint for this cluster.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE
-   * instead of being immediately reassigned, making behavior consistent with CrushEd.
-   * @param enabled true to enable relaxed constraint, false for strict constraint (default)
-   */
-  public void setRelaxedDisabledPartitionConstraint(boolean enabled) {
-    _record.setBooleanField(ClusterConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
   }
 
   /**
@@ -1424,43 +1307,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public String getClusterName() {
     return _record.getId();
-  }
-
-  public String getPlainInstanceHelixDisabledType(String instanceName) {
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .get(ClusterConfigProperty.HELIX_DISABLED_TYPE.toString());
-  }
-
-  public String getInstanceHelixDisabledType(String instanceName) {
-    if (!getDisabledInstancesWithInfo().containsKey(instanceName)) {
-      return InstanceConstants.INSTANCE_NOT_DISABLED;
-    }
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .getOrDefault(ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-            InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
-  }
-
-  /**
-   * @return a String representing reason.
-   * null if instance is not disabled in batch mode or do not have disabled reason
-   */
-  public String getInstanceHelixDisabledReason(String instanceName) {
-    return ConfigStringUtil.parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-        .get(ClusterConfigProperty.HELIX_DISABLED_REASON.toString());
-  }
-
-  /**
-   * @param instanceName
-   * @return a String representation of unix time
-   * null if the instance is not disabled in batch mode.
-   */
-  public String getInstanceHelixDisabledTimeStamp(String instanceName) {
-    if (getDisabledInstancesWithInfo().containsKey(instanceName)) {
-      return ConfigStringUtil
-          .parseConcatenatedConfig(getDisabledInstancesWithInfo().get(instanceName))
-          .get(ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString());
-    }
-    return null;
   }
 
   /**

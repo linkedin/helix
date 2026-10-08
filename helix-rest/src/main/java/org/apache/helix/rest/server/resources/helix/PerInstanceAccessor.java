@@ -55,8 +55,10 @@ import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.MinActiveReplicaChecker;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
@@ -85,6 +87,7 @@ import org.apache.helix.rest.server.json.instance.InstanceInfo;
 import org.apache.helix.rest.server.json.instance.StoppableCheck;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.eclipse.jetty.util.StringUtil;
 import org.slf4j.Logger;
@@ -505,7 +508,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
         case enable:
           admin.enableInstance(clusterId, instanceName, true);
           break;
-        case disable:
+        case disable: {
           InstanceConstants.InstanceDisabledType disabledTypeEnum = null;
           if (disabledType != null) {
             try {
@@ -514,8 +517,40 @@ public class PerInstanceAccessor extends AbstractHelixResource {
               return badRequest("Invalid instanceDisabledType!");
             }
           }
+          // Guard rail: block (or simulate) a disable that would push a partition this instance
+          // currently hosts below its minActiveReplicas on the remaining instances. Disabling drains
+          // the instance's replicas, so an unchecked disable can silently reduce availability or lose
+          // a top state -- the same failure EVACUATE is guarded against, but a plain disable runs no
+          // such check. force overrides the verdict (draining a failing node is often mandatory);
+          // dryRun reports it without writing. Skip the what-if for a real force write, whose result
+          // would be discarded anyway.
+          if (dryRun || !force) {
+            HelixDataAccessor disableDataAccessor = getDataAccssor(clusterId);
+            MinActiveReplicaChecker minActiveReplicaChecker =
+                (targetInstance, toBeStoppedInstances) -> InstanceValidationUtil
+                    .siblingNodesActiveReplicaCheckWithDetails(disableDataAccessor, targetInstance,
+                        toBeStoppedInstances, true);
+            GuardrailContext disableContext = GuardrailContext.newBuilder(clusterId)
+                .dataAccessor(disableDataAccessor)
+                .instanceName(instanceName)
+                .minActiveReplicaChecker(minActiveReplicaChecker)
+                .build();
+            GuardrailPipeline disablePipeline =
+                new GuardrailPipeline(new InstanceDisableMinActiveReplicaGuardrailRule());
+            Optional<Response> disablePreflight =
+                preflight(disablePipeline, disableContext, force, dryRun);
+            if (disablePreflight.isPresent()) {
+              return disablePreflight.get();
+            }
+          } else {
+            LOG.info(
+                "Bypassing the instance-disable min-active-replica guard rail for a force disable on "
+                    + "instance {} in cluster {} (reason: {}); force overrides the verdict, so the "
+                    + "min-active what-if is skipped.", instanceName, clusterId, disabledReason);
+          }
           admin.enableInstance(clusterId, instanceName, false, disabledTypeEnum, disabledReason);
           break;
+        }
 
         case reset:
         case resetPartitions:

@@ -64,7 +64,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
     TOP_STATE_PARTITION_COUNT_GAUGE("TopStatePartitionGauge"),
     ACTUAL_PARTITION_COUNT_GAUGE("ActualPartitionGauge"),
     ACTUAL_TOP_STATE_PARTITION_COUNT_GAUGE("ActualTopStatePartitionGauge"),
-    DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge");
+    DOMAIN_INFO_VALID_GAUGE("DomainInfoValidGauge"),
+    MAPPING_CAPACITY_REJECTION_COUNTER("MappingCapacityRejectionCounter");
 
     private final String metricName;
 
@@ -86,6 +87,7 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
   // Counters
   private SimpleDynamicMetric<Long> _totalMessagedReceivedCounter;
+  private SimpleDynamicMetric<Long> _mappingCapacityRejectionCounter;
 
   // Gauges
   private SimpleDynamicMetric<Long> _enabledStatusGauge;
@@ -193,6 +195,9 @@ public class InstanceMonitor extends DynamicMBeanProvider {
 
     _domainInfoValidGauge = new SimpleDynamicMetric<>(
         InstanceMonitorMetric.DOMAIN_INFO_VALID_GAUGE.metricName(), 1L);
+
+    _mappingCapacityRejectionCounter = new SimpleDynamicMetric<>(
+        InstanceMonitorMetric.MAPPING_CAPACITY_REJECTION_COUNTER.metricName(), 0L);
   }
 
   private List<DynamicMetric<?, ?>> buildAttributeList() {
@@ -215,7 +220,8 @@ public class InstanceMonitor extends DynamicMBeanProvider {
         _instanceOperationDurationEvacuateGauge,
         _instanceOperationDurationSwapInGauge,
         _instanceOperationDurationUnknownGauge,
-        _domainInfoValidGauge
+        _domainInfoValidGauge,
+        _mappingCapacityRejectionCounter
     );
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());
@@ -465,6 +471,31 @@ public class InstanceMonitor extends DynamicMBeanProvider {
    */
   public synchronized void updateMaxCapacityUsage(double maxUsage) {
     _maxCapacityUsageGauge.updateValue(maxUsage);
+  }
+
+  /**
+   * Increments this instance's mapping capacity rejection counter.
+   * It tracks how many replica placements this instance refused during mapping calculation because
+   * it had no capacity left, summed over all resources. The matching per-resource view lives on
+   * {@code ResourceMonitor}, so the two together give the same attribution as a per-(resource,
+   * instance) attribute would, at fixed cardinality. The exact (resource, instance) pairing is
+   * logged once per pipeline pass.
+   *
+   * @param rejectionCount The number of rejections to add. Non-positive values are ignored.
+   */
+  public synchronized void incrementMappingCapacityRejectionCounter(long rejectionCount) {
+    if (rejectionCount <= 0) {
+      return;
+    }
+    _mappingCapacityRejectionCounter
+        .updateValue(_mappingCapacityRejectionCounter.getValue() + rejectionCount);
+  }
+
+  /**
+   * @return The cumulative number of capacity rejections recorded for this instance.
+   */
+  public synchronized long getMappingCapacityRejectionCounter() {
+    return _mappingCapacityRejectionCounter.getValue();
   }
 
   /**

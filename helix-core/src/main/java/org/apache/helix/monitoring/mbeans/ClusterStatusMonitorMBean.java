@@ -458,4 +458,12 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    * @return number of instances currently in UNKNOWN operation
    */
   long getInstancesInOperationUnknownGauge();
+
+  /**
+   * @return number of instances that carry a valid (unexpired) instance-operation maintenance
+   * marker, live or not. This is the population the INSTANCE_OPERATION_MAINTENANCE_BUDGET (or
+   * _PERCENTAGE) cap applies to, so it reads directly as budget usage. An expired marker stops
+   * counting on the next pipeline run, even though the field is still on the InstanceConfig.
+   */
+  long getInstancesUnderInstanceOperationMaintenanceGauge();
 }

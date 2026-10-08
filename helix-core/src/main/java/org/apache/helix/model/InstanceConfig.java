@@ -1049,9 +1049,7 @@ public class InstanceConfig extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalanceEnabled() {
-    return _record
-        .getBooleanField(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-            true);
+    return _record.getBooleanField(InstanceConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**
@@ -1060,8 +1058,7 @@ public class InstanceConfig extends HelixProperty {
    * @param enabled
    */
   public void setDelayRebalanceEnabled(boolean enabled) {
-    _record.setBooleanField(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-        enabled);
+    _record.setBooleanField(InstanceConfigProperty.DELAY_REBALANCE_ENABLED.name(), enabled);
   }
 
   /**

@@ -26,12 +26,137 @@ import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.api.config.RebalanceConfig;
+import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.CrushRebalanceStrategy;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestResourceConfig {
   private static final ObjectMapper _objectMapper = new ObjectMapper();
+  private static final String LEGACY_REBALANCE_STRATEGY = "REBALANCE_STRATEGY";
+
+  @Test
+  public void testLegacyStrategyPreservedInRecordButNotRebuilt() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setSimpleField(LEGACY_REBALANCE_STRATEGY, CrushEdRebalanceStrategy.class.getName());
+    record.setLongField("REBALANCE_DELAY", 3000L);
+    record.setSimpleField("applicationSetting", "applicationValue");
+    record.setListField("resource_0", Collections.singletonList("instance"));
+    record.setMapField("applicationMap", Collections.singletonMap("key", "value"));
+    ZNRecord original = new ZNRecord(record);
+
+    ResourceConfig wrapped = new ResourceConfig(record);
+    RebalanceConfig rebalanceConfig = wrapped.getRebalanceConfig();
+    ResourceConfig rebuilt = new ResourceConfig.Builder("resource")
+        .setRebalanceConfig(rebalanceConfig)
+        .setStateModelFactoryName("customFactory")
+        .build();
+
+    Assert.assertEquals(wrapped.getRecord(), original);
+    Assert.assertEquals(rebalanceConfig.getConfigsMap(), Collections.emptyMap());
+    Assert.assertFalse(rebuilt.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(rebuilt.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_DELAY"));
+    Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_MODE"));
+    Assert.assertEquals(rebuilt.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(record, original);
+  }
+
+  @Test
+  public void testConstructorDoesNotWriteLegacyStrategy() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setSimpleField(LEGACY_REBALANCE_STRATEGY, CrushEdRebalanceStrategy.class.getName());
+    record.setLongField("REBALANCE_DELAY", 3000L);
+
+    ResourceConfig resourceConfig = new ResourceConfig("resource", false, "customFactory",
+        10, "placementTag", new RebalanceConfig(record), null, null, null, true);
+
+    Assert.assertFalse(
+        resourceConfig.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_DELAY"));
+    Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_MODE"));
+    Assert.assertEquals(resourceConfig.getStateModelFactoryName(), "customFactory");
+    Assert.assertEquals(record.getSimpleField(LEGACY_REBALANCE_STRATEGY),
+        CrushEdRebalanceStrategy.class.getName());
+  }
+
+  @Test
+  public void testMergeDoesNotMigrateOrOverrideStrategy() {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    resourceConfig.putSimpleConfig(LEGACY_REBALANCE_STRATEGY,
+        CrushEdRebalanceStrategy.class.getName());
+    IdealState idealState = new IdealState("resource");
+    idealState.setRebalanceStrategy(CrushRebalanceStrategy.class.getName());
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertEquals(merged.getSimpleConfig(LEGACY_REBALANCE_STRATEGY),
+        CrushEdRebalanceStrategy.class.getName());
+    Assert.assertFalse(merged.getRebalanceConfig().getConfigsMap()
+        .containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(idealState.getRebalanceStrategy(), CrushRebalanceStrategy.class.getName());
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+
+    ResourceConfig fromIdealState = ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+    Assert.assertFalse(
+        fromIdealState.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
+
+  @Test
+  public void testRebalanceConfigBuilderOmitsRetiredFields() {
+    ZNRecord record = new ZNRecord("resource");
+    record.setLongField("REBALANCE_DELAY", 1000L);
+    record.setSimpleField("REBALANCE_MODE", "FULL_AUTO");
+    record.setSimpleField("REBALANCER_CLASS_NAME", "legacy.Rebalancer");
+    record.setSimpleField("REBALANCE_STRATEGY", "retained.Strategy");
+    record.setLongField("REBALANCE_TIMER_PERIOD", 2000L);
+    ZNRecord original = new ZNRecord(record);
+    Map<String, String> retained = Collections.emptyMap();
+
+    ResourceConfig resourceConfig = new ResourceConfig.Builder("resource")
+        .setRebalanceConfig(new RebalanceConfig(record)).build();
+
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleFields(), retained);
+    Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), retained);
+    Assert.assertEquals(record, original);
+  }
+
+  @Test
+  public void testLegacyRebalanceFieldsRemainOpaqueAfterMerge() {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    Map<String, String> legacy = ImmutableMap.of("REBALANCE_DELAY", "not-a-delay",
+        "REBALANCE_MODE", "not-a-mode", "REBALANCER_CLASS_NAME", "legacy.Rebalancer");
+    resourceConfig.putSimpleConfigs(legacy);
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    IdealState idealState = new IdealState("resource");
+    idealState.setRebalanceDelay(1000L);
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setRebalancerClassName("active.Rebalancer");
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+    ResourceConfig fromIdealState =
+        ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+
+    Assert.assertEquals(merged.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    Assert.assertEquals(fromIdealState.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
+    for (Map.Entry<String, String> entry : legacy.entrySet()) {
+      Assert.assertEquals(merged.getSimpleConfig(entry.getKey()), entry.getValue());
+      Assert.assertFalse(fromIdealState.simpleConfigContains(entry.getKey()));
+    }
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
 
   @Test
   public void testGetPartitionCapacityMap() throws IOException {
@@ -196,7 +321,7 @@ public class TestResourceConfig {
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
-            "EXTERNAL_VIEW_DISABLED", "MIN_ACTIVE_REPLICAS"}) {
+            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED", "MIN_ACTIVE_REPLICAS"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -239,9 +364,8 @@ public class TestResourceConfig {
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
       Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
-    Assert.assertEquals(Boolean.valueOf(mergedResourceConfig
-        .getSimpleConfig(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name()))
-        .booleanValue(), testIdealState.isDelayRebalanceEnabled());
+    Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
     // Test priority, Resource Config field has higher priority.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
@@ -264,5 +388,60 @@ public class TestResourceConfig {
       Assert.assertEquals(mergedResourceConfig.getRecord().getSimpleField(legacyField),
           testConfig.getRecord().getSimpleField(legacyField));
     }
+  }
+
+  @DataProvider(name = "idealStateDelayRebalanceEnabled")
+  public Object[][] idealStateDelayRebalanceEnabled() {
+    return new Object[][]{{null}, {true}, {false}};
+  }
+
+  @Test(dataProvider = "idealStateDelayRebalanceEnabled")
+  public void testMergeDoesNotCopyDelayRebalanceEnabled(Boolean enabled) {
+    IdealState idealState = new IdealState("resource");
+    if (enabled != null) {
+      idealState.setDelayRebalanceEnabled(enabled);
+    }
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+
+    ResourceConfig mergedWithoutConfig =
+        ResourceConfig.mergeIdealStateWithResourceConfig(null, idealState);
+    ResourceConfig mergedWithConfig =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertFalse(mergedWithoutConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+    Assert.assertFalse(mergedWithConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+  }
+
+  @DataProvider(name = "legacyDelayRebalanceValues")
+  public Object[][] legacyDelayRebalanceValues() {
+    return new Object[][]{{"true"}, {"false"}, {"legacy-value"}};
+  }
+
+  @Test(dataProvider = "legacyDelayRebalanceValues")
+  public void testMergePreservesLegacyDelayRebalanceMetadata(String value) {
+    ResourceConfig resourceConfig = new ResourceConfig("resource");
+    resourceConfig.putSimpleConfig("DELAY_REBALANCE_ENABLED", value);
+    IdealState idealState = new IdealState("resource");
+    idealState.setDelayRebalanceEnabled("false".equals(value));
+    ZNRecord originalResourceConfig = new ZNRecord(resourceConfig.getRecord());
+    ZNRecord originalIdealState = new ZNRecord(idealState.getRecord());
+
+    ResourceConfig merged =
+        ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, idealState);
+
+    Assert.assertEquals(merged.getSimpleConfig("DELAY_REBALANCE_ENABLED"), value);
+    Assert.assertEquals(resourceConfig.getRecord(), originalResourceConfig);
+    Assert.assertEquals(idealState.getRecord(), originalIdealState);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testDelayRebalanceEnabledIsNotResourceConfigProperty() {
+    ResourceConfig.ResourceConfigProperty.valueOf("DELAY_REBALANCE_ENABLED");
   }
 }

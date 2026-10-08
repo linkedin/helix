@@ -39,6 +39,39 @@ Mailing list: http://helix.apache.org/mail-lists.html
 mvn clean install -Dmaven.test.skip.exec=true
 ```
 
+## Configuration compatibility
+
+`ResourceConfigProperty.DELAY_REBALANCE_ENABLED` has been removed. Its ResourceConfig
+copy was not consumed by delayed rebalancing, and merging an IdealState into a
+ResourceConfig no longer adds it. Existing raw ResourceConfig fields with this name
+remain opaque metadata; they are not deleted or migrated into another config.
+
+Delayed rebalancing remains supported through `IdealState.setDelayRebalanceEnabled`,
+`InstanceConfig.setDelayRebalanceEnabled`, and `ClusterConfig.setDelayRebalaceEnabled`.
+Their serialized `DELAY_REBALANCE_ENABLED` key and default value (`true`) are unchanged.
+Code referencing the removed ResourceConfig enum constant must use the corresponding
+IdealState, InstanceConfig, or ClusterConfig API/enum instead and be rebuilt before
+upgrading Helix. Already-compiled references to the removed enum constant are not
+binary compatible. Do not copy an old ResourceConfig value into IdealState as part of
+this cleanup: doing so could activate a previously ignored setting.
+
+### ResourceConfig rebalance strategy compatibility
+
+`REBALANCE_STRATEGY` is no longer exposed by the `RebalanceConfig` wrapper used by
+`ResourceConfig`. Its enum constant, `getRebalanceStrategy()` and
+`setRebalanceStrategy(String)` have been removed. Callers using these APIs must
+update and recompile; use `IdealState.IdealStateProperty.REBALANCE_STRATEGY` and
+`IdealState.getRebalanceStrategy()` / `setRebalanceStrategy(String)` for strategy
+selection. IdealState strategy support and controller behavior are unchanged.
+
+Existing raw `REBALANCE_STRATEGY` fields in ResourceConfig records remain opaque
+metadata: wrapping or merging a record preserves them, but the typed
+`RebalanceConfig.getConfigsMap()` output and ResourceConfig constructors/builders
+using that output no longer emit them. Generic raw-record APIs are unchanged.
+There is no automatic deletion or migration of persisted fields. Do not blindly
+copy a ResourceConfig value into IdealState: the ResourceConfig value was not
+used for strategy selection, and making it effective can change placement.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
@@ -50,6 +83,66 @@ Helix is a generic cluster management framework used for automatic management of
 5. Pluggable distributed state machine to manage the state of a resource via state transitions
 6. Automatic load balancing and throttling of transitions 
 
+## LinkedIn fork compatibility
+
+`GreedyRebalanceStrategy` and its cluster config
+`GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE` have been removed from this fork.
+Before upgrading, migrate any resource whose IdealState `REBALANCE_STRATEGY` names
+that class to an explicitly chosen supported strategy. There is no automatic
+fallback: an obsolete selector fails assignment calculation. Existing raw copies
+of the retired cluster key are preserved but ignored and no longer impose a cap.
+The separate `MAX_PARTITIONS_PER_INSTANCE` settings and WAGED capacity constraints
+are unchanged; they are not automatic replacements for Greedy's global count cap.
+
+The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, including
+`JobConfig.Builder.setMaxForcedReassignmentsPerTask(int)`,
+`JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
+Remove downstream API references and rebuild/release those callers before upgrading
+them to this Helix version. `MaxAttemptsPerTask` continues to control task attempts;
+retry and assignment behavior are unchanged.
+
+New job configurations and job-ID copies no longer emit the retired key. Legacy raw
+records may still contain it: reading them does not rewrite them, and rebuilding
+them through the typed builder ignores the key. No stored-record migration is
+required, and this change does not add rejection of unknown fields to generic APIs.
+
+The job option `RebalanceRunningTask` has also been retired. Its JobConfig enum,
+default constant, getter, builder setter and `JobBean.rebalanceRunningTask` field
+have been removed. Remove downstream Java references and rebuild callers before
+upgrading; this is a source and binary compatibility break.
+
+Scheduling preserves the former `false` behavior. Generic running tasks are not
+moved just to balance load; failure recovery and retries remain supported.
+Targeted tasks still follow changed target assignments after live-instance,
+current-state or message changes. Only the extra opt-in relocation path has been
+removed. Applications relying on `true` for targeted jobs must review that behavior
+before upgrading; there is no replacement knob.
+
+New typed job configurations and job-ID copies omit `RebalanceRunningTask`.
+Existing raw records remain readable without being rewritten; the old field is
+ignored even if it contains `true`. Job-level YAML `rebalanceRunningTask` is also
+accepted and ignored, using the existing narrowly scoped legacy-property handling.
+Unknown YAML properties and properties at the wrong scope remain rejected.
+
+The job setting `TerminalStateExpiry` has been retired, including its JobConfig
+enum entry, default constant, getter and builder setter. Remove downstream Java
+references and rebuild before upgrading; this is a source and binary compatibility
+break.
+
+Failed and timed-out jobs no longer become eligible for automatic job expiry
+based on their age. This preserves the former default (`-1`, disabled).
+Successful-job `Expiry`, explicit queue/job cleanup, missing-config cleanup and
+whole-workflow expiry/deletion remain supported. `Expiry` is not a replacement for
+the retired setting: it still applies only to successfully completed jobs.
+Applications that previously set a positive `TerminalStateExpiry` must review
+their failed-job retention and queue-capacity management before upgrading.
+
+Existing raw records remain readable without being rewritten. The legacy field,
+including positive or malformed values, is ignored by typed reconstruction, and
+new typed job configurations and job-ID copies omit it. There is no automatic
+stored-record migration. JobBean YAML did not expose this setting; unknown YAML
+properties remain rejected.
+
 ## Dependencies
 
 Helix UI has been tested to run well on these versions of node and yarn: 
@@ -60,3 +153,30 @@ Helix UI has been tested to run well on these versions of node and yarn:
     "yarn": "^1.22.18"
   },
 ```
+
+## ResourceConfig rebalance configuration compatibility
+
+`REBALANCE_DELAY`, `REBALANCE_MODE`, and `REBALANCER_CLASS_NAME` are no longer
+supported by `org.apache.helix.api.config.RebalanceConfig`, the rebalance settings
+wrapper used by `ResourceConfig`. Their enum constants, backing fields, and
+getters/setters have been removed. They were not consumed from ResourceConfig by
+Helix's rebalancers.
+
+Configure resource rebalancing through `IdealState.setRebalanceDelay`,
+`IdealState.setRebalanceMode`, and `IdealState.setRebalancerClassName` instead.
+The IdealState properties, serialized names, defaults, and runtime behavior are
+unchanged. Code referencing the removed RebalanceConfig enum constants or
+accessors must migrate and be rebuilt before upgrading Helix; already-compiled
+references are not binary compatible. The legacy `RebalanceConfig.RebalanceMode`
+enum remains available, deprecated, for callers that only use its mode names;
+new callers should use `IdealState.RebalanceMode`.
+
+The ResourceConfig rebalance wrapper and its legacy enum types remain for compatibility,
+but no supported settings remain in the wrapper; `getConfigsMap()` returns an empty map.
+Periodic rebalance is configured through `ClusterConfig.setRebalanceTimePeriod`;
+the resource-level timer has been removed separately.
+Building a ResourceConfig from a RebalanceConfig no longer writes the three
+retired fields, including the previously synthesized `REBALANCE_MODE=NONE`.
+Existing raw ResourceConfig fields remain opaque metadata: reading or merging
+a ResourceConfig does not delete or migrate them. Do not automatically copy
+these ignored values into IdealState, where they would affect rebalancing.

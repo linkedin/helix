@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -27,7 +28,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixDefinedState;
@@ -44,7 +47,6 @@ import org.apache.helix.controller.rebalancer.MaintenanceRebalancer;
 import org.apache.helix.controller.rebalancer.Rebalancer;
 import org.apache.helix.controller.rebalancer.SemiAutoRebalancer;
 import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
-import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -74,6 +76,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   private static final Logger logger =
       LoggerFactory.getLogger(BestPossibleStateCalcStage.class.getName());
   private static final String STAGE_NAME = "BestPossibleStateCalcStage";
+  // Upper bound on how many (resource, instance) pairs the aggregated capacity-rejection line
+  // names. A cluster-wide shortage can produce thousands of distinct pairs.
+  private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
+  // Gauge tasks of consecutive runs share a thread pool and can finish out of order. Keep the
+  // latest run that reported each resource, so an older run never overwrites a newer report,
+  // and the newest run's resources, so an older run does not report a resource deleted since.
+  private final AtomicLong _latestRun = new AtomicLong();
+  private final Map<String, Long> _reportedRuns = new HashMap<>();
+  private volatile Set<String> _latestResources = Collections.emptySet();
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -107,7 +118,15 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, StateModelDefinition> stateModelDefMap = cache.getStateModelDefMap();
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
+    final CurrentStateOutput currentStateIncludingUnknown =
+        event.getAttribute(AttributeName.CURRENT_STATE.name());
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
+    // Capture capacity rejection data from this pipeline run and clear for next run
+    final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
+        cache.getAndClearCapacityRejections();
+    final long run = _latestRun.incrementAndGet();
+    _latestResources = new HashSet<>(idealStateMap.keySet());
+
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
         if (clusterStatusMonitor != null) {
@@ -125,15 +144,115 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
               continue;
             }
             IdealState is = idealStateMap.get(resourceName);
-            reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
-                externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
+            ExternalView ev = externalViewMap.get(resourceName);
+            // The cached external view is updated asynchronously and can lag this run, leaving
+            // the gauges stale until the next run. Build the view from this run's current state
+            // instead, the same way ExternalViewComputeStage does.
+            if (resourceMap.containsKey(resourceName) && currentStateIncludingUnknown != null
+                && !is.isExternalViewDisabled()) {
+              ev = new ExternalView(resourceName);
+              for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
+                Map<String, String> stateMap =
+                    currentStateIncludingUnknown.getCurrentStateMap(resourceName, partition);
+                if (stateMap != null && !stateMap.isEmpty()) {
+                  ev.setStateMap(partition.getPartitionName(), new TreeMap<>(stateMap));
+                }
+              }
+            }
+            synchronized (_reportedRuns) {
+              if (_latestResources.contains(resourceName)
+                  && _reportedRuns.merge(resourceName, run, Math::max) == run) {
+                reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName,
+                    is, ev, stateModelDefMap.get(is.getStateModelDefRef()));
+              }
+            }
           }
+          // Forget the resources that the newest run no longer has.
+          synchronized (_reportedRuns) {
+            _reportedRuns.keySet().retainAll(_latestResources);
+          }
+
+          // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing
+          // goes to a single aggregated log line rather than to JMX attributes, so the metric
+          // cardinality stays at R + I and does not explode when the whole cluster is short on
+          // capacity.
+          reportCapacityRejections(clusterStatusMonitor, capacityRejectionSnapshot,
+              resourceConfigMap);
         }
       } catch (Exception e) {
         LogUtil.logError(logger, _eventId, "Could not update cluster status metrics!", e);
       }
       return null;
     });
+  }
+
+  /**
+   * Records the capacity rejections collected during one mapping-calculation pass: fixed
+   * cardinality counters on the resource and instance MBeans, plus one aggregated log line
+   * carrying the exact (resource, instance) pairing.
+   * <p>
+   * Resources with monitoring disabled are excluded from both halves, which keeps the invariant
+   * that the sum of the resource counters equals the sum of the instance counters.
+   */
+  private void reportCapacityRejections(ClusterStatusMonitor clusterStatusMonitor,
+      Map<String, Map<String, AtomicLong>> rejectionSnapshot,
+      Map<String, ResourceConfig> resourceConfigMap) {
+    if (rejectionSnapshot.isEmpty()) {
+      return;
+    }
+
+    Map<String, Map<String, Long>> monitoredRejections = new HashMap<>();
+    for (Map.Entry<String, Map<String, AtomicLong>> entry : rejectionSnapshot.entrySet()) {
+      String resourceName = entry.getKey();
+      ResourceConfig resourceConfig = resourceConfigMap.get(resourceName);
+      if (resourceConfig != null && resourceConfig.isMonitoringDisabled()) {
+        continue;
+      }
+      Map<String, Long> perInstanceCounts = new HashMap<>();
+      for (Map.Entry<String, AtomicLong> instanceEntry : entry.getValue().entrySet()) {
+        perInstanceCounts.put(instanceEntry.getKey(), instanceEntry.getValue().get());
+      }
+      monitoredRejections.put(resourceName, perInstanceCounts);
+    }
+
+    if (monitoredRejections.isEmpty()) {
+      return;
+    }
+
+    clusterStatusMonitor.recordMappingCapacityRejections(monitoredRejections);
+    logCapacityRejections(monitoredRejections);
+  }
+
+  /**
+   * Logs one aggregated line per pipeline pass naming which instances refused which resources.
+   * A cluster-wide capacity shortage can produce a very large number of distinct pairs, so only the
+   * heaviest {@link #MAX_LOGGED_REJECTION_PAIRS} are named and the rest are summarized by count.
+   */
+  private void logCapacityRejections(Map<String, Map<String, Long>> rejections) {
+    List<Map.Entry<String, Long>> pairs = new ArrayList<>();
+    long totalRejections = 0L;
+    for (Map.Entry<String, Map<String, Long>> resourceEntry : rejections.entrySet()) {
+      for (Map.Entry<String, Long> instanceEntry : resourceEntry.getValue().entrySet()) {
+        pairs.add(new AbstractMap.SimpleEntry<>(
+            resourceEntry.getKey() + "/" + instanceEntry.getKey(), instanceEntry.getValue()));
+        totalRejections += instanceEntry.getValue();
+      }
+    }
+    // Sort by count so truncation keeps the worst offenders rather than an arbitrary sample.
+    pairs.sort(Comparator.comparingLong((Map.Entry<String, Long> e) -> e.getValue()).reversed()
+        .thenComparing(Map.Entry::getKey));
+
+    String detail = pairs.stream().limit(MAX_LOGGED_REJECTION_PAIRS)
+        .map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(", "));
+    String truncated = pairs.size() > MAX_LOGGED_REJECTION_PAIRS
+        ? String.format(" (showing top %d of %d resource/instance pairs)",
+            MAX_LOGGED_REJECTION_PAIRS, pairs.size()) : "";
+
+    LogUtil.logWarn(logger, _eventId, String.format(
+        "Mapping calculation dropped %d replica placement(s) for lack of instance capacity across "
+            + "%d resource(s) and %d instance(s)%s: %s", totalRejections, rejections.size(),
+        rejections.values().stream().flatMap(m -> m.keySet().stream()).distinct().count(),
+        truncated, detail));
   }
 
   private String selectSwapInState(StateModelDefinition stateModelDef, Map<String, String> stateMap,
@@ -294,40 +413,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     Map<String, Resource> remainingResourceMap = new HashMap<>(resourceMap);
     remainingResourceMap.keySet().removeAll(calculatedResourceMap.keySet());
 
-    // Resources that use the global per-instance partition limit (GreedyRebalanceStrategy with an
-    // active capacity scoreboard) share a single mutable CapacityNode set
-    // (ResourceControllerDataProvider#getSimpleCapacitySet). Computing them in parallel is
-    // non-deterministic: the order in which threads reserve capacity varies run-to-run, producing a
-    // different (though still valid) assignment each pipeline round and causing perpetual rebalance
-    // churn (and previously ConcurrentModificationException). They must be computed sequentially in
-    // a stable order so the assignment is deterministic across rounds.
-    List<Resource> globalCapacityResources = new ArrayList<>();
-    List<Resource> parallelResources = new ArrayList<>();
-    for (Resource resource : remainingResourceMap.values()) {
-      if (usesGlobalCapacityScoreboard(resource, cache)) {
-        globalCapacityResources.add(resource);
-      } else {
-        parallelResources.add(resource);
-      }
-    }
-
     if (logger.isDebugEnabled()) {
       LogUtil.logDebug(logger, _eventId, String.format(
-          "Computing best possible state: %d global-capacity resource(s) sequentially, "
-              + "%d resource(s) in parallel.", globalCapacityResources.size(),
-          parallelResources.size()));
+          "Computing best possible state for %d resource(s) in parallel.",
+          remainingResourceMap.size()));
     }
 
-    // Sequential, deterministic-order computation for the shared global-capacity resources.
-    globalCapacityResources.sort(Comparator.comparing(Resource::getResourceName));
-    for (Resource resource : globalCapacityResources) {
-      computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
-          output, failureResources);
-    }
-
-    // Parallel computation for the remaining resources.
     List<Callable<Void>> computeBestPossibleStateTasks = new ArrayList<>();
-    for (Resource resource : parallelResources) {
+    for (Resource resource : remainingResourceMap.values()) {
       computeBestPossibleStateTasks.add(() -> {
         computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
             output, failureResources);
@@ -354,25 +447,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   }
 
   /**
-   * A resource participates in the global per-instance partition-limit computation when the
-   * cluster-wide capacity scoreboard is active and the resource uses {@link GreedyRebalanceStrategy}.
-   * Such resources share a single mutable {@code CapacityNode} set and therefore must be computed
-   * sequentially and in a deterministic order to avoid non-deterministic assignments and churn.
-   */
-  private boolean usesGlobalCapacityScoreboard(Resource resource,
-      ResourceControllerDataProvider cache) {
-    if (cache.getSimpleCapacitySet() == null) {
-      return false;
-    }
-    IdealState idealState = cache.getIdealState(resource.getResourceName());
-    return idealState != null && GreedyRebalanceStrategy.class.getName()
-        .equals(idealState.getRebalanceStrategy());
-  }
-
-  /**
    * Computes the best possible state for a single resource and records the resource as failed (in
-   * {@code failureResources}) when the computation does not succeed. Shared by the sequential
-   * global-capacity path and the parallel path.
+   * {@code failureResources}) when the computation does not succeed.
    */
   private void computeAndRecordSingleResourceBestPossibleState(ClusterEvent event,
       ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput, Resource resource,

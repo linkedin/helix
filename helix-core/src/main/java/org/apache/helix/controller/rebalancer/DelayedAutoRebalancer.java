@@ -397,6 +397,8 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
                 + "it from combinedPreferenceList.", instance, idealState.getResourceName(),
                 partition.getPartitionName());
             combinedPreferenceList.remove(instance);
+            // Record the capacity rejection for metrics
+            cache.recordCapacityRejection(idealState.getResourceName(), instance);
           }
         }
       }

@@ -19,6 +19,7 @@ package org.apache.helix.integration.task;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -29,6 +30,7 @@ import org.apache.helix.NotificationContext;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.task.JobConfig;
 import org.apache.helix.task.JobQueue;
 import org.apache.helix.task.TaskState;
@@ -41,10 +43,8 @@ public class TestDisableJobExternalView extends TaskTestBase {
   private static final Logger LOG = LoggerFactory.getLogger(TestDisableJobExternalView.class);
 
   /**
-   * This test is no longer valid since Helix no longer computes ExternalView for Task Framework
-   * resources. Contexts effectively serve as ExternalView for task resources.
-   * **This test has been modified to test that there are no job-related resources appearing in
-   * ExternalView**
+   * Jobs use contexts instead of ExternalViews, including requests containing the retired
+   * DisableExternalView flag. Legacy inputs must not cause the flag to be persisted again.
    * @throws Exception
    */
   @Test
@@ -62,13 +62,17 @@ public class TestDisableJobExternalView extends TaskTestBase {
         .setTargetResource(WorkflowGenerator.DEFAULT_TGT_DB)
         .setTargetPartitionStates(Sets.newHashSet("SLAVE"));
 
-    JobConfig.Builder job2 = new JobConfig.Builder().setCommand(MockTask.TASK_COMMAND)
+    JobConfig.Builder job2 = JobConfig.Builder
+        .fromMap(Collections.singletonMap("DisableExternalView", "true"))
+        .setCommand(MockTask.TASK_COMMAND)
         .setTargetResource(WorkflowGenerator.DEFAULT_TGT_DB)
-        .setTargetPartitionStates(Sets.newHashSet("SLAVE")).setDisableExternalView(true);
+        .setTargetPartitionStates(Sets.newHashSet("SLAVE"));
 
-    JobConfig.Builder job3 = new JobConfig.Builder().setCommand(MockTask.TASK_COMMAND)
+    JobConfig.Builder job3 = JobConfig.Builder
+        .fromMap(Collections.singletonMap("DisableExternalView", "false"))
+        .setCommand(MockTask.TASK_COMMAND)
         .setTargetResource(WorkflowGenerator.DEFAULT_TGT_DB)
-        .setTargetPartitionStates(Sets.newHashSet("MASTER")).setDisableExternalView(false);
+        .setTargetPartitionStates(Sets.newHashSet("MASTER"));
 
     // enqueue jobs
     queueBuilder.enqueueJob("job1", job1);
@@ -92,6 +96,15 @@ public class TestDisableJobExternalView extends TaskTestBase {
     Assert.assertTrue(!seenExternalViews.contains(namedSpaceJob3),
         "ExternalView found for " + namedSpaceJob3 + ". Jobs shouldn't be in EV!");
 
+    PropertyKey.Builder keyBuilder = new PropertyKey.Builder(CLUSTER_NAME);
+    for (String job : new String[] {namedSpaceJob1, namedSpaceJob2, namedSpaceJob3}) {
+      ResourceConfig storedJob =
+          _manager.getHelixDataAccessor().getProperty(keyBuilder.resourceConfig(job));
+      Assert.assertNotNull(storedJob);
+      Assert.assertFalse(storedJob.getRecord().getSimpleFields().containsKey("DisableExternalView"));
+      Assert.assertNull(_manager.getHelixDataAccessor().getProperty(keyBuilder.externalView(job)));
+    }
+
     _manager
         .removeListener(new PropertyKey.Builder(CLUSTER_NAME).externalViews(), externviewChecker);
   }
@@ -111,4 +124,3 @@ public class TestDisableJobExternalView extends TaskTestBase {
     }
   }
 }
-

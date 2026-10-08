@@ -122,11 +122,10 @@ public final class TestRebalanceRunningTask extends TaskSynchronizedTestBase {
 
   /**
    * Task type: generic
-   * Rebalance running task: disabled
    * Story: 1 node is down
    */
   @Test
-  public void testGenericTaskAndDisabledRebalanceAndNodeDown() throws InterruptedException {
+  public void testGenericTaskRecoveryOnNodeDown() throws InterruptedException {
     WORKFLOW = TestHelper.getTestMethodName();
     startParticipant(_initialNumNodes);
 
@@ -151,11 +150,10 @@ public final class TestRebalanceRunningTask extends TaskSynchronizedTestBase {
 
   /**
    * Task type: generic
-   * Rebalance running task: disabled
    * Story: new node added, then current task fails
    */
   @Test
-  public void testGenericTaskAndDisabledRebalanceAndNodeAddedAndTaskFail()
+  public void testGenericTasksStayPutUntilFailureOnNodeAdded()
       throws InterruptedException {
     WORKFLOW = TestHelper.getTestMethodName();
     JobConfig.Builder jobBuilder = new JobConfig.Builder().setWorkflow(WORKFLOW)
@@ -172,52 +170,20 @@ public final class TestRebalanceRunningTask extends TaskSynchronizedTestBase {
     // Add a new instance
     startParticipant(_initialNumNodes);
     Thread.sleep(3000);
-    // All tasks still stuck on the same instance, because RebalanceRunningTask is disabled
+    // A new participant alone does not move a running generic task.
     Assert.assertTrue(checkTasksOnSameInstances());
     // Signal to fail all tasks
     MockTask._signalFail = true;
     // After fail, some task will be re-assigned to the new node.
-    // This doesn't require RebalanceRunningTask to be enabled
-    Assert.assertTrue(checkTasksOnDifferentInstances());
-  }
-
-  /**
-   * Task type: generic
-   * Rebalance running task: enabled
-   * Story: new node added
-   * NOTE: This test is disabled because this "load-balancing" would happen at the Task Assigner
-   * level. In the legacy assignment strategy (Consistent Hashing) did not take instance's capacity
-   * into account. However, the new quota-based scheduling takes capacity into account, and it will
-   * generally assign to the most "free" instance, so load-balancing of tasks will happen at the
-   * Assigner layer. Deprecating this test.
-   */
-  @Deprecated
-  @Test(enabled = false)
-  public void testGenericTaskAndEnabledRebalanceAndNodeAdded() throws InterruptedException {
-    WORKFLOW = TestHelper.getTestMethodName();
-    JobConfig.Builder jobBuilder = new JobConfig.Builder().setWorkflow(WORKFLOW)
-        .setNumberOfTasks(10).setNumConcurrentTasksPerInstance(100)
-        .setCommand(MockTask.TASK_COMMAND).setRebalanceRunningTask(true)
-        .setJobCommandConfigMap(ImmutableMap.of(MockTask.JOB_DELAY, "99999999")); // task stuck
-
-    Workflow.Builder workflowBuilder = new Workflow.Builder(WORKFLOW).addJob(JOB, jobBuilder);
-
-    _driver.start(workflowBuilder.build());
-
-    // All tasks stuck on the same instance
-    Assert.assertTrue(checkTasksOnSameInstances());
-    // Add a new instance, and some running tasks will be rebalanced to the new node
-    startParticipant(_initialNumNodes);
     Assert.assertTrue(checkTasksOnDifferentInstances());
   }
 
   /**
    * Task type: fixed target
-   * Rebalance running task: disabled
    * Story: 1 node is down
    */
   @Test
-  public void testFixedTargetTaskAndDisabledRebalanceAndNodeDown() throws InterruptedException {
+  public void testFixedTargetTaskRecoveryOnNodeDown() throws InterruptedException {
     WORKFLOW = TestHelper.getTestMethodName();
     startParticipant(_initialNumNodes);
 
@@ -237,11 +203,10 @@ public final class TestRebalanceRunningTask extends TaskSynchronizedTestBase {
 
   /**
    * Task type: fixed target
-   * Rebalance running task: disabled
    * Story: new node added
    */
   @Test
-  public void testFixedTargetTaskAndDisabledRebalanceAndNodeAdded() throws Exception {
+  public void testFixedTargetTasksFollowTargetOnNodeAdded() throws Exception {
     WORKFLOW = TestHelper.getTestMethodName();
     JobConfig.Builder jobBuilder =
         new JobConfig.Builder().setWorkflow(WORKFLOW).setTargetResource(DATABASE)
@@ -295,28 +260,30 @@ public final class TestRebalanceRunningTask extends TaskSynchronizedTestBase {
     }, TestHelper.WAIT_DURATION);
     Assert.assertTrue(isMasterOnTwoDifferentNodes);
 
-    // Running tasks are also rebalanced, even though RebalanceRunningTask is disabled
+    // Running targeted tasks follow the target partition's placement.
     Assert.assertTrue(checkTasksOnDifferentInstances());
   }
 
   /**
    * Task type: fixed target
-   * Rebalance running task: enabled
    * Story: new node added
    */
   @Test
-  public void testFixedTargetTaskAndEnabledRebalanceAndNodeAdded() throws InterruptedException {
+  public void testFixedTargetTasksFollowTargetWithLegacyFlag() throws InterruptedException {
     WORKFLOW = TestHelper.getTestMethodName();
     JobConfig.Builder jobBuilder =
         new JobConfig.Builder().setWorkflow(WORKFLOW).setTargetResource(DATABASE)
             .setTargetPartitionStates(Sets.newHashSet(MasterSlaveSMD.States.MASTER.name()))
-            .setNumConcurrentTasksPerInstance(100).setRebalanceRunningTask(true)
+            .setNumConcurrentTasksPerInstance(100)
             .setCommand(MockTask.TASK_COMMAND)
             .setJobCommandConfigMap(ImmutableMap.of(MockTask.JOB_DELAY, "99999999")); // task stuck
 
     Workflow.Builder workflowBuilder = new Workflow.Builder(WORKFLOW).addJob(JOB, jobBuilder);
 
-    _driver.start(workflowBuilder.build());
+    Workflow workflow = workflowBuilder.build();
+    workflow.getJobConfigs().get(TaskUtil.getNamespacedJobName(WORKFLOW, JOB))
+        .put("RebalanceRunningTask", "true");
+    _driver.start(workflow);
 
     // All tasks stuck on the same instance
     Assert.assertTrue(checkTasksOnSameInstances());

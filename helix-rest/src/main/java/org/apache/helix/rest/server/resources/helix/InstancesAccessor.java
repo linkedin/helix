@@ -27,6 +27,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 import javax.ws.rs.DefaultValue;
@@ -93,7 +94,8 @@ public class InstancesAccessor extends AbstractHelixResource {
     customized_values,
     instance_stoppable_parallel,
     instance_not_stoppable_with_reasons,
-    instances_unable_to_accept_online_replicas
+    instances_unable_to_accept_online_replicas,
+    instances_under_instance_operation_maintenance
   }
 
   public enum InstanceHealthSelectionBase {
@@ -192,6 +194,8 @@ public class InstancesAccessor extends AbstractHelixResource {
       return JSONRepresentation(validationResultMap);
     case getInstancesUnableToAcceptOnlineReplicas:
       return getInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
+    case getInstancesUnderInstanceOperationMaintenance:
+      return getInstancesUnderInstanceOperationMaintenance(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
@@ -279,6 +283,85 @@ public class InstancesAccessor extends AbstractHelixResource {
     // Sorted so the payload is stable across calls for the same cluster state.
     for (String instanceName : new TreeSet<>(unableToAcceptOnlineReplicas)) {
       countedNode.add(instanceName);
+    }
+    return JSONRepresentation(root);
+  }
+
+  /**
+   * Lists every instance that holds a valid instance-operation maintenance marker, together with
+   * its liveness, instance operation and marker expiry, so a client can see which instances are
+   * exempt from the offline budget, and in what state, without reading every instance config.
+   *
+   * <p>An instance is listed when {@link InstanceConfig#isUnderInstanceOperationMaintenance(long)}
+   * holds, whatever its liveness or instance operation. That is the predicate the controller uses
+   * to leave an instance out of the offline budget, and the one the marker cap
+   * ({@code INSTANCE_OPERATION_MAINTENANCE_BUDGET}) counts against. An expired marker exempts
+   * nothing, so it is not listed.
+   *
+   * <p>Response (HTTP 200), keyed by instance name in sorted order:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instances_under_instance_operation_maintenance": {
+   *     "h1": { "live": true, "instanceOperation": "ENABLE",
+   *             "expiresAtMillis": 1776385800000 },
+   *     "h5": { "live": false, "instanceOperation": "DISABLE",
+   *             "expiresAtMillis": 1776385800000 } } }
+   * }</pre>
+   *
+   * <p>{@code live} is the raw {@code /LIVEINSTANCES} membership, the same liveness
+   * {@code getInstancesUnableToAcceptOnlineReplicas} reads. {@code instanceOperation} is the
+   * effective operation from {@link InstanceConfig#getInstanceOperation()}, and
+   * {@code expiresAtMillis} is the marker expiry, named as in the marker write APIs.
+   */
+  private Response getInstancesUnderInstanceOperationMaintenance(String clusterId,
+      HelixDataAccessor accessor) {
+    try {
+      return computeInstancesUnderInstanceOperationMaintenance(clusterId, accessor);
+    } catch (Exception e) {
+      _logger.error("Failed to list instances under instance-operation maintenance for {}",
+          clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  private Response computeInstancesUnderInstanceOperationMaintenance(String clusterId,
+      HelixDataAccessor accessor) {
+    // 404 rather than an empty listing, for the same reason as
+    // computeInstancesUnableToAcceptOnlineReplicas: an empty answer would say the cluster exists
+    // and holds no markers.
+    if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      return notFound();
+    }
+
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    List<InstanceConfig> instanceConfigs =
+        accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+    List<String> liveInstanceNames = accessor.getChildNames(keyBuilder.liveInstances());
+    Set<String> liveInstances =
+        liveInstanceNames == null ? Collections.emptySet() : new HashSet<>(liveInstanceNames);
+
+    long nowMs = System.currentTimeMillis();
+    // Sorted so the payload is stable across calls for the same cluster state.
+    Map<String, InstanceConfig> markedInstances = new TreeMap<>();
+    if (instanceConfigs != null) {
+      for (InstanceConfig instanceConfig : instanceConfigs) {
+        if (instanceConfig != null && instanceConfig.isUnderInstanceOperationMaintenance(nowMs)) {
+          markedInstances.put(instanceConfig.getInstanceName(), instanceConfig);
+        }
+      }
+    }
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    ObjectNode markedNode =
+        root.putObject(InstancesProperties.instances_under_instance_operation_maintenance.name());
+    for (Map.Entry<String, InstanceConfig> entry : markedInstances.entrySet()) {
+      InstanceConfig instanceConfig = entry.getValue();
+      ObjectNode instanceNode = markedNode.putObject(entry.getKey());
+      instanceNode.put("live", liveInstances.contains(entry.getKey()));
+      instanceNode.put("instanceOperation",
+          instanceConfig.getInstanceOperation().getOperation().name());
+      instanceNode.put("expiresAtMillis", instanceConfig.getInstanceOperationMaintenanceUntilMs());
     }
     return JSONRepresentation(root);
   }
