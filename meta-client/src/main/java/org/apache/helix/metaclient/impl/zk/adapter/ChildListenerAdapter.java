@@ -41,6 +41,9 @@ public class ChildListenerAdapter implements RecursivePersistListener {
       case NodeCreated: return ChildChangeListener.ChangeType.ENTRY_CREATED;
       case NodeDataChanged: return ChildChangeListener.ChangeType.ENTRY_DATA_CHANGE;
       case NodeDeleted: return ChildChangeListener.ChangeType.ENTRY_DELETED;
+      // Resync after a reconnect or a new session: the subtree of the subscribed path may have
+      // changed while the client was not connected.
+      case None: return ChildChangeListener.ChangeType.ENTRY_DATA_CHANGE;
       default: throw new IllegalArgumentException("EventType " + eventType + " is not supported.");
     }
   }

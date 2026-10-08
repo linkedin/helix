@@ -20,6 +20,8 @@ package org.apache.helix.zookeeper.zkclient.util;
  */
 
 import java.util.Date;
+import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.zookeeper.zkclient.RecursivePersistListener;
 import org.apache.zookeeper.Watcher;
@@ -96,6 +98,35 @@ public class TestZkPathRecursiveWatcherTrie {
     Assert.assertEquals(_recursiveWatcherTrie.getRootNode().getChild("a").getChildren().size(), 1);
     // node f should have 0 listeners
     Assert.assertEquals(_recursiveWatcherTrie.getAllRecursiveListeners("a/b3/c/d/e/f/g/h").size(), 0);
+  }
+
+  @org.testng.annotations.Test
+  public void testGetRecursiveListenersByPath() {
+    ZkPathRecursiveWatcherTrie trie = new ZkPathRecursiveWatcherTrie();
+    Assert.assertTrue(trie.getRecursiveListenersByPath().isEmpty());
+
+    Test listenerOnRoot = new Test();
+    Test listenerOnB = new Test();
+    Test listenerOnD1 = new Test();
+    Test listenerOnD2 = new Test();
+    trie.addRecursiveListener("/", listenerOnRoot);
+    trie.addRecursiveListener("/a/b", listenerOnB);
+    trie.addRecursiveListener("/a/b/c/d", listenerOnD1);
+    trie.addRecursiveListener("/a/b/c/d", listenerOnD2);
+
+    Map<String, Set<RecursivePersistListener>> listenersByPath = trie.getRecursiveListenersByPath();
+    // "/a" and "/a/b/c" have no listener of their own, so they are not reported.
+    Assert.assertEquals(listenersByPath.keySet(), Set.of("/", "/a/b", "/a/b/c/d"));
+    Assert.assertEquals(listenersByPath.get("/"), Set.of(listenerOnRoot));
+    Assert.assertEquals(listenersByPath.get("/a/b"), Set.of(listenerOnB));
+    Assert.assertEquals(listenersByPath.get("/a/b/c/d"), Set.of(listenerOnD1, listenerOnD2));
+
+    // The result is a snapshot that does not change with the trie.
+    trie.removeRecursiveListener("/a/b/c/d", listenerOnD1);
+    trie.removeRecursiveListener("/a/b", listenerOnB);
+    Assert.assertEquals(listenersByPath.get("/a/b/c/d"), Set.of(listenerOnD1, listenerOnD2));
+    Assert.assertEquals(trie.getRecursiveListenersByPath(),
+        Map.of("/", Set.of(listenerOnRoot), "/a/b/c/d", Set.of(listenerOnD2)));
   }
 
   class Test implements RecursivePersistListener {

@@ -476,6 +476,9 @@ public interface MetaClientInterface<T> {
    * Subscribe change of a particular entry. Including entry data change, entry deletion and creation
    * of the given key.
    * The listener should be permanent until it's unsubscribed.
+   * Changes made while the client is disconnected are not delivered one by one. Instead, after
+   * the client reconnects, the listener is invoked once with the current state: ENTRY_UPDATE if
+   * the entry exists, ENTRY_DELETED otherwise. This may happen even if nothing changed.
    * @param key Key to identify the entry
    * @param listener An implementation of {@link org.apache.helix.metaclient.api.DataChangeListener} to register
    * @param skipWatchingNonExistNode Will not register lister to a non-exist key if set to true.
@@ -503,6 +506,8 @@ public interface MetaClientInterface<T> {
    * Subscribe for direct child change event on a particular key. It includes new child
    * creation or deletion. It does not include existing child data change.
    * The listener should be permanent until it's unsubscribed.
+   * After the client reconnects, the listener is invoked once for the key, because children may
+   * have changed while the client was disconnected. This may happen even if nothing changed.
    * For hierarchy key spaces like zookeeper, it refers to an entry's direct children nodes.
    * For flat key spaces, it refers to keys that matches `prefix*separator`.
    * @param key key to identify the entry.
@@ -546,6 +551,10 @@ public interface MetaClientInterface<T> {
   /**
    * Subscribe change for all children including entry change and data change.
    * The listener should be permanent until it's unsubscribed.
+   * Changes made while the client is disconnected are not delivered one by one. Instead, after
+   * the client reconnects, the listener is invoked once with the subscribed key and
+   * ENTRY_DATA_CHANGE to signal that anything under the key may have changed. This may happen
+   * even if nothing changed.
    * For hierarchy key spaces like zookeeper, it would watch the whole tree structure.
    * For flat key spaces, it would watch for keys with certain prefix.
    * @param key key to identify the entry.

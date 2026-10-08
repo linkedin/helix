@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -1376,6 +1377,71 @@ public class ZkClient implements Watcher {
     for (Entry<String, Set<IZkDataListenerEntry>> entry : _dataListener.entrySet()) {
       fireDataChangedEvents(entry.getKey(), entry.getValue(), OptionalLong.empty(), true, event.getType());
     }
+    if (_usePersistWatcher) {
+      // The changed descendants are unknown, so notify recursive listeners on their own path.
+      for (Entry<String, Set<RecursivePersistListener>> entry : _zkPathRecursiveWatcherTrie
+          .getRecursiveListenersByPath().entrySet()) {
+        final String path = entry.getKey();
+        for (final RecursivePersistListener listener : entry.getValue()) {
+          _eventThread.send(
+              new ZkEventThread.ZkEvent("State of " + path + " resync sent to " + listener) {
+                @Override
+                public void run() throws Exception {
+                  listener.handleZNodeChange(path, event.getType());
+                }
+              });
+        }
+      }
+    }
+  }
+
+  /**
+   * Re-adds the persistent watches of all registered persist listeners. Runs on the event thread
+   * before the events queued by {@link #fireAllEvents(WatchedEvent)}, so the watches are in place
+   * before the listeners read the current state.
+   */
+  private void reinstallPersistWatches() {
+    final String sessionId = getHexSessionId();
+    _eventThread.send(
+        new ZkEventThread.ZkEvent("Reinstall persist watches for session " + sessionId, sessionId) {
+          @Override
+          public void run() throws Exception {
+            executeWithInPersistListenerMutex(() -> {
+              Set<String> persistPaths = new HashSet<>();
+              for (Entry<String, Set<IZkChildListener>> entry : _childListener.entrySet()) {
+                if (!entry.getValue().isEmpty()) {
+                  persistPaths.add(entry.getKey());
+                }
+              }
+              for (Entry<String, Set<IZkDataListenerEntry>> entry : _dataListener.entrySet()) {
+                if (!entry.getValue().isEmpty()) {
+                  persistPaths.add(entry.getKey());
+                }
+              }
+              for (String path : persistPaths) {
+                reinstallPersistWatch(path, AddWatchMode.PERSISTENT);
+              }
+              for (String path : _zkPathRecursiveWatcherTrie.getRecursiveListenersByPath()
+                  .keySet()) {
+                reinstallPersistWatch(path, AddWatchMode.PERSISTENT_RECURSIVE);
+              }
+            });
+          }
+        });
+  }
+
+  private void reinstallPersistWatch(final String path, final AddWatchMode mode) {
+    if (isClosed()) {
+      return;
+    }
+    try {
+      retryUntilConnected(() -> {
+        getConnection().addWatch(path, ZkClient.this, mode);
+        return null;
+      });
+    } catch (Exception e) {
+      LOG.error("zkclient {}, failed to reinstall {} watch on path: {}", _uid, mode, path, e);
+    }
   }
 
   /**
@@ -1573,10 +1639,27 @@ public class ZkClient implements Watcher {
          */
         _isNewSessionEventFired = true;
 
+        if (_usePersistWatcher) {
+          /*
+           * Persistent watches belong to a session and are not carried over to a new one, so add
+           * them back before notifying the listeners below.
+           */
+          reinstallPersistWatches();
+        }
+
         /*
          * With this first SyncConnected state, we just get connected to zookeeper service after
          * reconnecting when the session expired. Because previous session expired, we also have to
          * notify all listeners that something might have changed.
+         */
+        fireAllEvents(event);
+      } else if (_usePersistWatcher && _isNewSessionEventFired
+          && prevState != KeeperState.SyncConnected) {
+        /*
+         * Reconnected on the same session. ZooKeeper re-arms persistent watches on reconnect but,
+         * unlike one-time watches, does not send the events for changes made while the client was
+         * disconnected (ZOOKEEPER-4698). Notify all listeners so that they observe the current
+         * state.
          */
         fireAllEvents(event);
       }
