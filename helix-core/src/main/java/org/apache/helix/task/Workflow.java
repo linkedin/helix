@@ -158,7 +158,8 @@ public class Workflow {
     constructor.addTypeDescription(new TypeDescription(JobBean.class) {
       @Override
       public Property getProperty(String name) {
-        return "disableExternalView".equals(name) ? new MissingProperty(name)
+        return "disableExternalView".equals(name) || "rebalanceRunningTask".equals(name)
+            ? new MissingProperty(name)
             : super.getProperty(name);
       }
     });

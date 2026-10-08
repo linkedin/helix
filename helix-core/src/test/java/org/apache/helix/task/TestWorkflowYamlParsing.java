@@ -60,12 +60,44 @@ public class TestWorkflowYamlParsing {
   }
 
   @DataProvider
+  public Object[][] legacyRunningTaskFlags() {
+    return new Object[][] {
+        {false, null}, {false, "false"}, {false, "true"}, {false, "invalid"},
+        {true, null}, {true, "false"}, {true, "true"}, {true, "invalid"}
+    };
+  }
+
+  @Test(dataProvider = "legacyRunningTaskFlags")
+  public void testLegacyRunningTaskYamlIgnored(boolean targeted, String legacyFlag)
+      throws Exception {
+    String baseline = targeted ? WORKFLOW
+        : WORKFLOW.replace("targetResource: database", "numberOfTasks: 1");
+    String yaml = legacyFlag == null ? baseline
+        : baseline + "    rebalanceRunningTask: " + legacyFlag + "\n";
+    Workflow expected = Workflow.parse(baseline);
+    Workflow actual = Workflow.parse(yaml);
+
+    Assert.assertEquals(actual.getJobConfigs(), expected.getJobConfigs());
+    Assert.assertFalse(
+        actual.getJobConfigs().get("workflow_job").containsKey("RebalanceRunningTask"));
+    Assert.assertEquals(actual.getWorkflowConfig().getJobDag().getAllNodes(),
+        expected.getWorkflowConfig().getJobDag().getAllNodes());
+    if (!targeted) {
+      Assert.assertEquals(actual.getTaskConfigs().get("workflow_job").size(), 1);
+    }
+  }
+
+  @DataProvider
   public Object[][] unknownYamlProperties() {
     return new Object[][] {
         {WORKFLOW + "    disableExternalViews: true\n", "disableExternalViews"},
         {"disableExternalView: true\n" + WORKFLOW, "disableExternalView"},
         {WORKFLOW + "    tasks:\n      - command: Dummy\n        disableExternalView: true\n",
-            "disableExternalView"}
+            "disableExternalView"},
+        {WORKFLOW + "    rebalanceRunningTasks: true\n", "rebalanceRunningTasks"},
+        {"rebalanceRunningTask: true\n" + WORKFLOW, "rebalanceRunningTask"},
+        {WORKFLOW + "    tasks:\n      - command: Dummy\n        rebalanceRunningTask: true\n",
+            "rebalanceRunningTask"}
     };
   }
 
