@@ -898,9 +898,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
 
       int numReplica = currentIdealState.getReplicaCount(enabledLiveInstances.size());
-      int minActiveReplica = DelayedRebalanceUtil.getMinActiveReplica(ResourceConfig
-          .mergeIdealStateWithResourceConfig(clusterData.getResourceConfig(resourceName),
-              currentIdealState), currentIdealState, numReplica);
+      int minActiveReplica =
+          DelayedRebalanceUtil.getMinActiveReplica(currentIdealState, numReplica);
       resourceAssignment.getMappedPartitions().parallelStream().forEach(partition -> {
         int enabledLivePlacementCounter = 0;
         for (String instance : resourceAssignment.getReplicaMap(partition).keySet()) {
