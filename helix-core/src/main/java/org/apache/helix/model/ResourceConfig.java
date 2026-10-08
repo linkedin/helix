@@ -47,7 +47,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
-    STATE_MODEL_FACTORY_NAME,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     PARTITION_CAPACITY_MAP,
@@ -92,20 +91,18 @@ public class ResourceConfig extends HelixProperty {
   }
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
-      String stateModelFactoryName,
       int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
-    this(resourceId, monitorDisabled, stateModelFactoryName,
+    this(resourceId, monitorDisabled,
         maxPartitionsPerInstance, instanceGroupTag,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
-      String stateModelFactoryName,
       int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
@@ -119,10 +116,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (p2pMessageEnabled != null) {
       _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), p2pMessageEnabled);
-    }
-
-    if (stateModelFactoryName != null) {
-      _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(), stateModelFactoryName);
     }
 
     if (maxPartitionsPerInstance >= 0) {
@@ -186,14 +179,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public String getResourceName() {
     return _record.getId();
-  }
-
-  /**
-   * Get the state model factory associated with this resource
-   * @return state model factory name
-   */
-  public String getStateModelFactoryName() {
-    return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name());
   }
 
   // Delimiter used for storing active states as a comma-separated string in simpleField
@@ -486,7 +471,6 @@ public class ResourceConfig extends HelixProperty {
   public static class Builder {
     private String _resourceId;
     private Boolean _monitorDisabled;
-    private String _stateModelFactoryName;
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
@@ -522,15 +506,6 @@ public class ResourceConfig extends HelixProperty {
 
     public String getResourceId() {
       return _resourceId;
-    }
-
-    public String getStateModelFactoryName() {
-      return _stateModelFactoryName;
-    }
-
-    public Builder setStateModelFactoryName(String stateModelFactoryName) {
-      _stateModelFactoryName = stateModelFactoryName;
-      return this;
     }
 
     public int getMaxPartitionsPerInstance() {
@@ -659,7 +634,7 @@ public class ResourceConfig extends HelixProperty {
       // validate();
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
-          _stateModelFactoryName, _maxPartitionsPerInstance,
+          _maxPartitionsPerInstance,
           _instanceGroupTag, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
@@ -702,9 +677,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord.setIntFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
         idealState.getMaxPartitionsPerInstance());
-    mergedZNRecord.setSimpleFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
-        idealState.getStateModelFactoryName());
     return mergedResourceConfig;
   }
 }
