@@ -606,6 +606,21 @@ public class ResourceAccessor extends AbstractHelixResource {
     return notFound();
   }
 
+  /**
+   * Update (merge) or delete a resource's ideal state.
+   * <p>
+   * <b>Latency note ({@code command=update}).</b> The always-on
+   * {@link IdealStateRebalanceFeasibilityGuardrailRule} runs a read-only WAGED what-if on a feasible,
+   * non-{@code force} edit: it computes a full {@code ReadOnlyWagedRebalancer} assignment for the
+   * cluster synchronously on the request thread, up to twice (once for the pre-edit baseline and once
+   * for the candidate), with cost scaling as resources &times; partitions &times; instances. It is
+   * bounded -- skipped entirely on {@code force=true} (the verdict is overridden anyway), run only for a
+   * WAGED (non-{@code ANY_LIVEINSTANCE}) proposed ideal state, and the baseline run is skipped when the
+   * cluster has no current WAGED resource (1&times; then). This is a low-QPS administrative mutation, so
+   * paying up to two full what-ifs per call is acceptable; a caller batching many ideal-state edits on a
+   * very large cluster should expect per-call latency on the order of a single WAGED rebalance, and can
+   * pass {@code force=true} to skip the what-if when the feasibility verdict is not wanted.
+   */
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @POST

@@ -306,6 +306,16 @@ final class WagedRebalanceFeasibilityWhatIf {
    *   <li><b>Every other WAGED resource vs. baseline.</b> Enlarging the edited resource's demand can
    *   steal capacity another resource needs; those are flagged the usual baseline-vs-candidate way.</li>
    * </ul>
+   * These per-partition checks are <em>not</em> redundant with the candidate-throw path below: the
+   * read-only WAGED rebalancer is only all-or-nothing for a hard failure (a genuine capacity deficit
+   * where even the base replicas cannot be placed, which makes {@code computeTargetAssignment} throw). A
+   * replica <em>count</em> that exceeds what the cluster can place -- e.g. raising replicas above the
+   * number of fault-domains/instances, so a partition can never reach its target -- does <b>not</b>
+   * throw; the rebalancer returns a <em>complete assignment that under-places</em> the affected
+   * partitions (places as many distinct-node replicas as it can and no more). Check 1 is what catches
+   * that case, and Check 2 the collateral version of it on other resources; only a hard deficit reaches
+   * the throw path. Both signals are therefore live.
+   * <p>
    * Only an edit to a WAGED (FULL_AUTO + WagedRebalancer, non-{@code ANY_LIVEINSTANCE}) resource is
    * simulated; everything else -- including un-WAGEDing a resource, which only frees capacity -- returns
    * feasible. The caller is expected to short-circuit on the opt-in flag before calling this.
@@ -401,8 +411,10 @@ final class WagedRebalanceFeasibilityWhatIf {
       candidate = provider.computeTargetAssignment(simulationClusterConfig, instanceConfigs,
           liveInstances, candidateIdealStates, candidateResourceConfigs);
     } catch (Exception e) {
-      // Applying the edit makes WAGED unable to compute any assignment at all (e.g. a cluster-wide
-      // CAPACITY_DEFICIT) -- the strongest signal that the proposed ideal state is unplaceable.
+      // Applying the edit makes WAGED unable to compute any assignment at all: a hard failure (e.g. a
+      // cluster-wide CAPACITY_DEFICIT where even the base replicas cannot be placed) that the rebalancer
+      // throws on rather than under-placing. This is the all-or-nothing path; the per-partition
+      // under-placement cases are caught by checks 1 and 2 below on the returned assignment.
       return ValidationResult.infeasible(Violation.newBuilder(ruleId)
           .message(String.format(
               "Applying %s makes the WAGED rebalancer unable to compute an assignment for cluster %s "
