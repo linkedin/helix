@@ -427,7 +427,7 @@
   </ciManagement>
 
   <properties>
-    <revision>1.6.42-SNAPSHOT</revision>
+    <revision>1.6.45-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.build.outputTimestamp>1738132755</project.build.outputTimestamp>
 
@@ -638,14 +638,6 @@
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-javadoc-plugin</artifactId>
-          <version>3.2.0</version>
-          <configuration>
-            <skip>true</skip>
-          </configuration>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-source-plugin</artifactId>
           <version>3.2.1</version>
           <executions>
@@ -708,6 +700,7 @@
           <version>3.5.0</version>
           <configuration>
             <failOnError>true</failOnError>
+            <skip>true</skip>
           </configuration>
         </plugin>
       </plugins>

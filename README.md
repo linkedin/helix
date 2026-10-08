@@ -72,6 +72,27 @@ There is no automatic deletion or migration of persisted fields. Do not blindly
 copy a ResourceConfig value into IdealState: the ResourceConfig value was not
 used for strategy selection, and making it effective can change placement.
 
+### ResourceConfig state-model factory compatibility
+
+`STATE_MODEL_FACTORY_NAME` is no longer a ResourceConfig option. Its enum constant,
+getter, builder getter/setter, and constructor argument have been removed; callers
+using those APIs must update and recompile. ResourceConfig merging no longer
+copies the factory from IdealState. Existing raw fields remain readable as opaque
+metadata, but no controller or task path uses them to select a factory.
+
+Ordinary resources continue to use IdealState's factory. Task execution uses
+`DEFAULT`, as normal task scheduling already did. Task drop messages use the
+target participant/session's CurrentState factory, and task cancellations use
+the pending message's factory. An absent runtime factory name means `DEFAULT`;
+an empty or named value is preserved. If a task drop has no corresponding
+CurrentState record, the controller logs a warning and does not send it using an
+unverified factory. This replaces the old orphan-job behavior that could route
+cleanup using a ResourceConfig override or another participant's factory.
+
+IdealState, CurrentState, and Message factory APIs remain supported. There is no
+automatic deletion or migration of stored values; do not copy an ignored
+ResourceConfig value into IdealState without reviewing the intended factory.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 
@@ -141,12 +162,49 @@ The ignored job setting `MaxForcedReassignmentsPerTask` has been removed, includ
 `JobConfig.DEFAULT_MAX_FORCED_REASSIGNMENTS_PER_TASK`, and its config enum entry.
 Remove downstream API references and rebuild/release those callers before upgrading
 them to this Helix version. `MaxAttemptsPerTask` continues to control task attempts;
-retry, assignment, and `TerminalStateExpiry` behavior are unchanged.
+retry and assignment behavior are unchanged.
 
 New job configurations and job-ID copies no longer emit the retired key. Legacy raw
 records may still contain it: reading them does not rewrite them, and rebuilding
 them through the typed builder ignores the key. No stored-record migration is
 required, and this change does not add rejection of unknown fields to generic APIs.
+
+The job option `RebalanceRunningTask` has also been retired. Its JobConfig enum,
+default constant, getter, builder setter and `JobBean.rebalanceRunningTask` field
+have been removed. Remove downstream Java references and rebuild callers before
+upgrading; this is a source and binary compatibility break.
+
+Scheduling preserves the former `false` behavior. Generic running tasks are not
+moved just to balance load; failure recovery and retries remain supported.
+Targeted tasks still follow changed target assignments after live-instance,
+current-state or message changes. Only the extra opt-in relocation path has been
+removed. Applications relying on `true` for targeted jobs must review that behavior
+before upgrading; there is no replacement knob.
+
+New typed job configurations and job-ID copies omit `RebalanceRunningTask`.
+Existing raw records remain readable without being rewritten; the old field is
+ignored even if it contains `true`. Job-level YAML `rebalanceRunningTask` is also
+accepted and ignored, using the existing narrowly scoped legacy-property handling.
+Unknown YAML properties and properties at the wrong scope remain rejected.
+
+The job setting `TerminalStateExpiry` has been retired, including its JobConfig
+enum entry, default constant, getter and builder setter. Remove downstream Java
+references and rebuild before upgrading; this is a source and binary compatibility
+break.
+
+Failed and timed-out jobs no longer become eligible for automatic job expiry
+based on their age. This preserves the former default (`-1`, disabled).
+Successful-job `Expiry`, explicit queue/job cleanup, missing-config cleanup and
+whole-workflow expiry/deletion remain supported. `Expiry` is not a replacement for
+the retired setting: it still applies only to successfully completed jobs.
+Applications that previously set a positive `TerminalStateExpiry` must review
+their failed-job retention and queue-capacity management before upgrading.
+
+Existing raw records remain readable without being rewritten. The legacy field,
+including positive or malformed values, is ignored by typed reconstruction, and
+new typed job configurations and job-ID copies omit it. There is no automatic
+stored-record migration. JobBean YAML did not expose this setting; unknown YAML
+properties remain rejected.
 
 ## Dependencies
 
