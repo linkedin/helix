@@ -833,6 +833,136 @@ public class TestResourceAccessor extends AbstractTestClass {
     }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
+  /**
+   * Guard rail: flipping an existing resource to WAGED via the {@code enableWagedRebalance} command
+   * is rejected before it is written to ZooKeeper when some assignable instance omits a capacity
+   * dimension (a key in the cluster's INSTANCE_CAPACITY_KEYS). That is the same instance-side gap
+   * {@code addWagedResource} guards: {@code enableWagedRebalance} sets WagedRebalancer + FULL_AUTO on
+   * the resource's IdealState without any instance validation, so with such a gap WAGED cannot build
+   * a model and the resource is flipped to WAGED but never places. The guard rail always runs on
+   * enableWagedRebalance (it is not gated behind a cluster config toggle). Verifies enforcement (400 +
+   * verdict naming the instance, and the resource is NOT flipped), dry-run (200 + verdict, not
+   * flipped), force bypass (flipped despite the gap, since the admin path does not re-check instance
+   * capacities), and the fully-covered happy path (flipped).
+   * The cluster/instance capacity configuration is saved and restored so this test does not perturb
+   * the other resource tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddWagedResourceCapacityKeyGuardrail")
+  public void testEnableWagedRebalanceCapacityKeyGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances =
+        _gSetupTool.getClusterManagementTool().getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalInstanceCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalInstanceCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+    String starvedInstance = instances.get(0);
+
+    String blockedResource = "enableWagedKeyGuardrailBlockedResource";
+    String forcedResource = "enableWagedKeyGuardrailForcedResource";
+    String validResource = "enableWagedKeyGuardrailValidResource";
+
+    try {
+      // Create three non-WAGED resources to flip; each starts on SEMI_AUTO, not WagedRebalancer.
+      for (String resource : Arrays.asList(blockedResource, forcedResource, validResource)) {
+        _gSetupTool.getClusterManagementTool()
+            .addResource(CLUSTER_NAME, resource, 1, "OnlineOffline");
+        Assert.assertFalse(isWagedRebalanced(resource));
+      }
+
+      // Declare two capacity dimensions and give every instance capacity in both dimensions, except
+      // starve one assignable instance of BAR to create the instance-side gap.
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(instance.equals(starvedInstance)
+            ? ImmutableMap.of("FOO", 100) : ImmutableMap.of("FOO", 100, "BAR", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // 1) Enforcement: blocked with 400 + a verdict naming the starved instance; NOT flipped.
+      Response blocked = postEnableWagedRebalance(blockedResource, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(starvedInstance));
+      Assert.assertFalse(isWagedRebalanced(blockedResource));
+
+      // 2) Dry-run: always 200 with the same infeasible verdict, and still NOT flipped.
+      Response dryRun =
+          postEnableWagedRebalance(blockedResource, ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertFalse(isWagedRebalanced(blockedResource));
+
+      // 3) force=true bypasses the guard rail: the resource is actually flipped despite the gap
+      //    (the admin path does not validate instance capacities, which is exactly the silent
+      //    failure this guard rail exists to prevent).
+      Response forced = postEnableWagedRebalance(forcedResource, ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(isWagedRebalanced(forcedResource));
+
+      // 4) Close the gap (every instance now declares both keys) and the flip passes the guard rail.
+      InstanceConfig restored = _configAccessor.getInstanceConfig(CLUSTER_NAME, starvedInstance);
+      restored.setInstanceCapacityMap(ImmutableMap.of("FOO", 100, "BAR", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, starvedInstance, restored);
+
+      Response valid = postEnableWagedRebalance(validResource, Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertTrue(isWagedRebalanced(validResource));
+    } finally {
+      // Drop any resources this test created (ignore failures).
+      for (String resource : Arrays.asList(blockedResource, forcedResource, validResource)) {
+        try {
+          _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resource);
+        } catch (Exception ignored) {
+        }
+      }
+      // Restore cluster + instance capacity configuration so it does not leak into other tests
+      // sharing this cluster.
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(originalCapacityKeys);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalInstanceCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * The force / dryRun flags on the resource-update (POST) endpoint are only meaningful for the
+   * guard-rail-backed enableWagedRebalance command. For any other command they are rejected up front
+   * with a 400 so a caller is never misled into thinking, e.g., a plain enable/disable was simulated
+   * (dryRun) or its verdict overridden (force) -- neither of which those commands honor.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testDryRunAndForceRejectedForNonWagedUpdateCommand() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    Entity<?> entity = Entity.entity(null, MediaType.APPLICATION_JSON_TYPE);
+    for (String flag : Arrays.asList("dryRun", "force")) {
+      Response response = target("clusters/" + CLUSTER_NAME + "/resources/" + RESOURCE_NAME)
+          .queryParam("command", "enable").queryParam(flag, true).request().post(entity);
+      Assert.assertEquals(response.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertTrue(response.readEntity(String.class).contains("enableWagedRebalance"));
+    }
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testAddResourceWithWeight")
   public void testDryRunAndForceRejectedForNonWagedCommand() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -856,6 +986,21 @@ public class TestResourceAccessor extends AbstractTestClass {
         .contains(forceResource));
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private Response postEnableWagedRebalance(String resourceName, Map<String, Object> flags) {
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/resources/" + resourceName)
+        .queryParam("command", "enableWagedRebalance");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(Entity.entity(null, MediaType.APPLICATION_JSON_TYPE));
+  }
+
+  private boolean isWagedRebalanced(String resourceName) {
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resourceName);
+    return WagedRebalancer.class.getName().equals(idealState.getRebalancerClassName());
   }
 
   private Response putWagedResource(String resourceName, ResourceConfig resourceConfig,
