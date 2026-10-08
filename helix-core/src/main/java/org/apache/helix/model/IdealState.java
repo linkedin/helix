@@ -83,6 +83,7 @@ public class IdealState extends HelixProperty {
    * assignment, SEMI_AUTO only does the latter, and CUSTOMIZED does neither. USER_DEFINED
    * uses a Rebalancer implementation plugged in by the user. TASK designates that a
    * {@link TaskRebalancer} instance should be used to rebalance this resource.
+   * NONE is treated as unset by {@link IdealState#getRebalanceMode()}, defaulting to SEMI_AUTO.
    */
   public enum RebalanceMode {
     FULL_AUTO,
@@ -246,13 +247,14 @@ public class IdealState extends HelixProperty {
   }
 
   /**
-   * Get the rebalancing mode without modifying the record. Missing or invalid modern values
-   * default to SEMI_AUTO; explicit NONE is preserved. Legacy mode metadata is ignored.
+   * Get the rebalancing mode without modifying the record. Missing, invalid, or NONE modern
+   * values default to SEMI_AUTO. Legacy mode metadata is ignored.
    * @return {@link RebalanceMode}
    */
   public RebalanceMode getRebalanceMode() {
-    return _record.getEnumField(IdealStateProperty.REBALANCE_MODE.toString(), RebalanceMode.class,
-        RebalanceMode.SEMI_AUTO);
+    RebalanceMode mode = _record.getEnumField(IdealStateProperty.REBALANCE_MODE.toString(),
+        RebalanceMode.class, RebalanceMode.SEMI_AUTO);
+    return mode == RebalanceMode.NONE ? RebalanceMode.SEMI_AUTO : mode;
   }
 
   /**

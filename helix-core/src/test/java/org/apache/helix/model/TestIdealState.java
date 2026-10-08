@@ -148,7 +148,8 @@ public class TestIdealState {
 
   @DataProvider
   public Object[][] rebalanceModes() {
-    return Arrays.stream(RebalanceMode.values()).map(mode -> new Object[]{mode})
+    return Arrays.stream(RebalanceMode.values())
+        .map(mode -> new Object[]{mode, mode == RebalanceMode.NONE ? RebalanceMode.SEMI_AUTO : mode})
         .toArray(Object[][]::new);
   }
 
@@ -164,12 +165,16 @@ public class TestIdealState {
   }
 
   @Test(dataProvider = "rebalanceModes")
-  public void testModernModeRoundTripWithoutLegacyField(RebalanceMode mode) {
+  public void testModernModeRoundTripWithoutLegacyField(RebalanceMode mode,
+      RebalanceMode expectedMode) {
     IdealState idealState = new IdealState("resource");
     idealState.setRebalanceMode(mode);
     Assert.assertEquals(idealState.getRecord().getSimpleFields(),
         Collections.singletonMap("REBALANCE_MODE", mode.name()));
-    Assert.assertEquals(new IdealState(new ZNRecord(idealState.getRecord())).getRebalanceMode(), mode);
+    IdealState restored = new IdealState(new ZNRecord(idealState.getRecord()));
+    Assert.assertEquals(restored.getRebalanceMode(), expectedMode);
+    Assert.assertEquals(restored.getRecord().getSimpleFields(),
+        Collections.singletonMap("REBALANCE_MODE", mode.name()));
     Assert.assertEquals(idealState.rebalanceModeFromString(mode.name(), RebalanceMode.SEMI_AUTO),
         mode);
   }
@@ -179,9 +184,11 @@ public class TestIdealState {
     List<Object[]> cases = new ArrayList<>();
     for (String legacy : new String[]{null, "", "AUTO", "AUTO_REBALANCE", "CUSTOMIZED", "invalid"}) {
       for (RebalanceMode modern : RebalanceMode.values()) {
-        cases.add(new Object[]{modern.name(), legacy, modern});
+        if (modern != RebalanceMode.NONE) {
+          cases.add(new Object[]{modern.name(), legacy, modern});
+        }
       }
-      for (String modern : new String[]{null, "", "invalid", "AUTO", "AUTO_REBALANCE"}) {
+      for (String modern : new String[]{null, "", "invalid", "AUTO", "AUTO_REBALANCE", "NONE"}) {
         cases.add(new Object[]{modern, legacy, RebalanceMode.SEMI_AUTO});
       }
     }

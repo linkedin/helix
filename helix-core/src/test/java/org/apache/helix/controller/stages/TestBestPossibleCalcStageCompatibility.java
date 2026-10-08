@@ -20,6 +20,7 @@ package org.apache.helix.controller.stages;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,7 @@ import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.testng.AssertJUnit;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 @SuppressWarnings("deprecation")
@@ -76,6 +78,44 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
     }
     System.out.println("END TestBestPossibleStateCalcStage at "
         + new Date(System.currentTimeMillis()));
+  }
+
+  @DataProvider
+  public Object[][] semiAutoModes() {
+    return new Object[][]{{RebalanceMode.SEMI_AUTO}, {RebalanceMode.NONE}, {null}};
+  }
+
+  @Test(dataProvider = "semiAutoModes")
+  public void testSemiAutoModeFailover(RebalanceMode mode) {
+    String resourceName = "testResourceName";
+    String[] resources = {resourceName};
+    IdealState idealState = setupIdealStateWithMode(2, resources, 1, 2, mode).get(0);
+    idealState.setReplicas("2");
+    setSingleIdealState(idealState);
+    setupStateModel();
+    setupInstances(2);
+    setupLiveInstances(1);
+
+    Partition partition = new Partition(resourceName + "_0");
+    String liveInstance = "localhost_0";
+    CurrentStateOutput currentStateOutput = new CurrentStateOutput();
+    currentStateOutput.setCurrentState(resourceName, partition, liveInstance, "SLAVE");
+    Map<String, Resource> resourceMap = getResourceMap(resources, 1, "MasterSlave");
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateOutput);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new BestPossibleStateCalcStage());
+
+    BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
+    AssertJUnit.assertEquals(Collections.singletonMap(liveInstance, "MASTER"),
+        output.getInstanceStateMap(resourceName, partition));
+    AssertJUnit.assertEquals(mode == null ? null : mode.name(),
+        cache.getIdealState(resourceName).getRecord().getSimpleField("REBALANCE_MODE"));
   }
 
   @Test
@@ -135,7 +175,9 @@ public class TestBestPossibleCalcStageCompatibility extends BaseStageTest {
       }
       IdealState idealState = new IdealState(record);
       idealState.setStateModelDefRef("MasterSlave");
-      idealState.setRebalanceMode(mode);
+      if (mode != null) {
+        idealState.setRebalanceMode(mode);
+      }
       AssertJUnit.assertFalse(idealState.getRecord().getSimpleFields().containsKey("IDEAL_STATE_MODE"));
       idealState.setNumPartitions(partitions);
       idealStates.add(idealState);

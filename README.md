@@ -97,10 +97,11 @@ release downstream callers before upgrading Helix.
 The modern setter writes only `REBALANCE_MODE`. The getter does not mutate records,
 does not infer a mode from legacy metadata or a rebalancer class, and preserves
 the effective `SEMI_AUTO` default for missing or invalid modern values. Invalid
-values retain the standard enum-parser warning. Explicit modern values, including
-`NONE`, are now respected without fallback. `NONE` does not select an operational
-rebalancer; replace it with the intended mode before upgrading if the resource
-previously depended on fallback.
+values retain the standard enum-parser warning. Explicit `NONE` is treated like
+unset and also resolves to `SEMI_AUTO`, without rewriting the stored value.
+Other valid modern modes are respected. This does not restore legacy-derived
+`FULL_AUTO` or `CUSTOMIZED` behavior: records that depended on legacy fallback
+must explicitly store their intended modern mode before upgrading.
 
 `rebalanceModeFromString` accepts modern enum names only. Invalid inputs (including
 the retired `AUTO` and `AUTO_REBALANCE` aliases) are logged and return the caller's
