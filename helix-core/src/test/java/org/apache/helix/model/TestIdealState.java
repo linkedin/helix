@@ -29,7 +29,6 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.TestHelper;
-import org.apache.helix.model.IdealState.IdealStateModeProperty;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
@@ -147,42 +146,94 @@ public class TestIdealState {
         "should pass since replicas equals to preference-list size");
   }
 
-  @Test
-  public void testFullAutoModeCompatibility() {
-    IdealState idealStateOld = new IdealState("old-test-db");
-    idealStateOld.setIdealStateMode(IdealStateModeProperty.AUTO_REBALANCE.toString());
-    Assert.assertEquals(idealStateOld.getRebalanceMode(), RebalanceMode.FULL_AUTO);
-    Assert.assertEquals(idealStateOld.getIdealStateMode(), IdealStateModeProperty.AUTO_REBALANCE);
-
-    IdealState idealStateNew = new IdealState("new-test-db");
-    idealStateNew.setRebalanceMode(RebalanceMode.FULL_AUTO);
-    Assert.assertEquals(idealStateNew.getIdealStateMode(), IdealStateModeProperty.AUTO_REBALANCE);
-    Assert.assertEquals(idealStateNew.getRebalanceMode(), RebalanceMode.FULL_AUTO);
+  @DataProvider
+  public Object[][] rebalanceModes() {
+    return Arrays.stream(RebalanceMode.values())
+        .map(mode -> new Object[]{mode, mode == RebalanceMode.NONE ? RebalanceMode.SEMI_AUTO : mode})
+        .toArray(Object[][]::new);
   }
 
   @Test
-  public void testSemiAutoModeCompatibility() {
-    IdealState idealStateOld = new IdealState("old-test-db");
-    idealStateOld.setIdealStateMode(IdealStateModeProperty.AUTO.toString());
-    Assert.assertEquals(idealStateOld.getRebalanceMode(), RebalanceMode.SEMI_AUTO);
-    Assert.assertEquals(idealStateOld.getIdealStateMode(), IdealStateModeProperty.AUTO);
-
-    IdealState idealStateNew = new IdealState("new-test-db");
-    idealStateNew.setRebalanceMode(RebalanceMode.SEMI_AUTO);
-    Assert.assertEquals(idealStateNew.getIdealStateMode(), IdealStateModeProperty.AUTO);
-    Assert.assertEquals(idealStateNew.getRebalanceMode(), RebalanceMode.SEMI_AUTO);
+  public void testLegacyModeApiRemoved() {
+    Assert.assertFalse(Arrays.stream(IdealState.IdealStateProperty.values())
+        .anyMatch(property -> property.name().equals("IDEAL_STATE_MODE")));
+    Assert.assertFalse(Arrays.stream(IdealState.class.getDeclaredClasses())
+        .anyMatch(type -> type.getSimpleName().equals("IdealStateModeProperty")));
+    Assert.assertFalse(Arrays.stream(IdealState.class.getMethods())
+        .anyMatch(method -> method.getName().equals("getIdealStateMode")
+            || method.getName().equals("setIdealStateMode")));
   }
 
-  @Test
-  public void testCustomizedModeCompatibility() {
-    IdealState idealStateOld = new IdealState("old-test-db");
-    idealStateOld.setIdealStateMode(IdealStateModeProperty.CUSTOMIZED.toString());
-    Assert.assertEquals(idealStateOld.getRebalanceMode(), RebalanceMode.CUSTOMIZED);
-    Assert.assertEquals(idealStateOld.getIdealStateMode(), IdealStateModeProperty.CUSTOMIZED);
+  @Test(dataProvider = "rebalanceModes")
+  public void testModernModeRoundTripWithoutLegacyField(RebalanceMode mode,
+      RebalanceMode expectedMode) {
+    IdealState idealState = new IdealState("resource");
+    idealState.setRebalanceMode(mode);
+    Assert.assertEquals(idealState.getRecord().getSimpleFields(),
+        Collections.singletonMap("REBALANCE_MODE", mode.name()));
+    IdealState restored = new IdealState(new ZNRecord(idealState.getRecord()));
+    Assert.assertEquals(restored.getRebalanceMode(), expectedMode);
+    Assert.assertEquals(restored.getRecord().getSimpleFields(),
+        Collections.singletonMap("REBALANCE_MODE", mode.name()));
+    Assert.assertEquals(idealState.rebalanceModeFromString(mode.name(), RebalanceMode.SEMI_AUTO),
+        mode);
+  }
 
-    IdealState idealStateNew = new IdealState("new-test-db");
-    idealStateNew.setRebalanceMode(RebalanceMode.CUSTOMIZED);
-    Assert.assertEquals(idealStateNew.getIdealStateMode(), IdealStateModeProperty.CUSTOMIZED);
-    Assert.assertEquals(idealStateNew.getRebalanceMode(), RebalanceMode.CUSTOMIZED);
+  @DataProvider
+  public Object[][] modernAndLegacyModes() {
+    List<Object[]> cases = new ArrayList<>();
+    for (String legacy : new String[]{null, "", "AUTO", "AUTO_REBALANCE", "CUSTOMIZED", "invalid"}) {
+      for (RebalanceMode modern : RebalanceMode.values()) {
+        if (modern != RebalanceMode.NONE) {
+          cases.add(new Object[]{modern.name(), legacy, modern});
+        }
+      }
+      for (String modern : new String[]{null, "", "invalid", "AUTO", "AUTO_REBALANCE", "NONE"}) {
+        cases.add(new Object[]{modern, legacy, RebalanceMode.SEMI_AUTO});
+      }
+    }
+    return cases.toArray(new Object[0][]);
+  }
+
+  @Test(dataProvider = "modernAndLegacyModes")
+  public void testLegacyModeIsOpaqueAndReadsDoNotMutate(String modern, String legacy,
+      RebalanceMode expectedMode) {
+    ZNRecord record = new ZNRecord("resource");
+    if (modern != null) {
+      record.setSimpleField("REBALANCE_MODE", modern);
+    }
+    if (legacy != null) {
+      record.setSimpleField("IDEAL_STATE_MODE", legacy);
+    }
+    record.setSimpleField("applicationSetting", "keep");
+    record.setListField("resource_0", Collections.singletonList("node"));
+    record.setMapField("resource_0", Collections.singletonMap("node", "ONLINE"));
+    ZNRecord original = new ZNRecord(record);
+    IdealState idealState = new IdealState(record);
+
+    Assert.assertEquals(idealState.getRebalanceMode(), expectedMode);
+    Assert.assertEquals(idealState.getRebalanceMode(), expectedMode);
+    Assert.assertEquals(idealState.getRecord(), original);
+    Assert.assertEquals(record, original);
+
+    idealState.setRebalanceMode(RebalanceMode.USER_DEFINED);
+    ZNRecord expected = new ZNRecord(original);
+    expected.setSimpleField("REBALANCE_MODE", "USER_DEFINED");
+    Assert.assertEquals(idealState.getRecord(), expected);
+    Assert.assertEquals(record, original);
+  }
+
+  @DataProvider
+  public Object[][] invalidRebalanceModes() {
+    return new Object[][]{{null}, {""}, {"invalid"}, {"AUTO"}, {"AUTO_REBALANCE"}, {"full_auto"}};
+  }
+
+  @Test(dataProvider = "invalidRebalanceModes")
+  public void testModeParserUsesCallerDefaultWithoutLegacyAliases(String mode) {
+    IdealState idealState = new IdealState("resource");
+    Assert.assertEquals(idealState.rebalanceModeFromString(mode, RebalanceMode.CUSTOMIZED),
+        RebalanceMode.CUSTOMIZED);
+    Assert.assertNull(idealState.rebalanceModeFromString(mode, null));
+    Assert.assertTrue(idealState.getRecord().getSimpleFields().isEmpty());
   }
 }

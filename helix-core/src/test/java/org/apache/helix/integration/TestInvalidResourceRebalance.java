@@ -72,7 +72,7 @@ public class TestInvalidResourceRebalance extends ZkUnitTestBase {
     HelixAdmin helixAdmin = controller.getClusterManagmentTool();
     Map<String, String> properties = Maps.newHashMap();
     properties.put("IdealStateRule!sampleRuleName",
-        "IDEAL_STATE_MODE=CUSTOMIZED,STATE_MODEL_DEF_REF=MasterSlave");
+        "REBALANCE_MODE=CUSTOMIZED,STATE_MODEL_DEF_REF=MasterSlave");
     helixAdmin.setConfig(
         new HelixConfigScopeBuilder(ConfigScopeProperty.CLUSTER).forCluster(clusterName).build(),
         properties);

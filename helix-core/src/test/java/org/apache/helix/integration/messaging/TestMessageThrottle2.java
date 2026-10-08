@@ -146,7 +146,7 @@ public class TestMessageThrottle2 extends ZkTestBase {
 
     // ideal-state znrecord
     ZNRecord record = new ZNRecord(_resourceName);
-    record.setSimpleField("IDEAL_STATE_MODE", "AUTO");
+    record.setSimpleField("REBALANCE_MODE", "SEMI_AUTO");
     record.setSimpleField("NUM_PARTITIONS", "1");
     record.setSimpleField("REPLICAS", "2");
     record.setSimpleField("STATE_MODEL_DEF_REF", "MasterSlave");

@@ -66,8 +66,6 @@ public class TestAutoIsWithEmptyMap extends ZkTestBase {
         DefaultIdealStateCalculator.calculateIdealState(instanceNames, 10, 2, "TestDB0", "LEADER",
             "STANDBY");
     // System.out.println(idealState);
-    // curIdealState.setSimpleField(IdealState.IdealStateProperty.IDEAL_STATE_MODE.toString(),
-    // "CUSTOMIZED");
     curIdealState.setSimpleField(IdealState.IdealStateProperty.REPLICAS.toString(), "3");
 
     curIdealState.setListFields(idealState.getListFields());

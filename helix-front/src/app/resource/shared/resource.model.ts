@@ -14,7 +14,7 @@ export class Partition {
     return !_.some(
       this.replicas,
       (replica) =>
-        !replica.externalView || replica.externalView != replica.idealState
+        !replica.externalView || replica.externalView != replica.idealState,
     );
   }
 
@@ -33,7 +33,6 @@ export class Resource {
   readonly cluster: string;
 
   // meta data
-  readonly idealStateMode: string;
   readonly rebalanceMode: string;
   readonly stateModel: string;
   readonly partitionCount: number;
@@ -59,7 +58,7 @@ export class Resource {
     name: string,
     config: any,
     idealState: any,
-    externalView: any
+    externalView: any,
   ) {
     this.cluster = cluster;
     this.name = name;
@@ -68,7 +67,6 @@ export class Resource {
 
     // ignore config for now since config component will fetch itself
 
-    this.idealStateMode = idealState.simpleFields.IDEAL_STATE_MODE;
     this.rebalanceMode = idealState.simpleFields.REBALANCE_MODE;
     this.stateModel = idealState.simpleFields.STATE_MODEL_DEF_REF;
     this.partitionCount = +idealState.simpleFields.NUM_PARTITIONS;

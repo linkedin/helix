@@ -130,6 +130,13 @@ public class TestResourceAccessor extends AbstractTestClass {
         .setRebalanceStrategy("DEFAULT").build();
     Assert.assertEquals(queryIdealState, _gSetupTool.getClusterManagementTool()
         .getResourceIdealState(CLUSTER_NAME, newResourceName + "0"));
+    for (String resource : new String[]{newResourceName, newResourceName + "0"}) {
+      JsonNode fields = OBJECT_MAPPER.readTree(get(
+          "clusters/" + CLUSTER_NAME + "/resources/" + resource, null,
+          Response.Status.OK.getStatusCode(), true)).get("idealState").get("simpleFields");
+      Assert.assertTrue(fields.has("REBALANCE_MODE"));
+      Assert.assertFalse(fields.has("IDEAL_STATE_MODE"));
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
