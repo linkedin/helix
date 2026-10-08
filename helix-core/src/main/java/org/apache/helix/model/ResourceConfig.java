@@ -47,7 +47,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
-    MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
     INSTANCE_GROUP_TAG,
     PARTITION_CAPACITY_MAP,
@@ -92,19 +91,19 @@ public class ResourceConfig extends HelixProperty {
   }
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
     this(resourceId, monitorDisabled,
-        minActiveReplica, maxPartitionsPerInstance, instanceGroupTag,
+        maxPartitionsPerInstance, instanceGroupTag,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
+      int maxPartitionsPerInstance, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
@@ -117,10 +116,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (p2pMessageEnabled != null) {
       _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), p2pMessageEnabled);
-    }
-
-    if (minActiveReplica >= 0) {
-      _record.setIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), minActiveReplica);
     }
 
     if (maxPartitionsPerInstance >= 0) {
@@ -184,15 +179,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public String getResourceName() {
     return _record.getId();
-  }
-
-  /**
-   * Get the number of minimal active partitions for this resource.
-   *
-   * @return
-   */
-  public int getMinActiveReplica() {
-    return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
   }
 
   // Delimiter used for storing active states as a comma-separated string in simpleField
@@ -485,7 +471,6 @@ public class ResourceConfig extends HelixProperty {
   public static class Builder {
     private String _resourceId;
     private Boolean _monitorDisabled;
-    private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
     private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
@@ -521,15 +506,6 @@ public class ResourceConfig extends HelixProperty {
 
     public String getResourceId() {
       return _resourceId;
-    }
-
-    public int getMinActiveReplica() {
-      return _minActiveReplica;
-    }
-
-    public Builder setMinActiveReplica(int minActiveReplica) {
-      _minActiveReplica = minActiveReplica;
-      return this;
     }
 
     public int getMaxPartitionsPerInstance() {
@@ -658,7 +634,7 @@ public class ResourceConfig extends HelixProperty {
       // validate();
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
-          _minActiveReplica, _maxPartitionsPerInstance,
+          _maxPartitionsPerInstance,
           _instanceGroupTag, _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
@@ -701,9 +677,6 @@ public class ResourceConfig extends HelixProperty {
     mergedZNRecord.setIntFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
         idealState.getMaxPartitionsPerInstance());
-    mergedZNRecord
-        .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-            idealState.getMinActiveReplicas());
     return mergedResourceConfig;
   }
 }

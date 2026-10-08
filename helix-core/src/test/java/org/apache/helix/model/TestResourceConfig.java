@@ -73,7 +73,7 @@ public class TestResourceConfig {
     record.setLongField("REBALANCE_DELAY", 3000L);
 
     ResourceConfig resourceConfig = new ResourceConfig("resource", false,
-        1, 10, "placementTag", new RebalanceConfig(record), null, null, null, true);
+        10, "placementTag", new RebalanceConfig(record), null, null, null, true);
 
     Assert.assertFalse(
         resourceConfig.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
@@ -350,8 +350,7 @@ public class TestResourceConfig {
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
     ResourceConfig resourceConfig = new ResourceConfig("resource", false,
-        1, 10, "placementTag", null, null, null, null, true);
-    Assert.assertEquals(resourceConfig.getMinActiveReplica(), 1);
+        10, "placementTag", null, null, null, null, true);
     Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
     Assert.assertEquals(resourceConfig.getInstanceGroupTag(), "placementTag");
     Assert.assertFalse(resourceConfig.isMonitoringDisabled());
@@ -359,7 +358,8 @@ public class TestResourceConfig {
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
-            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED", "STATE_MODEL_FACTORY_NAME"}) {
+            "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED", "MIN_ACTIVE_REPLICAS",
+            "STATE_MODEL_FACTORY_NAME"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -397,8 +397,6 @@ public class TestResourceConfig {
     Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
         testIdealState.getMaxPartitionsPerInstance());
     Assert.assertFalse(mergedResourceConfig.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
-    Assert.assertEquals(mergedResourceConfig.getMinActiveReplica(),
-        testIdealState.getMinActiveReplicas());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
       Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
@@ -409,7 +407,6 @@ public class TestResourceConfig {
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
     configBuilder.setInstanceGroupTag("testRCGroup");
     configBuilder.setMaxPartitionsPerInstance(2);
-    configBuilder.setMinActiveReplica(2);
     testConfig = configBuilder.build();
     testConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "testRCFactory");
     testConfig.getRecord().setSimpleField("RESOURCE_GROUP_NAME", "testRCGroup");
@@ -423,8 +420,6 @@ public class TestResourceConfig {
         testConfig.getMaxPartitionsPerInstance());
     Assert.assertEquals(mergedResourceConfig.getSimpleConfig("STATE_MODEL_FACTORY_NAME"),
         "testRCFactory");
-    Assert
-        .assertEquals(mergedResourceConfig.getMinActiveReplica(), testConfig.getMinActiveReplica());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
       Assert.assertEquals(mergedResourceConfig.getRecord().getSimpleField(legacyField),

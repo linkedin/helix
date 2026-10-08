@@ -171,9 +171,8 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
         || liveEnabledAssignableNodeList.size() != activeNodes.size()) {
       List<String> activeNodeList = new ArrayList<>(activeNodes);
       Collections.sort(activeNodeList);
-      int minActiveReplicas = DelayedRebalanceUtil.getMinActiveReplica(
-          ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, currentIdealState),
-          currentIdealState, replicaCount);
+      int minActiveReplicas =
+          DelayedRebalanceUtil.getMinActiveReplica(currentIdealState, replicaCount);
 
       ZNRecord newActiveMapping =
           _rebalanceStrategy.computePartitionAssignment(allNodeList, activeNodeList, currentMapping,

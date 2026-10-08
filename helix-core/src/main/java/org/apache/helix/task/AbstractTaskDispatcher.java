@@ -607,20 +607,9 @@ public abstract class AbstractTaskDispatcher {
         taskAssignmentCal.getTaskAssignment(currStateOutput, liveInstances, jobCfg, jobCtx,
             workflowConfig, workflowCtx, filteredTaskPartitionNumbers, cache.getIdealStates());
 
-    if (!TaskUtil.isGenericTaskJob(jobCfg) && jobCfg.isRebalanceRunningTask()) {
-      // TODO: Revisit the logic for isRebalanceRunningTask() and valid use cases for it
-      // TODO: isRebalanceRunningTask() was originally put in place to allow users to move
-      // ("rebalance") long-running tasks, but there hasn't been a clear use case for this
-      // Previously, there was a bug in the condition above (it was || where it should have been &&)
-      dropRebalancedRunningTasks(tgtPartitionAssignments, currentInstanceToTaskAssignments, paMap,
-          jobCtx);
-    }
-
-    // If this is a targeted job and if there was a live instance change
+    // Targeted tasks follow changed target assignments after live-instance, state or message changes.
     if (!TaskUtil.isGenericTaskJob(jobCfg)
         && existsLiveInstanceOrCurrentStateOrMessageChangeChange) {
-      // Drop current jobs only if they are assigned to a different instance, regardless of
-      // the jobCfg.isRebalanceRunningTask() setting
       dropRebalancedRunningTasks(tgtPartitionAssignments, currentInstanceToTaskAssignments, paMap,
           jobCtx);
     }
@@ -963,8 +952,6 @@ public abstract class AbstractTaskDispatcher {
       workflowContext.setFinishTime(currentTime);
       updateWorkflowMonitor(workflowContext, workflowConfig);
     }
-    scheduleJobCleanUp(jobConfigMap.get(jobName).getTerminalStateExpiry(), workflowConfig,
-        currentTime);
   }
 
   protected void scheduleJobCleanUp(long expiry, WorkflowConfig workflowConfig,
