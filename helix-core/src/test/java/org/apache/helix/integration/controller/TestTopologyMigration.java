@@ -97,7 +97,6 @@ public class TestTopologyMigration extends ZkTestBase {
     _configAccessor = new ConfigAccessor(_gZkClient);
 
     // Set up cluster configuration and participants
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     setupClusterConfig(INIT_TOPOLOGY, RACK);
 
     // Initialize cluster verifier for validating state

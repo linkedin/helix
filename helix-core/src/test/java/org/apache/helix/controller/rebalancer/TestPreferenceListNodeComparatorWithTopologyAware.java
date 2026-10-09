@@ -72,7 +72,6 @@ public class TestPreferenceListNodeComparatorWithTopologyAware extends ZkTestBas
     }
 
     enableTopologyAwareRebalance();
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // start controller
     String controllerName = CONTROLLER_PREFIX + "_0";

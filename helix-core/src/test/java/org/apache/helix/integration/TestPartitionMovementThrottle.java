@@ -127,7 +127,6 @@ public class TestPartitionMovementThrottle extends ZkStandAloneCMTestBase {
         .setStateTransitionThrottleConfigs(Arrays.asList(resourceLoadThrottle, instanceLoadThrottle,
             clusterLoadThrottle, resourceRecoveryThrottle, clusterRecoveryThrottle));
 
-    clusterConfig.setPersistIntermediateAssignment(true);
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
   }
 

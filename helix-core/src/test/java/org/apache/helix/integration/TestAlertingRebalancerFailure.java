@@ -104,7 +104,6 @@ public class TestAlertingRebalancerFailure extends ZkStandAloneCMTestBase {
       _participants[i].syncStart();
     }
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     accessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
     errorNodeKey = accessor.keyBuilder().controllerTaskError(RebalanceResourceFailure.name());

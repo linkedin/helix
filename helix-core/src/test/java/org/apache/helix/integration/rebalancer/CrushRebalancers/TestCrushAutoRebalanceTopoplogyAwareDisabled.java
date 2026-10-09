@@ -57,7 +57,6 @@ public class TestCrushAutoRebalanceTopoplogyAwareDisabled extends TestCrushAutoR
     _controller = new ClusterControllerManager(ZkTestBase.ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(ZkTestBase._gZkClient, CLUSTER_NAME, true);
   }
 
   @Test(dataProvider = "rebalanceStrategies")

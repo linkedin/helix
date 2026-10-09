@@ -75,9 +75,8 @@ public class TestPersistAssignmentStage extends ZkStandAloneCMTestBase {
     runStage(_manager, event, new ReadClusterDataStage());
     runStage(_manager, event, new ResourceComputationStage());
 
-    // Ensure persist best possible assignment is true
+    // PersistAssignmentStage now always persists the best possible assignment.
     ClusterConfig clusterConfig = new ClusterConfig(CLUSTER_NAME);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     ResourceControllerDataProvider cache =
         event.getAttribute(AttributeName.ControllerDataProvider.name());
     cache.setClusterConfig(clusterConfig);
