@@ -647,6 +647,23 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
    */
   public void init() {
     logger.info("initializing CallbackHandler: {}, content: {} ", _uid, getContent());
+    synchronized (this) {
+      // The message and data-accessor handlers are init'd twice during a new ZK session: once
+      // when constructed and again by ZKHelixManager#initHandlers. Once a handler has been
+      // initialized it is awaiting CALLBACK/FINALIZE (INIT is no longer an expected type), so a
+      // repeat init() must be a true no-op. The invoke(INIT) at the end of this method would
+      // already be rejected as out-of-order, but the batch-mode reset() below runs first and
+      // would clear the callback executor's queue and cancel its in-flight task -- silently
+      // dropping any participant callback (e.g. a state-transition message) delivered in the
+      // window between the two init() calls. Returning here preserves those pending callbacks.
+      // Legitimate re-initialization on a reconnect is unaffected: handleNewSession finalizes
+      // handlers (restoring the INIT expectation) before re-init'ing them. See CICP-52393.
+      if (!_expectTypes.contains(Type.INIT)) {
+        logger.info("CallbackHandler {} is already initialized (expectTypes={}); skipping "
+            + "duplicate init for listener: {}, path: {}", _uid, _expectTypes, _listener, _path);
+        return;
+      }
+    }
     try {
       if (_batchModeEnabled) {
         CallbackEventExecutor callbackExecutor = _batchCallbackExecutorRef.get();

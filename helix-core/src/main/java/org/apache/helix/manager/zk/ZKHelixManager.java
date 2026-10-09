@@ -1407,8 +1407,9 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
 
     /**
      * init handlers
-     * ok to init message handler and data-accessor twice
-     * the second init will be skipped (see CallbackHandler)
+     * ok to init message handler and data-accessor twice: a repeat init() on an
+     * already-initialized handler is a safe no-op that preserves any pending (batched)
+     * callbacks instead of discarding them (see CallbackHandler#init, CICP-52393)
      */
     initHandlers(_handlers);
 
