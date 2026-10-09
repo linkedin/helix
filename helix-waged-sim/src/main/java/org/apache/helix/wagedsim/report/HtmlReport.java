@@ -207,8 +207,8 @@ public final class HtmlReport {
             sx.applyAsDouble(x), top + plotH + 16, x));
       }
       out.append(String.format(Locale.ROOT,
-          "<text x=\"%d\" y=\"%d\" font-size=\"11\" text-anchor=\"middle\" fill=\"#555\">round</text>",
-          left + plotW / 2, height - 4));
+          "<text x=\"%d\" y=\"%d\" font-size=\"11\" text-anchor=\"middle\" fill=\"#555\">%s</text>",
+          left + plotW / 2, height - 4, esc(chart.xLabel)));
       for (Double marker : chart.markers) {
         double px = sx.applyAsDouble(marker);
         out.append(String.format(Locale.ROOT, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" "

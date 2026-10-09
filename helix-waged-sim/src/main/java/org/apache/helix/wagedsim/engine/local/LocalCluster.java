@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -240,12 +241,27 @@ public class LocalCluster implements AutoCloseable {
     lines.add("# Written by waged-sim for the local controller.");
     weights.forEach((name, weight) -> lines.add(name + "=" + weight));
     Files.write(conf.resolve("soft-constraint-weight.properties"), lines, StandardCharsets.UTF_8);
+    // The engine reads rebalance failures from the controller's log, so WAGED's errors stay on here even
+    // though the tool's own logging turns them off.
+    Path logConfig = conf.resolve("log4j2-controller.properties");
+    Files.write(logConfig, Arrays.asList(
+        "status = error",
+        "name = waged-sim-controller",
+        "appender.console.type = Console",
+        "appender.console.name = STDOUT",
+        "appender.console.layout.type = PatternLayout",
+        "appender.console.layout.pattern = %d{HH:mm:ss} %-5p %c{1} - %m%n",
+        "rootLogger.level = error",
+        "rootLogger.appenderRef.stdout.ref = STDOUT",
+        "logger.rebalanceutil.name = org.apache.helix.util.RebalanceUtil",
+        "logger.rebalanceutil.level = off"), StandardCharsets.UTF_8);
     String java = Paths.get(System.getProperty("java.home"), "bin", "java").toString();
     String classpath = conf.toAbsolutePath() + File.pathSeparator + System.getProperty("java.class.path");
     List<String> command = new ArrayList<>();
     command.add(java);
     command.add("-Xmx" + System.getenv().getOrDefault("WAGED_SIM_CONTROLLER_XMX", "2g"));
     command.add("-Dlog4j2.formatMsgNoLookups=true");
+    command.add("-Dlog4j2.configurationFile=" + logConfig.toAbsolutePath());
     command.add("-cp");
     command.add(classpath);
     command.add(ControllerMain.class.getName());

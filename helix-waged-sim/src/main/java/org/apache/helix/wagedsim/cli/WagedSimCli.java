@@ -282,6 +282,14 @@ public final class WagedSimCli {
     if (options.get("format") != null) {
       scenario.report.formats = ClusterConfigOverrides.strings(options.get("format"));
     }
+    if (scenario.search != null) {
+      if (!"dry-run".equals(scenario.mode)) {
+        throw new IllegalArgumentException("A scale-down search runs in dry-run mode only");
+      }
+      if (options.get("until") != null || options.get("fail-if") != null || options.get("max-rounds") != null) {
+        _out.println("--until, --fail-if and --max-rounds do not apply to a scale-down search; ignoring them");
+      }
+    }
     if (!options.all("variant").isEmpty()) {
       scenario.variants.keySet().retainAll(options.all("variant"));
       if (scenario.variants.isEmpty()) {
@@ -337,6 +345,9 @@ public final class WagedSimCli {
       variant.put("settings", result.settings);
       variant.put("start", result.start);
       variant.put("end", result.end);
+      if (result.search != null) {
+        variant.put("search", result.search);
+      }
       variants.add(variant);
       if (result.verdict.status == Verdict.Status.ERROR) {
         exit = 2;
@@ -391,6 +402,9 @@ public final class WagedSimCli {
     report.put("stats", scenario.report.stats);
     map.put("report", report);
     map.put("variants", new ArrayList<>(scenario.variants.keySet()));
+    if (scenario.search != null) {
+      map.put("search", scenario.search.describe());
+    }
     map.put("source", scenario.source);
     return map;
   }

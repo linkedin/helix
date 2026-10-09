@@ -75,6 +75,9 @@ Both engines simulate WAGED resources only; other resources stay in the folder u
 (`settings.pass: partial | global | cold`) runs one WAGED pass directly, which is how the `rca` preset
 probes the causes of top-state skew.
 
+WAGED's own failure logs are off (see `src/main/config/log4j2.properties`): every failure is recorded
+per round in `rounds.jsonl` and in the report.
+
 ## Scenarios
 
 See [skill/SKILL.md](skill/SKILL.md) for the full scenario format, the event and selector vocabulary, and
@@ -85,6 +88,53 @@ the stat names usable in `until` and `failIf`. Exit criteria:
 - Neither: exactly `maxRounds` rounds; PASS when they complete.
 - Always: FAIL on `failIf`, a WAGED rebalance failure (unless `failOnRebalanceFailure: false`), `timeout`
   (wall clock) or `maxSimTime` (virtual time).
+
+## Scale-down search
+
+A scenario with a `search` block answers "how many instances can be removed before WAGED can no longer
+place every replica?" instead of running rounds. `preset:scale-down` is the ready-made version.
+
+```yaml
+name: scale-down
+search:
+  removeNodes: {strategy: mz-balanced, method: binary}   # linear also takes step; max caps the search
+  tolerateZoneLoss: none        # largest | every: also survive losing a whole zone afterwards
+  nonServing: keep              # remove: plan without disabled and offline instances
+  requireAtLeast: 4             # optional: FAIL when fewer can be removed
+variants:
+  mz-balanced: {}
+  survive-zone-loss: {tolerateZoneLoss: largest}
+  least-loaded: {searchStrategy: least-loaded}
+```
+
+- **Probe.** Each probe starts from the cluster as it is, removes the first k serving instances of a
+  removal order, and runs one controller pipeline. The removal changes the topology, so WAGED computes a
+  new baseline over the instances left (which fails with a capacity deficit or an unplaceable replica if
+  they cannot hold everything), and the partial pass re-homes the removed instances' replicas.
+- **Feasible** (default `feasibleIf`): no rebalance failure, and WAGED's assignment (its best possible
+  state) puts every replica on an instance, within capacity, with no two replicas of a partition in one
+  fault zone: `rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0
+  and zoneConflicts.added == 0`. `.added` counts only problems the probe that removes nothing did not
+  have. The probe is judged on the assignment, not the transient layout while replicas move.
+- **Search.** Binary search assumes that if removing k fails, removing more fails too. Its first guess
+  is the most instances the remaining capacity allows (WAGED's own cluster-wide capacity check), then
+  one more to confirm, so a capacity-bound cluster takes about three probes. `linear` checks every step.
+- **Removal orders.** `mz-balanced` (default) takes the next instance from the zone that stays least
+  utilized without it, the smallest instance first, so zones stay even; `mz-single` empties the largest
+  zone first (the worst case for zone spread); `least-loaded`, `most-loaded`, `random` and `name`
+  ignore zones. The same orders are event selectors: `removeNode: mz-balanced:3`.
+- **Fault zones.** WAGED places at most one replica of a partition per fault zone (a hard constraint).
+  With fewer zones left than replicas, it does not fail: it places fewer replicas. Unplaced replicas
+  catch that. `tolerateZoneLoss: largest` also requires that the cluster survives losing the zone with
+  the most capacity after the removal, as if it stayed down past the delay window; `every` checks each
+  zone. With as many zones as replicas no zone can be lost, and the search says so.
+- **Disabled and offline instances** stay by default, as WAGED counts them: their capacity for the
+  baseline, and as active while within the delay window. The report says how many replicas WAGED keeps
+  on them; `nonServing: remove` plans without them.
+
+The report's "Scale-down search" section has the answer per variant, why the next removal fails (the
+WAGED failure and the hard constraints that blocked it), every probe, and instances and utilization per
+zone. `run.json` has the same under `variants[].search`. Searches run in dry-run mode only.
 
 ## Reports
 

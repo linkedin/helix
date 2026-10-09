@@ -74,6 +74,8 @@ public class Runner {
     public Map<String, Object> settings = new LinkedHashMap<>();
     public Map<String, Object> start = new LinkedHashMap<>();
     public Map<String, Object> end = new LinkedHashMap<>();
+    /** Scale-down search result, for search scenarios. */
+    public Map<String, Object> search;
   }
 
   public List<VariantResult> run(ClusterState base, int parallelism) throws Exception {
@@ -121,6 +123,12 @@ public class Runner {
       List<String> problems = ClusterNormalizer.validate(state);
       if (!problems.isEmpty()) {
         throw new IllegalArgumentException("Cluster cannot run WAGED: " + String.join("; ", problems));
+      }
+      if (_scenario.search != null) {
+        new ScaleDownSearch(_scenario, _output, _console, _focusKey).run(state, variant, settings, result, start);
+        result.elapsedMillis = System.currentTimeMillis() - start;
+        _console.println("[" + variant.name + "] " + result.verdict + " (" + Durations.format(result.elapsedMillis) + ")");
+        return result;
       }
       engine = _engines.get();
       engine.start(state, settings);

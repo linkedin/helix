@@ -209,10 +209,21 @@ public class DryRunEngine implements Engine {
     }
     _state.replaceCurrentStates(served);
     pullBack();
+    result.blockingConstraints.putAll(_algorithm.drainBlocking());
     result.computeMillis = System.currentTimeMillis() - start;
     result.simTimeMillis = now();
     result.maintenance = StateOps.isMaintenance(_state);
     return result;
+  }
+
+  /** @return the message of the innermost rebalance failure, without the type and category suffix */
+  static String rootMessage(HelixRebalanceException failure) {
+    Throwable root = failure;
+    while (root.getCause() instanceof HelixRebalanceException && root.getCause() != root) {
+      root = root.getCause();
+    }
+    String message = String.valueOf(root.getMessage());
+    return message.replaceAll("\\s*Failure Type: \\S+( Category: \\S+)?\\s*$", "");
   }
 
   private Map<String, Map<String, Map<String, String>>> runPipeline(RoundResult result)
@@ -242,7 +253,7 @@ public class DryRunEngine implements Engine {
     recordCounters(result);
     for (HelixRebalanceException failure : _rebalancer.drainFailures()) {
       result.failures.add(failure.getFailureType() + "/" + failure.getFailureCategory() + ": "
-          + failure.getMessage());
+          + rootMessage(failure));
       result.failureCategories.add(String.valueOf(failure.getFailureCategory()));
     }
     if (_provider.isMaintenanceModeEnabled() && !StateOps.isMaintenance(_state)) {

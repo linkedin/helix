@@ -58,6 +58,14 @@ public final class StateOps {
     return true;
   }
 
+  /** Removes an instance from the cluster: its config, live instance and everything under INSTANCES. */
+  public static boolean removeInstance(ClusterState state, String instance) {
+    boolean existed = state.remove(ClusterState.instanceConfigPath(instance)) != null;
+    state.remove(ClusterState.liveInstancePath(instance));
+    state.removeTree(ClusterState.INSTANCES + "/" + instance);
+    return existed;
+  }
+
   /** Brings an instance online with a new session and no current states. */
   public static boolean revive(ClusterState state, String instance, int generation) {
     if (state.get(ClusterState.instanceConfigPath(instance)) == null

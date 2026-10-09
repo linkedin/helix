@@ -26,8 +26,10 @@ public class Verdict {
   }
 
   public Status status;
+  /** The round the verdict was reached at, or the number of probes for a scale-down search. */
   public int round;
   public String reason;
+  public boolean probes;
 
   public static Verdict pass(int round, String reason) {
     return of(Status.PASS, round, reason);
@@ -51,6 +53,6 @@ public class Verdict {
 
   @Override
   public String toString() {
-    return status + " at round " + round + ": " + reason;
+    return status + (probes ? " after " + round + " probe(s): " : " at round " + round + ": ") + reason;
   }
 }

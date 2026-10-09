@@ -69,9 +69,13 @@ public final class ReportBuilder {
     setup(report, data, scenario, cluster);
     start(report, data);
     scenarioSection(report, data, scenario);
-    trends(report, data, stats);
-    for (String variant : data.rounds.keySet()) {
-      rounds(report, data, variant, stats);
+    if (scenario.get("search") != null) {
+      search(report, data, focus);
+    } else {
+      trends(report, data, stats);
+      for (String variant : data.rounds.keySet()) {
+        rounds(report, data, variant, stats);
+      }
     }
     finalResult(report, data, stats, focus);
     if (data.variants().size() > 1) {
@@ -81,12 +85,16 @@ public final class ReportBuilder {
     return report;
   }
 
+  private static boolean isSearch(RunData data) {
+    return data.map(data.summary.get("scenario")).get("search") != null;
+  }
+
   private static void verdict(ReportContent report, RunData data) {
     int pass = 0;
     int fail = 0;
     int error = 0;
-    ReportContent.Table table = new ReportContent.Table("Variant", "Result", "Round", "Reason", "Elapsed")
-        .kind(1, "verdict");
+    ReportContent.Table table = new ReportContent.Table("Variant", "Result", isSearch(data) ? "Probes" : "Round",
+        "Reason", "Elapsed").kind(1, "verdict");
     for (Map<String, Object> variant : data.variants()) {
       String status = String.valueOf(variant.get("status"));
       if ("PASS".equals(status)) {
@@ -128,13 +136,19 @@ public final class ReportBuilder {
     bullets.add("Mode: " + scenario.get("mode") + "; focus key: " + data.focusKey()
         + "; capacity keys: " + data.capacityKeys());
     Map<String, Object> exit = data.map(scenario.get("exit"));
-    List<String> exitParts = new ArrayList<>();
-    exit.forEach((k, v) -> {
-      if (!"conditionStats".equals(k)) {
-        exitParts.add(k + " " + v);
-      }
-    });
-    bullets.add("Exit criteria: " + String.join("; ", exitParts));
+    if (scenario.get("search") != null) {
+      List<String> searchParts = new ArrayList<>();
+      data.map(scenario.get("search")).forEach((k, v) -> searchParts.add(k + " " + v));
+      bullets.add("Scale-down search: " + String.join("; ", searchParts) + "; timeout " + exit.get("timeout"));
+    } else {
+      List<String> exitParts = new ArrayList<>();
+      exit.forEach((k, v) -> {
+        if (!"conditionStats".equals(k)) {
+          exitParts.add(k + " " + v);
+        }
+      });
+      bullets.add("Exit criteria: " + String.join("; ", exitParts));
+    }
     ReportContent.Section section = report.section("Setup");
     section.bullets(bullets);
     List<String> fidelity = new ArrayList<>();
@@ -193,13 +207,21 @@ public final class ReportBuilder {
     if (scenario.get("description") != null) {
       section.text(scenario.get("description").toString());
     }
-    ReportContent.Table variants = new ReportContent.Table("Variant", "Pass", "Constraint weights",
-        "Cluster config changes");
+    boolean search = scenario.get("search") != null;
+    ReportContent.Table variants = search
+        ? new ReportContent.Table("Variant", "Removal order", "Survive losing a zone", "Constraint weights",
+            "Cluster config changes")
+        : new ReportContent.Table("Variant", "Pass", "Constraint weights", "Cluster config changes");
     for (Map<String, Object> variant : data.variants()) {
       Map<String, Object> settings = data.map(variant.get("settings"));
-      variants.row(Arrays.asList(String.valueOf(variant.get("name")),
-          settings.get("pass") + " / " + settings.get("activeNodes"),
-          String.valueOf(settings.get("constraintWeights")), String.valueOf(settings.get("clusterConfig"))));
+      Map<String, Object> result = data.map(variant.get("search"));
+      variants.row(search
+          ? Arrays.asList(String.valueOf(variant.get("name")), String.valueOf(result.get("strategy")),
+              String.valueOf(result.get("tolerateZoneLoss")), String.valueOf(settings.get("constraintWeights")),
+              String.valueOf(settings.get("clusterConfig")))
+          : Arrays.asList(String.valueOf(variant.get("name")),
+              settings.get("pass") + " / " + settings.get("activeNodes"),
+              String.valueOf(settings.get("constraintWeights")), String.valueOf(settings.get("clusterConfig"))));
     }
     section.table(variants);
     List<String> events = new ArrayList<>();
@@ -209,6 +231,130 @@ public final class ReportBuilder {
     section.text(events.isEmpty() ? "No scheduled events." : "Scheduled events:");
     if (!events.isEmpty()) {
       section.bullets(events);
+    }
+  }
+
+  /** The scale-down search: the answer per variant, the probes, and instances per zone. */
+  private static void search(ReportContent report, RunData data, String focus) {
+    Map<String, Object> spec = data.map(data.map(data.summary.get("scenario")).get("search"));
+    ReportContent.Section section = report.section("Scale-down search");
+    section.text("Each probe starts from the cluster as it is, removes the first k serving instances of the "
+        + "removal order, and runs one controller pipeline: the global pass computes a new baseline over the "
+        + "remaining instances and the partial pass re-homes the removed instances' replicas. The probe is "
+        + "judged on WAGED's assignment (its best possible state); it is feasible when " + spec.get("feasibleIf")
+        + ". \".added\" counts only problems the probe that removes nothing did not have. Search: "
+        + spec.get("method") + ("binary".equals(spec.get("method"))
+        ? ", starting at the most instances the remaining capacity allows; it assumes that if removing k "
+        + "instances fails, removing more fails too" : "") + ".");
+    section.bullets(Arrays.asList(
+        "When WAGED fails, it keeps its last good assignment, so the removed instances' replicas have no "
+            + "home: they count as unplaced.",
+        "With \"survive losing a zone\", a removal also has to pass with a whole fault zone gone on top of "
+            + "it (largest: the zone with the most capacity left; every: each zone), as if the zone stayed "
+            + "down past the delay window. Within the window WAGED leaves a down zone's replicas in place, so "
+            + "a short outage needs no spare capacity.",
+        "WAGED places at most one replica of a partition per fault zone, and with fewer zones than "
+            + "replicas it silently places fewer replicas instead of failing. Removing a whole zone can pass "
+            + "every capacity check and still lose replicas; unplaced replicas catch it.",
+        "Stats and charts of a probe describe WAGED's assignment, not the transient layout while replicas move."));
+    ReportContent.Table answer = new ReportContent.Table("Variant", "Removal order", "Serving instances",
+        "Can remove", "Fewest removed from a zone", "Fails at", "Why it fails");
+    ReportContent.Chart utilization = new ReportContent.Chart();
+    utilization.title = "Highest instance utilization on " + focus + " (all replicas) by instances removed";
+    utilization.yLabel = "%";
+    utilization.xLabel = "instances removed";
+    ReportContent.Chart skew = new ReportContent.Chart();
+    skew.title = "Top-state skew on " + focus + " by instances removed";
+    skew.xLabel = "instances removed";
+    skew.reference = 1.0;
+    for (Map<String, Object> variant : data.variants()) {
+      Map<String, Object> result = data.map(variant.get("search"));
+      if (result.isEmpty()) {
+        continue;
+      }
+      Map<String, Object> failure = data.map(result.get("firstInfeasible"));
+      answer.row(Arrays.asList(String.valueOf(variant.get("name")), String.valueOf(result.get("strategy")),
+          number(result.get("servingInstances")), number(result.get("maxRemovable")),
+          number(result.get("removedFromEveryZone")), number(failure.get("k")),
+          failure.isEmpty() ? "" : String.valueOf(failure.get("reason"))));
+      List<double[]> util = new ArrayList<>();
+      List<double[]> top = new ArrayList<>();
+      for (Object item : data.list(result.get("probes"))) {
+        Map<String, Object> probe = data.map(item);
+        double k = ((Number) probe.get("k")).doubleValue();
+        Object u = probe.get("maxUtil.all." + focus);
+        Object t = probe.get("skew.top." + focus);
+        if (u instanceof Number && Boolean.TRUE.equals(probe.get("feasible"))) {
+          util.add(new double[]{k, ((Number) u).doubleValue()});
+        }
+        if (t instanceof Number && Boolean.TRUE.equals(probe.get("feasible"))) {
+          top.add(new double[]{k, ((Number) t).doubleValue()});
+        }
+      }
+      if (!util.isEmpty()) {
+        utilization.series.put(String.valueOf(variant.get("name")), util);
+      }
+      if (!top.isEmpty()) {
+        skew.series.put(String.valueOf(variant.get("name")), top);
+      }
+    }
+    section.table(answer);
+    if (!utilization.series.isEmpty()) {
+      section.chart(utilization);
+      section.chart(skew);
+      section.text("Charts show feasible probes only.");
+    }
+    for (Map<String, Object> variant : data.variants()) {
+      Map<String, Object> result = data.map(variant.get("search"));
+      if (result.isEmpty()) {
+        continue;
+      }
+      String name = String.valueOf(variant.get("name"));
+      ReportContent.Table probes = new ReportContent.Table("Instances removed", "Result",
+          "Util % (required, " + focus + ")", "Max host util % (" + focus + ")", "Skew (top state, " + focus + ")",
+          "Replicas moved", "Unplaced replicas", "Reason").kind(3, "util").kind(4, "skew");
+      section.text("Probes for " + name + " (" + result.get("strategy") + " order). Replicas moved compares "
+          + "WAGED's assignment with the one at the start.");
+      for (Object item : data.list(result.get("probes"))) {
+        Map<String, Object> probe = data.map(item);
+        boolean feasible = Boolean.TRUE.equals(probe.get("feasible"));
+        probes.row(Arrays.asList(number(probe.get("k")), feasible ? "feasible" : "fails",
+            number(probe.get("util.required." + focus)), feasible ? number(probe.get("maxUtil.all." + focus)) : "",
+            feasible ? number(probe.get("skew.top." + focus)) : "", feasible ? number(probe.get("moves.replicas")) : "",
+            number(probe.get("unplacedReplicas")), feasible ? "" : String.valueOf(probe.get("reason"))));
+      }
+      section.table(probes);
+      if (result.get("note") != null) {
+        section.text("Note for " + name + ": " + result.get("note") + ".");
+      }
+      long nonServing = result.get("nonServingInstances") instanceof Number
+          ? ((Number) result.get("nonServingInstances")).longValue() : 0;
+      if (nonServing > 0 && "removed".equals(result.get("nonServing"))) {
+        section.text(nonServing + " disabled or offline instance(s) were removed in every probe; the answer "
+            + "counts serving instances only.");
+      } else if (nonServing > 0) {
+        section.text(nonServing + " disabled or offline instance(s) stayed in the cluster. WAGED counts their "
+            + "capacity for its baseline and keeps replicas on those within the delay window ("
+            + number(result.get("replicasOnNonServing")) + " replicas at the largest feasible removal), so the "
+            + "answer assumes they come back. To plan without them, set search.nonServing: remove.");
+      }
+      Map<String, Object> before = data.map(result.get("servingPerZoneBefore"));
+      Map<String, Object> removed = data.map(result.get("removedPerZone"));
+      Map<String, Object> after = data.map(result.get("servingPerZoneAfter"));
+      Map<String, Object> utilBefore = data.map(result.get("zoneUtilBefore"));
+      Map<String, Object> utilAfter = data.map(result.get("zoneUtilAfter"));
+      if (!before.isEmpty()) {
+        ReportContent.Table zones = new ReportContent.Table("Zone", "Serving instances", "Removed", "Left",
+            "Zone util % before (" + focus + ")", "Zone util % after (" + focus + ")").kind(4, "util").kind(5, "util");
+        for (String zone : before.keySet()) {
+          zones.row(Arrays.asList(zone, number(before.get(zone)), number(removed.getOrDefault(zone, 0)),
+              number(after.getOrDefault(zone, before.get(zone))), number(utilBefore.get(zone)),
+              number(utilAfter.get(zone))));
+        }
+        section.text("Serving instances per zone at the largest feasible removal for " + name + " (zone "
+            + "util is the zone's all-replica load over its serving capacity, after WAGED re-placed the replicas):");
+        section.table(zones);
+      }
     }
   }
 
@@ -320,8 +466,16 @@ public final class ReportBuilder {
       shown.add("skew.all." + key);
       shown.add("maxUtil.top." + key);
     }
-    shown.addAll(Arrays.asList("missingTopState", "underReplicated", "violations.capacity", "moves.cumulative",
-        "drift.baseline", "yardstick.targetKey", "peak.top." + focus));
+    if (isSearch(data)) {
+      // Probes describe WAGED's assignment, where serving-layout counts such as missing top states
+      // would include replicas parked on instances that are down within the delay window.
+      shown.removeAll(Arrays.asList("missingTopState", "underReplicated"));
+      shown.addAll(Arrays.asList("unplacedReplicas", "overCapacityInstances", "zoneConflicts",
+          "replicasOnNonServing", "zones.serving", "moves.replicas", "moves.topState", "peak.top." + focus));
+    } else {
+      shown.addAll(Arrays.asList("missingTopState", "underReplicated", "violations.capacity", "moves.cumulative",
+          "drift.baseline", "yardstick.targetKey", "peak.top." + focus));
+    }
     for (Map<String, Object> variant : data.variants()) {
       String name = String.valueOf(variant.get("name"));
       Map<String, Object> start = data.map(variant.get("start"));
@@ -338,8 +492,9 @@ public final class ReportBuilder {
         }
         table.row(Arrays.asList(stat, number(start.get(stat)), number(end.get(stat)), change));
       }
-      section.text("Variant " + name + ": " + variant.get("status") + " at round " + number(variant.get("round"))
-          + ". " + variant.get("reason"));
+      section.text("Variant " + name + ": " + variant.get("status")
+          + (isSearch(data) ? " after " + number(variant.get("round")) + " probes. End is the largest feasible "
+              + "removal. " : " at round " + number(variant.get("round")) + ". ") + variant.get("reason"));
       section.table(table);
       hottest(section, data, name, ((Number) variant.getOrDefault("rounds", 0)).intValue(), focus);
     }
@@ -401,7 +556,9 @@ public final class ReportBuilder {
       header.add(String.valueOf(variant.get("name")));
     }
     ReportContent.Table table = new ReportContent.Table(header.toArray(new String[0]));
-    Set<String> rows = new LinkedHashSet<>(Arrays.asList("result", "round"));
+    boolean search = isSearch(data);
+    Set<String> rows = new LinkedHashSet<>(search ? Arrays.asList("result", "probes", "can remove")
+        : Arrays.asList("result", "round"));
     rows.addAll(stats);
     for (String row : rows) {
       List<String> cells = new ArrayList<>();
@@ -409,15 +566,18 @@ public final class ReportBuilder {
       for (Map<String, Object> variant : data.variants()) {
         if (row.equals("result")) {
           cells.add(String.valueOf(variant.get("status")));
-        } else if (row.equals("round")) {
+        } else if (row.equals("round") || row.equals("probes")) {
           cells.add(number(variant.get("round")));
+        } else if (row.equals("can remove")) {
+          cells.add(number(data.map(variant.get("search")).get("maxRemovable")));
         } else {
           cells.add(number(data.map(variant.get("end")).get(row)));
         }
       }
       table.row(cells);
     }
-    report.section("Variant comparison").text("Values at each variant's last round.").table(table);
+    report.section("Variant comparison").text(search ? "Values at each variant's largest feasible removal."
+        : "Values at each variant's last round.").table(table);
   }
 
   private static void reproducibility(ReportContent report, RunData data, Map<String, Object> cluster,

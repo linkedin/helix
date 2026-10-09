@@ -133,9 +133,7 @@ public final class Events {
         break;
       case "removeNode":
         for (String instance : select(args, ctx, i -> true)) {
-          state.remove(ClusterState.instanceConfigPath(instance));
-          state.remove(ClusterState.liveInstancePath(instance));
-          state.removeTree(ClusterState.INSTANCES + "/" + instance);
+          StateOps.removeInstance(state, instance);
           log.add("removeNode " + instance);
         }
         break;
@@ -254,8 +252,9 @@ public final class Events {
   /**
    * Selects instances. Forms: a name, a comma-separated or YAML list of names, {@code all},
    * {@code hottest-top[:N]}, {@code hottest-all[:N]}, {@code random[:N]}, {@code zone:<zone>},
-   * {@code re:<regex>}, {@code previously-disabled}, {@code previously-killed}, or a map with
-   * {@code pick}, {@code count}, {@code key}, {@code zone}, {@code names}, {@code pattern}.
+   * {@code re:<regex>}, {@code previously-disabled}, {@code previously-killed}, the removal orders
+   * {@code mz-balanced[:N]}, {@code mz-single[:N]}, {@code least-loaded[:N]}, {@code most-loaded[:N]},
+   * or a map with {@code pick}, {@code count}, {@code key}, {@code zone}, {@code names}, {@code pattern}.
    */
   @SuppressWarnings("unchecked")
   public static List<String> select(Object spec, Context ctx, Predicate<String> eligible) {
@@ -313,6 +312,17 @@ public final class Events {
         List<String> shuffled = new ArrayList<>(universe);
         Collections.shuffle(shuffled, ctx.random);
         return shuffled.subList(0, Math.min(count, shuffled.size()));
+      }
+      case "mz-balanced":
+      case "mz-single":
+      case "least-loaded":
+      case "most-loaded": {
+        Map<String, NodeStats> nodes = ctx.lastNodes != null ? ctx.lastNodes
+            : new StatsCollector(state, key).nodes(state.getServedLayout());
+        List<String> serving = universe.stream().filter(i -> nodes.containsKey(i) && nodes.get(i).serving)
+            .collect(Collectors.toList());
+        List<String> order = RemovalOrder.order(RemovalOrder.Strategy.parse(pick), serving, nodes, key, ctx.random);
+        return order.subList(0, Math.min(count, order.size()));
       }
       case "zone": {
         String zone = argument;

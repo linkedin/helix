@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,8 +93,33 @@ public class LocalClusterEngine implements Engine {
     }
     _cluster.startController(_settings.constraintWeights);
     RoundResult bootstrap = new RoundResult();
+    Set<String> withViews = new HashSet<>();
+    state.getWagedIdealStates().forEach((name, idealState) -> {
+      if (!idealState.isExternalViewDisabled()) {
+        withViews.add(name);
+      }
+    });
+    awaitController(withViews, System.currentTimeMillis() + _settings.roundTimeoutMillis);
     settle(bootstrap);
     readBack();
+  }
+
+  /**
+   * Waits, at most until the deadline, for the controller to lead and run its first pipeline (an
+   * external view for every resource that has one), so a slow controller start is not mistaken for a
+   * quiet cluster.
+   */
+  private void awaitController(Set<String> resources, long deadline) throws InterruptedException {
+    while (System.currentTimeMillis() < deadline) {
+      boolean ready = _cluster.read("CONTROLLER/LEADER") != null;
+      for (String resource : resources) {
+        ready &= _cluster.read("EXTERNALVIEW/" + resource) != null;
+      }
+      if (ready) {
+        return;
+      }
+      Thread.sleep(200);
+    }
   }
 
   private static Map<String, String> sessions(ClusterState state) {

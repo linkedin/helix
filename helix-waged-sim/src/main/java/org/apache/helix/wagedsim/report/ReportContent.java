@@ -103,6 +103,8 @@ public class ReportContent {
     public List<Double> markers = new ArrayList<>();
     /** Optional reference line, for example 1.0 for perfectly even. */
     public Double reference;
+    /** Label of the x axis of a line chart. */
+    public String xLabel = "round";
   }
 
   public String title;

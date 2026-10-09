@@ -49,8 +49,8 @@ public final class ScenarioLoader {
       "capacity", "weights", "addResource", "removeResource", "partitions", "replicas",
       "clusterConfig", "constraintWeights", "maintenance", "advanceClock", "restartController",
       "onDemandRebalance", "random")));
-  public static final List<String> PRESETS =
-      Collections.unmodifiableList(Arrays.asList("replay", "rca", "levers", "rehome", "converge", "restart-all"));
+  public static final List<String> PRESETS = Collections.unmodifiableList(
+      Arrays.asList("replay", "rca", "levers", "rehome", "converge", "restart-all", "scale-down"));
   private static final Set<String> TIMING = new LinkedHashSet<>(Arrays.asList("at", "every", "from", "times"));
 
   private ScenarioLoader() {
@@ -90,7 +90,7 @@ public final class ScenarioLoader {
     scenario.source = map;
     for (String key : map.keySet()) {
       if (!Arrays.asList("name", "description", "mode", "focusKey", "seed", "settings", "clusterConfig",
-          "variants", "events", "exit", "report").contains(key)) {
+          "variants", "events", "exit", "report", "search").contains(key)) {
         throw new IllegalArgumentException("Unknown scenario field '" + key + "'");
       }
     }
@@ -129,6 +129,16 @@ public final class ScenarioLoader {
     }
     if (map.get("report") != null) {
       report(scenario.report, (Map<String, Object>) map.get("report"));
+    }
+    if (map.get("search") != null) {
+      scenario.search = search((Map<String, Object>) map.get("search"));
+      if (!scenario.mode.equals("dry-run")) {
+        throw new IllegalArgumentException("A scale-down search runs in dry-run mode only");
+      }
+      if (!scenario.events.isEmpty()) {
+        throw new IllegalArgumentException(
+            "A scale-down search does not take events; set the cluster up with clusterConfig or variants");
+      }
     }
     return scenario;
   }
@@ -216,11 +226,81 @@ public final class ScenarioLoader {
         case "firstRound":
           variant.firstRound = enumValue(EngineSettings.FirstRound.class, value);
           break;
+        case "searchStrategy":
+          variant.searchStrategy = RemovalOrder.Strategy.parse(value.toString());
+          break;
+        case "tolerateZoneLoss":
+          variant.zoneLoss = zoneLoss(value);
+          break;
         default:
           throw new IllegalArgumentException("Unknown field '" + entry.getKey() + "' in variant " + name);
       }
     }
     return variant;
+  }
+
+  /** @return largest, every, or none for no zone-loss check */
+  private static String zoneLoss(Object value) {
+    String zoneLoss = String.valueOf(value).toLowerCase(Locale.ROOT);
+    if (zoneLoss.equals("false") || zoneLoss.equals("none")) {
+      return "none";
+    }
+    if (zoneLoss.equals("largest") || zoneLoss.equals("every")) {
+      return zoneLoss;
+    }
+    throw new IllegalArgumentException("tolerateZoneLoss must be largest, every or none");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Scenario.SearchSpec search(Map<String, Object> map) {
+    Scenario.SearchSpec search = new Scenario.SearchSpec();
+    for (Map.Entry<String, Object> entry : map.entrySet()) {
+      Object value = entry.getValue();
+      switch (entry.getKey()) {
+        case "removeNodes":
+          for (Map.Entry<String, Object> option : ((Map<String, Object>) value).entrySet()) {
+            Object v = option.getValue();
+            switch (option.getKey()) {
+              case "strategy":
+                search.strategy = RemovalOrder.Strategy.parse(v.toString());
+                break;
+              case "method":
+                search.method = v.toString().toLowerCase(Locale.ROOT);
+                if (!search.method.equals("binary") && !search.method.equals("linear")) {
+                  throw new IllegalArgumentException("search method must be binary or linear");
+                }
+                break;
+              case "step":
+                search.step = Math.max(1, ((Number) v).intValue());
+                break;
+              case "max":
+                search.max = ((Number) v).intValue();
+                break;
+              default:
+                throw new IllegalArgumentException("Unknown search.removeNodes field '" + option.getKey() + "'");
+            }
+          }
+          break;
+        case "feasibleIf":
+          search.feasibleIf = Condition.parse(value.toString());
+          break;
+        case "requireAtLeast":
+          search.requireAtLeast = ((Number) value).intValue();
+          break;
+        case "tolerateZoneLoss":
+          search.zoneLoss = zoneLoss(value);
+          break;
+        case "nonServing":
+          if (!"keep".equals(value) && !"remove".equals(value)) {
+            throw new IllegalArgumentException("search.nonServing must be keep or remove");
+          }
+          search.removeNonServing = "remove".equals(value);
+          break;
+        default:
+          throw new IllegalArgumentException("Unknown search field '" + entry.getKey() + "'");
+      }
+    }
+    return search;
   }
 
   private static EventSpec event(Map<String, Object> map) {

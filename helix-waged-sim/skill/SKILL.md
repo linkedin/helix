@@ -5,12 +5,14 @@ description: >-
   load evolve. Use when the user asks to "simulate WAGED", "what happens to leader skew if ...",
   "copy cluster X locally", "run a rebalance scenario", "replay a cluster's placement", "why is
   top-state skewed", "try a constraint weight / preferredScoringKeys change", "kill or disable nodes
-  and see where partitions go", or wants a local Helix cluster built from a real one. Sets up a
+  and see where partitions go", "how many nodes can we remove / scale down", "capacity headroom",
+  "can the cluster lose a zone (MZ)", or wants a local Helix cluster built from a real one. Sets up a
   cluster from helix-rest, a Pensieve point-in-time pull, a local folder of copied data, or a spec of
   nodes/resources/partitions; runs scenario rounds either as a dry run (production WAGED code in
   process) or on a real local cluster (embedded ZooKeeper, real controller, simulated participants);
-  stops on exit criteria (rounds, a condition, a timeout, or a mix); and writes Markdown/HTML (and
-  optional xlsx) reports with per-round stats and the final result.
+  stops on exit criteria (rounds, a condition, a timeout, or a mix), or searches for the most
+  instances that can be removed while WAGED still places every replica (fault-zone aware); and writes
+  Markdown/HTML (and optional xlsx) reports with per-round stats and the final result.
 allowed-tools: Bash
 ---
 
@@ -58,6 +60,22 @@ builds the package on first use, and sets `JAVA_HOME`.
 5. **Report back:** the verdict per variant, the key stats at the start and end (from the console and
    `report.md`), and the paths of `report.html` and `report.md`. Offer xlsx
    (`python3 scripts/render_xlsx.py <run folder>`) or a Google Sheet only if useful.
+
+### Scale-down questions
+
+"How many nodes can we remove?" is a search, not rounds: `scripts/waged-sim run <cluster folder>
+--scenario preset:scale-down -j 4`. Report per variant: how many instances can be removed, how many from
+each zone, and why one more fails (the WAGED failure: a capacity deficit, or a replica no instance can
+take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAPACITY). Point out:
+
+- `mz-balanced` is the plan to follow (zones stay even); `mz-single` is the worst case for zone spread.
+- `mz-balanced-zone-loss` is the answer that still survives losing the largest zone past the delay
+  window. With as many zones as replicas no zone can be lost; say so rather than calling it a failure
+  of the plan.
+- Disabled or offline instances count as capacity for WAGED. If the report says WAGED keeps replicas
+  on them, give the answer without them too (`search: {nonServing: remove}`).
+- The search assumes that if removing k fails, removing more fails too; `method: linear` checks every
+  step when that matters.
 
 ## Spec format (cluster from given constraints)
 
@@ -134,7 +152,28 @@ Events: `disable`, `enable`, `setOperation {nodes, operation}`, `kill`, `revive`
 `advanceClock: 16h`, `restartController: true`, `onDemandRebalance: true`, `random {kind, count}`.
 
 Node selectors: a name or list, `all`, `hottest-top:N`, `hottest-all:N`, `random:N`, `zone:<z>`,
-`re:<regex>`, `previously-disabled`, `previously-killed`, or `{pick, count, key, zone, names}`.
+`re:<regex>`, `previously-disabled`, `previously-killed`, the removal orders `mz-balanced:N`,
+`mz-single:N`, `least-loaded:N`, `most-loaded:N` (serving instances only), or
+`{pick, count, key, zone, names}`.
+
+A scale-down search replaces `events` and `exit` (except `timeout`) with a `search` block:
+
+```yaml
+search:
+  removeNodes: {strategy: mz-balanced, method: binary, step: 1, max: 50}   # strategy as below
+  feasibleIf: "rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
+  tolerateZoneLoss: none       # largest | every
+  nonServing: keep             # remove
+  requireAtLeast: 4            # optional; FAIL below it
+variants:                      # per variant: searchStrategy, tolerateZoneLoss, plus the usual fields
+  mz-balanced: {}
+  mz-single: {searchStrategy: mz-single}
+```
+
+Strategies: `mz-balanced`, `mz-single`, `least-loaded`, `most-loaded`, `random`, `name`. Probe stats
+(judged on WAGED's assignment): `unplacedReplicas`, `overCapacityInstances`, `zoneConflicts`,
+`replicasOnNonServing`, `zones.serving`, `search.k`, each with `.added` (relative to removing nothing),
+plus the stats below.
 
 Stats usable in conditions (per capacity key K): `skew.top.K`, `skew.all.K` (max/mean of utilization
 over serving instances), `maxUtil.top.K`, `maxUtil.all.K`, `util.top.K`, `util.all.K`,
@@ -149,4 +188,5 @@ over serving instances), `maxUtil.top.K`, `maxUtil.all.K`, `util.top.K`, `util.a
 `replay` (no changes until stable), `rca` (root-cause probes: anchors, TopState weight, scoring keys,
 MaxCapacityUsage, cold starts), `levers` (configuration changes with a controller restart), `rehome`
 (kill the 3 hottest, wait out the delay, revive), `converge` (controller restart churn),
-`restart-all` (rolling restarts).
+`restart-all` (rolling restarts), `scale-down` (how many instances can be removed: mz-balanced,
+mz-balanced surviving the loss of the largest zone, least-loaded, mz-single).

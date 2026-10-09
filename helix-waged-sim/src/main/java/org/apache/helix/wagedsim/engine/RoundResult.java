@@ -33,6 +33,8 @@ public class RoundResult {
   /** WAGED failures in this round, as TYPE/CATEGORY: message. */
   public List<String> failures = new ArrayList<>();
   public List<String> failureCategories = new ArrayList<>();
+  /** Hard constraints that blocked placement in this round, with the number of partitions they blocked. */
+  public Map<String, Long> blockingConstraints = new LinkedHashMap<>();
   public boolean maintenance;
   public boolean settled = true;
   public long computeMillis;

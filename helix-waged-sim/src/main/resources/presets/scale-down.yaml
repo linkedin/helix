@@ -1,0 +1,33 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: scale-down
+description: >-
+  How many serving instances can be removed before WAGED can no longer place every replica: a
+  capacity deficit, or a hard constraint such as fault-zone (maintenance zone) spread, makes the
+  rebalance fail, or WAGED silently places fewer replicas. Each probe removes the first k instances of
+  a removal order and runs one controller pipeline from the cluster as it is; a search finds the
+  largest k that still places everything. mz-balanced keeps zones even (the next instance comes from
+  the zone that stays least utilized without it); mz-balanced-zone-loss also requires surviving the
+  loss of the largest zone afterwards; least-loaded ignores zones; mz-single empties one zone first,
+  the worst case for zone spread.
+search:
+  removeNodes:
+    strategy: mz-balanced
+    method: binary
+  # Judged on WAGED's assignment; ".added" counts only problems the probe that removes nothing did not have.
+  feasibleIf: "rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
+  # Disabled or offline instances stay, as WAGED counts them; "remove" plans without them.
+  nonServing: keep
+variants:
+  mz-balanced: {}
+  mz-balanced-zone-loss:
+    tolerateZoneLoss: largest
+  least-loaded:
+    searchStrategy: least-loaded
+  mz-single:
+    searchStrategy: mz-single
+exit:
+  timeout: 60m
+report:
+  perNode: [start, end]

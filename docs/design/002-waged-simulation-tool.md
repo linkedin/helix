@@ -425,6 +425,20 @@ The cluster card (capacity vs required and util % per key, max host %, skew for 
 - **xlsx** uses the colour scales of the investigation sheets. It is rendered from the raw data by the skill's Python script, and the skill can upload it as a Google Sheet on request.
 - **Raw data**: `run.json`, `rounds.jsonl`, `nodes_<variant>_<round>.csv`.
 
+### Scale-down search
+
+A scenario with a `search` block answers "how many instances can be removed before WAGED can no longer place every replica?" (`preset:scale-down`). It replaces events and rounds with probes and runs in dry-run mode only.
+
+- **Probe k.** A fresh engine starts from the cluster as it is, removes the first k serving instances of a removal order (and, with `nonServing: remove`, every disabled or offline instance), and runs one controller pipeline. The topology change makes WAGED compute a new baseline over the instances left; the partial pass re-homes the removed instances' replicas.
+- **Judged on WAGED's assignment** (its best possible state), because the served layout of a single round still holds the old copies of moved replicas and omits replicas on instances that are down within the delay window. Default `feasibleIf`: `rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0`, where `.added` is relative to the probe that removes nothing.
+- **Why unplaced replicas matter.** WAGED sizes each partition's replica set by the number of active fault zones (`StateModelDefinition.getStateCountMap(activeFaultZoneCount, replicas)`). With fewer zones than replicas it places fewer replicas instead of failing, so a removal that empties a zone can pass every capacity check. A failed rebalance falls back to the last good assignment, whose replicas on removed instances also count as unplaced.
+- **Search.** Binary by default: probe 0; then the capacity bound (the most instances whose removal keeps the capacity of every assignable instance, as WAGED's baseline counts it, at or above what all replicas require) and the bound plus one; then bisect. It assumes feasibility is monotonic in k. `linear` steps from 0 to the first failure.
+- **Removal orders.** `mz-balanced` takes the next instance from the zone that stays least utilized without it (load over remaining capacity on the tightest key; with equal instances, the zone with the most instances left), smallest first; `mz-single` empties the largest zone first; `least-loaded`, `most-loaded`, `random`, `name`. The orders are also event selectors (`removeNode: mz-balanced:3`).
+- **Zone loss.** `tolerateZoneLoss: largest | every` also requires the removal to survive losing the zone with the most capacity left (or each zone) as if it stayed down past the delay window. With as many zones as replicas no zone can be lost.
+- **Fault zones as WAGED sees them.** Without topology awareness WAGED treats every instance as its own fault zone, so the search ignores domain zones there: no zone conflicts, no zone-loss check, and the zone-aware orders fall back to the smallest and least loaded instances.
+- **Failure detail.** The innermost WAGED failure message and the hard constraints that blocked the failing replica (`FAULT_ZONE`, `NODE_CAPACITY`, ...), from a failure reporter installed on the algorithm.
+- **Output.** `run.json` `variants[].search` (answer, per-zone removal and utilization, first failure, probes); one `rounds.jsonl` record per probe; per-node CSVs for the start and the largest feasible removal; a "Scale-down search" report section.
+
 ### Copilot skill (thin)
 
 `SKILL.md` lives at `helix-waged-sim/skill/` and is installed to `~/.copilot/skills/waged-sim`. Its workflow:
@@ -443,7 +457,8 @@ Guardrails:
 ## Implementation status
 
 Built on 2026-10-08 as module `helix-waged-sim` (CLI, both engines, all four sources, reports, presets,
-skill) plus the helix-core seam. All 36 module tests pass; the seam has its own test in helix-core.
+skill) plus the helix-core seam. The scale-down search was added on 2026-10-09. 44 of the 45 module tests
+pass and one is skipped unless a real Pensieve pull is given; the seam has its own test in helix-core.
 
 **Validated:**
 - **RCA parity.** The `rca` preset reproduces the published probe values exactly on the two captured
@@ -455,6 +470,13 @@ skill) plus the helix-core seam. All 36 module tests pass; the seam has its own 
 - **Engines.** The local cluster (embedded ZooKeeper, controller in a child JVM, real participants)
   settles, honours the compressed delay window, and gives the same best possible placement as the dry
   run started with a controller restart.
+- **Scale-down search.** On generated clusters the answers match hand-computed limits: 3 zones of 4
+  instances at 70% load allow one removal per zone (3) with balanced removal but only 1 from a single
+  zone; 3 uneven zones (10/8/6) allow 9 balanced versus 5 ignoring zones; 5 zones allow 3 when the
+  largest zone must also be survivable. On a captured 230-instance, 20-zone production snapshot at 84%
+  CU, four variants take about 75 seconds with `-j 4`: 38 removable (capacity bound, confirmed by WAGED's
+  capacity deficit at 39), 37 without a disabled instance WAGED still counts, and 26 when the largest
+  zone must also be survivable (24 when removal ignores zones).
 
 **Deviations from the design:**
 - Both engines simulate WAGED resources only; other resources stay in the folder untouched.
@@ -463,6 +485,11 @@ skill) plus the helix-core seam. All 36 module tests pass; the seam has its own 
 - The local cluster starts participants before the controller, so the controller's first pipeline sees
   every live instance.
 - `report.xlsx` is rendered by the skill's `render_xlsx.py`, not by the Java tool.
+- The tool's own log turns WAGED's failure logs off (every failure is in the results). The local
+  controller gets its own log configuration that keeps them, because local mode reads rebalance
+  failures from the controller's log.
+- Local mode waits until the controller leads and has written an external view for every WAGED
+  resource before the first settle, so a slow controller start is not taken for a quiet cluster.
 
 **Not built yet:**
 - The single-process participant simulator for clusters over about 100 instances. Local mode uses real
