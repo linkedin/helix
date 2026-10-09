@@ -1,0 +1,26 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+#
+# A small generated cluster: 24 instances in 4 zones, 6 MasterSlave resources with lognormal CU
+# weights and two heavier partitions per resource, and a 16-hour delay window.
+cluster:
+  name: SIM_SMALL
+  capacityKeys: [CU, DISK, PARTCOUNT]
+  instanceCapacity: {CU: 20000, DISK: 400000, PARTCOUNT: 200}
+  defaultPartitionWeight: {CU: 10, DISK: 1000, PARTCOUNT: 1}
+  rebalancePreference: {EVENNESS: 1, LESS_MOVEMENT: 2}
+  delayRebalance: {enabled: true, time: 16h}
+  topology: {faultZoneType: zone, path: /zone/instance}
+instances:
+  - {count: 24, prefix: node, zones: 4}
+resources:
+  - count: 6
+    prefix: db
+    partitions: 96
+    replicas: 3
+    stateModel: MasterSlave
+    weights: {CU: "lognormal(60, 0.6)", DISK: "uniform(500, 6000)", PARTCOUNT: 1}
+    outliers: {count: 2, factor: 4, key: CU}
+initialPlacement: cold-start
+seed: 7

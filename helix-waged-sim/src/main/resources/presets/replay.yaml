@@ -1,0 +1,13 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: replay
+description: >-
+  Run the controller's normal pipeline on the cluster as copied, with no changes, until nothing moves.
+  Shows whether WAGED would move anything from the served layout, and the starting stats.
+settings:
+  firstRound: steady
+exit:
+  stableFor: 2
+  maxRounds: 10
+  timeout: 30m

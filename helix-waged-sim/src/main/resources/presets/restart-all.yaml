@@ -1,0 +1,15 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: restart-all
+description: >-
+  A rolling restart: one random instance restarts in each of the first ten rounds. Inside the delay
+  window replicas stay put, so this mostly moves top states. Ends when nothing moves for two rounds.
+events:
+  - every: 1
+    times: 10
+    restart: random:1
+exit:
+  stableFor: 2
+  maxRounds: 20
+  timeout: 60m

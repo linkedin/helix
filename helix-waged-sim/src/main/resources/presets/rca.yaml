@@ -1,0 +1,48 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: rca
+description: >-
+  Root-cause probes for top-state skew. Each variant re-runs one WAGED partial pass on the copied
+  state (served layout, stored baseline, enabled-live nodes active) with one setting changed, so the
+  difference to the replay variant shows what holds the skew: the movement anchors, the TopState
+  weight, the keys the usage terms read (the yardstick), MaxCapacityUsage, or nothing (the floor and
+  the cold starts show how even any layout can be). Diagnostic only; these are not proposed settings.
+settings:
+  pass: partial
+  activeNodes: enabled-live
+variants:
+  replay: {}
+  anchors-off:
+    constraintWeights: {PartitionMovement: 0, BaselineInfluence: 0}
+  pm-off:
+    constraintWeights: {PartitionMovement: 0}
+  bi-off:
+    constraintWeights: {BaselineInfluence: 0}
+  ts-x4:
+    constraintWeights: {TopState: 12}
+  focus-keys:
+    clusterConfig: {preferredScoringKeys: ["${focusKey}"]}
+  focus-keys-ts-x4:
+    constraintWeights: {TopState: 12}
+    clusterConfig: {preferredScoringKeys: ["${focusKey}"]}
+  mc-off:
+    constraintWeights: {MaxCapacityUsage: 0}
+  yardstick-mc-off:
+    constraintWeights: {MaxCapacityUsage: 0}
+  yardstick-focus-mc-off:
+    constraintWeights: {MaxCapacityUsage: 0}
+    clusterConfig: {preferredScoringKeys: ["${focusKey}"]}
+  role-blind-off:
+    constraintWeights: {MaxCapacityUsage: 0, InstancePartitionsCount: 0, ResourcePartitionAntiAffinity: 0}
+  cold-start:
+    pass: cold
+  cold-start-focus-keys:
+    pass: cold
+    clusterConfig: {preferredScoringKeys: ["${focusKey}"]}
+exit:
+  maxRounds: 1
+  failOnRebalanceFailure: false
+report:
+  stats: ["skew.top.${focusKey}", "skew.all.${focusKey}", "maxUtil.top.${focusKey}", moves.topState, moves.replicas, yardstick.misrated]
+  perNode: [start, end]

@@ -29,6 +29,7 @@ Build order matters — modules listed earlier are dependencies of later ones:
 | `helix-common` | Shared utilities, data models (`ZNRecord`), exceptions, constants |
 | `helix-core` | **Main engine**: controller, participant, spectator, rebalancers, state machines, pipeline |
 | `helix-rest` | REST API server for cluster management operations |
+| `helix-waged-sim` | `waged-sim` CLI: copies or generates a cluster, runs WAGED scenarios (in-process dry run or a real local cluster), writes reports |
 | `helix-lock` | Distributed lock primitives built on ZooKeeper |
 | `helix-agent` | Command execution agent for running tasks on cluster nodes |
 | `recipes` | Example implementations (distributed lock manager, etc.) |

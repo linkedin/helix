@@ -313,6 +313,7 @@
     <module>helix-common</module>
     <module>helix-core</module>
     <module>helix-rest</module>
+    <module>helix-waged-sim</module>
     <module>helix-lock</module>
     <module>helix-agent</module>
     <module>recipes</module>

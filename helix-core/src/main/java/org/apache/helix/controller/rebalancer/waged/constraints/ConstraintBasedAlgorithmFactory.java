@@ -19,6 +19,7 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,28 @@ public class ConstraintBasedAlgorithmFactory {
 
   public static RebalanceAlgorithm getInstance(
       Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preferences) {
+    return getInstance(preferences, Collections.emptyMap());
+  }
+
+  /**
+   * Same as {@link #getInstance(Map)}, with base weights supplied for this algorithm instance only.
+   * Keys are soft constraint class simple names, as in soft-constraint-weight.properties; a value
+   * replaces the configured base weight before the preference multipliers apply. The shared
+   * configured weights are not modified, so instances with different weights can run side by side.
+   *
+   * @param preferences the global rebalance preferences
+   * @param constraintWeightOverrides base weight per soft constraint class simple name
+   * @throws IllegalArgumentException if a key does not name a configured soft constraint
+   */
+  public static RebalanceAlgorithm getInstance(
+      Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preferences,
+      Map<String, Float> constraintWeightOverrides) {
+    for (String constraintName : constraintWeightOverrides.keySet()) {
+      if (!MODEL.containsKey(constraintName)) {
+        throw new IllegalArgumentException(
+            "Unknown soft constraint " + constraintName + "; known: " + MODEL.keySet());
+      }
+    }
     List<HardConstraint> hardConstraints =
         ImmutableList.of(new FaultZoneAwareConstraint(), new NodeCapacityConstraint(),
             new ReplicaActivateConstraint(), new NodeMaxPartitionLimitConstraint(),
@@ -118,7 +141,8 @@ public class ConstraintBasedAlgorithmFactory {
         return FORCE_BASELINE_CONVERGE_WEIGHT;
       }
 
-      float weight = MODEL.get(key.getClass().getSimpleName());
+      String constraintName = key.getClass().getSimpleName();
+      float weight = constraintWeightOverrides.getOrDefault(constraintName, MODEL.get(constraintName));
       // Note that BaselineInfluenceConstraint is a constraint that promotes movement for evenness,
       // and is therefore controlled by the evenness preference. Only PartitionMovementConstraint
       // contributes to less movement.
@@ -128,6 +152,14 @@ public class ConstraintBasedAlgorithmFactory {
 
     ForkJoinPool constraintEvaluationPool = getSharedConstraintEvaluationPool();
     return new ConstraintBasedAlgorithm(hardConstraints, softConstraintsWithWeight, constraintEvaluationPool);
+  }
+
+  /**
+   * @return a copy of the configured base weights of the soft constraints, keyed by class simple
+   *         name, before the preference multipliers apply
+   */
+  public static Map<String, Float> getConstraintWeights() {
+    return Collections.unmodifiableMap(new HashMap<>(MODEL));
   }
 
   /**

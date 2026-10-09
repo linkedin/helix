@@ -1,0 +1,13 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: converge
+description: >-
+  Restart the controller and run pipeline rounds until nothing moves for three rounds: shows how much
+  a controller restart (global pass) churns, and whether WAGED settles.
+settings:
+  firstRound: restart
+exit:
+  stableFor: 3
+  maxRounds: 20
+  timeout: 60m

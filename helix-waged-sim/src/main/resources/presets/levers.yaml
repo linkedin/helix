@@ -1,0 +1,24 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: levers
+description: >-
+  What a configuration change would do. Each variant starts the controller fresh (as a weight or
+  preference change does in production), runs the global pass anchored to the stored baseline, then
+  partial passes until nothing moves.
+settings:
+  firstRound: restart
+variants:
+  current: {}
+  ts-x2:
+    constraintWeights: {TopState: 6}
+  ts-x4:
+    constraintWeights: {TopState: 12}
+  less-movement-1:
+    clusterConfig: {rebalancePreference: {LESS_MOVEMENT: 1}}
+  focus-keys:
+    clusterConfig: {preferredScoringKeys: ["${focusKey}"]}
+exit:
+  stableFor: 2
+  maxRounds: 8
+  timeout: 60m

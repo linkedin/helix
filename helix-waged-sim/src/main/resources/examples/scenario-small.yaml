@@ -1,0 +1,36 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+#
+# Take the two instances with the most top-state CU offline, wait out the delay window, bring them
+# back, and compare production settings with a TopState term that reads CU only and outweighs the
+# movement anchor. Both variants start with a controller restart, which is how new weights reach
+# production (the global pass recomputes the baseline). In this cluster DISK is twice as utilized as
+# CU, so with all keys the TopState term reads DISK and cannot even out CU. Passes when every partition
+# has a top state and top-state CU skew is 1.25 or less for two rounds; fails at round 12 or after
+# 10 minutes.
+name: kill-and-recover
+focusKey: CU
+settings:
+  firstRound: restart
+variants:
+  production: {}
+  cu-keys-topstate-x4:
+    constraintWeights: {TopState: 12}
+    clusterConfig: {preferredScoringKeys: [CU]}
+events:
+  - at: 1
+    kill: hottest-top:2
+  - at: 2
+    advanceClock: 17h
+  - at: 4
+    revive: previously-killed
+exit:
+  until: "skew.top.CU <= 1.25 and missingTopState == 0"
+  stableFor: 2
+  failIf: "violations.capacity > 0"
+  maxRounds: 12
+  timeout: 10m
+report:
+  formats: [md, html]
+  perNode: [start, end]

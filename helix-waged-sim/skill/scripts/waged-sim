@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+#
+# Runs the waged-sim command line. Finds the Helix repository (WAGED_SIM_REPO, the path recorded by
+# install.sh, or this script's own location), builds the package on first use, and sets JAVA_HOME.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${WAGED_SIM_REPO:-}"
+if [ -z "$REPO" ] && [ -f "$HERE/../repo-path" ]; then
+  REPO="$(cat "$HERE/../repo-path")"
+fi
+if [ -z "$REPO" ] && [ -f "$HERE/../../pom.xml" ] && [ -d "$HERE/../../../helix-core" ]; then
+  REPO="$(cd "$HERE/../../.." && pwd)"
+fi
+if [ -z "$REPO" ] || [ ! -d "$REPO/helix-waged-sim" ]; then
+  echo "waged-sim: cannot find the Helix repository; set WAGED_SIM_REPO=/path/to/helix" >&2
+  exit 2
+fi
+
+if [ -z "${JAVA_HOME:-}" ]; then
+  if [ -x /usr/libexec/java_home ]; then
+    JAVA_HOME="$(/usr/libexec/java_home 2>/dev/null || true)"
+  fi
+  if [ -z "${JAVA_HOME:-}" ] && command -v java >/dev/null 2>&1; then
+    JAVA_BIN="$(command -v java)"
+    JAVA_BIN="$(readlink -f "$JAVA_BIN" 2>/dev/null || echo "$JAVA_BIN")"
+    JAVA_HOME="$(dirname "$(dirname "$JAVA_BIN")")"
+  fi
+  export JAVA_HOME
+fi
+
+PKG="$REPO/helix-waged-sim/target/helix-waged-sim-pkg"
+if [ ! -f "$PKG/bin/waged-sim.sh" ] || [ "${WAGED_SIM_REBUILD:-0}" = "1" ]; then
+  echo "waged-sim: building the package (first run)..." >&2
+  (cd "$REPO" && mvn -q -pl helix-waged-sim -am install -DskipTests -Dcheckstyle.skip=true >&2)
+fi
+chmod +x "$PKG/bin/waged-sim.sh"
+exec "$PKG/bin/waged-sim.sh" "$@"

@@ -1,0 +1,18 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+# See the NOTICE file distributed with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to you under the Apache License, Version 2.0.
+name: rehome
+description: >-
+  Take the three instances with the most top-state load offline, wait out the delay window so WAGED
+  re-homes their replicas, then bring them back, and watch how top-state skew moves.
+events:
+  - at: 1
+    kill: hottest-top:3
+  - at: 2
+    advanceClock: 7d
+  - at: 4
+    revive: previously-killed
+exit:
+  stableFor: 2
+  maxRounds: 12
+  timeout: 60m
