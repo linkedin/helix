@@ -173,6 +173,12 @@ public class CloudConfig extends HelixProperty {
     private ZNRecord _record;
 
     public CloudConfig build() {
+      // When cloud is enabled but no provider is specified, default to the CUSTOMIZED provider. The
+      // engine (HelixCloudProperty) then supplies the cloud-info processor package and name, so they
+      // no longer need to be provided here.
+      if (getCloudEnabled() && getCloudProvider() == null) {
+        setCloudProvider(CloudProvider.CUSTOMIZED);
+      }
       validate();
       return new CloudConfig(_record);
     }
@@ -275,10 +281,12 @@ public class CloudConfig extends HelixProperty {
           throw new HelixException(
               "This Cloud Configuration is Invalid. The Cloud Provider is missing from the config.");
         } else if (this.getCloudProvider().equals(CloudProvider.CUSTOMIZED.name())) {
-          if (this.getCloudInfoProcessorName() == null || this.getCloudInfoSources() == null
-              || this.getCloudInfoSources().size() == 0) {
+          // CloudInfoProcessorName is no longer required: when it is absent the engine
+          // (HelixCloudProperty) supplies the default LinkedIn cloud-info processor. CloudInfoSources
+          // still varies per fabric/product and therefore remains required.
+          if (this.getCloudInfoSources() == null || this.getCloudInfoSources().size() == 0) {
             throw new HelixException(
-                "This Cloud Configuration is Invalid. CUSTOMIZED provider has been chosen without defining CloudInfoProcessorName or CloudInfoSources");
+                "This Cloud Configuration is Invalid. CUSTOMIZED provider has been chosen without defining CloudInfoSources");
           }
         }
       }
