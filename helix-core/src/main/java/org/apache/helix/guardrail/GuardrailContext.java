@@ -43,6 +43,7 @@ public class GuardrailContext {
   private final String clusterName;
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
+  private final String resourceName;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
   private final InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -57,6 +58,7 @@ public class GuardrailContext {
     this.clusterName = builder.clusterName;
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
+    this.resourceName = builder.resourceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
     this.proposedInstanceOperation = builder.proposedInstanceOperation;
@@ -79,6 +81,11 @@ public class GuardrailContext {
   /** The instance targeted by an instance-scoped mutation, or {@code null} if not applicable. */
   public String getInstanceName() {
     return instanceName;
+  }
+
+  /** The resource targeted by a resource-scoped mutation, or {@code null} if not applicable. */
+  public String getResourceName() {
+    return resourceName;
   }
 
   /**
@@ -171,6 +178,7 @@ public class GuardrailContext {
     private final String clusterName;
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
+    private String resourceName;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
     private InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -192,6 +200,11 @@ public class GuardrailContext {
 
     public Builder instanceName(String instanceName) {
       this.instanceName = instanceName;
+      return this;
+    }
+
+    public Builder resourceName(String resourceName) {
+      this.resourceName = resourceName;
       return this;
     }
 
