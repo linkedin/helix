@@ -27,7 +27,6 @@ import org.apache.helix.guardrail.ReadOnlyDataAccessor;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.IdealState;
-import org.apache.helix.model.ResourceConfig;
 
 /**
  * Guard rail that blocks an ideal-state edit which would <em>introduce or worsen</em> a resource
@@ -44,10 +43,10 @@ import org.apache.helix.model.ResourceConfig;
  * is accepted into ZooKeeper and only manifests later as degraded rebalance behavior.
  * <p>
  * The effective minimum active replica count is resolved exactly the way the rebalancer resolves it
- * ({@link DelayedRebalanceUtil#getMinActiveReplica}): the resource config value takes precedence,
- * then the ideal state value, then the replica count itself (which is always safe). The existing
- * resource config is read from the metadata store because an ideal-state edit does not change it;
- * this makes <em>lowering</em> {@code REPLICAS} below an existing {@code MIN_ACTIVE_REPLICAS}
+ * ({@link DelayedRebalanceUtil#getMinActiveReplica}): the ideal state value is used, falling back to
+ * the replica count itself (which is always safe) when it is unset. The existing ideal state is read
+ * from the metadata store because an ideal-state edit is validated against the state already in the
+ * store; this makes <em>lowering</em> {@code REPLICAS} below an existing {@code MIN_ACTIVE_REPLICAS}
  * detectable, not only edits that raise {@code MIN_ACTIVE_REPLICAS}.
  * <p>
  * This is a <em>delta</em> guard: it compares the resulting (merged, post-write) ideal state
@@ -92,13 +91,10 @@ public class MinActiveReplicasConsistencyGuardrailRule implements GuardrailRule 
       return ValidationResult.feasible();
     }
 
-    // Resolve the effective minimum active replica count the same way the rebalancer does: the
-    // resource config value wins, then the ideal state value, then the replica count. The resource
-    // config is unchanged by an ideal-state edit, so the same value applies to the before and after
-    // states.
-    ResourceConfig resourceConfig = readResourceConfig(context, resourceName);
-    int proposedMinActiveReplicas = DelayedRebalanceUtil.getMinActiveReplica(resourceConfig,
-        proposedIdealState, proposedReplicaCount);
+    // Resolve the effective minimum active replica count the same way the rebalancer does: the ideal
+    // state value is used, falling back to the replica count when it is unset.
+    int proposedMinActiveReplicas =
+        DelayedRebalanceUtil.getMinActiveReplica(proposedIdealState, proposedReplicaCount);
     int proposedGap = proposedMinActiveReplicas - proposedReplicaCount;
     if (proposedGap <= 0) {
       // Resulting state is consistent: MIN_ACTIVE_REPLICAS <= REPLICAS.
@@ -108,7 +104,7 @@ public class MinActiveReplicasConsistencyGuardrailRule implements GuardrailRule 
     // The resulting state is inconsistent. Only block when this edit introduces or worsens it; a
     // pre-existing gap of equal-or-greater size is grandfathered so re-writing an already
     // inconsistent resource, editing an unrelated field, or shrinking the gap is not rejected.
-    int existingGap = existingGap(context, resourceName, resourceConfig);
+    int existingGap = existingGap(context, resourceName);
     if (proposedGap <= existingGap) {
       return ValidationResult.feasible();
     }
@@ -127,14 +123,12 @@ public class MinActiveReplicasConsistencyGuardrailRule implements GuardrailRule 
   }
 
   /**
-   * The current (pre-write) {@code effectiveMinActive - replicas} gap for the resource, using the
-   * same resource config that applies to the proposed state. Returns {@link Integer#MIN_VALUE} when
-   * no concrete benign baseline can be established (the ideal state does not yet exist, or its
-   * replica count is not a concrete number) so that any resulting inconsistency is treated as newly
-   * introduced.
+   * The current (pre-write) {@code effectiveMinActive - replicas} gap for the resource. Returns
+   * {@link Integer#MIN_VALUE} when no concrete benign baseline can be established (the ideal state
+   * does not yet exist, or its replica count is not a concrete number) so that any resulting
+   * inconsistency is treated as newly introduced.
    */
-  private static int existingGap(GuardrailContext context, String resourceName,
-      ResourceConfig resourceConfig) {
+  private static int existingGap(GuardrailContext context, String resourceName) {
     IdealState existingIdealState = readIdealState(context, resourceName);
     if (existingIdealState == null) {
       return Integer.MIN_VALUE;
@@ -143,8 +137,8 @@ public class MinActiveReplicasConsistencyGuardrailRule implements GuardrailRule 
     if (existingReplicaCount == null) {
       return Integer.MIN_VALUE;
     }
-    int existingMinActiveReplicas = DelayedRebalanceUtil.getMinActiveReplica(resourceConfig,
-        existingIdealState, existingReplicaCount);
+    int existingMinActiveReplicas =
+        DelayedRebalanceUtil.getMinActiveReplica(existingIdealState, existingReplicaCount);
     return existingMinActiveReplicas - existingReplicaCount;
   }
 
@@ -155,15 +149,6 @@ public class MinActiveReplicasConsistencyGuardrailRule implements GuardrailRule 
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     return dataAccessor.getProperty(keyBuilder.idealStates(resourceName));
-  }
-
-  private static ResourceConfig readResourceConfig(GuardrailContext context, String resourceName) {
-    if (resourceName == null) {
-      return null;
-    }
-    ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
-    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
-    return dataAccessor.getProperty(keyBuilder.resourceConfig(resourceName));
   }
 
   private static Integer parseConcreteReplicaCount(String replicas) {
