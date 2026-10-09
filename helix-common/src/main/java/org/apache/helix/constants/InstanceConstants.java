@@ -29,13 +29,6 @@ public class InstanceConstants {
   public static final Set<InstanceOperation> UNROUTABLE_INSTANCE_OPERATIONS =
       ImmutableSet.of(InstanceOperation.SWAP_IN, InstanceOperation.UNKNOWN);
 
-  @Deprecated
-  public enum InstanceDisabledType {
-    CLOUD_EVENT,
-    USER_OPERATION,
-    DEFAULT_INSTANCE_DISABLE_TYPE
-  }
-
   public enum InstanceOperationSource {
     ADMIN(0), USER(1), AUTOMATION(2), DEFAULT(3);
 
@@ -47,26 +40,6 @@ public class InstanceConstants {
 
     public int getPriority() {
       return _priority;
-    }
-
-    /**
-     * Convert from InstanceDisabledType to InstanceOperationTrigger
-     *
-     * @param disabledType InstanceDisabledType
-     * @return InstanceOperationTrigger
-     * @deprecated The concept of InstanceDisabledType mapping directly to an InstanceOperationSource is no longer used.
-     */
-    @Deprecated
-    public static InstanceOperationSource instanceDisabledTypeToInstanceOperationSource(
-        InstanceDisabledType disabledType) {
-      switch (disabledType) {
-        case CLOUD_EVENT:
-          return InstanceOperationSource.AUTOMATION;
-        case USER_OPERATION:
-          return InstanceOperationSource.USER;
-        default:
-          return InstanceOperationSource.DEFAULT;
-      }
     }
   }
 

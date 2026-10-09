@@ -83,26 +83,20 @@ public class TestInstanceConfig {
   public void testSetInstanceEnableWithReason() {
     InstanceConfig instanceConfig = new InstanceConfig(new ZNRecord("id"));
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
 
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.toString()), null);
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.toString()), null);
-    Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
-        .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_TYPE.toString()), null);
 
     String reasonCode = "ReasonCode";
     instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
         InstanceConstants.InstanceOperation.DISABLE).setReason(reasonCode).build());
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.toString()), "false");
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.toString()), reasonCode);
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), reasonCode);
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.USER_OPERATION.toString());
   }
 
   @Test
@@ -136,8 +130,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.AUTOMATION);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "disableReason");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "disableReason");
 
     // Automation source then enables the instance
@@ -184,7 +176,6 @@ public class TestInstanceConfig {
     // Disable the instance with legacy HELIX_ENABLED field set to false
     instanceConfig.getRecord()
         .setSimpleField(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "false");
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
     instanceConfig.setInstanceDisabledReason("foo");
     Assert.assertFalse(instanceConfig.getInstanceEnabled());
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
@@ -202,8 +193,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.AUTOMATION);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "bar");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "bar");
 
     // Enable with automation source and return the instance to DISABLE with user source
@@ -216,8 +205,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.USER);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "foo");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.USER_OPERATION.name());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "foo");
   }
 
