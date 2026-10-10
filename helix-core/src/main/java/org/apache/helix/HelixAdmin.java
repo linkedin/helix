@@ -41,6 +41,7 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
@@ -883,6 +884,23 @@ public interface HelixAdmin {
    */
   default boolean isInstanceDrained(String clusterName, String instanceName) {
     throw new UnsupportedOperationException("isInstanceDrained is not implemented.");
+  }
+
+  /**
+   * Returns a read-only, instance-scoped observation of the replicas an instance holds and of
+   * whether Helix considers it drained.
+   *
+   * <p>Replica coverage and drain coverage are reported separately and must be checked before a
+   * result is used; an observation Helix could not complete reports incomplete coverage and every
+   * readiness predicate on the result returns false.
+   *
+   * @param clusterName cluster name
+   * @param instanceName instance name
+   * @return the instance replica status
+   */
+  default InstanceReplicaStatus getInstanceReplicaStatus(String clusterName,
+      String instanceName) {
+    throw new UnsupportedOperationException("getInstanceReplicaStatus is not implemented.");
   }
 
   /**
