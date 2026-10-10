@@ -139,6 +139,22 @@ class GlobalRebalanceRunner implements AutoCloseable {
       final boolean waitForGlobalRebalance = !_asyncGlobalRebalanceEnabled;
       _lastAsyncFailure.set(null);
       final String clusterName = clusterData.getClusterName();
+
+      // CICP-5409: build the cluster model on the CALLING (pipeline) thread.
+      //
+      // GenericHelixController owns a single ResourceControllerDataProvider instance and refreshes
+      // it in place on every event-loop iteration. In async mode the pipeline thread does not wait
+      // for the future below, so anything the baseline task reads from clusterData or
+      // currentStateOutput can be mutated underneath it by the next iteration. Materializing the
+      // ClusterModel here keeps all reads of that shared, mutable pipeline state on the thread that
+      // owns it; the model and the cluster name are the only things the async task needs, and the
+      // model holds no back-reference into the data provider.
+      //
+      // The expensive part -- the rebalance algorithm -- still runs asynchronously.
+      final ClusterModel clusterModel =
+          buildClusterModel(clusterData, resourceMap, allAssignableInstances, currentStateOutput,
+              clusterChanges);
+
       // Calculate the Baseline assignment for global rebalance.
       Future<Boolean> result = _baselineCalculateExecutor.submit(() -> {
         final Thread currentThread = Thread.currentThread();
@@ -148,8 +164,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
           // If the synchronous thread does not wait for the baseline to be calculated, the synchronous thread should
           // be triggered again after baseline is finished.
           // Set shouldTriggerMainPipeline to be !waitForGlobalRebalance
-          doGlobalRebalance(clusterData, resourceMap, allAssignableInstances, algorithm,
-              currentStateOutput, !waitForGlobalRebalance, clusterChanges);
+          doGlobalRebalance(clusterModel, clusterName, algorithm, !waitForGlobalRebalance);
         } catch (HelixRebalanceException e) {
           // Capture the original exception so the synchronous caller can preserve the
           // FailureCategory when re-throwing. The Type is intentionally NOT preserved on the
@@ -197,34 +212,48 @@ class GlobalRebalanceRunner implements AutoCloseable {
   }
 
   /**
-   * Calculate and update the Baseline assignment
-   * @param shouldTriggerMainPipeline True if the call should trigger a following main pipeline rebalance
-   *                                   so the new Baseline could be applied to cluster.
+   * Materialize the ClusterModel for a Baseline calculation.
+   * <p>
+   * CICP-5409: this reads the shared, pipeline-owned {@link ResourceControllerDataProvider} and
+   * {@link CurrentStateOutput}, so it must only ever be called on the controller pipeline thread -
+   * never from the async baseline executor.
    */
-  private void doGlobalRebalance(ResourceControllerDataProvider clusterData,
+  private ClusterModel buildClusterModel(ResourceControllerDataProvider clusterData,
       Map<String, Resource> resourceMap, Set<String> allAssignableInstances,
-      RebalanceAlgorithm algorithm, CurrentStateOutput currentStateOutput, boolean shouldTriggerMainPipeline,
-      Map<HelixConstants.ChangeType, Set<String>> clusterChanges)
-      throws HelixRebalanceException {
-    LOG.info("Start calculating the new baseline.");
-    _baselineCalcCounter.increment(1L);
-    _baselineCalcLatency.startMeasuringLatency();
-
+      CurrentStateOutput currentStateOutput,
+      Map<HelixConstants.ChangeType, Set<String>> clusterChanges) throws HelixRebalanceException {
     // Build the cluster model for rebalance calculation.
     // Note, for a Baseline calculation,
     // 1. Ignore node status (disable/offline).
     // 2. Use the previous Baseline as the only parameter about the previous assignment.
     Map<String, ResourceAssignment> currentBaseline =
         _assignmentManager.getBaselineAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
-    ClusterModel clusterModel;
     try {
-      clusterModel = ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
+      return ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
           allAssignableInstances, clusterChanges, currentBaseline);
     } catch (Exception ex) {
       throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
+  }
+
+  /**
+   * Calculate and update the Baseline assignment
+   * <p>
+   * CICP-5409: this runs on the async baseline executor and therefore must operate only on the
+   * pre-materialized {@link ClusterModel} and the cluster name. It must not be given the
+   * ResourceControllerDataProvider, the resource map or the CurrentStateOutput, all of which the
+   * pipeline thread may be mutating concurrently.
+   * @param shouldTriggerMainPipeline True if the call should trigger a following main pipeline rebalance
+   *                                   so the new Baseline could be applied to cluster.
+   */
+  private void doGlobalRebalance(ClusterModel clusterModel, String clusterName,
+      RebalanceAlgorithm algorithm, boolean shouldTriggerMainPipeline)
+      throws HelixRebalanceException {
+    LOG.info("Start calculating the new baseline.");
+    _baselineCalcCounter.increment(1L);
+    _baselineCalcLatency.startMeasuringLatency();
 
     Map<String, ResourceAssignment> newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
     boolean isBaselineChanged =
@@ -248,7 +277,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
 
     if (isBaselineChanged && shouldTriggerMainPipeline) {
       LOG.info("Schedule a new rebalance after the new baseline calculation has finished.");
-      RebalanceUtil.scheduleOnDemandPipeline(clusterData.getClusterName(), 0L, false);
+      RebalanceUtil.scheduleOnDemandPipeline(clusterName, 0L, false);
     }
   }
 
