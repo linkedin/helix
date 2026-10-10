@@ -98,6 +98,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // a partition stays degraded (its recovery duration). Persists across pipeline runs so a start
   // recorded in one run resolves to a duration in a later run, mirroring _missingTopStateMap.
   private Map<String, Map<String, MissingMinActiveReplicaRecord>> _missingMinActiveReplicaMap;
+  private final AtomicLong _recoveryObservationEpoch = new AtomicLong();
 
   // Maintain a set of all ChangeTypes for change detection
   private Set<HelixConstants.ChangeType> _refreshedChangeTypes;
@@ -167,7 +168,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _inProgressHandoffMap = new HashMap<>();
     _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
-    _missingMinActiveReplicaMap = new HashMap<>();
+    _missingMinActiveReplicaMap = new ConcurrentHashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
     _customizedViewCacheMap = new HashMap<>();
@@ -398,6 +399,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     return _missingMinActiveReplicaMap;
   }
 
+  public long getRecoveryObservationEpoch() {
+    return _recoveryObservationEpoch.get();
+  }
+
   public Map<String, Map<String, InProgressHandoffRecord>> getInProgressHandoffMap() {
     return _inProgressHandoffMap;
   }
@@ -493,6 +498,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   }
 
   public void clearMonitoringRecords() {
+    _recoveryObservationEpoch.incrementAndGet();
     _missingTopStateMap.clear();
     _lastTopStateLocationMap.clear();
     _missingMinActiveReplicaMap.clear();
