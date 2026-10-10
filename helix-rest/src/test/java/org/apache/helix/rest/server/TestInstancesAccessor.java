@@ -40,6 +40,9 @@ import com.google.common.collect.ImmutableSet;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
@@ -1098,6 +1101,142 @@ public class TestInstancesAccessor extends AbstractTestClass {
             .isBodyReturnExpected(true).format(clusterName).get(this));
     return getSortedStringList(node,
         InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas.name());
+  }
+
+  /**
+   * End to end through the real rebalance-feasibility guard rail. Four instances host three
+   * replicas of every partition, so draining one is feasible but draining two together is not.
+   * A request commits every instance or none.
+   */
+  @Test
+  public void testInstanceOperationMaintenance() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestInstanceOperationMaintenanceCluster";
+    try {
+      _gSetupTool.addCluster(cluster, true);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList("CU"));
+      clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap("CU", 100));
+      clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap("CU", 1));
+      clusterConfig.setInstanceOperationMaintenanceBudget(2);
+      _configAccessor.setClusterConfig(cluster, clusterConfig);
+      List<String> instances = new ArrayList<>();
+      for (int i = 0; i < 4; i++) {
+        String instance = cluster + "_localhost_" + (13200 + i);
+        _gSetupTool.addInstanceToCluster(cluster, instance);
+        instances.add(instance);
+        MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+        participant.syncStart();
+        _mockParticipantManagers.add(participant);
+      }
+      _clusterControllerManagers.add(startController(cluster));
+      String resource = "TestDB_WAGED";
+      _gSetupTool.addResourceToCluster(cluster, resource, 3, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+      IdealState idealState =
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+      idealState.setMinActiveReplicas(1);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+      _gSetupTool.rebalanceStorageCluster(cluster, resource, 3);
+      try (BestPossibleExternalViewVerifier verifier =
+          new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+        Assert.assertTrue(verifier.verifyByPolling());
+      }
+      clusterConfig = _configAccessor.getClusterConfig(cluster);
+      clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(cluster, clusterConfig);
+      String first = instances.get(0);
+      String second = instances.get(1);
+      long expiresAt = System.currentTimeMillis() + 600_000L;
+
+      String evacuate = "\"],\"instanceOperation\":\"EVACUATE\","
+          + "\"instanceOperationSource\":\"AUTOMATION\",\"expiresAtMillis\":" + expiresAt + "}";
+
+      JsonNode outcomes = postInstanceOperationMaintenance(cluster,
+          "{\"instances\":[\"" + first + "\",\"" + second + evacuate);
+      for (String instance : Arrays.asList(first, second)) {
+        Assert.assertEquals(outcomes.get(instance).get("status").asText(), "GUARDRAIL_REJECTED");
+        Assert.assertTrue(outcomes.get(instance).get("message").asText().contains(
+            InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID), outcomes.toString());
+      }
+      outcomes = postInstanceOperationMaintenance(cluster,
+          "{\"instances\":[\"" + first + "\",\"missing" + evacuate);
+      Assert.assertEquals(outcomes.get(first).get("status").asText(), "NOT_APPLIED");
+      Assert.assertEquals(outcomes.get("missing").get("status").asText(), "INSTANCE_NOT_FOUND");
+      Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, first).isAssignable());
+      outcomes = postInstanceOperationMaintenance(cluster, "{\"instances\":[\"" + first + evacuate);
+      Assert.assertEquals(outcomes.get(first),
+          OBJECT_MAPPER.readTree("{\"status\":\"APPLIED\",\"expiresAtMillis\":" + expiresAt + "}"));
+      InstanceConfig drained = _configAccessor.getInstanceConfig(cluster, first);
+      Assert.assertEquals(drained.getInstanceOperation().getOperation(),
+          InstanceConstants.InstanceOperation.EVACUATE);
+      Assert.assertEquals(drained.getInstanceOperationMaintenanceUntilMs(), expiresAt);
+      InstanceConfig blocked = _configAccessor.getInstanceConfig(cluster, second);
+      Assert.assertTrue(blocked.isAssignable());
+      Assert.assertEquals(blocked.getInstanceOperationMaintenanceUntilMs(),
+          InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+      // ENABLE releases the marker and needs no expiry.
+      outcomes = postInstanceOperationMaintenance(cluster, "{\"instances\":[\"" + first
+          + "\"],\"instanceOperation\":\"ENABLE\",\"instanceOperationSource\":\"AUTOMATION\"}");
+      Assert.assertEquals(outcomes.get(first), OBJECT_MAPPER.readTree("{\"status\":\"APPLIED\"}"));
+      Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, first)
+          .getInstanceOperationMaintenanceUntilMs(),
+          InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+      // Without an operation only the marker is written, so no guard rail applies; -1 clears it.
+      outcomes = postInstanceOperationMaintenance(cluster,
+          "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":" + expiresAt + "}");
+      Assert.assertEquals(outcomes.get(second),
+          OBJECT_MAPPER.readTree("{\"status\":\"APPLIED\",\"expiresAtMillis\":" + expiresAt + "}"));
+      blocked = _configAccessor.getInstanceConfig(cluster, second);
+      Assert.assertTrue(blocked.isAssignable());
+      Assert.assertEquals(blocked.getInstanceOperationMaintenanceUntilMs(), expiresAt);
+      outcomes = postInstanceOperationMaintenance(cluster,
+          "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":-1}");
+      Assert.assertEquals(outcomes.get(second), OBJECT_MAPPER.readTree("{\"status\":\"APPLIED\"}"));
+      Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, second)
+          .getInstanceOperationMaintenanceUntilMs(),
+          InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+
+      // The operation and source come together: a defaulted source could leave another source's
+      // operation active, and dropping a lone one would write the marker alone. ADMIN would clear
+      // every other source's operation. The expiry must be a JSON integer that fits a long.
+      String toSecond = "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":";
+      String evacuateSecond = toSecond + expiresAt + ",\"instanceOperation\":";
+      for (String badBody : Arrays.asList(evacuateSecond + "\"EVACUATE\"}",
+          toSecond + expiresAt + ",\"instanceOperationSource\":\"AUTOMATION\"}",
+          evacuateSecond + "\"DRAIN\",\"instanceOperationSource\":\"AUTOMATION\"}",
+          evacuateSecond + "\"EVACUATE\",\"instanceOperationSource\":\"ADMIN\"}",
+          toSecond + "\"" + expiresAt + "\"}", toSecond + expiresAt + ".5}",
+          toSecond + "99999999999999999999}",
+          toSecond + "-1,\"instanceOperation\":\"EVACUATE\","
+              + "\"instanceOperationSource\":\"AUTOMATION\"}",
+          "{\"instances\":[\"" + second + "\"]}",
+          "{\"instances\":[],\"instanceOperation\":\"ENABLE\","
+              + "\"instanceOperationSource\":\"AUTOMATION\"}")) {
+        new JerseyUriRequestBuilder("clusters/{}/instances?command=instanceOperationMaintenance")
+            .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode()).format(cluster)
+            .post(this, Entity.entity(badBody, MediaType.APPLICATION_JSON_TYPE));
+      }
+      blocked = _configAccessor.getInstanceConfig(cluster, second);
+      Assert.assertTrue(blocked.isAssignable());
+      Assert.assertEquals(blocked.getInstanceOperationMaintenanceUntilMs(),
+          InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private JsonNode postInstanceOperationMaintenance(String cluster, String body)
+      throws IOException {
+    return OBJECT_MAPPER.readTree(new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=instanceOperationMaintenance")
+        .isBodyReturnExpected(true).format(cluster)
+        .post(this, Entity.entity(body, MediaType.APPLICATION_JSON_TYPE))
+        .readEntity(String.class)).get("instances");
   }
 
   private void setInstanceOperation(String clusterName, String instanceName,
