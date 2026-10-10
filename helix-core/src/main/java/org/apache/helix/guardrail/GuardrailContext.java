@@ -19,6 +19,8 @@
 
 package org.apache.helix.guardrail;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
@@ -43,6 +45,7 @@ public class GuardrailContext {
   private final String clusterName;
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
+  private final Collection<String> instanceNames;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
   private final InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -57,6 +60,7 @@ public class GuardrailContext {
     this.clusterName = builder.clusterName;
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
+    this.instanceNames = builder.instanceNames;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
     this.proposedInstanceOperation = builder.proposedInstanceOperation;
@@ -79,6 +83,19 @@ public class GuardrailContext {
   /** The instance targeted by an instance-scoped mutation, or {@code null} if not applicable. */
   public String getInstanceName() {
     return instanceName;
+  }
+
+  /**
+   * Every instance a batched mutation targets, judged together; defaults to the single
+   * {@link #getInstanceName()}, or empty when there is none. Only rules that read this method
+   * support a batch.
+   */
+  public Collection<String> getInstanceNames() {
+    if (instanceNames != null) {
+      return instanceNames;
+    }
+    return instanceName == null ? Collections.emptyList()
+        : Collections.singletonList(instanceName);
   }
 
   /**
@@ -171,6 +188,7 @@ public class GuardrailContext {
     private final String clusterName;
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
+    private Collection<String> instanceNames;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
     private InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -192,6 +210,11 @@ public class GuardrailContext {
 
     public Builder instanceName(String instanceName) {
       this.instanceName = instanceName;
+      return this;
+    }
+
+    public Builder instanceNames(Collection<String> instanceNames) {
+      this.instanceNames = instanceNames;
       return this;
     }
 

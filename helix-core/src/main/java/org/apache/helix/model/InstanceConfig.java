@@ -801,6 +801,15 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
+   * Returns the operation the given source has set on this instance, active or not, or null if
+   * that source has set none. Operations stack by source and the latest one set is active.
+   */
+  public InstanceOperation getInstanceOperation(InstanceConstants.InstanceOperationSource source) {
+    return getInstanceOperations().stream().filter(op -> op.getSource() == source).findFirst()
+        .orElse(null);
+  }
+
+  /**
    * Get the current instance operation state. This provides a simple, human-readable view of
    * the current instance state (ENABLE, DISABLE, EVACUATE, SWAP_IN, UNKNOWN).
    *
