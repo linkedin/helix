@@ -36,9 +36,13 @@ import java.util.Map;
 
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -50,6 +54,7 @@ public class TestInstanceOperationMaintenanceWriteHandler {
 
   private HelixAdmin _admin;
   private ConfigAccessor _configAccessor;
+  private HelixDataAccessor _dataAccessor;
   private ClusterConfig _clusterConfig;
   private Map<String, InstanceConfig> _storedConfigs;
   private InstanceOperationMaintenanceWriteHandler _handler;
@@ -58,22 +63,26 @@ public class TestInstanceOperationMaintenanceWriteHandler {
   public void setUp() {
     _admin = mock(HelixAdmin.class);
     _configAccessor = mock(ConfigAccessor.class);
+    _dataAccessor = mock(HelixDataAccessor.class);
     _clusterConfig = new ClusterConfig(CLUSTER);
     _storedConfigs = new HashMap<>();
+    for (String instanceName : Arrays.asList("h1", "h2", "h3", "h4")) {
+      _storedConfigs.put(instanceName, new InstanceConfig(instanceName));
+    }
     when(_configAccessor.getClusterConfig(CLUSTER)).thenReturn(_clusterConfig);
     when(_admin.getInstancesInCluster(CLUSTER))
         .thenAnswer(invocation -> Arrays.asList("h1", "h2", "h3", "h4"));
     when(_admin.getInstanceConfig(eq(CLUSTER), anyString()))
-        .thenAnswer(invocation -> _storedConfigs.computeIfAbsent(invocation.getArgument(1),
-            InstanceConfig::new));
+        .thenAnswer(invocation -> _storedConfigs.get(invocation.getArgument(1)));
+    when(_dataAccessor.keyBuilder()).thenReturn(new PropertyKey.Builder(CLUSTER));
     doAnswer(invocation -> {
-      String name = invocation.getArgument(1);
-      InstanceConfig written = invocation.getArgument(2);
-      _storedConfigs.put(name, written);
-      return null;
-    }).when(_configAccessor).setInstanceConfig(eq(CLUSTER), anyString(), any(InstanceConfig.class));
+      DataUpdater<ZNRecord> updater = invocation.getArgument(1);
+      InstanceConfig markerUpdate = invocation.getArgument(2);
+      return applyUpdater(markerUpdate.getInstanceName(), updater);
+    }).when(_dataAccessor).updateProperty(any(PropertyKey.class), any(), any(InstanceConfig.class));
 
-    _handler = new InstanceOperationMaintenanceWriteHandler(_admin, _configAccessor);
+    _handler =
+        new InstanceOperationMaintenanceWriteHandler(_admin, _configAccessor, _dataAccessor);
   }
 
   // --- TTL resolution ----------------------------------------------------------------------
@@ -106,6 +115,26 @@ public class TestInstanceOperationMaintenanceWriteHandler {
         .resolveExpiresAtMillis(NOW_MS - 1L, _clusterConfig, NOW_MS);
   }
 
+  @Test(expectedExceptions = InstanceOperationMaintenanceWriteHandler.BadRequestException.class)
+  public void testResolveExpiresAtMillis_RejectsCallerValueEqualToNow() {
+    InstanceOperationMaintenanceWriteHandler
+        .resolveExpiresAtMillis(NOW_MS, _clusterConfig, NOW_MS);
+  }
+
+  @Test(expectedExceptions = InstanceOperationMaintenanceWriteHandler.BadRequestException.class)
+  public void testResolveExpiresAtMillis_RejectsNonPositiveClusterDefault() {
+    _clusterConfig.setDefaultInstanceOperationMaintenanceDurationMs(0L);
+    InstanceOperationMaintenanceWriteHandler.resolveExpiresAtMillis(
+        InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET, _clusterConfig, NOW_MS);
+  }
+
+  @Test(expectedExceptions = InstanceOperationMaintenanceWriteHandler.BadRequestException.class)
+  public void testResolveExpiresAtMillis_RejectsOverflowingClusterDefault() {
+    _clusterConfig.setDefaultInstanceOperationMaintenanceDurationMs(Long.MAX_VALUE);
+    InstanceOperationMaintenanceWriteHandler.resolveExpiresAtMillis(
+        InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET, _clusterConfig, NOW_MS);
+  }
+
   // --- Set path ----------------------------------------------------------------------------
 
   @Test
@@ -129,9 +158,7 @@ public class TestInstanceOperationMaintenanceWriteHandler {
         Arrays.asList("h1", "h2", "h1", "h2"), NOW_MS + 60_000L, NOW_MS);
 
     Assert.assertEquals(result.getApplied(), Arrays.asList("h1", "h2"));
-    verify(_configAccessor, times(1)).setInstanceConfig(eq(CLUSTER), eq("h1"),
-        any(InstanceConfig.class));
-    verify(_configAccessor, times(1)).setInstanceConfig(eq(CLUSTER), eq("h2"),
+    verify(_dataAccessor, times(2)).updateProperty(any(PropertyKey.class), any(),
         any(InstanceConfig.class));
   }
 
@@ -160,12 +187,39 @@ public class TestInstanceOperationMaintenanceWriteHandler {
     Assert.assertEquals(result.getRejected().keySet(), Collections.singleton("h99"));
     Assert.assertTrue(result.getRejected().get("h99").contains("not found"));
 
-    verify(_configAccessor, times(1)).setInstanceConfig(eq(CLUSTER), eq("h1"),
+    verify(_dataAccessor, times(2)).updateProperty(any(PropertyKey.class), any(),
         any(InstanceConfig.class));
-    verify(_configAccessor, times(1)).setInstanceConfig(eq(CLUSTER), eq("h2"),
-        any(InstanceConfig.class));
-    verify(_configAccessor, never()).setInstanceConfig(eq(CLUSTER), eq("h99"),
-        any(InstanceConfig.class));
+  }
+
+  @Test
+  public void testApply_StaleInstanceConfigIsRejectedWithoutCreation() {
+    _storedConfigs.remove("h1");
+
+    InstanceOperationMaintenanceResult result = _handler.apply(CLUSTER,
+        Collections.singletonList("h1"), NOW_MS + 60_000L, NOW_MS);
+
+    Assert.assertTrue(result.getApplied().isEmpty());
+    Assert.assertEquals(result.getRejected().keySet(), Collections.singleton("h1"));
+    Assert.assertTrue(result.getRejected().get("h1").contains("not found"));
+    Assert.assertFalse(result.isWriteFailure("h1"));
+    Assert.assertFalse(_storedConfigs.containsKey("h1"),
+        "The optimistic updater must not create a missing InstanceConfig");
+  }
+
+  @Test
+  public void testApply_SetRetryPreservesConcurrentUnrelatedField() {
+    _storedConfigs.get("h1").getRecord().setSimpleField("EXISTING_FIELD", "existing");
+    stubRetryWithConcurrentField("CONCURRENT_FIELD", "preserved");
+
+    long expiresAt = NOW_MS + 60_000L;
+    InstanceOperationMaintenanceResult result = _handler.apply(CLUSTER,
+        Collections.singletonList("h1"), expiresAt, NOW_MS);
+
+    Assert.assertEquals(result.getApplied(), Collections.singletonList("h1"));
+    InstanceConfig stored = _storedConfigs.get("h1");
+    Assert.assertEquals(stored.getInstanceOperationMaintenanceUntilMs(), expiresAt);
+    Assert.assertEquals(stored.getRecord().getSimpleField("EXISTING_FIELD"), "existing");
+    Assert.assertEquals(stored.getRecord().getSimpleField("CONCURRENT_FIELD"), "preserved");
   }
 
   // --- Cap enforcement (partial-accept semantics) -----------------------------------------
@@ -177,7 +231,7 @@ public class TestInstanceOperationMaintenanceWriteHandler {
 
     Assert.assertEquals(result.getApplied(), Arrays.asList("h1", "h2", "h3", "h4"));
     Assert.assertTrue(result.getRejected().isEmpty());
-    verify(_configAccessor, times(4)).setInstanceConfig(eq(CLUSTER), anyString(),
+    verify(_dataAccessor, times(4)).updateProperty(any(PropertyKey.class), any(),
         any(InstanceConfig.class));
   }
 
@@ -263,8 +317,37 @@ public class TestInstanceOperationMaintenanceWriteHandler {
 
     Assert.assertTrue(result.getApplied().isEmpty());
     Assert.assertEquals(result.getRejected().keySet().size(), 2);
-    verify(_configAccessor, never()).setInstanceConfig(eq(CLUSTER), anyString(),
+    verify(_dataAccessor, never()).updateProperty(any(PropertyKey.class), any(),
         any(InstanceConfig.class));
+  }
+
+  @Test
+  public void testEnforceCap_FailedWriteRejectedAndDoesNotConsumeQuota() throws Exception {
+    _clusterConfig.setInstanceOperationMaintenanceBudget(1);
+    doAnswer(invocation -> {
+      DataUpdater<ZNRecord> updater = invocation.getArgument(1);
+      InstanceConfig markerUpdate = invocation.getArgument(2);
+      String instanceName = markerUpdate.getInstanceName();
+      if ("h1".equals(instanceName)) {
+        InstanceConfig stored = _storedConfigs.get(instanceName);
+        updater.update(new ZNRecord(stored.getRecord()));
+        return false;
+      }
+      return applyUpdater(instanceName, updater);
+    }).when(_dataAccessor).updateProperty(any(PropertyKey.class), any(),
+        any(InstanceConfig.class));
+
+    InstanceOperationMaintenanceResult result = _handler.apply(CLUSTER,
+        Arrays.asList("h1", "h2"), NOW_MS + 60_000L, NOW_MS);
+
+    Assert.assertEquals(result.getApplied(), Collections.singletonList("h2"));
+    Assert.assertEquals(result.getRejected().keySet(), Collections.singleton("h1"));
+    Assert.assertTrue(result.isWriteFailure("h1"));
+    Assert.assertTrue(result.getRejected().get("h1").contains("failed to update"));
+    Assert.assertEquals(_storedConfigs.get("h1").getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertEquals(_storedConfigs.get("h2").getInstanceOperationMaintenanceUntilMs(),
+        NOW_MS + 60_000L);
   }
 
   // --- Clear path --------------------------------------------------------------------------
@@ -317,5 +400,54 @@ public class TestInstanceOperationMaintenanceWriteHandler {
 
     Assert.assertEquals(result.getApplied(), Collections.singletonList("h1"));
     Assert.assertEquals(result.getRejected().keySet(), Collections.singleton("h99"));
+  }
+
+  @Test
+  public void testApply_ClearRetryPreservesConcurrentUnrelatedField() {
+    InstanceConfig h1 = _storedConfigs.get("h1");
+    h1.setInstanceOperationMaintenanceUntilMs(NOW_MS + 60_000L);
+    h1.getRecord().setSimpleField("EXISTING_FIELD", "existing");
+    stubRetryWithConcurrentField("CONCURRENT_FIELD", "preserved");
+
+    InstanceOperationMaintenanceResult result = _handler.apply(CLUSTER,
+        Collections.singletonList("h1"),
+        InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_CLEAR, NOW_MS);
+
+    Assert.assertEquals(result.getApplied(), Collections.singletonList("h1"));
+    InstanceConfig stored = _storedConfigs.get("h1");
+    Assert.assertEquals(stored.getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    Assert.assertEquals(stored.getRecord().getSimpleField("EXISTING_FIELD"), "existing");
+    Assert.assertEquals(stored.getRecord().getSimpleField("CONCURRENT_FIELD"), "preserved");
+  }
+
+  private boolean applyUpdater(String instanceName, DataUpdater<ZNRecord> updater) {
+    InstanceConfig stored = _storedConfigs.get(instanceName);
+    ZNRecord current = stored == null ? null : new ZNRecord(stored.getRecord());
+    ZNRecord updated = updater.update(current);
+    if (updated != null) {
+      _storedConfigs.put(instanceName, new InstanceConfig(updated));
+    }
+    return true;
+  }
+
+  private void stubRetryWithConcurrentField(String field, String value) {
+    doAnswer(invocation -> {
+      DataUpdater<ZNRecord> updater = invocation.getArgument(1);
+      InstanceConfig markerUpdate = invocation.getArgument(2);
+      String instanceName = markerUpdate.getInstanceName();
+      InstanceConfig stored = _storedConfigs.get(instanceName);
+
+      Assert.assertNotNull(updater.update(new ZNRecord(stored.getRecord())));
+      InstanceConfig latest = new InstanceConfig(new ZNRecord(stored.getRecord()));
+      latest.getRecord().setSimpleField(field, value);
+      _storedConfigs.put(instanceName, latest);
+
+      ZNRecord updated = updater.update(new ZNRecord(latest.getRecord()));
+      Assert.assertNotNull(updated);
+      _storedConfigs.put(instanceName, new InstanceConfig(updated));
+      return true;
+    }).when(_dataAccessor).updateProperty(any(PropertyKey.class), any(),
+        any(InstanceConfig.class));
   }
 }
