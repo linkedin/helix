@@ -95,7 +95,8 @@ public class AbstractResource {
     isEvacuateFinished,
     isInstanceDrained,
     setPartitionsToError,
-    forceKillInstance
+    forceKillInstance,
+    updateReplicaCounts
   }
 
   @Context
