@@ -19,9 +19,9 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  * under the License.
  */
 
-import java.util.Collections;
-import java.util.List;
+import java.util.Map;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
@@ -29,10 +29,11 @@ import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Matchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 
@@ -52,7 +53,7 @@ public class TestTopStateMaxCapacityUsageInstanceConstraint {
   @Test
   public void testGetNormalizedScore() {
     when(_testReplica.isReplicaTopState()).thenReturn(true);
-    when(_testNode.getTopStateProjectedHighestUtilization(anyMap(), any())).thenReturn(0.8f);
+    when(_testNode.getTopStateProjectedHighestUtilization(anyMap())).thenReturn(0.8f);
     when(_clusterContext.getEstimatedTopStateMaxUtilization()).thenReturn(1f);
     double score = _constraint.getAssignmentScore(_testNode, _testReplica, _clusterContext);
     // Convert to float so as to compare with equal.
@@ -64,18 +65,18 @@ public class TestTopStateMaxCapacityUsageInstanceConstraint {
 
 
   @Test
-  public void testGetNormalizedScoreWithPreferredScoringKey() {
-    List<String> preferredScoringKeys = Collections.singletonList("CU");
+  public void testProjectedTopStateUsageAboveClusterEstimate() {
+    Map<String, Integer> usage = ImmutableMap.of("CPU", 40, "DISK", 90);
     when(_testReplica.isReplicaTopState()).thenReturn(true);
-    when(_testNode.getTopStateProjectedHighestUtilization(anyMap(),
-        eq(preferredScoringKeys))).thenReturn(0.5f);
-    when(_clusterContext.getPreferredScoringKeys()).thenReturn(preferredScoringKeys);
-    when(_clusterContext.getEstimatedTopStateMaxUtilization()).thenReturn(1f);
+    when(_testReplica.getCapacity()).thenReturn(usage);
+    when(_testNode.getTopStateProjectedHighestUtilization(eq(usage))).thenReturn(0.9f);
+    when(_clusterContext.getEstimatedTopStateMaxUtilization()).thenReturn(0.5f);
+
     double score = _constraint.getAssignmentScore(_testNode, _testReplica, _clusterContext);
-    // Convert to float so as to compare with equal.
-    Assert.assertEquals((float) score,0.5f);
+    Assert.assertEquals((float) score, 1.8f);
     double normalizedScore =
-            _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext);
-    Assert.assertTrue(normalizedScore > 0.99);
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext);
+    Assert.assertEquals(normalizedScore, 1 / (1 + Math.exp(44 * (score - 1))), 1e-12);
+    verify(_testNode, times(2)).getTopStateProjectedHighestUtilization(usage);
   }
 }
