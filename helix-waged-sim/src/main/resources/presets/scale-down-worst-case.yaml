@@ -8,8 +8,10 @@ description: >-
   the best case (zones kept even); mz-tightest piles removals into the tightest, usually smallest,
   zone, the worst case for zone spread and for surviving a zone loss; most-loaded takes the busiest
   instances first; mz-single empties the largest zone first; random-N are arbitrary removals. The
-  zone-loss variants must also survive losing the largest zone afterwards, and the without-down
-  variants plan without disabled or offline instances.
+  zone-outage variants must also ride out the largest zone going offline and coming back within the
+  delay window (with every partition kept at its minimum active replicas, or, for -serving, with every
+  partition keeping a replica up); the zone-loss variants must survive it staying down past the window.
+  The without-down variants plan without disabled or offline instances.
 search:
   removeNodes:
     strategy: mz-balanced
@@ -22,10 +24,14 @@ variants:
   random-1: {searchStrategy: random, seed: 1}
   random-2: {searchStrategy: random, seed: 2}
   random-3: {searchStrategy: random, seed: 3}
+  mz-balanced-zone-outage: {tolerateZoneOutage: largest}
+  mz-tightest-zone-outage: {searchStrategy: mz-tightest, tolerateZoneOutage: largest}
+  mz-tightest-zone-outage-serving: {searchStrategy: mz-tightest, tolerateZoneOutage: largest, outageFeasibleIf: "noLiveReplica.added == 0"}
   mz-balanced-zone-loss: {tolerateZoneLoss: largest}
   mz-tightest-zone-loss: {searchStrategy: mz-tightest, tolerateZoneLoss: largest}
   random-1-zone-loss: {searchStrategy: random, seed: 1, tolerateZoneLoss: largest}
   mz-tightest-without-down: {searchStrategy: mz-tightest, nonServing: remove}
+  mz-tightest-zone-outage-without-down: {searchStrategy: mz-tightest, tolerateZoneOutage: largest, nonServing: remove}
   mz-tightest-zone-loss-without-down: {searchStrategy: mz-tightest, tolerateZoneLoss: largest, nonServing: remove}
 exit:
   timeout: 120m

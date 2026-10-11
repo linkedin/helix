@@ -98,11 +98,13 @@ place every replica?" instead of running rounds. `preset:scale-down` is the read
 name: scale-down
 search:
   removeNodes: {strategy: mz-balanced, method: binary}   # linear also takes step; max caps the search
-  tolerateZoneLoss: none        # largest | every: also survive losing a whole zone afterwards
+  tolerateZoneOutage: none      # largest | every: also ride out a zone outage within the delay window
+  tolerateZoneLoss: none        # largest | every: also survive a zone staying down past the window
   nonServing: keep              # remove: plan without disabled and offline instances
   requireAtLeast: 4             # optional: FAIL when fewer can be removed
-variants:                       # per variant: searchStrategy, tolerateZoneLoss, nonServing, seed
+variants:                       # per variant: searchStrategy, tolerateZoneOutage, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}
+  survive-zone-outage: {tolerateZoneOutage: largest}
   survive-zone-loss: {tolerateZoneLoss: largest}
   worst-case: {searchStrategy: mz-tightest}
 ```
@@ -130,8 +132,8 @@ variants:                       # per variant: searchStrategy, tolerateZoneLoss,
 
   The same orders are event selectors: `removeNode: mz-balanced:3`.
 - **Worst case.** A real scale-down usually cannot choose which instances go. `preset:scale-down-worst-case`
-  runs the best, the adversarial and three random orders, with and without zone loss and down
-  instances. The report's "Across removal orders" table shows the lowest answer per setting, which is
+  runs the best, the adversarial and three random orders, with and without a zone outage, a zone loss
+  and down instances. The report's "Across removal orders" table shows the lowest answer per setting, which is
   what such a scale-down can count on.
   - With as many zones as replicas, the answer depends heavily on the order. Every zone must hold one
     replica of each partition, so piling removals into the tightest zone breaks it soonest.
@@ -140,9 +142,27 @@ variants:                       # per variant: searchStrategy, tolerateZoneLoss,
     on which zone is left largest.
 - **Fault zones.** WAGED places at most one replica of a partition per fault zone (a hard constraint).
   With fewer zones left than replicas, it does not fail: it places fewer replicas. Unplaced replicas
-  catch that. `tolerateZoneLoss: largest` also requires that the cluster survives losing the zone with
-  the most capacity after the removal, as if it stayed down past the delay window; `every` checks each
-  zone. With as many zones as replicas no zone can be lost, and the search says so.
+  catch that.
+- **Surviving a zone going down: two answers.** Both take out the zone with the most capacity left
+  after the removal (`largest`), or each zone in turn (`every`).
+  - `tolerateZoneOutage`: the zone goes offline and comes back within the delay window. The removal
+    settles first (two controller rounds). Then the zone's instances go offline and one more round
+    runs. WAGED keeps their replicas in place and only adds temporary replicas where a partition falls
+    below its minimum active replicas (`MIN_ACTIVE_REPLICAS`, which defaults to all replicas).
+    - Passes when `outageFeasibleIf` holds, counted on what the controller serves. The default
+      (`min-active`) is `rebalanceFailures == 0 and belowMinActive.added == 0 and
+      noLiveReplica.added == 0`. Set `noLiveReplica.added == 0` (`serving`) to only require that every
+      partition keeps a replica up. Both can be variants of one run.
+    - With 2 of 3 replicas as the minimum, an outage usually costs no capacity. With the default, it
+      costs as much as losing the zone. Without delayed rebalance, an outage is a loss.
+    - When WAGED does add temporary replicas, its capacity check weighs every replica against the
+      instances that are up. Partitions already short because another instance is down can make an
+      outage fail early under `min-active`, while `serving` still holds.
+    - The top-state utilization on the instances that stay up is reported too, since they take over
+      the down zone's top states.
+  - `tolerateZoneLoss`: the zone stays down past the window, or never comes back. Its instances are
+    removed on top of the k, and WAGED must re-place all of their replicas. With as many zones as
+    replicas no zone can be lost, and the search says so.
 - **Disabled and offline instances** stay by default, as WAGED counts them: their capacity for the
   baseline, and as active while within the delay window. The report says how many replicas WAGED keeps
   on them; `nonServing: remove` plans without them.

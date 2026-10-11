@@ -233,6 +233,12 @@ public final class ScenarioLoader {
         case "tolerateZoneLoss":
           variant.zoneLoss = zoneLoss(value);
           break;
+        case "tolerateZoneOutage":
+          variant.zoneOutage = zoneLoss(value);
+          break;
+        case "outageFeasibleIf":
+          variant.outageFeasibleIf = Condition.parse(value.toString());
+          break;
         case "nonServing":
           variant.removeNonServing = nonServing(value);
           break;
@@ -263,7 +269,7 @@ public final class ScenarioLoader {
     if (zoneLoss.equals("largest") || zoneLoss.equals("every")) {
       return zoneLoss;
     }
-    throw new IllegalArgumentException("tolerateZoneLoss must be largest, every or none");
+    throw new IllegalArgumentException("tolerateZoneLoss and tolerateZoneOutage must be largest, every or none");
   }
 
   @SuppressWarnings("unchecked")
@@ -304,6 +310,12 @@ public final class ScenarioLoader {
           break;
         case "tolerateZoneLoss":
           search.zoneLoss = zoneLoss(value);
+          break;
+        case "tolerateZoneOutage":
+          search.zoneOutage = zoneLoss(value);
+          break;
+        case "outageFeasibleIf":
+          search.outageFeasibleIf = Condition.parse(value.toString());
           break;
         case "nonServing":
           search.removeNonServing = nonServing(value);

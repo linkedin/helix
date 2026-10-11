@@ -66,6 +66,10 @@ public class Scenario {
     public RemovalOrder.Strategy searchStrategy;
     /** Zone-loss check for a scale-down search (largest, every or none); overrides the scenario's. */
     public String zoneLoss;
+    /** Zone-outage check for a scale-down search (largest, every or none); overrides the scenario's. */
+    public String zoneOutage;
+    /** When a zone outage counts as survived; overrides the scenario's. */
+    public org.apache.helix.wagedsim.run.Condition outageFeasibleIf;
     /** Whether a scale-down search removes disabled and offline instances; overrides the scenario's. */
     public Boolean removeNonServing;
     /** Seed for random choices, such as a random removal order; overrides the scenario's. */
@@ -121,6 +125,30 @@ public class Scenario {
      * "every" checks each zone, "none" skips the check.
      */
     public String zoneLoss = "none";
+    /**
+     * Also require that the cluster rides out a whole fault zone going offline after the removal and
+     * coming back within the delay window: "largest" checks the zone with the most capacity, "every"
+     * checks each zone, "none" skips the check.
+     */
+    public String zoneOutage = "none";
+    /** Default for {@link #outageFeasibleIf}: WAGED holds every partition at its minimum active replicas. */
+    public static final String DEFAULT_OUTAGE_FEASIBLE =
+        "rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0";
+    /** A looser outage condition: every partition keeps a replica up, so it keeps serving. */
+    public static final String SERVING_OUTAGE_FEASIBLE = "noLiveReplica.added == 0";
+
+    /** @return a short name for an outage condition: min-active, serving, or custom */
+    public static String outageCriterion(org.apache.helix.wagedsim.run.Condition condition) {
+      String text = condition.toString();
+      return text.equals(DEFAULT_OUTAGE_FEASIBLE) ? "min-active"
+          : text.equals(SERVING_OUTAGE_FEASIBLE) ? "serving" : "custom";
+    }
+    /**
+     * When a zone outage counts as survived: by default WAGED does not fail and every partition keeps its
+     * minimum active replicas on instances that are up.
+     */
+    public org.apache.helix.wagedsim.run.Condition outageFeasibleIf =
+        org.apache.helix.wagedsim.run.Condition.parse(DEFAULT_OUTAGE_FEASIBLE);
 
     public Map<String, Object> describe() {
       Map<String, Object> map = new LinkedHashMap<>();
@@ -135,6 +163,10 @@ public class Scenario {
       map.put("feasibleIf", feasibleIf.toString());
       map.put("nonServing", removeNonServing ? "remove" : "keep");
       map.put("tolerateZoneLoss", zoneLoss);
+      map.put("tolerateZoneOutage", zoneOutage);
+      if (!"none".equals(zoneOutage)) {
+        map.put("outageFeasibleIf", outageFeasibleIf.toString());
+      }
       if (requireAtLeast != null) {
         map.put("requireAtLeast", requireAtLeast);
       }

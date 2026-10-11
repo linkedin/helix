@@ -8,9 +8,13 @@ description: >-
   rebalance fail, or WAGED silently places fewer replicas. Each probe removes the first k instances of
   a removal order and runs one controller pipeline from the cluster as it is; a search finds the
   largest k that still places everything. mz-balanced keeps zones even (the next instance comes from
-  the zone that stays least utilized without it); mz-balanced-zone-loss also requires surviving the
-  loss of the largest zone afterwards; least-loaded ignores zones; mz-single empties the largest zone
-  first. When the scale-down cannot choose its instances, use scale-down-worst-case.
+  the zone that stays least utilized without it). The largest zone going down afterwards, three ways:
+  mz-balanced-zone-outage rides out an outage that ends within the delay window with WAGED keeping
+  every partition at its minimum active replicas; mz-balanced-zone-outage-serving only requires every
+  partition to keep a replica up during that outage; mz-balanced-zone-loss survives the zone staying
+  down past the window or never coming back (WAGED re-places all of its replicas).
+  least-loaded ignores zones; mz-single empties the largest zone first. When the scale-down cannot
+  choose its instances, use scale-down-worst-case.
 search:
   removeNodes:
     strategy: mz-balanced
@@ -21,6 +25,11 @@ search:
   nonServing: keep
 variants:
   mz-balanced: {}
+  mz-balanced-zone-outage:
+    tolerateZoneOutage: largest
+  mz-balanced-zone-outage-serving:
+    tolerateZoneOutage: largest
+    outageFeasibleIf: "noLiveReplica.added == 0"
   mz-balanced-zone-loss:
     tolerateZoneLoss: largest
   least-loaded:

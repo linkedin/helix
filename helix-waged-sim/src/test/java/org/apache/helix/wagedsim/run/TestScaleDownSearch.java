@@ -293,6 +293,65 @@ public class TestScaleDownSearch {
   }
 
   @Test
+  public void testZoneOutageWithinTheDelayWindow() throws Exception {
+    // 15 instances of 1,000 CU in 5 zones of 3; 8,400 CU of replicas. Plain removal allows 6 and
+    // surviving the loss of a whole zone allows 3 (15 - k - 3 >= 9 instances).
+    Scenario scenario = scenario(String.join("\n",
+        "name: zone-outage",
+        "search:",
+        "  removeNodes: {strategy: mz-balanced}",
+        "  tolerateZoneOutage: largest",
+        "variants:",
+        "  outage: {}"));
+    // MIN_ACTIVE_REPLICAS 2: a zone outage leaves 2 of 3 replicas up, WAGED adds nothing, so the
+    // outage costs no capacity and the answer stays at 6.
+    Runner.VariantResult minTwo = run(SpecSource.build(outageSpec("TEST_OUTAGE_MIN2", 2, true)), scenario,
+        Files.createTempDirectory("waged-sim-outage")).get("outage");
+    Assert.assertEquals(minTwo.search.get("maxRemovable"), 6, minTwo.search.toString());
+    Assert.assertEquals(minTwo.search.get("tolerateZoneOutage"), "largest");
+    // Default MIN_ACTIVE_REPLICAS (all 3): WAGED adds a temporary replica for every partition of the down
+    // zone, which needs the same room as losing the zone.
+    Runner.VariantResult minAll = run(SpecSource.build(outageSpec("TEST_OUTAGE_MIN3", -1, true)), scenario,
+        Files.createTempDirectory("waged-sim-outage")).get("outage");
+    Assert.assertEquals(minAll.search.get("maxRemovable"), 3, minAll.search.toString());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> failure = (Map<String, Object>) minAll.search.get("firstInfeasible");
+    Assert.assertTrue(failure.get("reason").toString().contains("within the delay window"), failure.toString());
+    // Only asking that every partition keeps a replica up: WAGED fails to add the temporary replicas
+    // beyond 3, but 2 of 3 replicas stay up, so the answer is the plain 6.
+    Scenario serving = scenario(String.join("\n",
+        "name: zone-outage-serving",
+        "search:",
+        "  removeNodes: {strategy: mz-balanced}",
+        "  tolerateZoneOutage: largest",
+        "variants:",
+        "  outage: {outageFeasibleIf: \"noLiveReplica.added == 0\"}"));
+    Runner.VariantResult servingAll = run(SpecSource.build(outageSpec("TEST_OUTAGE_SERVING", -1, true)), serving,
+        Files.createTempDirectory("waged-sim-outage")).get("outage");
+    Assert.assertEquals(servingAll.search.get("maxRemovable"), 6, servingAll.search.toString());
+    Assert.assertEquals(servingAll.search.get("outageCriterion"), "serving");
+    // Without delayed rebalance an outage is a loss: WAGED re-places the zone's replicas at once.
+    Runner.VariantResult noDelay = run(SpecSource.build(outageSpec("TEST_OUTAGE_NODELAY", 2, false)), scenario,
+        Files.createTempDirectory("waged-sim-outage")).get("outage");
+    Assert.assertEquals(noDelay.search.get("maxRemovable"), 3, noDelay.search.toString());
+  }
+
+  private static Map<String, Object> outageSpec(String name, int minActive, boolean delay) {
+    Map<String, Object> spec = spec(name, 15, 5);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> cluster = (Map<String, Object>) spec.get("cluster");
+    if (delay) {
+      cluster.put("delayRebalance", TestClusters.map("enabled", true, "time", "1h"));
+    }
+    if (minActive > 0) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> resource = ((List<Map<String, Object>>) spec.get("resources")).get(0);
+      resource.put("minActiveReplicas", minActive);
+    }
+    return spec;
+  }
+
+  @Test
   public void testRemovingNonServingInstances() throws Exception {
     Map<String, Object> spec = spec("TEST_NON_SERVING");
     spec.put("liveness", TestClusters.map("disabled", 1));

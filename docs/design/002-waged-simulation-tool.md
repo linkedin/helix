@@ -435,7 +435,12 @@ A scenario with a `search` block answers "how many instances can be removed befo
 - **Search.** Binary by default: probe 0; then the capacity bound (the most instances whose removal keeps the capacity of every assignable instance, as WAGED's baseline counts it, at or above what all replicas require) and the bound plus one; then bisect. It assumes feasibility is monotonic in k. `linear` steps from 0 to the first failure.
 - **Removal orders.** `mz-balanced` takes the next instance from the zone that stays least utilized without it (load over remaining capacity on the tightest key; with equal instances, the zone with the most instances left), smallest first. `mz-tightest` is its opposite: the zone that is most utilized without the instance, largest and busiest first, which piles removals into the tightest zone. `mz-single` empties the largest zone first. Then `least-loaded`, `most-loaded`, `random` (per-variant `seed`) and `name`. The orders are also event selectors (`removeNode: mz-balanced:3`).
 - **Worst case.** A scale-down usually cannot choose its instances, so `preset:scale-down-worst-case` runs best, adversarial and random orders, with and without zone loss and down instances (per-variant `tolerateZoneLoss` and `nonServing`). The report shows the lowest and highest answer per setting.
-- **Zone loss.** `tolerateZoneLoss: largest | every` also requires the removal to survive losing the zone with the most capacity left (or each zone) as if it stayed down past the delay window. With as many zones as replicas no zone can be lost.
+- **Zone outage (within the delay window).** `tolerateZoneOutage: largest | every`:
+  - After the removal settles (two controller rounds), the zone's instances go offline (live instance and current states gone, offline time now) and a third round runs.
+  - WAGED keeps their replicas while the window lasts. Its delayed-rebalance overwrite adds temporary replicas only where a partition falls below `MIN_ACTIVE_REPLICAS` (`DelayedRebalanceUtil.getMinActiveReplica`, which defaults to the replica count). The overwrite is in the controller's output, not the stored assignment.
+  - So the outage is judged on what is served: `outageFeasibleIf`, default `rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0` ("min-active"). A variant can set `noLiveReplica.added == 0` ("serving"), which only requires every partition to keep a replica up. It also records the top-state utilization on the instances still up and whether the controller entered maintenance mode (`MAX_OFFLINE_INSTANCES_ALLOWED`).
+  - The overwrite's cluster model holds every replica, so `ConstraintBasedAlgorithm`'s cluster-wide check weighs all of them against the capacity of the live instances. It fails with `CAPACITY_DEFICIT` once those can't hold the whole cluster, even though only a few replicas need a temporary home.
+- **Zone loss (past the window).** `tolerateZoneLoss: largest | every` also requires the removal to survive losing the zone with the most capacity left (or each zone) as if it stayed down past the delay window: its instances are removed and WAGED re-places their replicas. With as many zones as replicas no zone can be lost.
 - **Fault zones as WAGED sees them.** Without topology awareness WAGED treats every instance as its own fault zone, so the search ignores domain zones there: no zone conflicts, no zone-loss check, and the zone-aware orders fall back to the smallest and least loaded instances.
 - **Failure detail.** The innermost WAGED failure message and the hard constraints that blocked the failing replica (`FAULT_ZONE`, `NODE_CAPACITY`, ...), from a failure reporter installed on the algorithm.
 - **Output.** `run.json` `variants[].search` (answer, per-zone removal and utilization, first failure, probes); one `rounds.jsonl` record per probe; per-node CSVs for the start and the largest feasible removal; a "Scale-down search" report section.
@@ -458,9 +463,9 @@ Guardrails:
 ## Implementation status
 
 Built on 2026-10-08 as module `helix-waged-sim` (CLI, both engines, all four sources, reports, presets,
-skill) plus the helix-core seam. The scale-down search was added on 2026-10-09 and its worst-case orders on
-2026-10-11. 45 of the 46 module tests pass and one is skipped unless a real Pensieve pull is given; the seam
-has its own test in helix-core.
+skill) plus the helix-core seam. The scale-down search was added on 2026-10-09, and its worst-case orders and
+zone-outage check on 2026-10-11. 46 of the 47 module tests pass and one is skipped unless a real Pensieve pull
+is given; the seam has its own test in helix-core.
 
 **Validated:**
 - **RCA parity.** The `rca` preset reproduces the published probe values exactly on the two captured

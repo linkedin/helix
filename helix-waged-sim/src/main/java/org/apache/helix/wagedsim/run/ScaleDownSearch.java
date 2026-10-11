@@ -31,7 +31,9 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.wagedsim.cluster.ClusterState;
 import org.apache.helix.wagedsim.engine.EngineSettings;
@@ -63,6 +65,9 @@ class ScaleDownSearch {
   private List<String> _dropFirst = Collections.emptyList();
   /** largest, every or none. */
   private String _zoneLoss = "none";
+  /** largest, every or none. */
+  private String _zoneOutage = "none";
+  private Condition _outageFeasibleIf;
   /** Whether WAGED places by fault zone; without topology awareness every instance is its own zone. */
   private boolean _faultZones = true;
 
@@ -85,11 +90,20 @@ class ScaleDownSearch {
     Probe zoneLoss;
     /** Zone-loss checks run: zone to "ok" or why it fails. */
     Map<String, String> zoneLossResults = new TreeMap<>(RemovalOrder.ZONE_ORDER);
+    /** The last zone-outage check run, for its stats. */
+    Probe lastOutageCheck;
+    /** The failed zone-outage check, if any, and every zone-outage check run. */
+    Probe zoneOutage;
+    Map<String, String> zoneOutageResults = new TreeMap<>(RemovalOrder.ZONE_ORDER);
 
     String reason() {
       if (zoneLoss != null && !zoneLoss.feasible) {
         return "places every replica, but not after also losing zone " + zoneLoss.lostZone + " ("
             + zoneLoss.lostInstances + " instances): " + zoneLoss.reason();
+      }
+      if (zoneOutage != null && !zoneOutage.feasible) {
+        return "places every replica, but does not ride out an outage of zone " + zoneOutage.lostZone + " ("
+            + zoneOutage.lostInstances + " instances) within the delay window: " + zoneOutage.reason();
       }
       if (feasible) {
         return "places every replica";
@@ -108,9 +122,20 @@ class ScaleDownSearch {
             + "replica of a partition per zone, so it places fewer replicas without a rebalance failure; "
             + "unplaced replicas +" + stats.get("unplacedReplicas.added");
       }
-      return "no rebalance failure, but the assignment does not meet the feasibility condition: unplaced replicas +"
-          + stats.get("unplacedReplicas.added") + ", instances over capacity +" + stats.get("overCapacityInstances.added")
-          + ", partitions with two replicas in a zone +" + stats.get("zoneConflicts.added");
+      List<String> problems = new ArrayList<>();
+      String[][] labels = {{"unplacedReplicas", "unplaced replicas"},
+          {"overCapacityInstances", "instances over capacity"},
+          {"zoneConflicts", "partitions with two replicas in a zone"},
+          {"belowMinActive", "partitions below their minimum active replicas on instances that are up"},
+          {"noLiveReplica", "partitions with no replica on an instance that is up"}};
+      for (String[] label : labels) {
+        long added = number(stats.get(label[0] + ".added"));
+        if (added > 0) {
+          problems.add(label[1] + " +" + added);
+        }
+      }
+      return "no rebalance failure, but the feasibility condition does not hold"
+          + (problems.isEmpty() ? "" : ": " + String.join(", ", problems));
     }
   }
 
@@ -126,6 +151,8 @@ class ScaleDownSearch {
       long start) throws Exception {
     RemovalOrder.Strategy strategy = variant.searchStrategy != null ? variant.searchStrategy : _spec.strategy;
     _zoneLoss = variant.zoneLoss != null ? variant.zoneLoss : _spec.zoneLoss;
+    _zoneOutage = variant.zoneOutage != null ? variant.zoneOutage : _spec.zoneOutage;
+    _outageFeasibleIf = variant.outageFeasibleIf != null ? variant.outageFeasibleIf : _spec.outageFeasibleIf;
     _faultZones = state.getClusterConfig().isTopologyAwareEnabled();
     Map<String, Map<String, Map<String, String>>> served = state.getServedLayout();
     StatsCollector collector = new StatsCollector(state, _focusKey);
@@ -141,10 +168,13 @@ class ScaleDownSearch {
       _dropFirst = nonServing;
     }
     String zoneLossNote = null;
-    if (!"none".equals(_zoneLoss) && nodes.values().stream().noneMatch(n -> n.zone != null)) {
-      zoneLossNote = "the cluster has no fault zones (or is not topology aware), so zone loss was not checked";
+    boolean zoneChecks = !"none".equals(_zoneLoss) || !"none".equals(_zoneOutage);
+    if (zoneChecks && nodes.values().stream().noneMatch(n -> n.zone != null)) {
+      zoneLossNote = "the cluster has no fault zones (or is not topology aware), so zone loss and outage were "
+          + "not checked";
       _console.println("[" + variant.name + "] " + zoneLossNote);
       _zoneLoss = "none";
+      _zoneOutage = "none";
     }
     long seed = variant.seed != null ? variant.seed : _scenario.seed;
     List<String> order = RemovalOrder.order(strategy, candidates, nodes, _focusKey, new Random(seed));
@@ -222,6 +252,11 @@ class ScaleDownSearch {
     summary.put("strategy", strategy.label());
     summary.put("method", _spec.method);
     summary.put("tolerateZoneLoss", _zoneLoss);
+    summary.put("tolerateZoneOutage", _zoneOutage);
+    if (!"none".equals(_zoneOutage)) {
+      summary.put("outageFeasibleIf", _outageFeasibleIf.toString());
+      summary.put("outageCriterion", Scenario.SearchSpec.outageCriterion(_outageFeasibleIf));
+    }
     if (zoneLossNote != null) {
       summary.put("note", zoneLossNote);
     }
@@ -248,6 +283,14 @@ class ScaleDownSearch {
       if (!probe.zoneLossResults.isEmpty()) {
         row.put("zoneLoss", probe.zoneLossResults);
       }
+      if (!probe.zoneOutageResults.isEmpty()) {
+        row.put("zoneOutage", probe.zoneOutageResults);
+        Probe check = probe.zoneOutage != null ? probe.zoneOutage : probe.lastOutageCheck;
+        if (check != null) {
+          row.put("outage.maxUtil.top." + _focusKey, check.stats.get("outage.maxUtil.top." + _focusKey));
+          row.put("outage.passes.overwrite", check.stats.get("passes.overwrite"));
+        }
+      }
       for (String stat : new String[]{"util.required." + _focusKey, "maxUtil.all." + _focusKey,
           "skew.all." + _focusKey, "skew.top." + _focusKey, "unplacedReplicas", "overCapacityInstances",
           "zoneConflicts", "moves.replicas"}) {
@@ -263,6 +306,10 @@ class ScaleDownSearch {
       reason = zero.zoneLoss != null
           ? "Even before any instance is removed, the cluster cannot lose zone " + zero.zoneLoss.lostZone + " ("
               + zero.zoneLoss.lostInstances + " instances): " + zero.zoneLoss.reason()
+          : zero.zoneOutage != null
+          ? "Even before any instance is removed, the cluster does not ride out an outage of zone "
+              + zero.zoneOutage.lostZone + " (" + zero.zoneOutage.lostInstances + " instances) within the delay "
+              + "window: " + zero.zoneOutage.reason()
           : "WAGED cannot place every replica even before any instance is removed: " + zero.reason();
       verdict = Verdict.fail(probes.size(), reason);
     } else {
@@ -286,6 +333,10 @@ class ScaleDownSearch {
         failure.put("blocking", firstFailure.zoneLoss != null ? firstFailure.zoneLoss.blocking : firstFailure.blocking);
         if (firstFailure.zoneLoss != null) {
           failure.put("lostZone", firstFailure.zoneLoss.lostZone);
+        }
+        if (firstFailure.zoneOutage != null) {
+          failure.put("outageZone", firstFailure.zoneOutage.lostZone);
+          failure.put("blocking", firstFailure.zoneOutage.blocking);
         }
         summary.put("firstInfeasible", failure);
       }
@@ -339,10 +390,35 @@ class ScaleDownSearch {
       }
       probe.stats.put("zoneLoss.checked", probe.zoneLossResults.size());
     }
+    if (probe.feasible && !"none".equals(_zoneOutage)) {
+      for (Map.Entry<String, List<String>> zone : zonesToLose(probe.nodes).entrySet()) {
+        Probe check = evaluate(base, settings, removed, zone.getValue(), startLayout,
+            reference != null ? reference : probe);
+        check.lostZone = zone.getKey();
+        check.lostInstances = zone.getValue().size();
+        probe.lastOutageCheck = check;
+        probe.zoneOutageResults.put(zone.getKey(), check.feasible ? "ok" : check.reason());
+        if (!check.feasible) {
+          probe.zoneOutage = check;
+          probe.feasible = false;
+          break;
+        }
+      }
+      probe.stats.put("zoneOutage.checked", probe.zoneOutageResults.size());
+      Probe check = probe.zoneOutage != null ? probe.zoneOutage : probe.lastOutageCheck;
+      if (check != null) {
+        // During the outage: top-state load on the instances that are up, and whether WAGED added replicas.
+        probe.stats.put("outage.maxUtil.top." + _focusKey, check.stats.get("outage.maxUtil.top." + _focusKey));
+        probe.stats.put("outage.passes.overwrite", check.stats.get("passes.overwrite"));
+        probe.stats.put("outage.maintenance", check.stats.get("outage.maintenance"));
+      }
+    }
     probe.stats.put("search.feasible", probe.feasible ? 1 : 0);
     List<String> events = new ArrayList<>();
     events.add("remove " + k + " instance(s)" + (k == 0 ? "" : ": " + summarize(removed)));
     probe.zoneLossResults.forEach((zone, result) -> events.add("then lose zone " + zone + ": " + result));
+    probe.zoneOutageResults.forEach((zone, result) ->
+        events.add("then zone " + zone + " down within the delay window: " + result));
     record(variant, probe.index, events, probe.round, probe.stats, probe);
     probes.add(probe);
     _console.println("[" + variant + "] probe k=" + k + ": " + (probe.feasible ? "feasible" : "infeasible")
@@ -376,6 +452,18 @@ class ScaleDownSearch {
   /** Removes the instances, runs one controller pipeline, and judges WAGED's assignment. */
   private Probe evaluate(ClusterState base, EngineSettings settings, List<String> removed,
       Map<String, Map<String, Map<String, String>>> startLayout, Probe reference) throws Exception {
+    return evaluate(base, settings, removed, Collections.emptyList(), startLayout, reference);
+  }
+
+  /**
+   * Removes the instances and runs one controller pipeline. With instances to take down, it then runs
+   * a second pipeline so the scale-down settles, takes those instances offline (live instance and
+   * current states gone, offline time now, so they are within the delay window) and runs a third:
+   * WAGED keeps their replicas while the window lasts and only adds replicas where a partition falls
+   * below its minimum active replicas. Judges WAGED's assignment either way.
+   */
+  private Probe evaluate(ClusterState base, EngineSettings settings, List<String> removed, List<String> down,
+      Map<String, Map<String, Map<String, String>>> startLayout, Probe reference) throws Exception {
     Probe probe = new Probe();
     try (DryRunEngine engine = new DryRunEngine()) {
       engine.start(base.copy(), settings);
@@ -386,6 +474,13 @@ class ScaleDownSearch {
         StateOps.removeInstance(engine.state(), instance);
       }
       RoundResult round = engine.runRound(1);
+      if (!down.isEmpty()) {
+        merge(round, engine.runRound(2));
+        for (String instance : down) {
+          StateOps.kill(engine.state(), instance);
+        }
+        merge(round, engine.runRound(3));
+      }
       ClusterState after = engine.state();
       // Judge WAGED's own assignment. The served layout of a single round still has the old copies of
       // moved replicas, and leaves out replicas on instances that are offline within the delay window.
@@ -396,10 +491,21 @@ class ScaleDownSearch {
       StatsCollector collector = new StatsCollector(after, _focusKey);
       probe.nodes = withFaultZones(collector.nodes(assignment));
       probe.stats = collector.stats(assignment, startLayout, after.getBaseline(), probe.nodes);
-      placement(after, assignment, probe);
+      // Minimum active replicas count what serves: WAGED's temporary replicas for instances that are down
+      // within the delay window are in the controller's output, not in its stored assignment.
+      placement(after, assignment, after.getServedLayout(), probe);
       probe.stats.put("rebalanceFailures", (long) round.failures.size());
       probe.stats.put("passes.global", round.passes.getOrDefault("global", 0L));
       probe.stats.put("passes.partial", round.passes.getOrDefault("partial", 0L));
+      probe.stats.put("passes.overwrite", round.passes.getOrDefault("overwrite", 0L));
+      if (!down.isEmpty()) {
+        // What clients see during the outage: top states on the instances still serving.
+        Map<String, Map<String, Map<String, String>>> served = after.getServedLayout();
+        Map<String, Object> servedStats = collector.stats(served, null, null, collector.nodes(served));
+        probe.stats.put("outage.missingTopState", servedStats.get("missingTopState"));
+        probe.stats.put("outage.maxUtil.top." + _focusKey, servedStats.get("maxUtil.top." + _focusKey));
+        probe.stats.put("outage.maintenance", round.maintenance ? 1 : 0);
+      }
       for (String stat : ADDED) {
         long now = number(probe.stats.get(stat));
         long then = reference == null ? now : number(reference.stats.get(stat));
@@ -407,10 +513,24 @@ class ScaleDownSearch {
       }
       probe.failures.addAll(round.failures);
       probe.blocking.putAll(round.blockingConstraints);
-      probe.feasible = _spec.feasibleIf.test(probe.stats);
+      probe.feasible = (down.isEmpty() ? _spec.feasibleIf : _outageFeasibleIf).test(probe.stats);
       probe.round = round;
     }
     return probe;
+  }
+
+  private static void merge(RoundResult into, RoundResult next) {
+    into.failures.addAll(next.failures);
+    next.blockingConstraints.forEach((type, count) -> into.blockingConstraints.merge(type, count, Long::sum));
+    next.passes.forEach((pass, count) -> into.passes.merge(pass, count, Long::sum));
+    into.notes.addAll(next.notes);
+    into.maintenance |= next.maintenance;
+  }
+
+  /** @return whether a replica in this state holds data: not dropped, in error or in the initial state */
+  private static boolean hosting(StateModelDefinition model, String state) {
+    return state != null && !"DROPPED".equals(state) && !"ERROR".equals(state)
+        && (model == null || !state.equals(model.getInitialState()));
   }
 
   /**
@@ -418,12 +538,15 @@ class ScaleDownSearch {
    * instances over capacity, and partitions with two replicas in one fault zone.
    */
   private static void placement(ClusterState state, Map<String, Map<String, Map<String, String>>> assignment,
-      Probe probe) {
+      Map<String, Map<String, Map<String, String>>> served, Probe probe) {
     Set<String> instances = state.getInstanceConfigs().keySet();
     Map<String, StateModelDefinition> models = state.getStateModelDefs();
     int live = Math.max(1, state.getLiveInstances().size());
     long unplaced = 0;
     long zoneConflicts = 0;
+    long belowMinActive = 0;
+    long noLiveReplica = 0;
+    Map<String, ResourceConfig> resourceConfigs = state.getResourceConfigs();
     for (Map.Entry<String, IdealState> entry : state.getWagedIdealStates().entrySet()) {
       IdealState idealState = entry.getValue();
       int replicas = idealState.getReplicaCount(live);
@@ -432,17 +555,27 @@ class ScaleDownSearch {
         probe.replicas = Math.max(probe.replicas, replicas);
       }
       StateModelDefinition model = models.get(idealState.getStateModelDefRef());
+      int minActive = DelayedRebalanceUtil.getMinActiveReplica(resourceConfigs.get(entry.getKey()), idealState,
+          replicas);
       Map<String, Map<String, String>> partitions =
           assignment.getOrDefault(entry.getKey(), Collections.emptyMap());
+      Map<String, Map<String, String>> servedPartitions = served == null ? Collections.emptyMap()
+          : served.getOrDefault(entry.getKey(), Collections.emptyMap());
       for (String partition : idealState.getPartitionSet()) {
         int placed = 0;
+        int up = 0;
+        for (Map.Entry<String, String> replica : servedPartitions.getOrDefault(partition, Collections.emptyMap())
+            .entrySet()) {
+          NodeStats node = probe.nodes.get(replica.getKey());
+          if (node != null && node.serving && hosting(model, replica.getValue())) {
+            up++;
+          }
+        }
         Set<String> zones = new TreeSet<>();
         boolean conflict = false;
         for (Map.Entry<String, String> replica : partitions.getOrDefault(partition, Collections.emptyMap())
             .entrySet()) {
-          String replicaState = replica.getValue();
-          if (!instances.contains(replica.getKey()) || replicaState == null || "DROPPED".equals(replicaState)
-              || "ERROR".equals(replicaState) || (model != null && replicaState.equals(model.getInitialState()))) {
+          if (!instances.contains(replica.getKey()) || !hosting(model, replica.getValue())) {
             continue;
           }
           placed++;
@@ -452,6 +585,12 @@ class ScaleDownSearch {
           }
         }
         unplaced += Math.max(0, replicas - placed);
+        if (up < Math.min(minActive, replicas)) {
+          belowMinActive++;
+        }
+        if (up == 0) {
+          noLiveReplica++;
+        }
         if (conflict) {
           zoneConflicts++;
         }
@@ -479,6 +618,8 @@ class ScaleDownSearch {
     probe.stats.put("overCapacityInstances", overCapacity);
     probe.stats.put("zoneConflicts", zoneConflicts);
     probe.stats.put("replicasOnNonServing", onNonServing);
+    probe.stats.put("belowMinActive", belowMinActive);
+    probe.stats.put("noLiveReplica", noLiveReplica);
     probe.stats.put("zones.serving", probe.zonesLeft);
   }
 
@@ -494,8 +635,8 @@ class ScaleDownSearch {
   }
 
   /** Problems counted against the k = 0 probe, so problems the cluster already has don't count. */
-  static final String[] ADDED = {"unplacedReplicas", "overCapacityInstances", "zoneConflicts", "underReplicated",
-      "missingTopState"};
+  static final String[] ADDED = {"unplacedReplicas", "overCapacityInstances", "zoneConflicts", "belowMinActive",
+      "noLiveReplica", "underReplicated", "missingTopState"};
 
   private static long number(Object value) {
     return value instanceof Number ? ((Number) value).longValue() : 0;
@@ -576,6 +717,9 @@ class ScaleDownSearch {
       record.put("feasible", probe.feasible);
       if (!probe.zoneLossResults.isEmpty()) {
         record.put("zoneLoss", probe.zoneLossResults);
+      }
+      if (!probe.zoneOutageResults.isEmpty()) {
+        record.put("zoneOutage", probe.zoneOutageResults);
       }
     }
     record.put("stats", stats);

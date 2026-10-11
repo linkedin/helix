@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.wagedsim.cluster.Manifest;
+import org.apache.helix.wagedsim.scenario.Scenario;
 
 import static org.apache.helix.wagedsim.report.ReportContent.number;
 
@@ -209,15 +210,17 @@ public final class ReportBuilder {
     }
     boolean search = scenario.get("search") != null;
     ReportContent.Table variants = search
-        ? new ReportContent.Table("Variant", "Removal order", "Survive losing a zone", "Constraint weights",
-            "Cluster config changes")
+        ? new ReportContent.Table("Variant", "Removal order", "Survive losing a zone", "Ride out a zone outage",
+            "Down instances", "Constraint weights", "Cluster config changes")
         : new ReportContent.Table("Variant", "Pass", "Constraint weights", "Cluster config changes");
     for (Map<String, Object> variant : data.variants()) {
       Map<String, Object> settings = data.map(variant.get("settings"));
       Map<String, Object> result = data.map(variant.get("search"));
       variants.row(search
           ? Arrays.asList(String.valueOf(variant.get("name")), String.valueOf(result.get("strategy")),
-              String.valueOf(result.get("tolerateZoneLoss")), String.valueOf(settings.get("constraintWeights")),
+              String.valueOf(result.getOrDefault("tolerateZoneLoss", "none")),
+              outageLabel(result), String.valueOf(result.getOrDefault("nonServing", "kept")),
+              String.valueOf(settings.get("constraintWeights")),
               String.valueOf(settings.get("clusterConfig")))
           : Arrays.asList(String.valueOf(variant.get("name")),
               settings.get("pass") + " / " + settings.get("activeNodes"),
@@ -232,6 +235,13 @@ public final class ReportBuilder {
     if (!events.isEmpty()) {
       section.bullets(events);
     }
+  }
+
+  /** @return the zone-outage setting of a search result, with its condition when it is checked */
+  private static String outageLabel(Map<String, Object> result) {
+    String zoneOutage = String.valueOf(result.getOrDefault("tolerateZoneOutage", "none"));
+    return "none".equals(zoneOutage) || result.get("outageCriterion") == null ? zoneOutage
+        : zoneOutage + ", " + result.get("outageCriterion");
   }
 
   /** The scale-down search: the answer per variant, the probes, and instances per zone. */
@@ -249,17 +259,26 @@ public final class ReportBuilder {
     section.bullets(Arrays.asList(
         "When WAGED fails, it keeps its last good assignment, so the removed instances' replicas have no "
             + "home: they count as unplaced.",
-        "With \"survive losing a zone\", a removal also has to pass with a whole fault zone gone on top of "
-            + "it (largest: the zone with the most capacity left; every: each zone), as if the zone stayed "
-            + "down past the delay window. Within the window WAGED leaves a down zone's replicas in place, so "
-            + "a short outage needs no spare capacity.",
+        "Survive losing a zone: a removal also has to pass with a whole fault zone gone on top of it "
+            + "(largest: the zone with the most capacity left; every: each zone), as if the zone stayed down "
+            + "past the delay window or never came back. WAGED then re-places all of its replicas.",
+        "Ride out a zone outage: after the removal settles, the zone's instances go offline and come back "
+            + "within the delay window. WAGED keeps their replicas in place and only adds replicas where a "
+            + "partition falls below its minimum active replicas (MIN_ACTIVE_REPLICAS, which defaults to all "
+            + "replicas). Two conditions: min-active (" + Scenario.SearchSpec.DEFAULT_OUTAGE_FEASIBLE + ": WAGED "
+            + "keeps every partition at its minimum without failing) and serving ("
+            + Scenario.SearchSpec.SERVING_OUTAGE_FEASIBLE + ": every partition keeps a replica up, even if WAGED "
+            + "fails to add temporary replicas and reports rebalance failures until the zone is back). WAGED's "
+            + "temporary-replica pass checks the capacity of the instances that are up against every replica, "
+            + "so it fails once those cannot hold the whole cluster. The top-state load on the instances that "
+            + "stay up is reported, since they take over the down zone's top states.",
         "WAGED places at most one replica of a partition per fault zone, and with fewer zones than "
             + "replicas it silently places fewer replicas instead of failing. Removing a whole zone can pass "
             + "every capacity check and still lose replicas; unplaced replicas catch it.",
         "Stats and charts of a probe describe WAGED's assignment, not the transient layout while replicas move."));
     ReportContent.Table answer = new ReportContent.Table("Variant", "Removal order", "Survive losing a zone",
-        "Down instances", "Serving instances", "Can remove", "Fewest removed from a zone", "Fails at",
-        "Why it fails");
+        "Ride out a zone outage", "Down instances", "Serving instances", "Can remove", "Fewest removed from a zone",
+        "Fails at", "Why it fails");
     // Lowest and highest answer per setting, across removal orders: the lowest is the worst case.
     Map<String, List<Object[]>> bySetting = new LinkedHashMap<>();
     ReportContent.Chart utilization = new ReportContent.Chart();
@@ -277,14 +296,16 @@ public final class ReportBuilder {
       }
       Map<String, Object> failure = data.map(result.get("firstInfeasible"));
       String zoneLoss = String.valueOf(result.getOrDefault("tolerateZoneLoss", "none"));
+      String zoneOutage = outageLabel(result);
       String down = String.valueOf(result.getOrDefault("nonServing", "kept"));
       answer.row(Arrays.asList(String.valueOf(variant.get("name")), String.valueOf(result.get("strategy")),
-          zoneLoss, down, number(result.get("servingInstances")), number(result.get("maxRemovable")),
+          zoneLoss, zoneOutage, down, number(result.get("servingInstances")), number(result.get("maxRemovable")),
           number(result.get("removedFromEveryZone")), number(failure.get("k")),
           failure.isEmpty() ? "" : String.valueOf(failure.get("reason"))));
       if (result.get("maxRemovable") instanceof Number) {
-        bySetting.computeIfAbsent(zoneLoss + "|" + down, s -> new ArrayList<>()).add(new Object[]{
-            ((Number) result.get("maxRemovable")).intValue(), variant.get("name") + " (" + result.get("strategy") + ")"});
+        bySetting.computeIfAbsent(zoneLoss + "|" + zoneOutage + "|" + down, s -> new ArrayList<>()).add(new Object[]{
+            ((Number) result.get("maxRemovable")).intValue(),
+            variant.get("name") + " (" + result.get("strategy") + ")"});
       }
       List<double[]> util = new ArrayList<>();
       List<double[]> top = new ArrayList<>();
@@ -309,15 +330,15 @@ public final class ReportBuilder {
     }
     section.table(answer);
     if (bySetting.values().stream().anyMatch(list -> list.size() > 1)) {
-      ReportContent.Table range = new ReportContent.Table("Survive losing a zone", "Down instances", "Orders tried",
-          "Lowest (worst case)", "Lowest from", "Highest", "Highest from");
+      ReportContent.Table range = new ReportContent.Table("Survive losing a zone", "Ride out a zone outage",
+          "Down instances", "Orders tried", "Lowest (worst case)", "Lowest from", "Highest", "Highest from");
       bySetting.forEach((setting, list) -> {
         list.sort(Comparator.comparingInt((Object[] row) -> (Integer) row[0]));
         Object[] low = list.get(0);
         Object[] high = list.get(list.size() - 1);
         String[] parts = setting.split("\\|");
         boolean same = low[0].equals(high[0]);
-        range.row(Arrays.asList(parts[0], parts[1], String.valueOf(list.size()), number(low[0]),
+        range.row(Arrays.asList(parts[0], parts[1], parts[2], String.valueOf(list.size()), number(low[0]),
             same ? "every order tried" : String.valueOf(low[1]), number(high[0]),
             same ? "every order tried" : String.valueOf(high[1])));
       });
@@ -336,18 +357,33 @@ public final class ReportBuilder {
         continue;
       }
       String name = String.valueOf(variant.get("name"));
-      ReportContent.Table probes = new ReportContent.Table("Instances removed", "Result",
+      boolean outage = !"none".equals(result.getOrDefault("tolerateZoneOutage", "none"));
+      List<String> header = new ArrayList<>(Arrays.asList("Instances removed", "Result",
           "Util % (required, " + focus + ")", "Max host util % (" + focus + ")", "Skew (top state, " + focus + ")",
-          "Replicas moved", "Unplaced replicas", "Reason").kind(3, "util").kind(4, "skew");
+          "Replicas moved", "Unplaced replicas"));
+      if (outage) {
+        header.add("Max top-state util % during outage (" + focus + ")");
+        header.add("WAGED added replicas during outage");
+      }
+      header.add("Reason");
+      ReportContent.Table probes =
+          new ReportContent.Table(header.toArray(new String[0])).kind(3, "util").kind(4, "skew");
       section.text("Probes for " + name + " (" + result.get("strategy") + " order). Replicas moved compares "
           + "WAGED's assignment with the one at the start.");
       for (Object item : data.list(result.get("probes"))) {
         Map<String, Object> probe = data.map(item);
         boolean feasible = Boolean.TRUE.equals(probe.get("feasible"));
-        probes.row(Arrays.asList(number(probe.get("k")), feasible ? "feasible" : "fails",
+        List<String> cells = new ArrayList<>(Arrays.asList(number(probe.get("k")), feasible ? "feasible" : "fails",
             number(probe.get("util.required." + focus)), feasible ? number(probe.get("maxUtil.all." + focus)) : "",
             feasible ? number(probe.get("skew.top." + focus)) : "", feasible ? number(probe.get("moves.replicas")) : "",
-            number(probe.get("unplacedReplicas")), feasible ? "" : String.valueOf(probe.get("reason"))));
+            number(probe.get("unplacedReplicas"))));
+        if (outage) {
+          cells.add(number(probe.get("outage.maxUtil.top." + focus)));
+          Object overwrite = probe.get("outage.passes.overwrite");
+          cells.add(overwrite == null ? "" : ((Number) overwrite).longValue() > 0 ? "yes" : "no");
+        }
+        cells.add(feasible ? "" : String.valueOf(probe.get("reason")));
+        probes.row(cells);
       }
       section.table(probes);
       if (result.get("note") != null) {

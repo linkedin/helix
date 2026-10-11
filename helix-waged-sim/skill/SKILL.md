@@ -75,8 +75,17 @@ take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAP
   "Across removal orders" table has it. `mz-tightest` is the adversarial order: removals pile up in
   the tightest zone. With as many zones as replicas the lowest answer can be far below mz-balanced.
   With many small zones and equal instances, plain placement depends only on the count.
-- `mz-balanced-zone-loss` is the answer that still survives losing the largest zone past the delay
-  window. With as many zones as replicas no zone can be lost; say so rather than calling it a failure
+- Give both answers for surviving the largest zone going down and let the user decide:
+  - `mz-balanced-zone-outage`: the zone comes back within the delay window. WAGED keeps its replicas
+    and only restores `MIN_ACTIVE_REPLICAS`, which defaults to all replicas. With a minimum of 2 of 3
+    this usually costs nothing.
+  - `mz-balanced-zone-outage-serving`: the same outage, only requiring every partition to keep a
+    replica up. This one still holds when WAGED fails to add temporary replicas. Its capacity check
+    weighs every replica against the instances that are up.
+  - `mz-balanced-zone-loss`: the zone stays down past the window, and WAGED re-places everything.
+
+  Mention the delay window and `MIN_ACTIVE_REPLICAS` of the cluster, and the top-state load during the
+  outage. With as many zones as replicas no zone can be lost; say so rather than calling it a failure
   of the plan.
 - Disabled or offline instances count as capacity for WAGED. If the report says WAGED keeps replicas
   on them, give the answer without them too (`search: {nonServing: remove}`).
@@ -168,10 +177,12 @@ A scale-down search replaces `events` and `exit` (except `timeout`) with a `sear
 search:
   removeNodes: {strategy: mz-balanced, method: binary, step: 1, max: 50}   # strategy as below
   feasibleIf: "rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
-  tolerateZoneLoss: none       # largest | every
+  tolerateZoneOutage: none     # largest | every: zone back within the delay window
+  outageFeasibleIf: "rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0"   # or "noLiveReplica.added == 0"
+  tolerateZoneLoss: none       # largest | every: zone down past the window
   nonServing: keep             # remove
   requireAtLeast: 4            # optional; FAIL below it
-variants:                      # per variant: searchStrategy, tolerateZoneLoss, nonServing, seed
+variants:                      # per variant: searchStrategy, tolerateZoneOutage, outageFeasibleIf, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}
   mz-tightest: {searchStrategy: mz-tightest}
   random-1: {searchStrategy: random, seed: 1}
@@ -180,8 +191,10 @@ variants:                      # per variant: searchStrategy, tolerateZoneLoss, 
 Strategies: `mz-balanced` (best case), `mz-tightest` (worst case for zones), `mz-single`,
 `least-loaded`, `most-loaded`, `random`, `name`. Probe stats
 (judged on WAGED's assignment): `unplacedReplicas`, `overCapacityInstances`, `zoneConflicts`,
-`replicasOnNonServing`, `zones.serving`, `search.k`, each with `.added` (relative to removing nothing),
-plus the stats below.
+`belowMinActive`, `noLiveReplica` (on what the controller serves), `replicasOnNonServing`,
+`zones.serving`, `search.k`, each with `.added` (relative to removing nothing), plus the stats below.
+Outage checks also record `outage.maxUtil.top.K`, `outage.missingTopState`, `outage.maintenance`
+and `passes.overwrite`.
 
 Stats usable in conditions (per capacity key K): `skew.top.K`, `skew.all.K` (max/mean of utilization
 over serving instances), `maxUtil.top.K`, `maxUtil.all.K`, `util.top.K`, `util.all.K`,
@@ -196,7 +209,8 @@ over serving instances), `maxUtil.top.K`, `maxUtil.all.K`, `util.top.K`, `util.a
 `replay` (no changes until stable), `rca` (root-cause probes: anchors, TopState weight, scoring keys,
 MaxCapacityUsage, cold starts), `levers` (configuration changes with a controller restart), `rehome`
 (kill the 3 hottest, wait out the delay, revive), `converge` (controller restart churn),
-`restart-all` (rolling restarts), `scale-down` (how many instances can be removed: mz-balanced,
-mz-balanced surviving the loss of the largest zone, least-loaded, mz-single), `scale-down-worst-case`
-(the same question when the instances that go cannot be chosen: best, adversarial and random orders,
-with and without zone loss and down instances).
+`restart-all` (rolling restarts), `scale-down` (how many instances can be removed: mz-balanced, plus
+riding out an outage of the largest zone within the delay window and surviving its loss past the
+window, least-loaded, mz-single), `scale-down-worst-case` (the same question when the instances that go
+cannot be chosen: best, adversarial and random orders, with and without zone outage, zone loss and
+down instances).
