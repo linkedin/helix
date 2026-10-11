@@ -133,7 +133,8 @@ public class Runner {
       engine = _engines.get();
       engine.start(state, settings);
       long simStart = engine.now();
-      Events.Context context = new Events.Context(engine, _scenario.seed, _focusKey);
+      Events.Context context = new Events.Context(engine, variant.seed != null ? variant.seed : _scenario.seed,
+          _focusKey);
       ExitCriteria.Tracker tracker = _scenario.exit.new Tracker(_scenario.lastEventRound());
       Map<String, Map<String, Map<String, String>>> previous = engine.state().getServedLayout();
       StatsCollector collector = new StatsCollector(engine.state(), _focusKey);

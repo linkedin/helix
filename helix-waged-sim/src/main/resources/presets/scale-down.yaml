@@ -9,8 +9,8 @@ description: >-
   a removal order and runs one controller pipeline from the cluster as it is; a search finds the
   largest k that still places everything. mz-balanced keeps zones even (the next instance comes from
   the zone that stays least utilized without it); mz-balanced-zone-loss also requires surviving the
-  loss of the largest zone afterwards; least-loaded ignores zones; mz-single empties one zone first,
-  the worst case for zone spread.
+  loss of the largest zone afterwards; least-loaded ignores zones; mz-single empties the largest zone
+  first. When the scale-down cannot choose its instances, use scale-down-worst-case.
 search:
   removeNodes:
     strategy: mz-balanced

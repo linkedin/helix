@@ -253,7 +253,8 @@ public final class Events {
    * Selects instances. Forms: a name, a comma-separated or YAML list of names, {@code all},
    * {@code hottest-top[:N]}, {@code hottest-all[:N]}, {@code random[:N]}, {@code zone:<zone>},
    * {@code re:<regex>}, {@code previously-disabled}, {@code previously-killed}, the removal orders
-   * {@code mz-balanced[:N]}, {@code mz-single[:N]}, {@code least-loaded[:N]}, {@code most-loaded[:N]},
+   * {@code mz-balanced[:N]}, {@code mz-tightest[:N]}, {@code mz-single[:N]}, {@code least-loaded[:N]},
+   * {@code most-loaded[:N]},
    * or a map with {@code pick}, {@code count}, {@code key}, {@code zone}, {@code names}, {@code pattern}.
    */
   @SuppressWarnings("unchecked")
@@ -314,6 +315,7 @@ public final class Events {
         return shuffled.subList(0, Math.min(count, shuffled.size()));
       }
       case "mz-balanced":
+      case "mz-tightest":
       case "mz-single":
       case "least-loaded":
       case "most-loaded": {

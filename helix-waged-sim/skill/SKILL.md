@@ -68,7 +68,13 @@ builds the package on first use, and sets `JAVA_HOME`.
 each zone, and why one more fails (the WAGED failure: a capacity deficit, or a replica no instance can
 take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAPACITY). Point out:
 
-- `mz-balanced` is the plan to follow (zones stay even); `mz-single` is the worst case for zone spread.
+- `mz-balanced` is the plan to follow (zones stay even). `mz-single` shows what emptying one zone
+  does.
+- If the scale-down cannot choose which instances go (the usual case), run
+  `--scenario preset:scale-down-worst-case` and report the lowest answer per setting. The report's
+  "Across removal orders" table has it. `mz-tightest` is the adversarial order: removals pile up in
+  the tightest zone. With as many zones as replicas the lowest answer can be far below mz-balanced.
+  With many small zones and equal instances, plain placement depends only on the count.
 - `mz-balanced-zone-loss` is the answer that still survives losing the largest zone past the delay
   window. With as many zones as replicas no zone can be lost; say so rather than calling it a failure
   of the plan.
@@ -153,7 +159,7 @@ Events: `disable`, `enable`, `setOperation {nodes, operation}`, `kill`, `revive`
 
 Node selectors: a name or list, `all`, `hottest-top:N`, `hottest-all:N`, `random:N`, `zone:<z>`,
 `re:<regex>`, `previously-disabled`, `previously-killed`, the removal orders `mz-balanced:N`,
-`mz-single:N`, `least-loaded:N`, `most-loaded:N` (serving instances only), or
+`mz-tightest:N`, `mz-single:N`, `least-loaded:N`, `most-loaded:N` (serving instances only), or
 `{pick, count, key, zone, names}`.
 
 A scale-down search replaces `events` and `exit` (except `timeout`) with a `search` block:
@@ -165,12 +171,14 @@ search:
   tolerateZoneLoss: none       # largest | every
   nonServing: keep             # remove
   requireAtLeast: 4            # optional; FAIL below it
-variants:                      # per variant: searchStrategy, tolerateZoneLoss, plus the usual fields
+variants:                      # per variant: searchStrategy, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}
-  mz-single: {searchStrategy: mz-single}
+  mz-tightest: {searchStrategy: mz-tightest}
+  random-1: {searchStrategy: random, seed: 1}
 ```
 
-Strategies: `mz-balanced`, `mz-single`, `least-loaded`, `most-loaded`, `random`, `name`. Probe stats
+Strategies: `mz-balanced` (best case), `mz-tightest` (worst case for zones), `mz-single`,
+`least-loaded`, `most-loaded`, `random`, `name`. Probe stats
 (judged on WAGED's assignment): `unplacedReplicas`, `overCapacityInstances`, `zoneConflicts`,
 `replicasOnNonServing`, `zones.serving`, `search.k`, each with `.added` (relative to removing nothing),
 plus the stats below.
@@ -189,4 +197,6 @@ over serving instances), `maxUtil.top.K`, `maxUtil.all.K`, `util.top.K`, `util.a
 MaxCapacityUsage, cold starts), `levers` (configuration changes with a controller restart), `rehome`
 (kill the 3 hottest, wait out the delay, revive), `converge` (controller restart churn),
 `restart-all` (rolling restarts), `scale-down` (how many instances can be removed: mz-balanced,
-mz-balanced surviving the loss of the largest zone, least-loaded, mz-single).
+mz-balanced surviving the loss of the largest zone, least-loaded, mz-single), `scale-down-worst-case`
+(the same question when the instances that go cannot be chosen: best, adversarial and random orders,
+with and without zone loss and down instances).

@@ -433,7 +433,8 @@ A scenario with a `search` block answers "how many instances can be removed befo
 - **Judged on WAGED's assignment** (its best possible state), because the served layout of a single round still holds the old copies of moved replicas and omits replicas on instances that are down within the delay window. Default `feasibleIf`: `rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0`, where `.added` is relative to the probe that removes nothing.
 - **Why unplaced replicas matter.** WAGED sizes each partition's replica set by the number of active fault zones (`StateModelDefinition.getStateCountMap(activeFaultZoneCount, replicas)`). With fewer zones than replicas it places fewer replicas instead of failing, so a removal that empties a zone can pass every capacity check. A failed rebalance falls back to the last good assignment, whose replicas on removed instances also count as unplaced.
 - **Search.** Binary by default: probe 0; then the capacity bound (the most instances whose removal keeps the capacity of every assignable instance, as WAGED's baseline counts it, at or above what all replicas require) and the bound plus one; then bisect. It assumes feasibility is monotonic in k. `linear` steps from 0 to the first failure.
-- **Removal orders.** `mz-balanced` takes the next instance from the zone that stays least utilized without it (load over remaining capacity on the tightest key; with equal instances, the zone with the most instances left), smallest first; `mz-single` empties the largest zone first; `least-loaded`, `most-loaded`, `random`, `name`. The orders are also event selectors (`removeNode: mz-balanced:3`).
+- **Removal orders.** `mz-balanced` takes the next instance from the zone that stays least utilized without it (load over remaining capacity on the tightest key; with equal instances, the zone with the most instances left), smallest first. `mz-tightest` is its opposite: the zone that is most utilized without the instance, largest and busiest first, which piles removals into the tightest zone. `mz-single` empties the largest zone first. Then `least-loaded`, `most-loaded`, `random` (per-variant `seed`) and `name`. The orders are also event selectors (`removeNode: mz-balanced:3`).
+- **Worst case.** A scale-down usually cannot choose its instances, so `preset:scale-down-worst-case` runs best, adversarial and random orders, with and without zone loss and down instances (per-variant `tolerateZoneLoss` and `nonServing`). The report shows the lowest and highest answer per setting.
 - **Zone loss.** `tolerateZoneLoss: largest | every` also requires the removal to survive losing the zone with the most capacity left (or each zone) as if it stayed down past the delay window. With as many zones as replicas no zone can be lost.
 - **Fault zones as WAGED sees them.** Without topology awareness WAGED treats every instance as its own fault zone, so the search ignores domain zones there: no zone conflicts, no zone-loss check, and the zone-aware orders fall back to the smallest and least loaded instances.
 - **Failure detail.** The innermost WAGED failure message and the hard constraints that blocked the failing replica (`FAULT_ZONE`, `NODE_CAPACITY`, ...), from a failure reporter installed on the algorithm.
@@ -457,8 +458,9 @@ Guardrails:
 ## Implementation status
 
 Built on 2026-10-08 as module `helix-waged-sim` (CLI, both engines, all four sources, reports, presets,
-skill) plus the helix-core seam. The scale-down search was added on 2026-10-09. 44 of the 45 module tests
-pass and one is skipped unless a real Pensieve pull is given; the seam has its own test in helix-core.
+skill) plus the helix-core seam. The scale-down search was added on 2026-10-09 and its worst-case orders on
+2026-10-11. 45 of the 46 module tests pass and one is skipped unless a real Pensieve pull is given; the seam
+has its own test in helix-core.
 
 **Validated:**
 - **RCA parity.** The `rca` preset reproduces the published probe values exactly on the two captured
@@ -477,6 +479,12 @@ pass and one is skipped unless a real Pensieve pull is given; the seam has its o
   CU, four variants take about 75 seconds with `-j 4`: 38 removable (capacity bound, confirmed by WAGED's
   capacity deficit at 39), 37 without a disabled instance WAGED still counts, and 26 when the largest
   zone must also be survivable (24 when removal ignores zones).
+- **Worst case (instances not chosen).** On generated 3-zone clusters the adversarial order
+  (`mz-tightest`) drops the answer from 9 to 1 (zones of 10/8/6) and from 3 to 1 (equal zones); with 5
+  zones every order gives 6. On the captured 20-zone snapshot all 7 orders give 38. Instance sizes are
+  equal and every zone holds far less than one replica of each partition, so only the count matters.
+  Surviving the loss of the largest zone drops from 26 (balanced) to 24 (adversarial): k_cap minus
+  the 14-instance zone that the adversary leaves whole.
 
 **Deviations from the design:**
 - Both engines simulate WAGED resources only; other resources stay in the folder untouched.

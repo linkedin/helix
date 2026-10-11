@@ -112,6 +112,13 @@ public class TestScaleDownSearch {
     List<String> single = RemovalOrder.order(RemovalOrder.Strategy.MZ_SINGLE, all, nodes, "CU", random);
     Assert.assertEquals(RemovalOrder.countByZone(single.subList(0, 4), nodes).size(), 1, single.toString());
 
+    // The tightest order empties one zone before touching the next.
+    List<String> tightest = RemovalOrder.order(RemovalOrder.Strategy.MZ_TIGHTEST, all, nodes, "CU", random);
+    Assert.assertEquals(new HashSet<>(tightest), new HashSet<>(all));
+    for (int k = 4; k <= all.size(); k += 4) {
+      Assert.assertEquals(RemovalOrder.countByZone(tightest.subList(k - 4, k), nodes).size(), 1, tightest.toString());
+    }
+
     List<String> least = RemovalOrder.order(RemovalOrder.Strategy.LEAST_LOADED, all, nodes, "CU", random);
     for (int i = 1; i < least.size(); i++) {
       Assert.assertTrue(nodes.get(least.get(i - 1)).allUtil("CU") <= nodes.get(least.get(i)).allUtil("CU"));
@@ -256,6 +263,33 @@ public class TestScaleDownSearch {
     // 90% caps it below the capacity bound; the reason must not blame fault zones.
     Assert.assertTrue((Integer) result.search.get("maxRemovable") < 3, result.search.toString());
     Assert.assertFalse(result.verdict.reason.contains("fault zone"), result.verdict.reason);
+  }
+
+  @Test
+  public void testWorstCaseOrderOnUnevenZones() throws Exception {
+    // Zones of 10, 8 and 6 instances of 10,000 CU; with 3 replicas every zone holds one replica of each
+    // of the 768 partitions (46,080 CU). Balanced removal reaches 9 (5/3/1). The tightest order takes
+    // from the 6-instance zone, which can lose only one instance.
+    Map<String, Object> spec = new LinkedHashMap<>();
+    spec.put("cluster", TestClusters.map("name", "TEST_UNEVEN", "capacityKeys", Collections.singletonList("CU"),
+        "instanceCapacity", TestClusters.map("CU", 10000), "defaultPartitionWeight", TestClusters.map("CU", 60)));
+    spec.put("instances", Arrays.asList(TestClusters.map("count", 18, "prefix", "node", "zones", 3),
+        TestClusters.map("count", 4, "prefix", "more", "zones", 2), TestClusters.map("count", 2, "prefix", "extra",
+            "zones", 1)));
+    spec.put("resources", Collections.singletonList(TestClusters.map("count", 6, "prefix", "db", "partitions", 128,
+        "replicas", 3, "stateModel", "MasterSlave", "weights", TestClusters.map("CU", 60))));
+    spec.put("seed", 3);
+    Scenario scenario = ScenarioLoader.load("preset:scale-down-worst-case");
+    scenario.variants.keySet().retainAll(Arrays.asList("mz-balanced", "mz-tightest", "random-1"));
+    Map<String, Runner.VariantResult> results =
+        run(SpecSource.build(spec), scenario, Files.createTempDirectory("waged-sim-worst"));
+    Assert.assertEquals(results.get("mz-balanced").search.get("maxRemovable"), 9);
+    Runner.VariantResult tightest = results.get("mz-tightest");
+    Assert.assertEquals(tightest.search.get("maxRemovable"), 1, tightest.search.toString());
+    Assert.assertEquals(tightest.search.get("removedPerZone"), TestClusters.map("z02", 1));
+    Assert.assertEquals(results.get("random-1").search.get("seed"), 1L);
+    int random = (Integer) results.get("random-1").search.get("maxRemovable");
+    Assert.assertTrue(random >= 1 && random <= 9, results.get("random-1").search.toString());
   }
 
   @Test

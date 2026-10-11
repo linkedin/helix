@@ -46,7 +46,14 @@ public final class RemovalOrder {
      * instance goes first, then the least loaded.
      */
     MZ_BALANCED,
-    /** Worst case for zone spread: empty the largest zone first (least loaded first), then the next. */
+    /**
+     * Worst case for zone spread: take the next instance from the zone that is most utilized without
+     * it, the largest and most loaded instance first. Removals pile up in the tightest (usually the
+     * smallest) zone until it is empty, then move on; the largest zones stay whole, which is also the
+     * worst case for surviving the loss of a zone.
+     */
+    MZ_TIGHTEST,
+    /** One zone at a time: empty the largest zone first (least loaded first), then the next. */
     MZ_SINGLE,
     /** Least loaded first, ignoring zones. */
     LEAST_LOADED,
@@ -62,7 +69,7 @@ public final class RemovalOrder {
         return valueOf(text.trim().toUpperCase(Locale.ROOT).replace('-', '_'));
       } catch (IllegalArgumentException e) {
         throw new IllegalArgumentException("Unknown removal strategy '" + text
-            + "'; use mz-balanced, mz-single, least-loaded, most-loaded, random or name");
+            + "'; use mz-balanced, mz-tightest, mz-single, least-loaded, most-loaded, random or name");
       }
     }
 
@@ -90,6 +97,8 @@ public final class RemovalOrder {
     List<String> list = new ArrayList<>(candidates);
     Comparator<String> leastLoaded = Comparator.comparingDouble((String i) -> load(nodes, i, key))
         .thenComparing(Comparator.naturalOrder());
+    Comparator<String> mostLoaded = Comparator.comparingDouble((String i) -> -load(nodes, i, key))
+        .thenComparing(Comparator.naturalOrder());
     switch (strategy) {
       case NAME:
         Collections.sort(list);
@@ -102,7 +111,7 @@ public final class RemovalOrder {
         list.sort(leastLoaded);
         return list;
       case MOST_LOADED:
-        list.sort(Comparator.comparingDouble((String i) -> -load(nodes, i, key)).thenComparing(Comparator.naturalOrder()));
+        list.sort(mostLoaded);
         return list;
       case MZ_SINGLE: {
         Map<String, List<String>> zones = byZone(list, nodes, leastLoaded);
@@ -113,17 +122,25 @@ public final class RemovalOrder {
         return result;
       }
       case MZ_BALANCED:
-        return balanced(list, nodes, key, leastLoaded);
+        return byZoneUtilization(list, nodes, key, false,
+            Comparator.comparingLong((String i) -> capacity(nodes, i, key)).thenComparing(leastLoaded), leastLoaded);
+      case MZ_TIGHTEST:
+        return byZoneUtilization(list, nodes, key, true,
+            Comparator.comparingLong((String i) -> -capacity(nodes, i, key)).thenComparing(mostLoaded), mostLoaded);
       default:
         throw new IllegalStateException(strategy.name());
     }
   }
 
-  private static List<String> balanced(List<String> list, Map<String, NodeStats> nodes, String key,
-      Comparator<String> leastLoaded) {
-    Comparator<String> smallestFirst = Comparator.comparingLong((String i) -> capacity(nodes, i, key))
-        .thenComparing(leastLoaded);
-    Map<String, List<String>> zones = byZone(list, nodes, smallestFirst);
+  /**
+   * Orders instances zone by zone. Each step looks at every zone's next instance and the zone's
+   * utilization (load over the capacity it has left, on its tightest key) once that instance is gone,
+   * and takes the lowest (balanced) or the highest (tightest). Ties go to the zone with more
+   * instances left (balanced) or fewer (tightest), then by {@code tieBreak} on the candidates.
+   */
+  private static List<String> byZoneUtilization(List<String> list, Map<String, NodeStats> nodes, String key,
+      boolean tightest, Comparator<String> withinZone, Comparator<String> tieBreak) {
+    Map<String, List<String>> zones = byZone(list, nodes, withinZone);
     Map<String, LinkedList<String>> remaining = new TreeMap<>(ZONE_ORDER);
     Map<String, Map<String, Long>> zoneCapacity = new TreeMap<>(ZONE_ORDER);
     Map<String, Map<String, Long>> zoneLoad = new TreeMap<>(ZONE_ORDER);
@@ -151,12 +168,13 @@ public final class RemovalOrder {
         }
         double util = utilizationWithout(zoneCapacity.get(zone.getKey()), zoneLoad.get(zone.getKey()),
             nodes.get(zone.getValue().getFirst()));
-        int cmp = best == null ? -1 : Double.compare(util, bestUtil);
+        int cmp = best == null ? -1 : tightest ? Double.compare(bestUtil, util) : Double.compare(util, bestUtil);
         if (cmp == 0) {
-          cmp = Integer.compare(remaining.get(best).size(), zone.getValue().size());
+          cmp = tightest ? Integer.compare(zone.getValue().size(), remaining.get(best).size())
+              : Integer.compare(remaining.get(best).size(), zone.getValue().size());
         }
         if (cmp == 0) {
-          cmp = leastLoaded.compare(zone.getValue().getFirst(), remaining.get(best).getFirst());
+          cmp = tieBreak.compare(zone.getValue().getFirst(), remaining.get(best).getFirst());
         }
         if (cmp < 0) {
           best = zone.getKey();

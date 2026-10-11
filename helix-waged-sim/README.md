@@ -101,10 +101,10 @@ search:
   tolerateZoneLoss: none        # largest | every: also survive losing a whole zone afterwards
   nonServing: keep              # remove: plan without disabled and offline instances
   requireAtLeast: 4             # optional: FAIL when fewer can be removed
-variants:
+variants:                       # per variant: searchStrategy, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}
   survive-zone-loss: {tolerateZoneLoss: largest}
-  least-loaded: {searchStrategy: least-loaded}
+  worst-case: {searchStrategy: mz-tightest}
 ```
 
 - **Probe.** Each probe starts from the cluster as it is, removes the first k serving instances of a
@@ -119,10 +119,25 @@ variants:
 - **Search.** Binary search assumes that if removing k fails, removing more fails too. Its first guess
   is the most instances the remaining capacity allows (WAGED's own cluster-wide capacity check), then
   one more to confirm, so a capacity-bound cluster takes about three probes. `linear` checks every step.
-- **Removal orders.** `mz-balanced` (default) takes the next instance from the zone that stays least
-  utilized without it, the smallest instance first, so zones stay even; `mz-single` empties the largest
-  zone first (the worst case for zone spread); `least-loaded`, `most-loaded`, `random` and `name`
-  ignore zones. The same orders are event selectors: `removeNode: mz-balanced:3`.
+- **Removal orders.**
+  - `mz-balanced` (default): the next instance comes from the zone that stays least utilized without
+    it, smallest instance first, so zones stay even. This is the best case.
+  - `mz-tightest`: the opposite. Removals pile up in the zone that is most utilized without the
+    instance (usually the smallest), largest and busiest instance first, until it is empty. This is
+    the worst case for zone spread and for surviving a zone loss.
+  - `mz-single`: empties the largest zone first.
+  - `least-loaded`, `most-loaded`, `random` (per-variant `seed`) and `name`: ignore zones.
+
+  The same orders are event selectors: `removeNode: mz-balanced:3`.
+- **Worst case.** A real scale-down usually cannot choose which instances go. `preset:scale-down-worst-case`
+  runs the best, the adversarial and three random orders, with and without zone loss and down
+  instances. The report's "Across removal orders" table shows the lowest answer per setting, which is
+  what such a scale-down can count on.
+  - With as many zones as replicas, the answer depends heavily on the order. Every zone must hold one
+    replica of each partition, so piling removals into the tightest zone breaks it soonest.
+  - With many zones each holding far less than one replica of every partition, and equal instance
+    sizes, plain placement depends only on how many instances go. Surviving a zone loss still depends
+    on which zone is left largest.
 - **Fault zones.** WAGED places at most one replica of a partition per fault zone (a hard constraint).
   With fewer zones left than replicas, it does not fail: it places fewer replicas. Unplaced replicas
   catch that. `tolerateZoneLoss: largest` also requires that the cluster survives losing the zone with

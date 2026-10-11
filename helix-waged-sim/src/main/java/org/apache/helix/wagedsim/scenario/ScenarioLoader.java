@@ -50,7 +50,8 @@ public final class ScenarioLoader {
       "clusterConfig", "constraintWeights", "maintenance", "advanceClock", "restartController",
       "onDemandRebalance", "random")));
   public static final List<String> PRESETS = Collections.unmodifiableList(
-      Arrays.asList("replay", "rca", "levers", "rehome", "converge", "restart-all", "scale-down"));
+      Arrays.asList("replay", "rca", "levers", "rehome", "converge", "restart-all", "scale-down",
+          "scale-down-worst-case"));
   private static final Set<String> TIMING = new LinkedHashSet<>(Arrays.asList("at", "every", "from", "times"));
 
   private ScenarioLoader() {
@@ -232,11 +233,25 @@ public final class ScenarioLoader {
         case "tolerateZoneLoss":
           variant.zoneLoss = zoneLoss(value);
           break;
+        case "nonServing":
+          variant.removeNonServing = nonServing(value);
+          break;
+        case "seed":
+          variant.seed = ((Number) value).longValue();
+          break;
         default:
           throw new IllegalArgumentException("Unknown field '" + entry.getKey() + "' in variant " + name);
       }
     }
     return variant;
+  }
+
+  /** @return true for remove, false for keep */
+  private static boolean nonServing(Object value) {
+    if (!"keep".equals(value) && !"remove".equals(value)) {
+      throw new IllegalArgumentException("nonServing must be keep or remove");
+    }
+    return "remove".equals(value);
   }
 
   /** @return largest, every, or none for no zone-loss check */
@@ -291,10 +306,7 @@ public final class ScenarioLoader {
           search.zoneLoss = zoneLoss(value);
           break;
         case "nonServing":
-          if (!"keep".equals(value) && !"remove".equals(value)) {
-            throw new IllegalArgumentException("search.nonServing must be keep or remove");
-          }
-          search.removeNonServing = "remove".equals(value);
+          search.removeNonServing = nonServing(value);
           break;
         default:
           throw new IllegalArgumentException("Unknown search field '" + entry.getKey() + "'");

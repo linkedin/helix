@@ -66,6 +66,10 @@ public class Scenario {
     public RemovalOrder.Strategy searchStrategy;
     /** Zone-loss check for a scale-down search (largest, every or none); overrides the scenario's. */
     public String zoneLoss;
+    /** Whether a scale-down search removes disabled and offline instances; overrides the scenario's. */
+    public Boolean removeNonServing;
+    /** Seed for random choices, such as a random removal order; overrides the scenario's. */
+    public Long seed;
     public Map<String, Object> source = new LinkedHashMap<>();
 
     public EngineSettings apply(EngineSettings base) {

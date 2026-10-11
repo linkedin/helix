@@ -257,8 +257,11 @@ public final class ReportBuilder {
             + "replicas it silently places fewer replicas instead of failing. Removing a whole zone can pass "
             + "every capacity check and still lose replicas; unplaced replicas catch it.",
         "Stats and charts of a probe describe WAGED's assignment, not the transient layout while replicas move."));
-    ReportContent.Table answer = new ReportContent.Table("Variant", "Removal order", "Serving instances",
-        "Can remove", "Fewest removed from a zone", "Fails at", "Why it fails");
+    ReportContent.Table answer = new ReportContent.Table("Variant", "Removal order", "Survive losing a zone",
+        "Down instances", "Serving instances", "Can remove", "Fewest removed from a zone", "Fails at",
+        "Why it fails");
+    // Lowest and highest answer per setting, across removal orders: the lowest is the worst case.
+    Map<String, List<Object[]>> bySetting = new LinkedHashMap<>();
     ReportContent.Chart utilization = new ReportContent.Chart();
     utilization.title = "Highest instance utilization on " + focus + " (all replicas) by instances removed";
     utilization.yLabel = "%";
@@ -273,10 +276,16 @@ public final class ReportBuilder {
         continue;
       }
       Map<String, Object> failure = data.map(result.get("firstInfeasible"));
+      String zoneLoss = String.valueOf(result.getOrDefault("tolerateZoneLoss", "none"));
+      String down = String.valueOf(result.getOrDefault("nonServing", "kept"));
       answer.row(Arrays.asList(String.valueOf(variant.get("name")), String.valueOf(result.get("strategy")),
-          number(result.get("servingInstances")), number(result.get("maxRemovable")),
+          zoneLoss, down, number(result.get("servingInstances")), number(result.get("maxRemovable")),
           number(result.get("removedFromEveryZone")), number(failure.get("k")),
           failure.isEmpty() ? "" : String.valueOf(failure.get("reason"))));
+      if (result.get("maxRemovable") instanceof Number) {
+        bySetting.computeIfAbsent(zoneLoss + "|" + down, s -> new ArrayList<>()).add(new Object[]{
+            ((Number) result.get("maxRemovable")).intValue(), variant.get("name") + " (" + result.get("strategy") + ")"});
+      }
       List<double[]> util = new ArrayList<>();
       List<double[]> top = new ArrayList<>();
       for (Object item : data.list(result.get("probes"))) {
@@ -299,6 +308,23 @@ public final class ReportBuilder {
       }
     }
     section.table(answer);
+    if (bySetting.values().stream().anyMatch(list -> list.size() > 1)) {
+      ReportContent.Table range = new ReportContent.Table("Survive losing a zone", "Down instances", "Orders tried",
+          "Lowest (worst case)", "Lowest from", "Highest", "Highest from");
+      bySetting.forEach((setting, list) -> {
+        list.sort(Comparator.comparingInt((Object[] row) -> (Integer) row[0]));
+        Object[] low = list.get(0);
+        Object[] high = list.get(list.size() - 1);
+        String[] parts = setting.split("\\|");
+        boolean same = low[0].equals(high[0]);
+        range.row(Arrays.asList(parts[0], parts[1], String.valueOf(list.size()), number(low[0]),
+            same ? "every order tried" : String.valueOf(low[1]), number(high[0]),
+            same ? "every order tried" : String.valueOf(high[1])));
+      });
+      section.text("Across removal orders. A scale-down that cannot choose its instances can only count on the "
+          + "lowest answer of the orders tried; -1 means not even the cluster as it is passes:");
+      section.table(range);
+    }
     if (!utilization.series.isEmpty()) {
       section.chart(utilization);
       section.chart(skew);

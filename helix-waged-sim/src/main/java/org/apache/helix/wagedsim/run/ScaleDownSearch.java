@@ -136,7 +136,8 @@ class ScaleDownSearch {
     List<String> candidates = new ArrayList<>();
     List<String> nonServing = new ArrayList<>();
     nodes.values().forEach(n -> (n.serving ? candidates : nonServing).add(n.instance));
-    if (_spec.removeNonServing) {
+    boolean removeNonServing = variant.removeNonServing != null ? variant.removeNonServing : _spec.removeNonServing;
+    if (removeNonServing) {
       _dropFirst = nonServing;
     }
     String zoneLossNote = null;
@@ -145,7 +146,8 @@ class ScaleDownSearch {
       _console.println("[" + variant.name + "] " + zoneLossNote);
       _zoneLoss = "none";
     }
-    List<String> order = RemovalOrder.order(strategy, candidates, nodes, _focusKey, new Random(_scenario.seed));
+    long seed = variant.seed != null ? variant.seed : _scenario.seed;
+    List<String> order = RemovalOrder.order(strategy, candidates, nodes, _focusKey, new Random(seed));
     int maxK = _spec.max != null ? Math.min(_spec.max, order.size()) : order.size();
     _console.println("[" + variant.name + "] scale-down search: " + order.size() + " serving instances, order "
         + strategy.label() + ", up to " + maxK + " removed");
@@ -160,7 +162,7 @@ class ScaleDownSearch {
     // Start and end both describe WAGED's assignment: with nothing removed, and with the most removed.
     result.start = zero.stats;
     _output.nodes(variant.name, 0, zero.nodes.values(), collector.keys());
-    int bound = capacityBound(order, nodes, startStats, collector.keys(), _spec.removeNonServing);
+    int bound = capacityBound(order, nodes, startStats, collector.keys(), removeNonServing);
     if (zero.feasible) {
       best = zero;
       if ("linear".equals(_spec.method)) {
@@ -227,7 +229,10 @@ class ScaleDownSearch {
     summary.put("searchedUpTo", maxK);
     summary.put("capacityBound", bound);
     summary.put("nonServingInstances", nonServing.size());
-    summary.put("nonServing", _spec.removeNonServing ? "removed" : "kept");
+    summary.put("nonServing", removeNonServing ? "removed" : "kept");
+    if (strategy == RemovalOrder.Strategy.RANDOM) {
+      summary.put("seed", seed);
+    }
     Map<String, Integer> before = RemovalOrder.countByZone(order, nodes);
     summary.put("servingPerZoneBefore", before);
     summary.put("zoneUtilBefore", zoneUtil(zero.nodes));
