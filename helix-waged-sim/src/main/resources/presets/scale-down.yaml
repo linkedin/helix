@@ -5,31 +5,29 @@ name: scale-down
 description: >-
   How many serving instances can be removed before WAGED can no longer place every replica: a
   capacity deficit, or a hard constraint such as fault-zone (maintenance zone) spread, makes the
-  rebalance fail, or WAGED silently places fewer replicas. Each probe removes the first k instances of
-  a removal order and runs one controller pipeline from the cluster as it is; a search finds the
-  largest k that still places everything. mz-balanced keeps zones even (the next instance comes from
-  the zone that stays least utilized without it). The largest zone going down afterwards, three ways:
-  mz-balanced-zone-outage rides out an outage that ends within the delay window with WAGED keeping
-  every partition at its minimum active replicas; mz-balanced-zone-outage-serving only requires every
-  partition to keep a replica up during that outage; mz-balanced-zone-loss survives the zone staying
-  down past the window or never coming back (WAGED re-places all of its replicas).
+  rebalance fail, or WAGED silently places fewer replicas. Each probe evacuates the first k instances
+  of a removal order from the cluster as it is (EVACUATE: their replicas move elsewhere while the old
+  ones keep serving), removes them once they are empty, and a search finds the largest k that still
+  places everything. mz-balanced keeps zones even (the next instance comes from
+  the zone that stays least utilized without it). The largest zone going down afterwards, two ways:
+  mz-balanced-zone-outage rides out an outage that ends within the delay window with every partition
+  keeping its minimum active replicas serving; mz-balanced-zone-loss survives the zone staying down
+  past the window or never coming back (WAGED re-places all of its replicas).
   least-loaded ignores zones; mz-single empties the largest zone first. When the scale-down cannot
   choose its instances, use scale-down-worst-case.
 search:
   removeNodes:
     strategy: mz-balanced
     method: binary
+    as: evacuate                 # or delete: same placement answer, faster
   # Judged on WAGED's assignment; ".added" counts only problems the probe that removes nothing did not have.
-  feasibleIf: "rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
+  feasibleIf: "rebalanceFailures == 0 and evacuationStuck == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
   # Disabled or offline instances stay, as WAGED counts them; "remove" plans without them.
   nonServing: keep
 variants:
   mz-balanced: {}
   mz-balanced-zone-outage:
     tolerateZoneOutage: largest
-  mz-balanced-zone-outage-serving:
-    tolerateZoneOutage: largest
-    outageFeasibleIf: "noLiveReplica.added == 0"
   mz-balanced-zone-loss:
     tolerateZoneLoss: largest
   least-loaded:

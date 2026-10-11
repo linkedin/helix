@@ -32,6 +32,11 @@ public class NodeStats {
   public boolean assignable;
   /** Enabled, live and assignable: the instances whose load is measured. */
   public boolean serving;
+  /**
+   * Live, not disabled and routable: the instances whose replicas serve. Unlike {@link #serving} this
+   * includes an EVACUATE instance, which keeps serving its replicas until they have moved.
+   */
+  public boolean routable;
   public Map<String, Integer> capacity = new TreeMap<>();
   public Map<String, Long> topLoad = new TreeMap<>();
   public Map<String, Long> allLoad = new TreeMap<>();

@@ -429,7 +429,13 @@ The cluster card (capacity vs required and util % per key, max host %, skew for 
 
 A scenario with a `search` block answers "how many instances can be removed before WAGED can no longer place every replica?" (`preset:scale-down`). It replaces events and rounds with probes and runs in dry-run mode only.
 
-- **Probe k.** A fresh engine starts from the cluster as it is, removes the first k serving instances of a removal order (and, with `nonServing: remove`, every disabled or offline instance), and runs one controller pipeline. The topology change makes WAGED compute a new baseline over the instances left; the partial pass re-homes the removed instances' replicas.
+- **Probe k.** A fresh engine starts from the cluster as it is and takes out the first k serving instances of a removal order the way a scale-down does (with `nonServing: remove`, every disabled or offline instance is deleted first).
+  - It sets the EVACUATE operation on them. EVACUATE instances are not assignable, so WAGED places their replicas on the others (a new baseline). The controller's n + 1 logic (`DelayedAutoRebalancer.computeBestPossibleStateForPartitionInternal`) keeps the old replica serving until the replacement reaches its state, then drops it.
+  - Evacuation runs in batches. Each batch keeps `InstanceUtil.getInstancesUnableToAcceptOnlineReplicas` (down, disabled and EVACUATE instances) within `MAX_OFFLINE_INSTANCES_ALLOWED`; past it, `BestPossibleStateCalcStage` puts the cluster into maintenance mode and WAGED stops moving replicas.
+  - Rounds run until a batch holds nothing (`isEvacuateFinished` checks for no current states), then its instances are removed and one more round runs.
+  - WAGED's partial pass treats instances that are down but within their delay window as active, so it can give them replacements that cannot come up. When an evacuation stalls on those, the probe advances the virtual clock past the delay window once and records it.
+  - An evacuation that still stops making progress, or exceeds `maxEvacuationRounds`, counts as `evacuationStuck`.
+  - `removeNodes.as: delete` instead deletes them and runs one round: the same placement answer, faster.
 - **Judged on WAGED's assignment** (its best possible state), because the served layout of a single round still holds the old copies of moved replicas and omits replicas on instances that are down within the delay window. Default `feasibleIf`: `rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0`, where `.added` is relative to the probe that removes nothing.
 - **Why unplaced replicas matter.** WAGED sizes each partition's replica set by the number of active fault zones (`StateModelDefinition.getStateCountMap(activeFaultZoneCount, replicas)`). With fewer zones than replicas it places fewer replicas instead of failing, so a removal that empties a zone can pass every capacity check. A failed rebalance falls back to the last good assignment, whose replicas on removed instances also count as unplaced.
 - **Search.** Binary by default: probe 0; then the capacity bound (the most instances whose removal keeps the capacity of every assignable instance, as WAGED's baseline counts it, at or above what all replicas require) and the bound plus one; then bisect. It assumes feasibility is monotonic in k. `linear` steps from 0 to the first failure.
@@ -438,7 +444,7 @@ A scenario with a `search` block answers "how many instances can be removed befo
 - **Zone outage (within the delay window).** `tolerateZoneOutage: largest | every`:
   - After the removal settles (two controller rounds), the zone's instances go offline (live instance and current states gone, offline time now) and a third round runs.
   - WAGED keeps their replicas while the window lasts. Its delayed-rebalance overwrite adds temporary replicas only where a partition falls below `MIN_ACTIVE_REPLICAS` (`DelayedRebalanceUtil.getMinActiveReplica`, which defaults to the replica count). The overwrite is in the controller's output, not the stored assignment.
-  - So the outage is judged on what is served: `outageFeasibleIf`, default `rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0` ("min-active"). A variant can set `noLiveReplica.added == 0` ("serving"), which only requires every partition to keep a replica up. It also records the top-state utilization on the instances still up and whether the controller entered maintenance mode (`MAX_OFFLINE_INSTANCES_ALLOWED`).
+  - So the outage is judged on what is served: `outageFeasibleIf`, default `belowMinActive.added == 0 and noLiveReplica.added == 0` ("min-active"), meaning every partition keeps its minimum active replicas serving. Adding `rebalanceFailures == 0` also forbids WAGED failures. It also records the top-state utilization on the instances still up, WAGED failures, and whether the controller entered maintenance mode (`MAX_OFFLINE_INSTANCES_ALLOWED`).
   - The overwrite's cluster model holds every replica, so `ConstraintBasedAlgorithm`'s cluster-wide check weighs all of them against the capacity of the live instances. It fails with `CAPACITY_DEFICIT` once those can't hold the whole cluster, even though only a few replicas need a temporary home.
 - **Zone loss (past the window).** `tolerateZoneLoss: largest | every` also requires the removal to survive losing the zone with the most capacity left (or each zone) as if it stayed down past the delay window: its instances are removed and WAGED re-places their replicas. With as many zones as replicas no zone can be lost.
 - **Fault zones as WAGED sees them.** Without topology awareness WAGED treats every instance as its own fault zone, so the search ignores domain zones there: no zone conflicts, no zone-loss check, and the zone-aware orders fall back to the smallest and least loaded instances.
@@ -463,9 +469,9 @@ Guardrails:
 ## Implementation status
 
 Built on 2026-10-08 as module `helix-waged-sim` (CLI, both engines, all four sources, reports, presets,
-skill) plus the helix-core seam. The scale-down search was added on 2026-10-09, and its worst-case orders and
-zone-outage check on 2026-10-11. 46 of the 47 module tests pass and one is skipped unless a real Pensieve pull
-is given; the seam has its own test in helix-core.
+skill) plus the helix-core seam. The scale-down search was added on 2026-10-09. Its worst-case orders,
+zone-outage check and evacuation-based probes followed on 2026-10-11. 48 of the 49 module tests pass and one
+is skipped unless a real Pensieve pull is given; the seam has its own test in helix-core.
 
 **Validated:**
 - **RCA parity.** The `rca` preset reproduces the published probe values exactly on the two captured

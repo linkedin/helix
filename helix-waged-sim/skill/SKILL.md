@@ -64,7 +64,13 @@ builds the package on first use, and sets `JAVA_HOME`.
 ### Scale-down questions
 
 "How many nodes can we remove?" is a search, not rounds: `scripts/waged-sim run <cluster folder>
---scenario preset:scale-down -j 4`. Report per variant: how many instances can be removed, how many from
+--scenario preset:scale-down -j 4`. Probes evacuate instances (EVACUATE) as a real scale-down does.
+The old replicas keep serving until their replacements are up, and the instances are removed once
+empty.
+
+Batches stay within `MAX_OFFLINE_INSTANCES_ALLOWED`, since more puts the cluster into maintenance mode
+and stalls everything. Mention the batch size and any wait for a down instance's delay window that the
+report notes. `removeNodes.as: delete` is several times faster when only the placement limit matters. Report per variant: how many instances can be removed, how many from
 each zone, and why one more fails (the WAGED failure: a capacity deficit, or a replica no instance can
 take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAPACITY). Point out:
 
@@ -79,9 +85,9 @@ take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAP
   - `mz-balanced-zone-outage`: the zone comes back within the delay window. WAGED keeps its replicas
     and only restores `MIN_ACTIVE_REPLICAS`, which defaults to all replicas. With a minimum of 2 of 3
     this usually costs nothing.
-  - `mz-balanced-zone-outage-serving`: the same outage, only requiring every partition to keep a
-    replica up. This one still holds when WAGED fails to add temporary replicas. Its capacity check
-    weighs every replica against the instances that are up.
+  - The outage passes when every partition keeps its minimum active replicas serving. WAGED's
+    temporary-replica pass weighs every replica against the instances that are up, so partitions
+    already short (another instance down) can fail it early.
   - `mz-balanced-zone-loss`: the zone stays down past the window, and WAGED re-places everything.
 
   Mention the delay window and `MIN_ACTIVE_REPLICAS` of the cluster, and the top-state load during the
@@ -175,10 +181,10 @@ A scale-down search replaces `events` and `exit` (except `timeout`) with a `sear
 
 ```yaml
 search:
-  removeNodes: {strategy: mz-balanced, method: binary, step: 1, max: 50}   # strategy as below
-  feasibleIf: "rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
+  removeNodes: {strategy: mz-balanced, method: binary, step: 1, max: 50, as: evacuate}   # as: delete is faster
+  feasibleIf: "rebalanceFailures == 0 and evacuationStuck == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0"
   tolerateZoneOutage: none     # largest | every: zone back within the delay window
-  outageFeasibleIf: "rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0"   # or "noLiveReplica.added == 0"
+  outageFeasibleIf: "belowMinActive.added == 0 and noLiveReplica.added == 0"   # add "rebalanceFailures == 0" to be strict
   tolerateZoneLoss: none       # largest | every: zone down past the window
   nonServing: keep             # remove
   requireAtLeast: 4            # optional; FAIL below it

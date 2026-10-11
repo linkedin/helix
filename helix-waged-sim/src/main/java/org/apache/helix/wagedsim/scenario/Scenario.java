@@ -101,9 +101,17 @@ public class Scenario {
      * No rebalance failure, and WAGED's assignment places every replica on an instance within capacity
      * with zones kept apart; ".added" counts only problems the probe that removes nothing did not have.
      */
-    public static final String DEFAULT_FEASIBLE = "rebalanceFailures == 0 and unplacedReplicas.added == 0"
-        + " and overCapacityInstances.added == 0 and zoneConflicts.added == 0";
+    public static final String DEFAULT_FEASIBLE = "rebalanceFailures == 0 and evacuationStuck == 0"
+        + " and unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0";
     public RemovalOrder.Strategy strategy = RemovalOrder.Strategy.MZ_BALANCED;
+    /**
+     * Remove instances the way a scale-down does: the EVACUATE operation, which keeps the old replicas
+     * serving until their replacements are up, then removal once the instances hold nothing. False
+     * deletes them at once, which is faster and gives the same placement answer.
+     */
+    public boolean evacuate = true;
+    /** Most controller rounds an evacuation may take before it counts as stuck. */
+    public int maxEvacuationRounds = 20;
     /** binary (fewest probes, assumes removing more never helps) or linear (every step from 0). */
     public String method = "binary";
     public int step = 1;
@@ -131,9 +139,11 @@ public class Scenario {
      * checks each zone, "none" skips the check.
      */
     public String zoneOutage = "none";
-    /** Default for {@link #outageFeasibleIf}: WAGED holds every partition at its minimum active replicas. */
-    public static final String DEFAULT_OUTAGE_FEASIBLE =
-        "rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0";
+    /**
+     * Default for {@link #outageFeasibleIf}: every partition keeps its minimum active replicas serving
+     * (for example 2 of 3), adding temporary replicas where WAGED must.
+     */
+    public static final String DEFAULT_OUTAGE_FEASIBLE = "belowMinActive.added == 0 and noLiveReplica.added == 0";
     /** A looser outage condition: every partition keeps a replica up, so it keeps serving. */
     public static final String SERVING_OUTAGE_FEASIBLE = "noLiveReplica.added == 0";
 
@@ -153,6 +163,10 @@ public class Scenario {
     public Map<String, Object> describe() {
       Map<String, Object> map = new LinkedHashMap<>();
       map.put("strategy", strategy.label());
+      map.put("removeAs", evacuate ? "evacuate" : "delete");
+      if (evacuate) {
+        map.put("maxEvacuationRounds", maxEvacuationRounds);
+      }
       map.put("method", method);
       if ("linear".equals(method)) {
         map.put("step", step);

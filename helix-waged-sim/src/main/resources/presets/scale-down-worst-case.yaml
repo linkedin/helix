@@ -9,8 +9,8 @@ description: >-
   zone, the worst case for zone spread and for surviving a zone loss; most-loaded takes the busiest
   instances first; mz-single empties the largest zone first; random-N are arbitrary removals. The
   zone-outage variants must also ride out the largest zone going offline and coming back within the
-  delay window (with every partition kept at its minimum active replicas, or, for -serving, with every
-  partition keeping a replica up); the zone-loss variants must survive it staying down past the window.
+  delay window, with every partition keeping its minimum active replicas serving; the zone-loss
+  variants must survive it staying down past the window. Instances are evacuated, as in a scale-down.
   The without-down variants plan without disabled or offline instances.
 search:
   removeNodes:
@@ -26,7 +26,6 @@ variants:
   random-3: {searchStrategy: random, seed: 3}
   mz-balanced-zone-outage: {tolerateZoneOutage: largest}
   mz-tightest-zone-outage: {searchStrategy: mz-tightest, tolerateZoneOutage: largest}
-  mz-tightest-zone-outage-serving: {searchStrategy: mz-tightest, tolerateZoneOutage: largest, outageFeasibleIf: "noLiveReplica.added == 0"}
   mz-balanced-zone-loss: {tolerateZoneLoss: largest}
   mz-tightest-zone-loss: {searchStrategy: mz-tightest, tolerateZoneLoss: largest}
   random-1-zone-loss: {searchStrategy: random, seed: 1, tolerateZoneLoss: largest}

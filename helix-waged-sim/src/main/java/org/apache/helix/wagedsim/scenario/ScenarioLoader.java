@@ -297,6 +297,15 @@ public final class ScenarioLoader {
               case "max":
                 search.max = ((Number) v).intValue();
                 break;
+              case "as":
+                if (!"evacuate".equals(v) && !"delete".equals(v)) {
+                  throw new IllegalArgumentException("search.removeNodes.as must be evacuate or delete");
+                }
+                search.evacuate = "evacuate".equals(v);
+                break;
+              case "maxEvacuationRounds":
+                search.maxEvacuationRounds = Math.max(1, ((Number) v).intValue());
+                break;
               default:
                 throw new IllegalArgumentException("Unknown search.removeNodes field '" + option.getKey() + "'");
             }

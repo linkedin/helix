@@ -248,9 +248,17 @@ public final class ReportBuilder {
   private static void search(ReportContent report, RunData data, String focus) {
     Map<String, Object> spec = data.map(data.map(data.summary.get("scenario")).get("search"));
     ReportContent.Section section = report.section("Scale-down search");
-    section.text("Each probe starts from the cluster as it is, removes the first k serving instances of the "
-        + "removal order, and runs one controller pipeline: the global pass computes a new baseline over the "
-        + "remaining instances and the partial pass re-homes the removed instances' replicas. The probe is "
+    boolean evacuate = !"delete".equals(spec.get("removeAs"));
+    section.text("Each probe starts from the cluster as it is and removes the first k serving instances of the "
+        + "removal order" + (evacuate ? " the way a scale-down does: they get the EVACUATE operation and stay up, "
+        + "WAGED places their replicas elsewhere (a new baseline over the other instances), the controller keeps "
+        + "the old replicas serving until the new ones are up and then drops them, and once the instances hold "
+        + "nothing they are removed. Instances are evacuated in batches that keep the instances unable to take "
+        + "replicas within MAX_OFFLINE_INSTANCES_ALLOWED (past it the controller enters maintenance mode and "
+        + "stops moving replicas). Controller rounds run until a batch is empty (at most "
+        + spec.get("maxEvacuationRounds") + " per batch, or until no progress)" : ": they are deleted and one "
+        + "controller round runs, in which WAGED computes a new baseline and re-homes their replicas")
+        + ". The probe is "
         + "judged on WAGED's assignment (its best possible state); it is feasible when " + spec.get("feasibleIf")
         + ". \".added\" counts only problems the probe that removes nothing did not have. Search: "
         + spec.get("method") + ("binary".equals(spec.get("method"))
@@ -262,16 +270,14 @@ public final class ReportBuilder {
         "Survive losing a zone: a removal also has to pass with a whole fault zone gone on top of it "
             + "(largest: the zone with the most capacity left; every: each zone), as if the zone stayed down "
             + "past the delay window or never came back. WAGED then re-places all of its replicas.",
-        "Ride out a zone outage: after the removal settles, the zone's instances go offline and come back "
-            + "within the delay window. WAGED keeps their replicas in place and only adds replicas where a "
+        "Ride out a zone outage: after the removal, the zone's instances go offline and come back within the "
+            + "delay window. WAGED keeps their replicas in place and only adds temporary replicas where a "
             + "partition falls below its minimum active replicas (MIN_ACTIVE_REPLICAS, which defaults to all "
-            + "replicas). Two conditions: min-active (" + Scenario.SearchSpec.DEFAULT_OUTAGE_FEASIBLE + ": WAGED "
-            + "keeps every partition at its minimum without failing) and serving ("
-            + Scenario.SearchSpec.SERVING_OUTAGE_FEASIBLE + ": every partition keeps a replica up, even if WAGED "
-            + "fails to add temporary replicas and reports rebalance failures until the zone is back). WAGED's "
-            + "temporary-replica pass checks the capacity of the instances that are up against every replica, "
-            + "so it fails once those cannot hold the whole cluster. The top-state load on the instances that "
-            + "stay up is reported, since they take over the down zone's top states.",
+            + "replicas). By default (min-active: " + Scenario.SearchSpec.DEFAULT_OUTAGE_FEASIBLE + ") every "
+            + "partition must keep its minimum active replicas serving. WAGED's temporary-replica pass checks "
+            + "the capacity of the instances that are up against every replica, so it fails, with rebalance "
+            + "failures until the zone is back, once those cannot hold the whole cluster. The top-state load "
+            + "on the instances that stay up is reported, since they take over the down zone's top states.",
         "WAGED places at most one replica of a partition per fault zone, and with fewer zones than "
             + "replicas it silently places fewer replicas instead of failing. Removing a whole zone can pass "
             + "every capacity check and still lose replicas; unplaced replicas catch it.",
@@ -361,6 +367,9 @@ public final class ReportBuilder {
       List<String> header = new ArrayList<>(Arrays.asList("Instances removed", "Result",
           "Util % (required, " + focus + ")", "Max host util % (" + focus + ")", "Skew (top state, " + focus + ")",
           "Replicas moved", "Unplaced replicas"));
+      if (evacuate) {
+        header.add("Evacuation rounds");
+      }
       if (outage) {
         header.add("Max top-state util % during outage (" + focus + ")");
         header.add("WAGED added replicas during outage");
@@ -377,6 +386,9 @@ public final class ReportBuilder {
             number(probe.get("util.required." + focus)), feasible ? number(probe.get("maxUtil.all." + focus)) : "",
             feasible ? number(probe.get("skew.top." + focus)) : "", feasible ? number(probe.get("moves.replicas")) : "",
             number(probe.get("unplacedReplicas"))));
+        if (evacuate) {
+          cells.add(number(probe.get("evacuation.rounds")));
+        }
         if (outage) {
           cells.add(number(probe.get("outage.maxUtil.top." + focus)));
           Object overwrite = probe.get("outage.passes.overwrite");
@@ -386,6 +398,32 @@ public final class ReportBuilder {
         probes.row(cells);
       }
       section.table(probes);
+      if (evacuate) {
+        Object batchSize = null;
+        boolean waited = false;
+        long waiting = 0;
+        for (Object item : data.list(result.get("probes"))) {
+          Map<String, Object> probe = data.map(item);
+          if (probe.get("evacuation.batchSize") instanceof Number) {
+            batchSize = probe.get("evacuation.batchSize");
+          }
+          if (probe.get("evacuation.waitedForDelayWindow") instanceof Number
+              && ((Number) probe.get("evacuation.waitedForDelayWindow")).intValue() > 0) {
+            waited = true;
+            waiting = Math.max(waiting, ((Number) probe.get("evacuation.waitingOnDownInstances")).longValue());
+          }
+        }
+        if (batchSize != null) {
+          section.text("Evacuated in batches of up to " + number(batchSize) + " instances (MAX_OFFLINE_INSTANCES_"
+              + "ALLOWED minus the instances already unable to take replicas).");
+        }
+        if (waited) {
+          section.text("The evacuations had to wait out the delay window: WAGED gave up to " + number(waiting)
+              + " replacement replicas to instances that are down but still within their delay window. They "
+              + "cannot come up there, so the old replicas stayed on the evacuating instances until the window "
+              + "ended and WAGED placed them on live instances.");
+        }
+      }
       if (result.get("note") != null) {
         section.text("Note for " + name + ": " + result.get("note") + ".");
       }

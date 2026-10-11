@@ -97,7 +97,7 @@ place every replica?" instead of running rounds. `preset:scale-down` is the read
 ```yaml
 name: scale-down
 search:
-  removeNodes: {strategy: mz-balanced, method: binary}   # linear also takes step; max caps the search
+  removeNodes: {strategy: mz-balanced, method: binary, as: evacuate}   # as: delete; linear also takes step; max caps the search
   tolerateZoneOutage: none      # largest | every: also ride out a zone outage within the delay window
   tolerateZoneLoss: none        # largest | every: also survive a zone staying down past the window
   nonServing: keep              # remove: plan without disabled and offline instances
@@ -109,14 +109,27 @@ variants:                       # per variant: searchStrategy, tolerateZoneOutag
   worst-case: {searchStrategy: mz-tightest}
 ```
 
-- **Probe.** Each probe starts from the cluster as it is, removes the first k serving instances of a
-  removal order, and runs one controller pipeline. The removal changes the topology, so WAGED computes a
-  new baseline over the instances left (which fails with a capacity deficit or an unplaceable replica if
-  they cannot hold everything), and the partial pass re-homes the removed instances' replicas.
-- **Feasible** (default `feasibleIf`): no rebalance failure, and WAGED's assignment (its best possible
-  state) puts every replica on an instance, within capacity, with no two replicas of a partition in one
-  fault zone: `rebalanceFailures == 0 and unplacedReplicas.added == 0 and overCapacityInstances.added == 0
-  and zoneConflicts.added == 0`. `.added` counts only problems the probe that removes nothing did not
+- **Probe.** Each probe starts from the cluster as it is and takes out the first k serving instances
+  of a removal order the way a scale-down does: the EVACUATE operation.
+  - The instances stay up but are no longer assignable, so WAGED computes a new baseline over the
+    others. That fails with a capacity deficit or an unplaceable replica if they cannot hold
+    everything.
+  - The controller keeps each old replica serving until its replacement is up (n + 1), hands top
+    states over, then drops it.
+  - Instances are evacuated in batches. Each batch keeps the instances unable to take replicas
+    (down, disabled, evacuating) within `MAX_OFFLINE_INSTANCES_ALLOWED`; past it the controller enters
+    maintenance mode and stops moving replicas.
+  - Controller rounds run until a batch holds nothing, at most `maxEvacuationRounds` (20) per batch or
+    until there is no progress. Then it is removed and one more round runs.
+  - WAGED can give a replacement to an instance that is down but still within its delay window. The
+    replacement cannot come up there, so the evacuation waits out the window once (the virtual clock
+    jumps past it) and reports that it had to.
+  - An evacuation that still never empties the instances counts against the probe (`evacuationStuck`).
+  - `as: delete` removes the instances at once instead: faster, and the same placement answer.
+- **Feasible** (default `feasibleIf`): no rebalance failure, the evacuation finishes, and WAGED's
+  assignment (its best possible state) puts every replica on an instance, within capacity, with no two
+  replicas of a partition in one fault zone: `rebalanceFailures == 0 and evacuationStuck == 0 and
+  unplacedReplicas.added == 0 and overCapacityInstances.added == 0 and zoneConflicts.added == 0`. `.added` counts only problems the probe that removes nothing did not
   have. The probe is judged on the assignment, not the transient layout while replicas move.
 - **Search.** Binary search assumes that if removing k fails, removing more fails too. Its first guess
   is the most instances the remaining capacity allows (WAGED's own cluster-wide capacity check), then
@@ -150,14 +163,14 @@ variants:                       # per variant: searchStrategy, tolerateZoneOutag
     runs. WAGED keeps their replicas in place and only adds temporary replicas where a partition falls
     below its minimum active replicas (`MIN_ACTIVE_REPLICAS`, which defaults to all replicas).
     - Passes when `outageFeasibleIf` holds, counted on what the controller serves. The default
-      (`min-active`) is `rebalanceFailures == 0 and belowMinActive.added == 0 and
-      noLiveReplica.added == 0`. Set `noLiveReplica.added == 0` (`serving`) to only require that every
-      partition keeps a replica up. Both can be variants of one run.
-    - With 2 of 3 replicas as the minimum, an outage usually costs no capacity. With the default, it
-      costs as much as losing the zone. Without delayed rebalance, an outage is a loss.
+      (`min-active`) is `belowMinActive.added == 0 and noLiveReplica.added == 0`: every partition keeps
+      its minimum active replicas serving, for example 2 of 3. Add `rebalanceFailures == 0` to also
+      require that WAGED reports no failure. Variants can set their own condition.
+    - With 2 of 3 replicas as the minimum, an outage usually costs no capacity. With the default
+      minimum (all replicas), it costs as much as losing the zone.
     - When WAGED does add temporary replicas, its capacity check weighs every replica against the
       instances that are up. Partitions already short because another instance is down can make an
-      outage fail early under `min-active`, while `serving` still holds.
+      outage fail early.
     - The top-state utilization on the instances that stay up is reported too, since they take over
       the down zone's top states.
   - `tolerateZoneLoss`: the zone stays down past the window, or never comes back. Its instances are

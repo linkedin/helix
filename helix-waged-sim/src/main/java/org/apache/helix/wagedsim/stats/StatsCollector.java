@@ -31,6 +31,7 @@ import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
@@ -128,6 +129,10 @@ public final class StatsCollector {
       node.live = live.contains(node.instance);
       node.assignable = config.isAssignable();
       node.serving = node.enabled && node.live && node.assignable;
+      // getInstanceEnabled() is true for ENABLE only; an EVACUATE instance still serves its replicas.
+      InstanceConstants.InstanceOperation operation = config.getInstanceOperation().getOperation();
+      node.routable = node.live && operation != InstanceConstants.InstanceOperation.DISABLE
+          && !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(operation);
       Map<String, String> domain = config.getDomainAsMap();
       node.zone = faultZoneType != null && domain.containsKey(faultZoneType) ? domain.get(faultZoneType)
           : config.getRecord().getSimpleField("ZONE_ID");
@@ -380,7 +385,7 @@ public final class StatsCollector {
         boolean hasTop = false;
         for (Map.Entry<String, String> replica : replicaMap.entrySet()) {
           NodeStats node = nodes.get(replica.getKey());
-          if (node != null && node.serving && hosting(model, replica.getValue())) {
+          if (node != null && node.routable && hosting(model, replica.getValue())) {
             hostingCount++;
             hasTop |= replica.getValue().equals(top);
           }

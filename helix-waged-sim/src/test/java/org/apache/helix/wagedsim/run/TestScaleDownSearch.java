@@ -330,10 +330,24 @@ public class TestScaleDownSearch {
         Files.createTempDirectory("waged-sim-outage")).get("outage");
     Assert.assertEquals(servingAll.search.get("maxRemovable"), 6, servingAll.search.toString());
     Assert.assertEquals(servingAll.search.get("outageCriterion"), "serving");
-    // Without delayed rebalance an outage is a loss: WAGED re-places the zone's replicas at once.
+    // Without delayed rebalance WAGED tries to re-place the zone's replicas at once and fails beyond 3,
+    // but with 2 of 3 as the minimum every partition still has 2 replicas serving: 6 by default, 3 when
+    // WAGED must not fail either.
     Runner.VariantResult noDelay = run(SpecSource.build(outageSpec("TEST_OUTAGE_NODELAY", 2, false)), scenario,
         Files.createTempDirectory("waged-sim-outage")).get("outage");
-    Assert.assertEquals(noDelay.search.get("maxRemovable"), 3, noDelay.search.toString());
+    Assert.assertEquals(noDelay.search.get("maxRemovable"), 6, noDelay.search.toString());
+    Scenario strict = scenario(String.join("\n",
+        "name: zone-outage-strict",
+        "search:",
+        "  removeNodes: {strategy: mz-balanced}",
+        "  tolerateZoneOutage: largest",
+        "  outageFeasibleIf: \"rebalanceFailures == 0 and belowMinActive.added == 0 and noLiveReplica.added == 0\"",
+        "variants:",
+        "  outage: {}"));
+    Runner.VariantResult noDelayStrict = run(SpecSource.build(outageSpec("TEST_OUTAGE_NODELAY_STRICT", 2, false)),
+        strict, Files.createTempDirectory("waged-sim-outage")).get("outage");
+    Assert.assertEquals(noDelayStrict.search.get("maxRemovable"), 3, noDelayStrict.search.toString());
+    Assert.assertEquals(noDelayStrict.search.get("outageCriterion"), "custom");
   }
 
   private static Map<String, Object> outageSpec(String name, int minActive, boolean delay) {
@@ -349,6 +363,96 @@ public class TestScaleDownSearch {
       resource.put("minActiveReplicas", minActive);
     }
     return spec;
+  }
+
+  @Test
+  public void testEvacuationKeepsReplicasServingUntilTheyMove() throws Exception {
+    // EVACUATE keeps the old replicas serving until their replacements are up (n + 1), then drops them.
+    ClusterState state = SpecSource.build(spec("TEST_EVACUATE"));
+    try (DryRunEngine engine = new DryRunEngine()) {
+      engine.start(state, new org.apache.helix.wagedsim.engine.EngineSettings());
+      long before = hosted(engine.state().getServedLayout(), "node_00");
+      Assert.assertTrue(before > 0);
+      org.apache.helix.wagedsim.engine.StateOps.setOperation(engine.state(), "node_00",
+          org.apache.helix.constants.InstanceConstants.InstanceOperation.EVACUATE);
+      engine.runRound(1);
+      // Replacements are placed, and the evacuating instance still serves every replica it had.
+      Assert.assertEquals(hosted(engine.state().getServedLayout(), "node_00"), before);
+      long left = before;
+      for (int round = 2; round <= 10 && left > 0; round++) {
+        StatsCollector collector = new StatsCollector(engine.state(), "CU");
+        Map<String, Object> stats = collector.stats(engine.state().getServedLayout(), null, null,
+            collector.nodes(engine.state().getServedLayout()));
+        // Every partition keeps all its replicas and a top state on the other instances throughout.
+        Assert.assertEquals(stats.get("underReplicated"), 0, "round " + round);
+        Assert.assertEquals(stats.get("missingTopState"), 0, "round " + round);
+        engine.runRound(round);
+        long now = hosted(engine.state().getServedLayout(), "node_00");
+        Assert.assertTrue(now <= left, "round " + round);
+        left = now;
+      }
+      // Once a replacement is up, the evacuating instance's replica is dropped; top states hand off first.
+      Assert.assertEquals(left, 0L);
+    }
+
+    // The search evacuates by default and gives the same answer as deleting.
+    Map<String, Runner.VariantResult> results = run(SpecSource.build(spec("TEST_EVACUATE_SEARCH")), scenario(
+        String.join("\n",
+            "name: evacuate-or-delete",
+            "search: {removeNodes: {strategy: mz-balanced}}",
+            "variants:",
+            "  evacuate: {}")), Files.createTempDirectory("waged-sim-evac"));
+    Map<String, Runner.VariantResult> deleted = run(SpecSource.build(spec("TEST_DELETE_SEARCH")), scenario(
+        String.join("\n",
+            "name: evacuate-or-delete",
+            "search: {removeNodes: {strategy: mz-balanced, as: delete}}",
+            "variants:",
+            "  delete: {}")), Files.createTempDirectory("waged-sim-del"));
+    Runner.VariantResult evacuate = results.get("evacuate");
+    Assert.assertEquals(evacuate.search.get("maxRemovable"), 3, evacuate.search.toString());
+    Assert.assertEquals(deleted.get("delete").search.get("maxRemovable"), 3);
+    Assert.assertEquals(number(evacuate.end.get("evacuationStuck")), 0L);
+    Assert.assertTrue(number(evacuate.end.get("evacuation.rounds")) >= 2, evacuate.end.toString());
+  }
+
+  @Test
+  public void testEvacuationBatchesAndDownInstances() throws Exception {
+    // 15 instances in 5 zones, one of them down within its delay window, and at most 4 instances unable
+    // to take replicas: evacuations run 3 at a time (4 minus the down one). WAGED gives some replacements
+    // to the down instance, which cannot take them, so the evacuation waits out the window; after it the
+    // down instance's capacity is gone, so 5 can be removed (9 live instances for 8,400 CU).
+    Map<String, Object> spec = outageSpec("TEST_EVAC_BATCHES", 2, true);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> cluster = (Map<String, Object>) spec.get("cluster");
+    cluster.put("maxOfflineInstancesAllowed", 4);
+    spec.put("liveness", TestClusters.map("down", 1));
+    Runner.VariantResult result = run(SpecSource.build(spec), scenario(String.join("\n",
+        "name: evacuate-batches",
+        "search: {removeNodes: {strategy: mz-balanced}}",
+        "variants:",
+        "  plan: {}")), Files.createTempDirectory("waged-sim-batches")).get("plan");
+    Assert.assertEquals(result.search.get("maxRemovable"), 5, result.search.toString());
+    Assert.assertEquals(number(result.end.get("evacuation.batchSize")), 3L, result.end.toString());
+    Assert.assertEquals(number(result.end.get("evacuation.batches")), 2L);
+    Assert.assertEquals(number(result.end.get("evacuation.waitedForDelayWindow")), 1L);
+    Assert.assertEquals(number(result.end.get("evacuation.maintenance")), 0L);
+  }
+
+  private static long hosted(Map<String, Map<String, Map<String, String>>> layout, String instance) {
+    long count = 0;
+    for (Map<String, Map<String, String>> partitions : layout.values()) {
+      for (Map<String, String> replicas : partitions.values()) {
+        String state = replicas.get(instance);
+        if (state != null && !"OFFLINE".equals(state) && !"DROPPED".equals(state)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  private static long number(Object value) {
+    return value instanceof Number ? ((Number) value).longValue() : -1;
   }
 
   @Test

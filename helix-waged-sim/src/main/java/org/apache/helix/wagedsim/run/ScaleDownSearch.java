@@ -31,10 +31,13 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.wagedsim.cluster.ClusterState;
 import org.apache.helix.wagedsim.engine.EngineSettings;
 import org.apache.helix.wagedsim.engine.RoundResult;
@@ -116,6 +119,13 @@ class ScaleDownSearch {
         }
         return (first.length() > 300 ? first.substring(0, 300) + "..." : first)
             + (blocking.isEmpty() ? "" : "; blocked by " + String.join(" + ", blocking.keySet()));
+      }
+      if (number(stats.get("evacuationStuck")) > 0) {
+        return "WAGED placed the replicas elsewhere, but the evacuation did not finish: "
+            + stats.get("evacuationStuck") + " replicas were still on the evacuating instances after "
+            + stats.get("evacuation.rounds") + " controller rounds"
+            + (number(stats.get("evacuation.waitedForDelayWindow")) > 0 ? ", even after waiting out the delay "
+                + "window of the down instances WAGED had given replacements to" : "");
       }
       if (zonesLeft > 0 && zonesLeft < replicas && number(stats.get("unplacedReplicas.added")) > 0) {
         return "only " + zonesLeft + " fault zone(s) left for " + replicas + " replicas: WAGED places at most one "
@@ -293,7 +303,8 @@ class ScaleDownSearch {
       }
       for (String stat : new String[]{"util.required." + _focusKey, "maxUtil.all." + _focusKey,
           "skew.all." + _focusKey, "skew.top." + _focusKey, "unplacedReplicas", "overCapacityInstances",
-          "zoneConflicts", "moves.replicas"}) {
+          "zoneConflicts", "moves.replicas", "evacuation.rounds", "evacuation.batches", "evacuation.batchSize",
+          "evacuation.waitedForDelayWindow", "evacuation.waitingOnDownInstances", "evacuationStuck", "rounds"}) {
         row.put(stat, probe.stats.get(stat));
       }
       probeRows.add(row);
@@ -376,9 +387,8 @@ class ScaleDownSearch {
     probe.stats.put("search.k", k);
     if (probe.feasible && !"none".equals(_zoneLoss)) {
       for (Map.Entry<String, List<String>> zone : zonesToLose(probe.nodes).entrySet()) {
-        List<String> lost = new ArrayList<>(removed);
-        lost.addAll(zone.getValue());
-        Probe check = evaluate(base, settings, lost, startLayout, reference != null ? reference : probe);
+        Probe check = evaluate(base, settings, removed, ZoneEvent.LOSS, zone.getValue(), startLayout,
+            reference != null ? reference : probe);
         check.lostZone = zone.getKey();
         check.lostInstances = zone.getValue().size();
         probe.zoneLossResults.put(zone.getKey(), check.feasible ? "ok" : check.reason());
@@ -392,7 +402,7 @@ class ScaleDownSearch {
     }
     if (probe.feasible && !"none".equals(_zoneOutage)) {
       for (Map.Entry<String, List<String>> zone : zonesToLose(probe.nodes).entrySet()) {
-        Probe check = evaluate(base, settings, removed, zone.getValue(), startLayout,
+        Probe check = evaluate(base, settings, removed, ZoneEvent.OUTAGE, zone.getValue(), startLayout,
             reference != null ? reference : probe);
         check.lostZone = zone.getKey();
         check.lostInstances = zone.getValue().size();
@@ -449,37 +459,127 @@ class ScaleDownSearch {
     return Collections.singletonMap(largest, zones.get(largest));
   }
 
-  /** Removes the instances, runs one controller pipeline, and judges WAGED's assignment. */
+  /** What happens to a zone after the scale-down, for the zone checks. */
+  enum ZoneEvent {
+    /** Nothing: the scale-down alone. */
+    NONE,
+    /** The zone's instances go offline and stay within the delay window. */
+    OUTAGE,
+    /** The zone's instances are gone, as after the delay window or for good. */
+    LOSS
+  }
+
+  /** The scale-down alone. */
   private Probe evaluate(ClusterState base, EngineSettings settings, List<String> removed,
       Map<String, Map<String, Map<String, String>>> startLayout, Probe reference) throws Exception {
-    return evaluate(base, settings, removed, Collections.emptyList(), startLayout, reference);
+    return evaluate(base, settings, removed, ZoneEvent.NONE, Collections.emptyList(), startLayout, reference);
   }
 
   /**
-   * Removes the instances and runs one controller pipeline. With instances to take down, it then runs
-   * a second pipeline so the scale-down settles, takes those instances offline (live instance and
-   * current states gone, offline time now, so they are within the delay window) and runs a third:
-   * WAGED keeps their replicas while the window lasts and only adds replicas where a partition falls
-   * below its minimum active replicas. Judges WAGED's assignment either way.
+   * Runs the scale-down, then the zone event, and judges WAGED's assignment.
+   * <ul>
+   * <li>Scale-down by evacuation (the default): the instances get the EVACUATE operation and stay up.
+   * WAGED places their replicas elsewhere, and the controller keeps the old replicas serving until the
+   * new ones are up (n + 1), then drops them. Rounds run until the instances hold nothing (or stop
+   * making progress); then the instances are removed and one more round runs.</li>
+   * <li>Scale-down by deletion: the instances are removed at once and one round runs.</li>
+   * <li>Zone outage: the zone's instances go offline (live instance and current states gone, offline
+   * time now, so within the delay window) and one round runs. WAGED keeps their replicas and only adds
+   * temporary ones where a partition falls below its minimum active replicas.</li>
+   * <li>Zone loss: the zone's instances are removed and one round runs.</li>
+   * </ul>
    */
-  private Probe evaluate(ClusterState base, EngineSettings settings, List<String> removed, List<String> down,
-      Map<String, Map<String, Map<String, String>>> startLayout, Probe reference) throws Exception {
+  private Probe evaluate(ClusterState base, EngineSettings settings, List<String> removed, ZoneEvent event,
+      List<String> zone, Map<String, Map<String, Map<String, String>>> startLayout, Probe reference)
+      throws Exception {
     Probe probe = new Probe();
     try (DryRunEngine engine = new DryRunEngine()) {
       engine.start(base.copy(), settings);
       for (String instance : _dropFirst) {
         StateOps.removeInstance(engine.state(), instance);
       }
-      for (String instance : removed) {
-        StateOps.removeInstance(engine.state(), instance);
+      int rounds = 0;
+      RoundResult round;
+      long stuck = 0;
+      int evacuationRounds = 0;
+      boolean waitedForWindow = false;
+      long waitingOnDown = 0;
+      int batches = 0;
+      int batchSizeUsed = 0;
+      boolean maintenance = false;
+      if (_spec.evacuate && !removed.isEmpty()) {
+        // Evacuate in batches that keep the instances unable to take replicas within
+        // MAX_OFFLINE_INSTANCES_ALLOWED: past it the controller enters maintenance mode and stops moving
+        // replicas, so the evacuation would never finish.
+        int batchSize = evacuationBatchSize(engine.state(), removed.size());
+        round = null;
+        long left = 0;
+        for (int from = 0; from < removed.size() && left == 0; from += batchSize) {
+          List<String> batch = removed.subList(from, Math.min(removed.size(), from + batchSize));
+          batches++;
+          for (String instance : batch) {
+            StateOps.setOperation(engine.state(), instance, InstanceConstants.InstanceOperation.EVACUATE);
+          }
+          RoundResult first = engine.runRound(++rounds);
+          if (round == null) {
+            round = first;
+          } else {
+            merge(round, first);
+          }
+          left = replicasOn(engine.state().getServedLayout(), batch);
+          int stalled = 0;
+          int batchRounds = 1;
+          while (left > 0 && round.failures.isEmpty() && batchRounds < _spec.maxEvacuationRounds) {
+            merge(round, engine.runRound(++rounds));
+            batchRounds++;
+            long now = replicasOn(engine.state().getServedLayout(), batch);
+            stalled = now < left ? 0 : stalled + 1;
+            left = now;
+            if (stalled >= 2) {
+              // WAGED may give a replacement to an instance that is down but within its delay window; it
+              // cannot come up there, so the old replica stays until the window ends. Wait it out once.
+              long waiting = replacementsOnDownInstances(engine.state(), batch);
+              ClusterConfig config = engine.state().getClusterConfig();
+              if (waitedForWindow || waiting == 0 || !config.isDelayRebalaceEnabled()) {
+                break;
+              }
+              waitingOnDown = waiting;
+              engine.advanceClock(config.getRebalanceDelayTime() + 60_000L);
+              waitedForWindow = true;
+              stalled = 0;
+            }
+          }
+          if (left == 0) {
+            for (String instance : batch) {
+              StateOps.removeInstance(engine.state(), instance);
+            }
+            merge(round, engine.runRound(++rounds));
+          }
+          maintenance |= StateOps.isMaintenance(engine.state());
+        }
+        evacuationRounds = rounds;
+        stuck = left;
+        batchSizeUsed = batchSize;
+      } else {
+        for (String instance : removed) {
+          StateOps.removeInstance(engine.state(), instance);
+        }
+        round = engine.runRound(++rounds);
+        if (event == ZoneEvent.OUTAGE) {
+          // Let the moves of the deleted instances' replicas settle before the outage.
+          merge(round, engine.runRound(++rounds));
+        }
       }
-      RoundResult round = engine.runRound(1);
-      if (!down.isEmpty()) {
-        merge(round, engine.runRound(2));
-        for (String instance : down) {
+      if (event == ZoneEvent.OUTAGE) {
+        for (String instance : zone) {
           StateOps.kill(engine.state(), instance);
         }
-        merge(round, engine.runRound(3));
+        merge(round, engine.runRound(++rounds));
+      } else if (event == ZoneEvent.LOSS) {
+        for (String instance : zone) {
+          StateOps.removeInstance(engine.state(), instance);
+        }
+        merge(round, engine.runRound(++rounds));
       }
       ClusterState after = engine.state();
       // Judge WAGED's own assignment. The served layout of a single round still has the old copies of
@@ -498,13 +598,24 @@ class ScaleDownSearch {
       probe.stats.put("passes.global", round.passes.getOrDefault("global", 0L));
       probe.stats.put("passes.partial", round.passes.getOrDefault("partial", 0L));
       probe.stats.put("passes.overwrite", round.passes.getOrDefault("overwrite", 0L));
-      if (!down.isEmpty()) {
+      probe.stats.put("rounds", rounds);
+      probe.stats.put("evacuationStuck", stuck);
+      if (evacuationRounds > 0) {
+        probe.stats.put("evacuation.rounds", evacuationRounds);
+        probe.stats.put("evacuation.batches", batches);
+        probe.stats.put("evacuation.batchSize", batchSizeUsed);
+        probe.stats.put("evacuation.waitedForDelayWindow", waitedForWindow ? 1 : 0);
+        probe.stats.put("evacuation.waitingOnDownInstances", waitingOnDown);
+        probe.stats.put("evacuation.maintenance", maintenance ? 1 : 0);
+      }
+      if (event == ZoneEvent.OUTAGE) {
         // What clients see during the outage: top states on the instances still serving.
         Map<String, Map<String, Map<String, String>>> served = after.getServedLayout();
         Map<String, Object> servedStats = collector.stats(served, null, null, collector.nodes(served));
         probe.stats.put("outage.missingTopState", servedStats.get("missingTopState"));
         probe.stats.put("outage.maxUtil.top." + _focusKey, servedStats.get("maxUtil.top." + _focusKey));
         probe.stats.put("outage.maintenance", round.maintenance ? 1 : 0);
+        probe.stats.put("outage.rebalanceFailures", (long) round.failures.size());
       }
       for (String stat : ADDED) {
         long now = number(probe.stats.get(stat));
@@ -513,10 +624,70 @@ class ScaleDownSearch {
       }
       probe.failures.addAll(round.failures);
       probe.blocking.putAll(round.blockingConstraints);
-      probe.feasible = (down.isEmpty() ? _spec.feasibleIf : _outageFeasibleIf).test(probe.stats);
+      probe.feasible = (event == ZoneEvent.OUTAGE ? _outageFeasibleIf : _spec.feasibleIf).test(probe.stats);
       probe.round = round;
     }
     return probe;
+  }
+
+  /**
+   * @return how many instances can be evacuated at once: what MAX_OFFLINE_INSTANCES_ALLOWED leaves after
+   *         the instances that already cannot take replicas (down, disabled), at least 1; all of them
+   *         when there is no limit
+   */
+  static int evacuationBatchSize(ClusterState state, int wanted) {
+    int limit = state.getClusterConfig().getMaxOfflineInstancesAllowed();
+    if (limit < 0) {
+      return wanted;
+    }
+    int unable = InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(state.getInstanceConfigs(),
+        state.getLiveInstances().keySet(), System.currentTimeMillis()).size();
+    return Math.max(1, Math.min(wanted, limit - unable));
+  }
+
+  /**
+   * @return replacements WAGED assigned to instances that are not live, for partitions that still have a
+   *         replica on the evacuating instances
+   */
+  private static long replacementsOnDownInstances(ClusterState state, List<String> evacuating) {
+    Set<String> set = new java.util.HashSet<>(evacuating);
+    Set<String> live = state.getLiveInstances().keySet();
+    Map<String, Map<String, Map<String, String>>> served = state.getServedLayout();
+    Map<String, Map<String, Map<String, String>>> assignment = state.getBestPossible();
+    if (assignment == null) {
+      return 0;
+    }
+    long count = 0;
+    for (Map.Entry<String, Map<String, Map<String, String>>> resource : served.entrySet()) {
+      for (Map.Entry<String, Map<String, String>> partition : resource.getValue().entrySet()) {
+        if (partition.getValue().keySet().stream().noneMatch(set::contains)) {
+          continue;
+        }
+        for (String instance : assignment.getOrDefault(resource.getKey(), Collections.emptyMap())
+            .getOrDefault(partition.getKey(), Collections.emptyMap()).keySet()) {
+          if (!partition.getValue().containsKey(instance) && !live.contains(instance)) {
+            count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  /** @return replicas the instances still hold in the layout */
+  private static long replicasOn(Map<String, Map<String, Map<String, String>>> layout, List<String> instances) {
+    Set<String> set = new java.util.HashSet<>(instances);
+    long count = 0;
+    for (Map<String, Map<String, String>> partitions : layout.values()) {
+      for (Map<String, String> replicas : partitions.values()) {
+        for (String instance : replicas.keySet()) {
+          if (set.contains(instance)) {
+            count++;
+          }
+        }
+      }
+    }
+    return count;
   }
 
   private static void merge(RoundResult into, RoundResult next) {
@@ -567,7 +738,7 @@ class ScaleDownSearch {
         for (Map.Entry<String, String> replica : servedPartitions.getOrDefault(partition, Collections.emptyMap())
             .entrySet()) {
           NodeStats node = probe.nodes.get(replica.getKey());
-          if (node != null && node.serving && hosting(model, replica.getValue())) {
+          if (node != null && node.routable && hosting(model, replica.getValue())) {
             up++;
           }
         }
