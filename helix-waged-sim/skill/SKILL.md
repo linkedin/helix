@@ -94,7 +94,9 @@ take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAP
   outage. With as many zones as replicas no zone can be lost; say so rather than calling it a failure
   of the plan.
 - Disabled or offline instances count as capacity for WAGED. If the report says WAGED keeps replicas
-  on them, give the answer without them too (`search: {nonServing: remove}`).
+  on them, also give the answer without them (`search: {nonServing: remove}`). If they are only down
+  for a short maintenance (for example a disable reason from an automated disruption), give the answer
+  with them back up (`nonServing: revive`).
 - The search assumes that if removing k fails, removing more fails too; `method: linear` checks every
   step when that matters.
 
@@ -186,7 +188,7 @@ search:
   tolerateZoneOutage: none     # largest | every: zone back within the delay window
   outageFeasibleIf: "belowMinActive.added == 0 and noLiveReplica.added == 0"   # add "rebalanceFailures == 0" to be strict
   tolerateZoneLoss: none       # largest | every: zone down past the window
-  nonServing: keep             # remove
+  nonServing: keep             # remove (gone for good) or revive (back from a short maintenance)
   requireAtLeast: 4            # optional; FAIL below it
 variants:                      # per variant: searchStrategy, tolerateZoneOutage, outageFeasibleIf, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}

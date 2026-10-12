@@ -92,7 +92,8 @@ public final class Events {
         break;
       case "enable":
         for (String instance : select(args, ctx, i -> !config(state, i).getInstanceEnabled())) {
-          StateOps.setOperation(state, instance, InstanceConstants.InstanceOperation.ENABLE);
+          // Clears disables from every source, including an automated maintenance's.
+          StateOps.enable(state, instance);
           ctx.disabled.remove(instance);
           log.add("enable " + instance);
         }

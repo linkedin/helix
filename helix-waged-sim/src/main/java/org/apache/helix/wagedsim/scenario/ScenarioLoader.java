@@ -240,7 +240,7 @@ public final class ScenarioLoader {
           variant.outageFeasibleIf = Condition.parse(value.toString());
           break;
         case "nonServing":
-          variant.removeNonServing = nonServing(value);
+          variant.nonServing = nonServing(value);
           break;
         case "seed":
           variant.seed = ((Number) value).longValue();
@@ -252,12 +252,13 @@ public final class ScenarioLoader {
     return variant;
   }
 
-  /** @return true for remove, false for keep */
-  private static boolean nonServing(Object value) {
-    if (!"keep".equals(value) && !"remove".equals(value)) {
-      throw new IllegalArgumentException("nonServing must be keep or remove");
+  /** @return keep, remove or revive */
+  private static String nonServing(Object value) {
+    String mode = String.valueOf(value);
+    if (!"keep".equals(mode) && !"remove".equals(mode) && !"revive".equals(mode)) {
+      throw new IllegalArgumentException("nonServing must be keep, remove or revive");
     }
-    return "remove".equals(value);
+    return mode;
   }
 
   /** @return largest, every, or none for no zone-loss check */
@@ -327,7 +328,7 @@ public final class ScenarioLoader {
           search.outageFeasibleIf = Condition.parse(value.toString());
           break;
         case "nonServing":
-          search.removeNonServing = nonServing(value);
+          search.nonServing = nonServing(value);
           break;
         default:
           throw new IllegalArgumentException("Unknown search field '" + entry.getKey() + "'");

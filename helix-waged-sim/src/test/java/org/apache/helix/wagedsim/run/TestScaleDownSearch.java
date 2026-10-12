@@ -469,6 +469,15 @@ public class TestScaleDownSearch {
     Assert.assertEquals(result.search.get("servingInstances"), 11, result.search.toString());
     Assert.assertEquals(result.search.get("nonServingInstances"), 1);
     Assert.assertEquals(result.search.get("nonServing"), "removed");
+    // Without the disabled instance 11 hold 11,000 CU for 8,400: 2 can go. Brought back up, 3 can.
+    Assert.assertEquals(result.search.get("maxRemovable"), 2, result.search.toString());
+    Runner.VariantResult revived = run(SpecSource.build(spec), scenario(String.join("\n",
+        "name: non-serving-revive",
+        "search: {nonServing: revive}",
+        "variants:",
+        "  balanced: {}")), Files.createTempDirectory("waged-sim-ns")).get("balanced");
+    Assert.assertEquals(revived.search.get("nonServing"), "revived");
+    Assert.assertEquals(revived.search.get("maxRemovable"), 3, revived.search.toString());
   }
 
   @Test
@@ -499,6 +508,23 @@ public class TestScaleDownSearch {
     Assert.assertEquals(removed, 3, log);
     Assert.assertEquals(zones.size(), 3, "one instance from each zone: " + log);
     Assert.assertEquals(result.end.get("nodes.total"), 9);
+  }
+
+  @Test
+  public void testEnableClearsAutomatedDisable() throws Exception {
+    // An automated maintenance's DISABLE outranks a plain ENABLE; reviving must clear it.
+    ClusterState state = SpecSource.build(spec("TEST_ENABLE"));
+    org.apache.helix.model.InstanceConfig config = state.getInstanceConfig("node_00");
+    config.setInstanceOperation(new org.apache.helix.model.InstanceConfig.InstanceOperation.Builder()
+        .setOperation(org.apache.helix.constants.InstanceConstants.InstanceOperation.DISABLE)
+        .setSource(org.apache.helix.constants.InstanceConstants.InstanceOperationSource.AUTOMATION)
+        .setReason("maintenance").build());
+    state.putInstanceConfig(config);
+    org.apache.helix.wagedsim.engine.StateOps.setOperation(state, "node_00",
+        org.apache.helix.constants.InstanceConstants.InstanceOperation.ENABLE);
+    Assert.assertFalse(state.getInstanceConfig("node_00").getInstanceEnabled(), "a plain ENABLE does not win");
+    org.apache.helix.wagedsim.engine.StateOps.enable(state, "node_00");
+    Assert.assertTrue(state.getInstanceConfig("node_00").getInstanceEnabled());
   }
 
   @Test

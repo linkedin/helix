@@ -432,6 +432,9 @@ public final class ReportBuilder {
       if (nonServing > 0 && "removed".equals(result.get("nonServing"))) {
         section.text(nonServing + " disabled or offline instance(s) were removed in every probe; the answer "
             + "counts serving instances only.");
+      } else if (nonServing > 0 && "revived".equals(result.get("nonServing"))) {
+        section.text(nonServing + " disabled or offline instance(s) were brought back up and enabled in every "
+            + "probe, as after a maintenance that ends; they count as capacity but are not removed.");
       } else if (nonServing > 0) {
         section.text(nonServing + " disabled or offline instance(s) stayed in the cluster. WAGED counts their "
             + "capacity for its baseline and keeps replicas on those within the delay window ("

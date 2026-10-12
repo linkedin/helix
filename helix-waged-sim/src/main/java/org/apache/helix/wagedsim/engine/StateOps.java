@@ -89,6 +89,21 @@ public final class StateOps {
     return history == null ? new ParticipantHistory(instance) : history;
   }
 
+  /**
+   * Enables an instance for good: an ADMIN-sourced ENABLE clears operations from every other source,
+   * such as an automated maintenance's DISABLE, which a plain ENABLE would not override.
+   */
+  public static void enable(ClusterState state, String instance) {
+    InstanceConfig config = state.getInstanceConfig(instance);
+    if (config == null) {
+      throw new IllegalArgumentException("No instance " + instance);
+    }
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.ADMIN).build());
+    state.putInstanceConfig(config);
+  }
+
   public static void setOperation(ClusterState state, String instance,
       InstanceConstants.InstanceOperation operation) {
     InstanceConfig config = state.getInstanceConfig(instance);

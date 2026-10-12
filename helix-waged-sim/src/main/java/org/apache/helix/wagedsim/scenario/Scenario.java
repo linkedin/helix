@@ -70,8 +70,8 @@ public class Scenario {
     public String zoneOutage;
     /** When a zone outage counts as survived; overrides the scenario's. */
     public org.apache.helix.wagedsim.run.Condition outageFeasibleIf;
-    /** Whether a scale-down search removes disabled and offline instances; overrides the scenario's. */
-    public Boolean removeNonServing;
+    /** What a scale-down search does with disabled and offline instances; overrides the scenario's. */
+    public String nonServing;
     /** Seed for random choices, such as a random removal order; overrides the scenario's. */
     public Long seed;
     public Map<String, Object> source = new LinkedHashMap<>();
@@ -122,11 +122,12 @@ public class Scenario {
     /** The search fails when fewer instances than this can be removed. */
     public Integer requireAtLeast;
     /**
-     * Remove disabled and offline instances in every probe, before the search's own removals. By
-     * default they stay, and WAGED counts them as it does in production: their capacity for the
-     * baseline, and as active while within the delay window.
+     * What to do with disabled and offline instances in every probe, before the search's own removals:
+     * "keep" them as WAGED sees them (their capacity counts for the baseline, and they stay active
+     * while within the delay window), "remove" them (gone for good), or "revive" them (back up and
+     * enabled, as after a maintenance that ends).
      */
-    public boolean removeNonServing;
+    public String nonServing = "keep";
     /**
      * Also require that the cluster survives losing a whole fault zone after the removal (as if the
      * zone stayed down past the delay window): "largest" checks the zone with the most capacity,
@@ -175,7 +176,7 @@ public class Scenario {
         map.put("max", max);
       }
       map.put("feasibleIf", feasibleIf.toString());
-      map.put("nonServing", removeNonServing ? "remove" : "keep");
+      map.put("nonServing", nonServing);
       map.put("tolerateZoneLoss", zoneLoss);
       map.put("tolerateZoneOutage", zoneOutage);
       if (!"none".equals(zoneOutage)) {

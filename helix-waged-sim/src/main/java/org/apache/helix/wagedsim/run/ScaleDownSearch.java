@@ -66,6 +66,8 @@ class ScaleDownSearch {
   private final String _focusKey;
   /** Instances every probe removes before the first k of the order: the non-serving ones, if asked. */
   private List<String> _dropFirst = Collections.emptyList();
+  /** Instances every probe brings back up and enables first: the non-serving ones, if asked. */
+  private List<String> _reviveFirst = Collections.emptyList();
   /** largest, every or none. */
   private String _zoneLoss = "none";
   /** largest, every or none. */
@@ -173,9 +175,12 @@ class ScaleDownSearch {
     List<String> candidates = new ArrayList<>();
     List<String> nonServing = new ArrayList<>();
     nodes.values().forEach(n -> (n.serving ? candidates : nonServing).add(n.instance));
-    boolean removeNonServing = variant.removeNonServing != null ? variant.removeNonServing : _spec.removeNonServing;
+    String nonServingMode = variant.nonServing != null ? variant.nonServing : _spec.nonServing;
+    boolean removeNonServing = "remove".equals(nonServingMode);
     if (removeNonServing) {
       _dropFirst = nonServing;
+    } else if ("revive".equals(nonServingMode)) {
+      _reviveFirst = nonServing;
     }
     String zoneLossNote = null;
     boolean zoneChecks = !"none".equals(_zoneLoss) || !"none".equals(_zoneOutage);
@@ -187,7 +192,12 @@ class ScaleDownSearch {
       _zoneOutage = "none";
     }
     long seed = variant.seed != null ? variant.seed : _scenario.seed;
-    List<String> order = RemovalOrder.order(strategy, candidates, nodes, _focusKey, new Random(seed));
+    // Instances brought back up hold their share of their zone: order by WAGED's assignment, which still
+    // has their replicas, and count their capacity.
+    Map<String, NodeStats> orderNodes = !_reviveFirst.isEmpty() && state.getBestPossible() != null
+        ? withFaultZones(collector.nodes(state.getBestPossible())) : nodes;
+    List<String> order = RemovalOrder.order(strategy, candidates, orderNodes, _focusKey, new Random(seed),
+        _reviveFirst);
     int maxK = _spec.max != null ? Math.min(_spec.max, order.size()) : order.size();
     _console.println("[" + variant.name + "] scale-down search: " + order.size() + " serving instances, order "
         + strategy.label() + ", up to " + maxK + " removed");
@@ -274,7 +284,7 @@ class ScaleDownSearch {
     summary.put("searchedUpTo", maxK);
     summary.put("capacityBound", bound);
     summary.put("nonServingInstances", nonServing.size());
-    summary.put("nonServing", removeNonServing ? "removed" : "kept");
+    summary.put("nonServing", removeNonServing ? "removed" : "revive".equals(nonServingMode) ? "revived" : "kept");
     if (strategy == RemovalOrder.Strategy.RANDOM) {
       summary.put("seed", seed);
     }
@@ -497,6 +507,10 @@ class ScaleDownSearch {
       engine.start(base.copy(), settings);
       for (String instance : _dropFirst) {
         StateOps.removeInstance(engine.state(), instance);
+      }
+      for (String instance : _reviveFirst) {
+        StateOps.enable(engine.state(), instance);
+        StateOps.revive(engine.state(), instance, 1);
       }
       int rounds = 0;
       RoundResult round;

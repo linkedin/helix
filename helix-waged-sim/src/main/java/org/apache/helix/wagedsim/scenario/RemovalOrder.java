@@ -94,6 +94,16 @@ public final class RemovalOrder {
    */
   public static List<String> order(Strategy strategy, Collection<String> candidates, Map<String, NodeStats> nodes,
       String key, Random random) {
+    return order(strategy, candidates, nodes, key, random, Collections.emptyList());
+  }
+
+  /**
+   * @param staying instances that stay: never removed, but their capacity and load count toward their
+   *        zone (for example instances brought back up after a maintenance)
+   * @return every candidate, in removal order
+   */
+  public static List<String> order(Strategy strategy, Collection<String> candidates, Map<String, NodeStats> nodes,
+      String key, Random random, Collection<String> staying) {
     List<String> list = new ArrayList<>(candidates);
     Comparator<String> leastLoaded = Comparator.comparingDouble((String i) -> load(nodes, i, key))
         .thenComparing(Comparator.naturalOrder());
@@ -123,10 +133,12 @@ public final class RemovalOrder {
       }
       case MZ_BALANCED:
         return byZoneUtilization(list, nodes, key, false,
-            Comparator.comparingLong((String i) -> capacity(nodes, i, key)).thenComparing(leastLoaded), leastLoaded);
+            Comparator.comparingLong((String i) -> capacity(nodes, i, key)).thenComparing(leastLoaded), leastLoaded,
+            staying);
       case MZ_TIGHTEST:
         return byZoneUtilization(list, nodes, key, true,
-            Comparator.comparingLong((String i) -> -capacity(nodes, i, key)).thenComparing(mostLoaded), mostLoaded);
+            Comparator.comparingLong((String i) -> -capacity(nodes, i, key)).thenComparing(mostLoaded), mostLoaded,
+            staying);
       default:
         throw new IllegalStateException(strategy.name());
     }
@@ -139,7 +151,7 @@ public final class RemovalOrder {
    * instances left (balanced) or fewer (tightest), then by {@code tieBreak} on the candidates.
    */
   private static List<String> byZoneUtilization(List<String> list, Map<String, NodeStats> nodes, String key,
-      boolean tightest, Comparator<String> withinZone, Comparator<String> tieBreak) {
+      boolean tightest, Comparator<String> withinZone, Comparator<String> tieBreak, Collection<String> staying) {
     Map<String, List<String>> zones = byZone(list, nodes, withinZone);
     Map<String, LinkedList<String>> remaining = new TreeMap<>(ZONE_ORDER);
     Map<String, Map<String, Long>> zoneCapacity = new TreeMap<>(ZONE_ORDER);
@@ -158,6 +170,15 @@ public final class RemovalOrder {
       zoneCapacity.put(zone, cap);
       zoneLoad.put(zone, load);
     });
+    for (String instance : staying) {
+      NodeStats node = nodes.get(instance);
+      String zone = zone(nodes, instance);
+      if (node == null || !zoneCapacity.containsKey(zone)) {
+        continue;
+      }
+      node.capacity.forEach((k, v) -> zoneCapacity.get(zone).merge(k, (long) v, Long::sum));
+      node.allLoad.forEach((k, v) -> zoneLoad.get(zone).merge(k, v, Long::sum));
+    }
     List<String> result = new ArrayList<>();
     while (result.size() < list.size()) {
       String best = null;
