@@ -57,9 +57,12 @@ public class TestPipelineRerunOnReconnect extends ZkUnitTestBase {
     }
     // Fail the connection check fast, so the event below is dropped well within the wait.
     System.setProperty(SystemPropertyKeys.ZK_WAIT_CONNECTED_TIMEOUT, "500");
-    ClusterControllerManager controller =
-        new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
-    System.clearProperty(SystemPropertyKeys.ZK_WAIT_CONNECTED_TIMEOUT);
+    ClusterControllerManager controller;
+    try {
+      controller = new ClusterControllerManager(ZK_ADDR, clusterName, "controller_0");
+    } finally {
+      System.clearProperty(SystemPropertyKeys.ZK_WAIT_CONNECTED_TIMEOUT);
+    }
     controller.syncStart();
     BestPossibleExternalViewVerifier verifier =
         new BestPossibleExternalViewVerifier.Builder(clusterName).setZkClient(_gZkClient)
