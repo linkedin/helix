@@ -241,12 +241,25 @@ public class ClusterAccessor extends AbstractHelixResource {
   @Path("{clusterId}")
   public Response updateCluster(@PathParam("clusterId") String clusterId,
       @QueryParam("command") String commandStr, @QueryParam("superCluster") String superCluster,
-      @QueryParam("duration") Long duration, String content) {
+      @QueryParam("duration") Long duration,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     try {
       command = getCommand(commandStr);
     } catch (HelixException ex) {
       return badRequest(ex.getMessage());
+    }
+
+    // force and dryRun are only honored by the enableWagedRebalanceForAllResources command, which
+    // runs the capacity-key guard rail pipeline. For any other command they are silently ignored
+    // and, worse, dryRun=true would still perform a real mutation -- the opposite of a simulation.
+    // Reject them up front for unsupported commands so a caller is never misled into thinking a
+    // mutation was simulated or its violations overridden.
+    if ((force || dryRun) && command != Command.enableWagedRebalanceForAllResources) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the "
+              + "'enableWagedRebalanceForAllResources' command, not '%s'.", commandStr));
     }
 
     ClusterSetup clusterSetup = getClusterSetup();
@@ -349,7 +362,26 @@ public class ClusterAccessor extends AbstractHelixResource {
             .manuallyEnableMaintenanceMode(clusterId, command == Command.enableMaintenanceMode,
                 content, customFieldsMap);
         break;
-      case enableWagedRebalanceForAllResources:
+      case enableWagedRebalanceForAllResources: {
+        // Guard rail: block (or simulate) flipping EVERY resource in the cluster to WAGED when some
+        // assignable instance's capacity map omits a cluster-required capacity key. Like the
+        // single-resource enableWagedRebalance path this writes WagedRebalancer + FULL_AUTO to
+        // ZooKeeper without any instance validation, so with such a gap WAGED could not build a
+        // cluster model and the resources would be flipped to WAGED but silently never place -- here
+        // for the whole cluster at once. The check is cluster-global and instance-side; no single
+        // resource is named, so the verdict is cluster-scoped. force=true overrides; dryRun=true only
+        // reports the verdict without writing.
+        GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(getDataAccssor(clusterId))
+            .wagedEnableForAllResources(true)
+            .build();
+        GuardrailPipeline guardrailPipeline =
+            new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule());
+        Optional<Response> preflightResponse =
+            preflight(guardrailPipeline, guardrailContext, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         // Enable WAGED rebalance for all resources in the cluster
         List<String> resources = helixAdmin.getResourcesInCluster(clusterId);
         try {
@@ -358,6 +390,7 @@ public class ClusterAccessor extends AbstractHelixResource {
           return badRequest(e.getMessage());
         }
         break;
+      }
       case purgeOfflineParticipants:
         if (duration == null || duration < 0) {
           helixAdmin

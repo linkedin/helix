@@ -313,6 +313,51 @@ public class TestCapacityKeyConsistencyGuardrailRule {
         CapacityKeyConsistencyGuardrailRule.RULE_ID);
   }
 
+  @Test
+  public void testWagedEnableForAllResourcesMissingKeyIsInfeasible() {
+    // Bulk WAGED-enable path: the committed cluster config requires FOO+BAR and instance0 omits BAR.
+    // Enabling WAGED for every resource would subject them all to a model WAGED cannot build, so the
+    // rule blocks it -- with a cluster-scoped verdict (no single resource) phrased for the bulk flip.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))));
+
+    ValidationResult result = rule.validate(contextWithWagedEnableForAllResources(dataAccessor));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), CapacityKeyConsistencyGuardrailRule.RULE_ID);
+    // No single resource is flipped on the bulk path, so the violation carries no resource name.
+    Assert.assertNull(violation.getResourceName());
+    Assert.assertTrue(violation.getMessage().contains("instance0"));
+    Assert.assertTrue(violation.getMessage().contains("BAR"));
+    Assert.assertTrue(violation.getMessage().contains("enabling WAGED for all resources"));
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesAllKeysPresentIsFeasible() {
+    // Every assignable instance declares both required keys, so flipping every resource to WAGED is
+    // safe.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig, ImmutableList.of(
+        instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100)),
+        instanceConfig("instance1", ImmutableMap.of("FOO", 100, "BAR", 100))));
+
+    Assert.assertTrue(
+        rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesNoCapacityKeysIsFeasible() {
+    // The cluster does not use the WAGED capacity model (no capacity keys), so a bulk WAGED-enable
+    // requires nothing of the instances even though instance0 declares no capacity at all.
+    HelixDataAccessor dataAccessor = mockAccessor(new ClusterConfig(CLUSTER),
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of())));
+
+    Assert.assertTrue(
+        rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -335,6 +380,13 @@ public class TestCapacityKeyConsistencyGuardrailRule {
         .dataAccessor(dataAccessor)
         .currentClusterConfig(currentClusterConfig)
         .proposedClusterConfig(proposedClusterConfig)
+        .build();
+  }
+
+  private GuardrailContext contextWithWagedEnableForAllResources(HelixDataAccessor dataAccessor) {
+    return GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .wagedEnableForAllResources(true)
         .build();
   }
 

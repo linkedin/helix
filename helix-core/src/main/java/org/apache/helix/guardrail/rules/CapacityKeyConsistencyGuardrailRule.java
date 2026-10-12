@@ -39,9 +39,10 @@ import org.apache.helix.model.ResourceConfig;
 /**
  * Guard rail that blocks a mutation which would leave the cluster's WAGED
  * {@code INSTANCE_CAPACITY_KEYS} unsatisfiable &mdash; i.e. when some assignable instance does not
- * declare a value for every capacity dimension (key) the cluster requires. It runs on two write
- * paths that can introduce such a gap: adding a WAGED resource (validated against the committed
- * cluster config) and changing the cluster config's capacity keys or default capacity map (validated
+ * declare a value for every capacity dimension (key) the cluster requires. It runs on the write
+ * paths that can newly subject resources to that model: adding a WAGED resource and flipping an
+ * existing resource (or every resource in the cluster) to WAGED, each validated against the committed
+ * cluster config; and changing the cluster config's capacity keys or default capacity map (validated
  * against the proposed, not-yet-written config, and only when that change actually alters the
  * capacity contract, so a newly-added key is checked before it is persisted while an unrelated edit
  * is not).
@@ -74,8 +75,9 @@ import org.apache.helix.model.ResourceConfig;
  * (matching the rebalancer and {@link PartitionWeightCapacityGuardrailRule}); a non-assignable
  * instance's capacity is never consulted, so a gap there cannot break placement.
  * <p>
- * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request and every
- * cluster-config update; it is not gated behind a cluster config toggle. On the cluster-config path
+ * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request, every
+ * {@code enableWagedRebalance} request (both the single-resource and the bulk all-resources forms),
+ * and every cluster-config update; it is not gated behind a cluster config toggle. On the cluster-config path
  * it enforces only when the update actually changes the capacity contract &mdash; its
  * {@code INSTANCE_CAPACITY_KEYS} or {@code DEFAULT_INSTANCE_CAPACITY_MAP} &mdash; so an unrelated
  * cluster-config edit is never rejected for a pre-existing capacity gap it does not touch (mirroring
@@ -103,8 +105,11 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   public ValidationResult validate(GuardrailContext context) {
     ResourceConfig proposedResourceConfig = context.getProposedResourceConfig();
     ClusterConfig proposedClusterConfig = context.getProposedClusterConfig();
-    if (proposedResourceConfig == null && proposedClusterConfig == null) {
-      // Neither a resource-scoped add nor a cluster-config change; nothing for this rule to certify.
+    boolean wagedEnableForAllResources = context.isWagedEnableForAllResources();
+    if (proposedResourceConfig == null && proposedClusterConfig == null
+        && !wagedEnableForAllResources) {
+      // Not a resource-scoped add/flip, a cluster-config capacity change, or a bulk WAGED enable;
+      // nothing for this rule to certify.
       return ValidationResult.feasible();
     }
 
@@ -148,14 +153,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
-    // On the resource-add path the verdict is scoped to the resource being added; the cluster-config
-    // path has no such resource, so its violations carry no resource name.
+    // On the resource-add/flip path the verdict is scoped to the resource being added or flipped; the
+    // cluster-config and bulk WAGED-enable paths have no single such resource, so their violations
+    // carry no resource name.
     String resourceName =
         proposedResourceConfig != null ? proposedResourceConfig.getResourceName() : null;
 
     List<Violation> violations = new ArrayList<>();
-    int totalViolations =
-        collectInstanceViolations(dataAccessor, keyBuilder, resourceName, clusterConfig, violations);
+    int totalViolations = collectInstanceViolations(dataAccessor, keyBuilder, resourceName,
+        wagedEnableForAllResources, clusterConfig, violations);
 
     if (violations.isEmpty()) {
       return ValidationResult.feasible();
@@ -184,14 +190,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
    * guard rail from drifting from what WAGED actually enforces: a single assignable instance missing a
    * key fails the whole model, so every WAGED resource would be accepted but never place. Reads
    * instance configs fail-closed so a transient read error surfaces as a rejection rather than
-   * validation against partial state. {@code resourceName} scopes the resource-add path's violations to
-   * the resource being added and is {@code null} on the cluster-config path. Returns the total number
+   * validation against partial state. {@code resourceName} scopes the resource-add/flip path's
+   * violations to the resource being added or flipped and is {@code null} on the cluster-config and
+   * bulk WAGED-enable paths. Returns the total number
    * of violations found (which may exceed the number appended to {@code violations} once the report cap
    * is reached).
    */
   private int collectInstanceViolations(ReadOnlyDataAccessor dataAccessor,
-      PropertyKey.Builder keyBuilder, String resourceName, ClusterConfig clusterConfig,
-      List<Violation> violations) {
+      PropertyKey.Builder keyBuilder, String resourceName, boolean wagedEnableForAllResources,
+      ClusterConfig clusterConfig, List<Violation> violations) {
     List<InstanceConfig> instanceConfigs =
         dataAccessor.getChildValues(keyBuilder.instanceConfigs(), true);
 
@@ -219,8 +226,8 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
           continue;
         }
         Violation.Builder violation = Violation.newBuilder(RULE_ID)
-            .message(instanceViolationMessage(resourceName, instanceConfig.getInstanceName(),
-                e.getMessage()));
+            .message(instanceViolationMessage(resourceName, wagedEnableForAllResources,
+                instanceConfig.getInstanceName(), e.getMessage()));
         if (resourceName != null) {
           violation.resource(resourceName);
         }
@@ -232,14 +239,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
 
   /**
    * Builds the per-instance violation message, wrapping the exact WAGED model-build error
-   * ({@code wagedError}). The resource-add path ({@code resourceName != null}) blames the specific
-   * resource being added; the cluster-config path frames the same gap as a consequence of the
-   * proposed capacity-key change. Both point the operator at the two places a key can be declared
-   * (the instance's {@code INSTANCE_CAPACITY_MAP} or the cluster's
-   * {@code DEFAULT_INSTANCE_CAPACITY_MAP}).
+   * ({@code wagedError}). The resource-add/flip path ({@code resourceName != null}) blames the
+   * specific resource being added or flipped; the bulk WAGED-enable path
+   * ({@code wagedEnableForAllResources}) frames the gap as a consequence of enabling WAGED for every
+   * resource in the cluster; and the cluster-config path frames it as a consequence of the proposed
+   * capacity-key change. All point the operator at the two places a key can be declared (the
+   * instance's {@code INSTANCE_CAPACITY_MAP} or the cluster's {@code DEFAULT_INSTANCE_CAPACITY_MAP}).
    */
-  private static String instanceViolationMessage(String resourceName, String instanceName,
-      String wagedError) {
+  private static String instanceViolationMessage(String resourceName,
+      boolean wagedEnableForAllResources, String instanceName, String wagedError) {
     if (resourceName != null) {
       return String.format(
           "Instance %s is not valid for the WAGED capacity model: %s WAGED cannot build a "
@@ -248,6 +256,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
               + "instance's INSTANCE_CAPACITY_MAP or to the cluster's "
               + "DEFAULT_INSTANCE_CAPACITY_MAP.",
           instanceName, wagedError, resourceName);
+    }
+    if (wagedEnableForAllResources) {
+      return String.format(
+          "Instance %s is not valid for the WAGED capacity model that enabling WAGED for all "
+              + "resources would require: %s WAGED cannot build a cluster model that includes it, so "
+              + "every WAGED resource would be accepted but never place. Add the missing key(s) to "
+              + "the instance's INSTANCE_CAPACITY_MAP or to the cluster's "
+              + "DEFAULT_INSTANCE_CAPACITY_MAP before enabling WAGED for all resources.",
+          instanceName, wagedError);
     }
     return String.format(
         "Instance %s is not valid for the WAGED capacity model that this cluster config change would "
