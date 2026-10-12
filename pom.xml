@@ -616,9 +616,10 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-javadoc-plugin</artifactId>
-          <version>3.2.0</version>
+          <version>3.5.0</version>
           <configuration>
             <skip>true</skip>
+            <failOnError>true</failOnError>
           </configuration>
         </plugin>
         <plugin>
@@ -677,14 +678,6 @@
               <exclude>.github/**</exclude>
               <exclude>scripts/**</exclude>
             </excludes>
-          </configuration>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-javadoc-plugin</artifactId>
-          <version>3.5.0</version>
-          <configuration>
-            <failOnError>true</failOnError>
           </configuration>
         </plugin>
       </plugins>
