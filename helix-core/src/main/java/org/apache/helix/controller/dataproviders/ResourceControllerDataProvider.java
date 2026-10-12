@@ -223,9 +223,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
         .getAndSet(false)) {
       CustomizedStateConfig customizedStateConfig =
           accessor.getProperty(accessor.keyBuilder().customizedStateConfig());
-      if (customizedStateConfig != null) {
-        _aggregationEnabledTypes =
-            new HashSet<>(customizedStateConfig.getAggregationEnabledTypes());
+      List<String> aggregationEnabledTypes =
+          customizedStateConfig == null ? null : customizedStateConfig.getAggregationEnabledTypes();
+      if (aggregationEnabledTypes != null) {
+        _aggregationEnabledTypes = new HashSet<>(aggregationEnabledTypes);
       } else {
         _aggregationEnabledTypes.clear();
       }

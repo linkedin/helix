@@ -20,6 +20,8 @@ package org.apache.helix.controller.dataproviders;
  */
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,15 +30,76 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.collect.ImmutableSet;
+import org.apache.helix.HelixConstants;
+import org.apache.helix.MockAccessor;
 import org.apache.helix.controller.stages.MissingMinActiveReplicaRecord;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CustomizedStateConfig;
 import org.apache.helix.model.IdealState;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class TestResourceControllerDataProvider {
+  @DataProvider(name = "customizedStateConfigs")
+  public Object[][] customizedStateConfigs() {
+    return new Object[][] {
+        {null, Collections.emptySet()},
+        {new CustomizedStateConfig(), Collections.emptySet()},
+        {new CustomizedStateConfig.Builder()
+            .setAggregationEnabledTypes(Collections.emptyList()).build(), Collections.emptySet()},
+        {new CustomizedStateConfig.Builder()
+            .setAggregationEnabledTypes(Arrays.asList("ingestion", "bootstrap", "ingestion")).build(),
+            ImmutableSet.of("ingestion", "bootstrap")}
+    };
+  }
+
+  @Test(dataProvider = "customizedStateConfigs")
+  public void testCustomizedStateConfigRefresh(CustomizedStateConfig config,
+      Set<String> expectedTypes) {
+    String clusterName = "TestCustomizedStateConfigRefresh";
+    MockAccessor accessor = new MockAccessor(clusterName);
+    accessor.setProperty(accessor.keyBuilder().clusterConfig(), new ClusterConfig(clusterName));
+    if (config != null) {
+      accessor.setProperty(accessor.keyBuilder().customizedStateConfig(), config);
+    }
+    ResourceControllerDataProvider dataProvider =
+        new ResourceControllerDataProvider(clusterName);
+
+    dataProvider.refresh(accessor);
+
+    Assert.assertEquals(dataProvider.getAggregationEnabledCustomizedStateTypes(), expectedTypes);
+  }
+
+  @Test(dataProvider = "customizedStateConfigs")
+  public void testCustomizedStateConfigRefreshReplacesPreviousTypes(CustomizedStateConfig config,
+      Set<String> expectedTypes) {
+    String clusterName = "TestCustomizedStateConfigRefreshReplacesPreviousTypes";
+    MockAccessor accessor = new MockAccessor(clusterName);
+    accessor.setProperty(accessor.keyBuilder().clusterConfig(), new ClusterConfig(clusterName));
+    accessor.setProperty(accessor.keyBuilder().customizedStateConfig(),
+        new CustomizedStateConfig.Builder()
+            .setAggregationEnabledTypes(Collections.singletonList("previous")).build());
+    ResourceControllerDataProvider dataProvider =
+        new ResourceControllerDataProvider(clusterName);
+    dataProvider.refresh(accessor);
+    Assert.assertEquals(dataProvider.getAggregationEnabledCustomizedStateTypes(),
+        Collections.singleton("previous"));
+
+    if (config == null) {
+      accessor.removeProperty(accessor.keyBuilder().customizedStateConfig());
+    } else {
+      accessor.setProperty(accessor.keyBuilder().customizedStateConfig(), config);
+    }
+    dataProvider.notifyDataChange(HelixConstants.ChangeType.CUSTOMIZED_STATE_CONFIG);
+    dataProvider.refresh(accessor);
+
+    Assert.assertEquals(dataProvider.getAggregationEnabledCustomizedStateTypes(), expectedTypes);
+  }
+
   @Test
   public void testStablePartitionListCache() {
     String resourceName = "TestResource";
