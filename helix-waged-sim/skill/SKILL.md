@@ -81,6 +81,10 @@ take, with the hard constraints that blocked it, such as FAULT_ZONE and NODE_CAP
   "Across removal orders" table has it. `mz-tightest` is the adversarial order: removals pile up in
   the tightest zone. With as many zones as replicas the lowest answer can be far below mz-balanced.
   With many small zones and equal instances, plain placement depends only on the count.
+- If the user can choose how many instances leave each zone, add a `searchStrategy: mz-flatten` variant:
+  it shrinks the largest zones first, the best case for surviving a zone loss. Its `removedPerZone` (and
+  `servingPerZoneAfter`) is the per-zone plan; if even it fails, no split of that size works for the
+  check, and the failure says why (for example a CU deficit after losing the largest zone).
 - Give both answers for surviving the largest zone going down and let the user decide:
   - `mz-balanced-zone-outage`: the zone comes back within the delay window. WAGED keeps its replicas
     and only restores `MIN_ACTIVE_REPLICAS`, which defaults to all replicas. With a minimum of 2 of 3
@@ -197,7 +201,8 @@ variants:                      # per variant: searchStrategy, tolerateZoneOutage
   random-1: {searchStrategy: random, seed: 1}
 ```
 
-Strategies: `mz-balanced` (best case), `mz-tightest` (worst case for zones), `mz-single`,
+Strategies: `mz-balanced` (zones kept even), `mz-tightest` (worst case for zones), `mz-flatten` (largest
+zones first: best case for surviving a zone loss when instances can be chosen), `mz-single`,
 `least-loaded`, `most-loaded`, `random`, `name`. Probe stats
 (judged on WAGED's assignment): `unplacedReplicas`, `overCapacityInstances`, `zoneConflicts`,
 `belowMinActive`, `noLiveReplica` (on what the controller serves), `replicasOnNonServing`,

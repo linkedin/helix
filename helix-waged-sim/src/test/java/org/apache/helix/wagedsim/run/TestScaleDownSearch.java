@@ -135,6 +135,59 @@ public class TestScaleDownSearch {
   }
 
   @Test
+  public void testFlattenOrderShrinksTheLargestZonesFirst() throws Exception {
+    // Zones of 8, 4, 4, 4, 4 and 4 instances of 1,000 CU, 17,400 CU of replicas, loads spread evenly.
+    // Surviving the loss of the largest zone needs 18 instances outside it. Flattening takes 4 from the
+    // 8-instance zone first, then one from each zone: 6 removed leaves 22, the largest zone 4. Keeping
+    // zones even spreads removals over all zones, so the 8-instance zone stays the largest and fewer go.
+    ClusterState state = SpecSource.build(flattenSpec());
+    StatsCollector collector = new StatsCollector(state, "CU");
+    Map<String, NodeStats> nodes = collector.nodes(state.getServedLayout());
+    List<String> flatten = RemovalOrder.order(RemovalOrder.Strategy.MZ_FLATTEN, new ArrayList<>(nodes.keySet()),
+        nodes, "CU", new Random(1));
+    Assert.assertEquals(RemovalOrder.countByZone(flatten.subList(0, 4), nodes), TestClusters.map("z00", 4),
+        "the 8-instance zone shrinks to the size of the others first: " + flatten);
+    Map<String, Integer> next = RemovalOrder.countByZone(flatten.subList(4, 10), nodes);
+    Assert.assertEquals(next.size(), 6, "then one from every zone: " + next);
+    Assert.assertEquals(RemovalOrder.Strategy.parse("mz-flatten").label(), "mz-flatten");
+
+    Scenario scenario = scenario(String.join("\n",
+        "name: flatten",
+        "search:",
+        "  removeNodes: {strategy: mz-balanced, as: delete}",
+        "  tolerateZoneLoss: largest",
+        "variants:",
+        "  balanced: {}",
+        "  tightest: {searchStrategy: mz-tightest}",
+        "  flatten: {searchStrategy: mz-flatten}"));
+    Map<String, Runner.VariantResult> results = run(state, scenario, Files.createTempDirectory("waged-sim-flat"));
+    Runner.VariantResult flat = results.get("flatten");
+    Assert.assertEquals(flat.search.get("strategy"), "mz-flatten");
+    Assert.assertEquals(flat.search.get("maxRemovable"), 6, flat.search.toString());
+    Assert.assertEquals(((Map<?, ?>) flat.search.get("removedPerZone")).get("z00"), 4, flat.search.toString());
+    for (String other : Arrays.asList("balanced", "tightest")) {
+      int removable = (Integer) results.get(other).search.get("maxRemovable");
+      Assert.assertTrue(removable < 6, other + " keeps a larger zone: " + results.get(other).search);
+    }
+  }
+
+  private static Map<String, Object> flattenSpec() {
+    Map<String, Object> cluster = new LinkedHashMap<>();
+    cluster.put("name", "TEST_FLATTEN");
+    cluster.put("capacityKeys", Collections.singletonList("CU"));
+    cluster.put("instanceCapacity", TestClusters.map("CU", 1000));
+    cluster.put("defaultPartitionWeight", TestClusters.map("CU", 10));
+    Map<String, Object> spec = new LinkedHashMap<>();
+    spec.put("cluster", cluster);
+    spec.put("instances", Arrays.asList(TestClusters.map("count", 24, "prefix", "node", "zones", 6),
+        TestClusters.map("count", 4, "prefix", "more", "zones", 1)));
+    spec.put("resources", Collections.singletonList(TestClusters.map("count", 5, "prefix", "db", "partitions", 116,
+        "replicas", 3, "stateModel", "MasterSlave", "weights", TestClusters.map("CU", 10))));
+    spec.put("seed", 5);
+    return spec;
+  }
+
+  @Test
   public void testBinarySearchKeepsZonesEven() throws Exception {
     ClusterState state = SpecSource.build(spec("TEST_SCALE"));
     Scenario scenario = scenario(String.join("\n",

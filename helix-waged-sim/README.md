@@ -141,6 +141,10 @@ variants:                       # per variant: searchStrategy, tolerateZoneOutag
   - `mz-tightest`: the opposite. Removals pile up in the zone that is most utilized without the
     instance (usually the smallest), largest and busiest instance first, until it is empty. This is
     the worst case for zone spread and for surviving a zone loss.
+  - `mz-flatten`: the next instance comes from the zone with the most capacity left, so the largest
+    zones shrink first and zones end up as even as possible. This is the best case for surviving a
+    zone loss when the scale-down can choose its instances: the search's `removedPerZone` is the
+    per-zone plan to follow.
   - `mz-single`: empties the largest zone first.
   - `least-loaded`, `most-loaded`, `random` (per-variant `seed`) and `name`: ignore zones.
 

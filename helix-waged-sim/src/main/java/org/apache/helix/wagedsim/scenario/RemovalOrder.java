@@ -55,6 +55,14 @@ public final class RemovalOrder {
     MZ_TIGHTEST,
     /** One zone at a time: empty the largest zone first (least loaded first), then the next. */
     MZ_SINGLE,
+    /**
+     * Best case for surviving the loss of a zone, for when the removal can choose its instances: take
+     * the next instance from the zone with the most capacity left on the focus key, so the largest
+     * zones shrink first and the zones end up as even as possible. Losing the largest zone then costs
+     * the least. Ties go to the zone that stays least utilized. Within a zone, the smallest instance
+     * goes first, then the least loaded.
+     */
+    MZ_FLATTEN,
     /** Least loaded first, ignoring zones. */
     LEAST_LOADED,
     /** Most loaded first, ignoring zones. */
@@ -69,7 +77,7 @@ public final class RemovalOrder {
         return valueOf(text.trim().toUpperCase(Locale.ROOT).replace('-', '_'));
       } catch (IllegalArgumentException e) {
         throw new IllegalArgumentException("Unknown removal strategy '" + text
-            + "'; use mz-balanced, mz-tightest, mz-single, least-loaded, most-loaded, random or name");
+            + "'; use mz-balanced, mz-tightest, mz-flatten, mz-single, least-loaded, most-loaded, random or name");
       }
     }
 
@@ -139,9 +147,72 @@ public final class RemovalOrder {
         return byZoneUtilization(list, nodes, key, true,
             Comparator.comparingLong((String i) -> -capacity(nodes, i, key)).thenComparing(mostLoaded), mostLoaded,
             staying);
+      case MZ_FLATTEN:
+        return byLargestZone(list, nodes, key,
+            Comparator.comparingLong((String i) -> capacity(nodes, i, key)).thenComparing(leastLoaded), staying);
       default:
         throw new IllegalStateException(strategy.name());
     }
+  }
+
+  /**
+   * Orders instances zone by zone, always taking the next instance from the zone with the most capacity
+   * left on {@code key} (the zone a zone-loss check would take out). Ties go to the zone that stays least
+   * utilized without the instance, then to the zone with more instances left, then by zone name.
+   */
+  private static List<String> byLargestZone(List<String> list, Map<String, NodeStats> nodes, String key,
+      Comparator<String> withinZone, Collection<String> staying) {
+    Map<String, List<String>> zones = byZone(list, nodes, withinZone);
+    Map<String, LinkedList<String>> remaining = new TreeMap<>(ZONE_ORDER);
+    Map<String, Map<String, Long>> zoneCapacity = new TreeMap<>(ZONE_ORDER);
+    Map<String, Map<String, Long>> zoneLoad = new TreeMap<>(ZONE_ORDER);
+    zones.forEach((zone, members) -> {
+      remaining.put(zone, new LinkedList<>(members));
+      zoneCapacity.put(zone, new TreeMap<>());
+      zoneLoad.put(zone, new TreeMap<>());
+    });
+    List<String> counted = new ArrayList<>(list);
+    counted.addAll(staying);
+    for (String instance : counted) {
+      NodeStats node = nodes.get(instance);
+      String zone = zone(nodes, instance);
+      if (node == null || !zoneCapacity.containsKey(zone)) {
+        continue;
+      }
+      node.capacity.forEach((k, v) -> zoneCapacity.get(zone).merge(k, (long) v, Long::sum));
+      node.allLoad.forEach((k, v) -> zoneLoad.get(zone).merge(k, v, Long::sum));
+    }
+    List<String> result = new ArrayList<>();
+    while (result.size() < list.size()) {
+      String best = null;
+      for (Map.Entry<String, LinkedList<String>> zone : remaining.entrySet()) {
+        if (zone.getValue().isEmpty()) {
+          continue;
+        }
+        int cmp = best == null ? -1 : Long.compare(zoneCapacity.get(best).getOrDefault(key, 0L),
+            zoneCapacity.get(zone.getKey()).getOrDefault(key, 0L));
+        if (cmp == 0) {
+          cmp = Double.compare(
+              utilizationWithout(zoneCapacity.get(zone.getKey()), zoneLoad.get(zone.getKey()),
+                  nodes.get(zone.getValue().getFirst())),
+              utilizationWithout(zoneCapacity.get(best), zoneLoad.get(best),
+                  nodes.get(remaining.get(best).getFirst())));
+        }
+        if (cmp == 0) {
+          cmp = Integer.compare(remaining.get(best).size(), zone.getValue().size());
+        }
+        if (cmp < 0) {
+          best = zone.getKey();
+        }
+      }
+      String instance = remaining.get(best).removeFirst();
+      NodeStats node = nodes.get(instance);
+      if (node != null) {
+        node.capacity.forEach((k, v) -> zoneCapacity.get(zone(nodes, instance)).merge(k, (long) -v, Long::sum));
+      }
+      result.add(instance);
+    }
+    return result;
   }
 
   /**
