@@ -43,7 +43,6 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
-import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,10 +59,11 @@ import org.slf4j.LoggerFactory;
  * a caller cannot interpret. This accessor performs the bucket reassembly, decompression, and
  * per-resource deserialization server side and returns the resulting partition placements.
  * <p>
- * Note that this reports what was last <i>persisted</i>, which is the controller's own view of its
- * latest computation. It is not a live recomputation, and it may lag the in-memory state of the
- * active controller. Use {@code /clusters/{clusterId}/partitionAssignment} for what-if computation
- * instead.
+ * Note that this reports what WAGED last <i>persisted</i>, not the live mapping. The controller
+ * still applies delayed-rebalance min-active adjustments and user-defined preference lists on top
+ * of it, the states are provisional, and it is only rewritten on a successful rebalance. Use the
+ * IdealState or ExternalView for the effective mapping, and
+ * {@code /clusters/{clusterId}/partitionAssignment} for what-if computation.
  */
 @ClusterAuth
 @Path("/clusters/{clusterId}/wagedAssignment")
@@ -74,6 +74,7 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
   private static final String LAST_SUCCESSFUL_WRITE_KEY = "LAST_SUCCESSFUL_WRITE";
   private static final String LAST_WRITE_KEY = "LAST_WRITE";
   private static final String METADATA_KEY = "METADATA";
+  private static final int MAX_READ_ATTEMPTS = 2;
 
   private static final String CLUSTER_ID_FIELD = "cluster";
   private static final String ASSIGNMENT_TYPE_FIELD = "assignmentType";
@@ -102,8 +103,11 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
    * Sample HTTP URL:
    * {@code GET /clusters/{clusterId}/wagedAssignment/bestPossible?format=IdealStateFormat&resources=db0,db1}
    * <p>
-   * Returns the decoded best possible assignment, which is the placement the WAGED rebalancer
-   * converged on and handed to the rest of the controller pipeline.
+   * Returns the best possible assignment last persisted by the WAGED rebalancer. This is the
+   * rebalancer's own output, before the controller applies delayed-rebalance min-active
+   * adjustments and user-defined preference lists, and the states are provisional. It is only
+   * updated on a successful rebalance. Use the IdealState or ExternalView for the effective
+   * mapping.
    *
    * @param clusterId       the cluster to read
    * @param formatStr       {@link AssignmentFormat}, defaults to {@code IdealStateFormat}
@@ -130,8 +134,9 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
    * Sample HTTP URL:
    * {@code GET /clusters/{clusterId}/wagedAssignment/baseline?format=CurrentStateFormat}
    * <p>
-   * Returns the decoded baseline assignment, which is the steady state placement WAGED computes
-   * ignoring transient conditions such as instances being temporarily down.
+   * Returns the baseline assignment last persisted by the WAGED rebalancer, which is the steady
+   * state placement it computes ignoring transient conditions such as instances being temporarily
+   * down. It is only updated on a successful global rebalance.
    *
    * @param clusterId       the cluster to read
    * @param formatStr       {@link AssignmentFormat}, defaults to {@code IdealStateFormat}
@@ -168,21 +173,41 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
     Set<String> instanceFilter = parseFilter(instances);
     Set<String> partitionFilter = parseFilter(partitions);
     String rootPath = getAssignmentPath(clusterId, assignmentType);
+    String lastSuccessfulWritePath = rootPath + "/" + LAST_SUCCESSFUL_WRITE_KEY;
+    BaseDataAccessor<byte[]> accessor = getByteArrayDataAccessor();
 
-    Map<String, ResourceAssignment> assignments;
-    try {
-      HelixProperty combined =
-          getZkBucketDataAccessor().compressedBucketRead(rootPath, HelixProperty.class);
-      assignments = AssignmentMetadataStore.splitAssignments(combined);
-    } catch (ZkNoNodeException e) {
-      // WAGED has never persisted this assignment for the cluster, so there is nothing to decode.
-      return notFound(String.format(
-          "No %s assignment found at %s. The cluster may have no WAGED resources, or the "
-              + "controller may not have persisted an assignment yet.", assignmentType, rootPath));
-    } catch (Exception e) {
-      LOG.error("Failed to read {} assignment for cluster {} at path {}", assignmentType, clusterId,
-          rootPath, e);
-      return serverError(e);
+    // The read is not atomic with the controller's writes and the GC of old versions, so the
+    // version being read can vanish mid read. A read only counts if LAST_SUCCESSFUL_WRITE is the
+    // same before and after it; versions only grow, so that pins the payload to that version.
+    String version = null;
+    Map<String, ResourceAssignment> assignments = null;
+    Exception lastError = null;
+    for (int attempt = 0; attempt < MAX_READ_ATTEMPTS && assignments == null; attempt++) {
+      try {
+        String before = readString(accessor, lastSuccessfulWritePath);
+        if (before == null) {
+          return notFound(String.format(
+              "No %s assignment found at %s. The cluster may have no WAGED resources, or the "
+                  + "controller may not have persisted an assignment yet.", assignmentType,
+              rootPath));
+        }
+        HelixProperty combined =
+            getZkBucketDataAccessor().compressedBucketRead(rootPath, HelixProperty.class);
+        if (before.equals(readString(accessor, lastSuccessfulWritePath))) {
+          assignments = AssignmentMetadataStore.splitAssignments(combined);
+          version = before;
+        }
+      } catch (Exception e) {
+        lastError = e;
+      }
+    }
+    if (assignments == null) {
+      LOG.error("Failed to read a consistent {} assignment for cluster {} at path {}",
+          assignmentType, clusterId, rootPath, lastError);
+      return serverError(String.format(
+          "Failed to read a consistent %s assignment at %s. A concurrent write may have replaced "
+              + "it, retry the request.%s", assignmentType, rootPath,
+          lastError == null ? "" : " Last error: " + lastError.getMessage()));
     }
 
     Map<String, Object> response = new LinkedHashMap<>();
@@ -190,7 +215,7 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
     response.put(ASSIGNMENT_TYPE_FIELD, assignmentType.name());
     response.put(FORMAT_FIELD, format.name());
     if (includeMetadata) {
-      response.put(METADATA_FIELD, readWriteMetadata(rootPath));
+      response.put(METADATA_FIELD, readWriteMetadata(accessor, rootPath, version));
     }
     response.put(ASSIGNMENT_FIELD,
         format == AssignmentFormat.CurrentStateFormat ? toCurrentStateFormat(assignments,
@@ -217,33 +242,26 @@ public class WagedAssignmentAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Reads the bookkeeping ZNodes the bucketized write left behind so callers can tell how fresh the
-   * decoded assignment is and how large the persisted payload was. Best effort: a partially written
-   * or concurrently garbage collected path yields whatever could be read rather than failing the
-   * whole request.
+   * Describes the decoded version: when it was written and how large the persisted payload was.
+   * {@code lastWriteVersion} is read live, so a value above {@code version} means a newer write is
+   * in flight or failed. Best effort: if the version was garbage collected after the decode, the
+   * missing fields are left out rather than failing the whole request.
    */
-  private Map<String, Object> readWriteMetadata(String rootPath) {
+  private Map<String, Object> readWriteMetadata(BaseDataAccessor<byte[]> accessor, String rootPath,
+      String version) {
     Map<String, Object> metadata = new LinkedHashMap<>();
-    BaseDataAccessor<byte[]> accessor = getByteArrayDataAccessor();
+    metadata.put("version", version);
     try {
-      String lastSuccessfulWrite = readString(accessor, rootPath + "/" + LAST_SUCCESSFUL_WRITE_KEY);
-      metadata.put("lastSuccessfulWriteVersion", lastSuccessfulWrite);
       metadata.put("lastWriteVersion", readString(accessor, rootPath + "/" + LAST_WRITE_KEY));
-
-      Stat[] stats =
-          accessor.getStats(Collections.singletonList(rootPath + "/" + LAST_SUCCESSFUL_WRITE_KEY),
-              AccessOption.PERSISTENT);
-      if (stats != null && stats.length > 0 && stats[0] != null) {
-        metadata.put("lastSuccessfulWriteTimeMs", stats[0].getMtime());
+      String versionPath = rootPath + "/" + version;
+      Stat stat = accessor.getStat(versionPath, AccessOption.PERSISTENT);
+      if (stat != null) {
+        metadata.put("writeTimeMs", stat.getCtime());
       }
-
-      if (lastSuccessfulWrite != null) {
-        byte[] rawBucketMetadata = accessor
-            .get(rootPath + "/" + lastSuccessfulWrite + "/" + METADATA_KEY, null,
-                AccessOption.PERSISTENT);
-        if (rawBucketMetadata != null) {
-          metadata.put("bucketMetadata", OBJECT_MAPPER.readValue(rawBucketMetadata, Map.class));
-        }
+      byte[] rawBucketMetadata =
+          accessor.get(versionPath + "/" + METADATA_KEY, null, AccessOption.PERSISTENT);
+      if (rawBucketMetadata != null) {
+        metadata.put("bucketMetadata", OBJECT_MAPPER.readValue(rawBucketMetadata, Map.class));
       }
     } catch (Exception e) {
       // Metadata is diagnostic only, so never fail the assignment read because of it.

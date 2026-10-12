@@ -21,20 +21,18 @@ package org.apache.helix.rest.server;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.ws.rs.core.Response;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.AccessOption;
-import org.apache.helix.HelixProperty;
 import org.apache.helix.TestHelper;
 import org.apache.helix.controller.rebalancer.waged.AssignmentMetadataStore;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordJacksonSerializer;
-import org.apache.helix.zookeeper.zkclient.serialize.ZkSerializer;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -46,34 +44,33 @@ import org.testng.annotations.Test;
  * the bucketized, GZIP compressed assignment metadata store.
  */
 public class TestWagedAssignmentAccessor extends AbstractTestClass {
-  private static final String TEST_CLUSTER = "TestCluster_0";
+  // Own cluster with no controller, so nothing else rewrites the fixture or shares its cleanup.
+  private static final String TEST_CLUSTER = "TestWagedAssignmentAccessorCluster";
   private static final String UNKNOWN_CLUSTER = "NonExistentWagedAssignmentCluster";
+  private static final String VANISHED_VERSION_CLUSTER = "WagedAssignmentVanishedVersionCluster";
   private static final String RESOURCE_0 = "wagedDb0";
   private static final String RESOURCE_1 = "wagedDb1";
   private static final String INSTANCE_0 = "wagedInstance0";
   private static final String INSTANCE_1 = "wagedInstance1";
   private static final String MASTER = "MASTER";
   private static final String SLAVE = "SLAVE";
-  private static final ZkSerializer SERIALIZER = new ZNRecordJacksonSerializer();
-
-  private ZkBucketDataAccessor _bucketDataAccessor;
 
   @BeforeClass
-  public void beforeClass() throws IOException {
-    _bucketDataAccessor = new ZkBucketDataAccessor(ZK_ADDR);
-    _bucketDataAccessor.compressedBucketWrite(
-        AssignmentMetadataStore.getBestPossiblePath(TEST_CLUSTER),
-        combineAssignments("BEST_POSSIBLE", buildBestPossibleAssignment()));
-    _bucketDataAccessor.compressedBucketWrite(AssignmentMetadataStore.getBaselinePath(TEST_CLUSTER),
-        combineAssignments("BASELINE", buildBaselineAssignment()));
+  public void beforeClass() {
+    _gSetupTool.addCluster(TEST_CLUSTER, true);
+    // Write through the real store so the test fails if its encoding drifts from the reader.
+    AssignmentMetadataStore store = newStore(TEST_CLUSTER);
+    try {
+      store.persistBestPossibleAssignment(buildBestPossibleAssignment());
+      store.persistBaseline(buildBaselineAssignment());
+    } finally {
+      store.close();
+    }
   }
 
   @AfterClass
   public void afterClass() {
-    if (_bucketDataAccessor != null) {
-      _bucketDataAccessor.close();
-    }
-    _baseAccessor.remove("/" + TEST_CLUSTER + "/ASSIGNMENT_METADATA", AccessOption.PERSISTENT);
+    _gSetupTool.deleteCluster(TEST_CLUSTER);
   }
 
   @Test
@@ -177,8 +174,10 @@ public class TestWagedAssignmentAccessor extends AbstractTestClass {
     JsonNode metadata = getAssignmentNode("bestPossible", null).get("metadata");
 
     Assert.assertNotNull(metadata);
-    Assert.assertNotNull(metadata.get("lastSuccessfulWriteVersion"));
-    Assert.assertTrue(metadata.get("lastSuccessfulWriteTimeMs").asLong() > 0);
+    // The metadata describes the decoded version, not whatever is latest by the time it is read.
+    String version = metadata.get("version").asText();
+    Assert.assertEquals(metadata.get("lastWriteVersion").asText(), version);
+    Assert.assertTrue(metadata.get("writeTimeMs").asLong() > 0);
     Assert.assertTrue(metadata.get("bucketMetadata").get("DATA_SIZE").asInt() > 0);
 
     // Metadata can be turned off for callers that only want the placement.
@@ -202,6 +201,37 @@ public class TestWagedAssignmentAccessor extends AbstractTestClass {
     get("clusters/" + UNKNOWN_CLUSTER + "/wagedAssignment/bestPossible", null,
         Response.Status.NOT_FOUND.getStatusCode(), true);
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testVanishedVersionIsNotReportedAsMissing() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String rootPath = AssignmentMetadataStore.getBestPossiblePath(VANISHED_VERSION_CLUSTER);
+    _gSetupTool.addCluster(VANISHED_VERSION_CLUSTER, true);
+    AssignmentMetadataStore store = newStore(VANISHED_VERSION_CLUSTER);
+    try {
+      store.persistBestPossibleAssignment(buildBestPossibleAssignment());
+      // Simulate the version being garbage collected while LAST_SUCCESSFUL_WRITE still points at it.
+      List<String> children = _baseAccessor.getChildNames(rootPath, AccessOption.PERSISTENT);
+      for (String child : children) {
+        if (child.chars().allMatch(Character::isDigit)) {
+          Assert.assertTrue(_baseAccessor.remove(rootPath + "/" + child, AccessOption.PERSISTENT));
+        }
+      }
+      // An assignment was persisted, so this must be an error rather than a 404.
+      get("clusters/" + VANISHED_VERSION_CLUSTER + "/wagedAssignment/bestPossible", null,
+          Response.Status.INTERNAL_SERVER_ERROR.getStatusCode(), true);
+    } finally {
+      store.close();
+      _gSetupTool.deleteCluster(VANISHED_VERSION_CLUSTER);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // The store owns its accessor and closes it, so each store gets its own.
+  private static AssignmentMetadataStore newStore(String clusterName) {
+    return new AssignmentMetadataStore(new ZkBucketDataAccessor(ZK_ADDR), clusterName) {
+    };
   }
 
   private JsonNode getAssignmentNode(String assignmentType, Map<String, String> queryParams)
@@ -232,17 +262,5 @@ public class TestWagedAssignmentAccessor extends AbstractTestClass {
         ImmutableMap.of(INSTANCE_1, MASTER, INSTANCE_0, SLAVE));
     assignments.put(RESOURCE_0, resource0);
     return assignments;
-  }
-
-  /**
-   * Mirrors {@code AssignmentMetadataStore#combineAssignments} so the test exercises the exact wire
-   * format the controller writes.
-   */
-  private static HelixProperty combineAssignments(String name,
-      Map<String, ResourceAssignment> assignmentMap) {
-    HelixProperty property = new HelixProperty(name);
-    assignmentMap.forEach((resource, assignment) -> property.getRecord()
-        .setSimpleField(resource, new String(SERIALIZER.serialize(assignment.getRecord()))));
-    return property;
   }
 }
