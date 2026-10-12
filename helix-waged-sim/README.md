@@ -100,7 +100,8 @@ search:
   removeNodes: {strategy: mz-balanced, method: binary, as: evacuate}   # as: delete; linear also takes step; max caps the search
   tolerateZoneOutage: none      # largest | every: also ride out a zone outage within the delay window
   tolerateZoneLoss: none        # largest | every: also survive a zone staying down past the window
-  nonServing: keep              # remove: plan without disabled and offline instances; revive: bring them back up
+  nonServing: keep              # remove: plan without disabled and offline instances; revive: bring them back up;
+                                # window: revive those within the delay window, remove the rest
   requireAtLeast: 4             # optional: FAIL when fewer can be removed
 variants:                       # per variant: searchStrategy, tolerateZoneOutage, tolerateZoneLoss, nonServing, seed
   mz-balanced: {}
@@ -182,6 +183,8 @@ variants:                       # per variant: searchStrategy, tolerateZoneOutag
   - `nonServing: remove` plans without them, for nodes that are gone for good.
   - `nonServing: revive` brings them back up and enables them first, for nodes that are briefly down
     (for example in an automated maintenance).
+  - `nonServing: window` follows WAGED: it revives the ones WAGED still assigns replicas to (down within
+    the delay window) and removes the ones it has moved replicas off (down longer).
 
 The report's "Scale-down search" section has the answer per variant, why the next removal fails (the
 WAGED failure and the hard constraints that blocked it), every probe, and instances and utilization per

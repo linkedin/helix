@@ -124,8 +124,9 @@ public class Scenario {
     /**
      * What to do with disabled and offline instances in every probe, before the search's own removals:
      * "keep" them as WAGED sees them (their capacity counts for the baseline, and they stay active
-     * while within the delay window), "remove" them (gone for good), or "revive" them (back up and
-     * enabled, as after a maintenance that ends).
+     * while within the delay window), "remove" them (gone for good), "revive" them (back up and
+     * enabled, as after a maintenance that ends), or "window": revive those WAGED still assigns
+     * replicas to (down within the delay window) and remove the rest (down longer).
      */
     public String nonServing = "keep";
     /**

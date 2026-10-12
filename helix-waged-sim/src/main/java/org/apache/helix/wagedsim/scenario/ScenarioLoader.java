@@ -252,11 +252,11 @@ public final class ScenarioLoader {
     return variant;
   }
 
-  /** @return keep, remove or revive */
+  /** @return keep, remove, revive or window */
   private static String nonServing(Object value) {
     String mode = String.valueOf(value);
-    if (!"keep".equals(mode) && !"remove".equals(mode) && !"revive".equals(mode)) {
-      throw new IllegalArgumentException("nonServing must be keep, remove or revive");
+    if (!"keep".equals(mode) && !"remove".equals(mode) && !"revive".equals(mode) && !"window".equals(mode)) {
+      throw new IllegalArgumentException("nonServing must be keep, remove, revive or window");
     }
     return mode;
   }

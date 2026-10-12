@@ -429,7 +429,7 @@ The cluster card (capacity vs required and util % per key, max host %, skew for 
 
 A scenario with a `search` block answers "how many instances can be removed before WAGED can no longer place every replica?" (`preset:scale-down`). It replaces events and rounds with probes and runs in dry-run mode only.
 
-- **Probe k.** A fresh engine starts from the cluster as it is and takes out the first k serving instances of a removal order the way a scale-down does. Disabled or offline instances are deleted first with `nonServing: remove`, or enabled and brought back up first with `nonServing: revive`.
+- **Probe k.** A fresh engine starts from the cluster as it is and takes out the first k serving instances of a removal order the way a scale-down does. Disabled or offline instances are deleted first with `nonServing: remove`, or enabled and brought back up first with `nonServing: revive`; `nonServing: window` brings back those WAGED still assigns replicas to (down within the delay window) and deletes the rest.
   - It sets the EVACUATE operation on them. EVACUATE instances are not assignable, so WAGED places their replicas on the others (a new baseline). The controller's n + 1 logic (`DelayedAutoRebalancer.computeBestPossibleStateForPartitionInternal`) keeps the old replica serving until the replacement reaches its state, then drops it.
   - Evacuation runs in batches. Each batch keeps `InstanceUtil.getInstancesUnableToAcceptOnlineReplicas` (down, disabled and EVACUATE instances) within `MAX_OFFLINE_INSTANCES_ALLOWED`; past it, `BestPossibleStateCalcStage` puts the cluster into maintenance mode and WAGED stops moving replicas.
   - Rounds run until a batch holds nothing (`isEvacuateFinished` checks for no current states), then its instances are removed and one more round runs.
@@ -470,7 +470,7 @@ Guardrails:
 
 Built on 2026-10-08 as module `helix-waged-sim` (CLI, both engines, all four sources, reports, presets,
 skill) plus the helix-core seam. The scale-down search was added on 2026-10-09. Its worst-case orders,
-zone-outage check and evacuation-based probes followed on 2026-10-11. 49 of the 50 module tests pass and one
+zone-outage check and evacuation-based probes followed on 2026-10-11. 50 of the 51 module tests pass and one
 is skipped unless a real Pensieve pull is given; the seam has its own test in helix-core.
 
 **Validated:**

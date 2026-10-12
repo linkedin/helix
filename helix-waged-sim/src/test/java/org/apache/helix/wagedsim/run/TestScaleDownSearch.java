@@ -481,6 +481,46 @@ public class TestScaleDownSearch {
   }
 
   @Test
+  public void testWindowRevivesOnlyInstancesWagedExpectsBack() throws Exception {
+    Map<String, Object> spec = spec("TEST_WINDOW");
+    spec.put("liveness", TestClusters.map("disabled", 2));
+    ClusterState state = SpecSource.build(spec);
+    List<String> down = new ArrayList<>();
+    for (String instance : state.getInstanceNames()) {
+      if (!state.getInstanceConfig(instance).getInstanceEnabled()) {
+        down.add(instance);
+      }
+    }
+    Assert.assertEquals(down.size(), 2);
+    // WAGED keeps replicas on an instance down within the delay window: give the first some.
+    String back = down.get(0);
+    int moved = 0;
+    for (Map<String, Map<String, String>> partitions : state.getBestPossible().values()) {
+      for (Map<String, String> replicas : partitions.values()) {
+        String slave = replicas.entrySet().stream().filter(e -> "SLAVE".equals(e.getValue()))
+            .map(Map.Entry::getKey).findFirst().orElse(null);
+        if (moved < 20 && slave != null && !replicas.containsKey(back)) {
+          replicas.remove(slave);
+          replicas.put(back, "SLAVE");
+          moved++;
+        }
+      }
+    }
+    Assert.assertEquals(ScaleDownSearch.assignedInstances(state).contains(back), true);
+    Assert.assertEquals(ScaleDownSearch.assignedInstances(state).contains(down.get(1)), false);
+    Runner.VariantResult result = run(state, scenario(String.join("\n",
+        "name: non-serving-window",
+        "search: {nonServing: window}",
+        "variants:",
+        "  balanced: {}")), Files.createTempDirectory("waged-sim-ns")).get("balanced");
+    Assert.assertEquals(result.search.get("nonServing"), "window: 1 revived, 1 removed");
+    Assert.assertEquals(result.search.get("nonServingRevived"), Collections.singletonList(back));
+    Assert.assertEquals(result.search.get("nonServingRemoved"), Collections.singletonList(down.get(1)));
+    // 11 instances: the zone that lost one has none to spare, the other two one each.
+    Assert.assertEquals(result.search.get("maxRemovable"), 2, result.search.toString());
+  }
+
+  @Test
   public void testRemovalOrderSelectorsInEvents() throws Exception {
     ClusterState state = SpecSource.build(spec("TEST_SELECTOR"));
     Scenario scenario = scenario(String.join("\n",

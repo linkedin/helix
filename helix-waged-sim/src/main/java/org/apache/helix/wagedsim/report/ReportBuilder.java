@@ -429,12 +429,19 @@ public final class ReportBuilder {
       }
       long nonServing = result.get("nonServingInstances") instanceof Number
           ? ((Number) result.get("nonServingInstances")).longValue() : 0;
-      if (nonServing > 0 && "removed".equals(result.get("nonServing"))) {
+      String nonServingMode = String.valueOf(result.getOrDefault("nonServing", "kept"));
+      if (nonServing > 0 && "removed".equals(nonServingMode)) {
         section.text(nonServing + " disabled or offline instance(s) were removed in every probe; the answer "
             + "counts serving instances only.");
-      } else if (nonServing > 0 && "revived".equals(result.get("nonServing"))) {
+      } else if (nonServing > 0 && "revived".equals(nonServingMode)) {
         section.text(nonServing + " disabled or offline instance(s) were brought back up and enabled in every "
             + "probe, as after a maintenance that ends; they count as capacity but are not removed.");
+      } else if (nonServing > 0 && nonServingMode.startsWith("window")) {
+        section.text(nonServing + " disabled or offline instance(s), as WAGED sees them: the "
+            + data.list(result.get("nonServingRevived")).size() + " it still assigns replicas to (down within "
+            + "the delay window) were brought back up and enabled in every probe, and the "
+            + data.list(result.get("nonServingRemoved")).size() + " it had moved replicas off (down longer) "
+            + "were removed.");
       } else if (nonServing > 0) {
         section.text(nonServing + " disabled or offline instance(s) stayed in the cluster. WAGED counts their "
             + "capacity for its baseline and keeps replicas on those within the delay window ("

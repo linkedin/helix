@@ -176,11 +176,17 @@ class ScaleDownSearch {
     List<String> nonServing = new ArrayList<>();
     nodes.values().forEach(n -> (n.serving ? candidates : nonServing).add(n.instance));
     String nonServingMode = variant.nonServing != null ? variant.nonServing : _spec.nonServing;
-    boolean removeNonServing = "remove".equals(nonServingMode);
-    if (removeNonServing) {
+    if ("remove".equals(nonServingMode)) {
       _dropFirst = nonServing;
     } else if ("revive".equals(nonServingMode)) {
       _reviveFirst = nonServing;
+    } else if ("window".equals(nonServingMode)) {
+      // WAGED keeps replicas on the instances it expects back within the delay window and has moved them
+      // off the ones down for longer: bring the first back up and remove the others.
+      Set<String> expectedBack = assignedInstances(state);
+      _reviveFirst = new ArrayList<>();
+      _dropFirst = new ArrayList<>();
+      nonServing.forEach(instance -> (expectedBack.contains(instance) ? _reviveFirst : _dropFirst).add(instance));
     }
     String zoneLossNote = null;
     boolean zoneChecks = !"none".equals(_zoneLoss) || !"none".equals(_zoneOutage);
@@ -212,7 +218,7 @@ class ScaleDownSearch {
     // Start and end both describe WAGED's assignment: with nothing removed, and with the most removed.
     result.start = zero.stats;
     _output.nodes(variant.name, 0, zero.nodes.values(), collector.keys());
-    int bound = capacityBound(order, nodes, startStats, collector.keys(), removeNonServing);
+    int bound = capacityBound(order, nodes, startStats, collector.keys(), new TreeSet<>(_dropFirst));
     if (zero.feasible) {
       best = zero;
       if ("linear".equals(_spec.method)) {
@@ -284,7 +290,11 @@ class ScaleDownSearch {
     summary.put("searchedUpTo", maxK);
     summary.put("capacityBound", bound);
     summary.put("nonServingInstances", nonServing.size());
-    summary.put("nonServing", removeNonServing ? "removed" : "revive".equals(nonServingMode) ? "revived" : "kept");
+    summary.put("nonServing", "window".equals(nonServingMode)
+        ? "window: " + _reviveFirst.size() + " revived, " + _dropFirst.size() + " removed"
+        : "remove".equals(nonServingMode) ? "removed" : "revive".equals(nonServingMode) ? "revived" : "kept");
+    summary.put("nonServingRevived", new ArrayList<>(_reviveFirst));
+    summary.put("nonServingRemoved", new ArrayList<>(_dropFirst));
     if (strategy == RemovalOrder.Strategy.RANDOM) {
       summary.put("seed", seed);
     }
@@ -828,12 +838,29 @@ class ScaleDownSearch {
   }
 
   /**
+   * @return instances WAGED's assignment gives replicas to: those serving, and those down that it
+   *         expects back within the delay window. Uses the persisted best possible assignment, or the
+   *         ideal states WAGED writes it to when the source has none.
+   */
+  static Set<String> assignedInstances(ClusterState state) {
+    Set<String> instances = new TreeSet<>();
+    if (state.getBestPossible() != null) {
+      state.getBestPossible().values().forEach(partitions -> partitions.values()
+          .forEach(replicas -> instances.addAll(replicas.keySet())));
+    } else {
+      state.getIdealStates().values().forEach(idealState -> idealState.getRecord().getMapFields().values()
+          .forEach(replicas -> instances.addAll(replicas.keySet())));
+    }
+    return instances;
+  }
+
+  /**
    * @return the largest k for which the instances left still have at least the capacity all replicas
    *         require on every key. Like WAGED's baseline, it counts every assignable instance, serving or
-   *         not, unless non-serving instances are removed. WAGED fails with a capacity deficit beyond it.
+   *         not, except those removed first. WAGED fails with a capacity deficit beyond it.
    */
   static int capacityBound(List<String> order, Map<String, NodeStats> nodes, Map<String, Object> stats,
-      List<String> keys, boolean removeNonServing) {
+      List<String> keys, Set<String> removedFirst) {
     Map<String, Long> spare = new TreeMap<>();
     for (String key : keys) {
       long required = number(stats.get("required.all." + key));
@@ -842,7 +869,7 @@ class ScaleDownSearch {
       }
       long capacity = 0;
       for (NodeStats node : nodes.values()) {
-        if (node.assignable && (node.serving || !removeNonServing)) {
+        if (node.assignable && !removedFirst.contains(node.instance)) {
           capacity += node.capacity.getOrDefault(key, 0);
         }
       }
