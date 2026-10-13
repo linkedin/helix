@@ -265,4 +265,47 @@ public class TestClusterContext extends AbstractTestClusterModel {
     //estimatedMaxUtilization calculated using preferredScoringKey only.
     Assert.assertEquals(actualEstimatedMaxUtilization, (float) totalUsage.get(preferredScoringKeys.get(0)) / totalCapacity.get(preferredScoringKeys.get(0)));
   }
+
+  @Test
+  public void testTopStateScoringKeysAndAlpha() throws IOException {
+    // The fixture uses 16 of 20 on "item1" and 0 of 30 on "item3"; its top state replicas use 8 of
+    // 20 on "item1" and 0 of 30 on "item3".
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    Set<AssignableReplica> assignmentSet = generateReplicas(testCache);
+    ClusterConfig clusterConfig = testCache.getClusterConfig();
+
+    // Not set: both estimates use all the capacity keys.
+    ClusterContext context = new ClusterContext(assignmentSet, generateNodes(testCache),
+        new HashMap<>(), new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getTopStateScoringKeys());
+    Assert.assertEquals(context.getTopStateScoringAlpha(), -1d, 0d);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 16f / 20, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
+
+    // The top state scoring keys change the top state estimate only.
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("item3"));
+    clusterConfig.setTopStateScoringAlpha(10d);
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertEquals(context.getTopStateScoringKeys(), Collections.singletonList("item3"));
+    Assert.assertEquals(context.getTopStateScoringAlpha(), 10d, 0d);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 16f / 20, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0f, 0.0001f);
+
+    // Without them, the top state estimate follows the preferred scoring keys...
+    clusterConfig.setTopStateScoringKeys(null);
+    clusterConfig.setPreferredScoringKeys(Collections.singletonList("item3"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getTopStateScoringKeys());
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0f, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0f, 0.0001f);
+
+    // ...and with them, they take precedence for the top state estimate.
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("item1"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0f, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
+  }
 }

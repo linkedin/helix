@@ -73,6 +73,11 @@ public class ClusterContext {
   // Cluster total capacity. Used to compute score when sorting replicas.
   private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
+  // The capacity keys on which the top state usage is scored, when they are configured separately
+  // from the preferred scoring keys; null otherwise.
+  private final List<String> _topStateScoringKeys;
+  // The steepness of the top state usage score, or -1 when not configured.
+  private final double _topStateScoringAlpha;
   private final String _clusterName;
   /**
    * Construct the cluster context based on the current instance status.
@@ -94,6 +99,10 @@ public class ClusterContext {
     Map<String, Long> totalTopStateUsage = new HashMap<>();
     Map<String, Long> totalCapacity = new HashMap<>();
     _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
+    _topStateScoringKeys = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::getTopStateScoringKeys).filter(keys -> !keys.isEmpty()).orElse(null);
+    _topStateScoringAlpha = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::getTopStateScoringAlpha).orElse(-1d);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
@@ -128,14 +137,16 @@ public class ClusterContext {
       _clusterCapacityMap = Collections.emptyMap();
     } else {
       _estimatedMaxUtilization = estimateMaxUtilization(totalCapacity, totalUsage, _preferredScoringKeys);
-      _estimatedTopStateMaxUtilization = estimateMaxUtilization(totalCapacity, totalTopStateUsage, _preferredScoringKeys);
+      _estimatedTopStateMaxUtilization = estimateMaxUtilization(totalCapacity, totalTopStateUsage,
+          _topStateScoringKeys != null ? _topStateScoringKeys : _preferredScoringKeys);
       _estimateUtilizationMap = estimateUtilization(totalCapacity, totalUsage);
       _clusterCapacityMap = Collections.unmodifiableMap(totalCapacity);
     }
-    LOG.info(
-        "clusterName: {}, preferredScoringKeys: {}, estimatedMaxUtilization: {}, estimatedTopStateMaxUtilization: {}",
-        _clusterName, _preferredScoringKeys, _estimatedMaxUtilization,
-        _estimatedTopStateMaxUtilization);
+    LOG.info("clusterName: {}, preferredScoringKeys: {}, topStateScoringKeys: {}, "
+            + "topStateScoringAlpha: {}, estimatedMaxUtilization: {}, "
+            + "estimatedTopStateMaxUtilization: {}",
+        _clusterName, _preferredScoringKeys, _topStateScoringKeys, _topStateScoringAlpha,
+        _estimatedMaxUtilization, _estimatedTopStateMaxUtilization);
     _estimatedMaxPartitionCount = estimateAvgReplicaCount(totalReplicas, instanceCount);
     _estimatedMaxTopStateCount = estimateAvgReplicaCount(totalTopStateReplicas, instanceCount);
     _baselineAssignment = baselineAssignment;
@@ -150,6 +161,26 @@ public class ClusterContext {
    */
   public List<String> getPreferredScoringKeys() {
     return _preferredScoringKeys;
+  }
+
+  /**
+   * Get the capacity keys on which the top state usage evenness is scored, if they are configured
+   * separately from the preferred scoring keys.
+   *
+   * @return the configured top state scoring keys, or null if not set; the top state usage is then
+   *         scored on {@link #getPreferredScoringKeys()}
+   */
+  public List<String> getTopStateScoringKeys() {
+    return _topStateScoringKeys;
+  }
+
+  /**
+   * Get the steepness (sigmoid alpha) of the top state usage evenness score, if configured.
+   *
+   * @return the configured steepness, or -1 if not set (the default steepness applies)
+   */
+  public double getTopStateScoringAlpha() {
+    return _topStateScoringAlpha;
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {

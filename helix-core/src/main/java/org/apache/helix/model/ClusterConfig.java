@@ -184,6 +184,17 @@ public class ClusterConfig extends HelixProperty {
     // for message ordering and extracted throttle logic. When disabled (default), the original
     // IntermediateStateCalcStage (V1) is used for backward compatibility.
     INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
+
+    // Optional capacity keys on which the WAGED rebalancer scores the evenness of the top state
+    // usage. When set, they replace PREFERRED_SCORING_KEYS for that score only; the other usage
+    // scores keep PREFERRED_SCORING_KEYS. When not set, the top state usage is scored like the
+    // other usage scores.
+    TOP_STATE_SCORING_KEYS,
+
+    // Optional steepness (sigmoid alpha) of the WAGED top state usage evenness score. The default
+    // (44) spends almost all of the score between 0.93x and 1.07x of the estimated usage, so the
+    // instances further above it score about the same; a smaller value keeps them ranked.
+    TOP_STATE_SCORING_ALPHA,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -1349,6 +1360,63 @@ public class ClusterConfig extends HelixProperty {
   public void setPreferredScoringKeys(List<String> preferredScoringKeys) {
     _record.setListField(ClusterConfigProperty.PREFERRED_SCORING_KEYS.name(),
         preferredScoringKeys);
+  }
+
+  /**
+   * Get the capacity keys on which the WAGED rebalancer scores the evenness of the top state usage,
+   * if set.
+   *
+   * @return the top state scoring keys, or null if not set; the top state usage is then scored on
+   *         the preferred scoring keys like the other usage scores
+   */
+  public List<String> getTopStateScoringKeys() {
+    return _record.getListField(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name());
+  }
+
+  /**
+   * Set the capacity keys on which the WAGED rebalancer scores the evenness of the top state usage.
+   * They replace the preferred scoring keys for that score only; the other usage scores keep the
+   * preferred scoring keys.
+   *
+   * @param topStateScoringKeys the capacity keys, or null to remove the setting
+   */
+  public void setTopStateScoringKeys(List<String> topStateScoringKeys) {
+    if (topStateScoringKeys == null) {
+      _record.getListFields().remove(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name());
+    } else {
+      _record.setListField(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name(),
+          topStateScoringKeys);
+    }
+  }
+
+  /**
+   * Get the steepness (sigmoid alpha) of the WAGED top state usage evenness score, if set.
+   *
+   * @return the steepness, or -1 if it is not set or is not a positive number
+   */
+  public double getTopStateScoringAlpha() {
+    double alpha =
+        _record.getDoubleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), -1);
+    return alpha > 0 && !Double.isInfinite(alpha) ? alpha : -1;
+  }
+
+  /**
+   * Set the steepness (sigmoid alpha) of the WAGED top state usage evenness score. With the default
+   * steepness the instances well above the estimated top state usage all score about the same; a
+   * smaller value keeps them ranked, so that a heavily loaded instance is still preferred less.
+   *
+   * @param alpha a positive steepness, or null to remove the setting and use the default
+   */
+  public void setTopStateScoringAlpha(Double alpha) {
+    if (alpha == null) {
+      _record.getSimpleFields().remove(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name());
+      return;
+    }
+    if (!(alpha > 0) || alpha.isInfinite()) {
+      throw new IllegalArgumentException(
+          "The top state scoring alpha must be a positive number, got " + alpha);
+    }
+    _record.setDoubleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), alpha);
   }
 
   /**
