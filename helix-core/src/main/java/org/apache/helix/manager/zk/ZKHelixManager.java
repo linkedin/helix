@@ -1553,6 +1553,18 @@ public class ZKHelixManager implements HelixManager, IZkStateListener {
     }
   }
 
+  @Override
+  public void handleStateChanged(KeeperState prevState, KeeperState curState) {
+    handleStateChanged(curState);
+    // Same-session reconnect. ZK replays the watches, but the pipeline events dropped while
+    // disconnected are lost, so rerun the pipeline once.
+    GenericHelixController controller = _controller;
+    if (controller != null && prevState == KeeperState.Disconnected
+        && curState == KeeperState.SyncConnected && isLeader()) {
+      controller.onReconnected(this);
+    }
+  }
+
   /**
    * Called after zookeeper session has expired and a new session has been established. This method
    * may cause session race condition when creating ephemeral nodes. Internally, this method calls
