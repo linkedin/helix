@@ -198,6 +198,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   protected final ConcurrentHashMap<ClusterEventType, TopologyChangeEventMonitor>
       _topologyChangeEventMonitorMap = new ConcurrentHashMap<>();
 
+  // capacity key -> CapacityKeyUsageMonitor (one entry per WAGED capacity key of the cluster)
+  private final ConcurrentHashMap<String, CapacityKeyUsageMonitor> _capacityKeyUsageMonitorMap =
+      new ConcurrentHashMap<>();
+  // Reported for a capacity key that has no data for one of the two (partition / top-state) views.
+  private static final WeightedUsageStats EMPTY_USAGE_STATS = new WeightedUsageStats(0, 0, 0, 0);
+
   private CustomizedViewMonitor _customizedViewMonitor;
 
   /**
@@ -771,6 +777,63 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Updates the per-capacity-key WAGED weighted capacity-usage distribution gauges: one
+   * {@link CapacityKeyUsageMonitor} MBean per capacity key, with the same gauges as
+   * {@link #updateWeightedCapacityUsageStats} computed on that key alone. A monitor is registered
+   * for each new key and unregistered once its key is no longer reported, e.g. after the key is
+   * removed from the cluster's capacity keys.
+   *
+   * @param partitionStatsByKey distribution of per-instance general (all-replica) weighted
+   *                            utilization, per capacity key
+   * @param topStateStatsByKey  distribution of per-instance top-state-only weighted utilization,
+   *                            per capacity key
+   */
+  public void updateCapacityKeyUsageStats(Map<String, WeightedUsageStats> partitionStatsByKey,
+      Map<String, WeightedUsageStats> topStateStatsByKey) {
+    Map<String, WeightedUsageStats> partitionStats =
+        partitionStatsByKey == null ? Collections.emptyMap() : partitionStatsByKey;
+    Map<String, WeightedUsageStats> topStateStats =
+        topStateStatsByKey == null ? Collections.emptyMap() : topStateStatsByKey;
+    Set<String> capacityKeys = new HashSet<>(partitionStats.keySet());
+    capacityKeys.addAll(topStateStats.keySet());
+    synchronized (_capacityKeyUsageMonitorMap) {
+      Iterator<Map.Entry<String, CapacityKeyUsageMonitor>> iterator =
+          _capacityKeyUsageMonitorMap.entrySet().iterator();
+      while (iterator.hasNext()) {
+        Map.Entry<String, CapacityKeyUsageMonitor> entry = iterator.next();
+        if (!capacityKeys.contains(entry.getKey())) {
+          entry.getValue().unregister();
+          iterator.remove();
+        }
+      }
+      for (String capacityKey : capacityKeys) {
+        CapacityKeyUsageMonitor monitor = _capacityKeyUsageMonitorMap.get(capacityKey);
+        if (monitor == null) {
+          try {
+            monitor = new CapacityKeyUsageMonitor(this, capacityKey).register();
+          } catch (JMException e) {
+            LOG.error("Failed to register CapacityKeyUsageMonitor for cluster {} capacityKey {}",
+                _clusterName, capacityKey, e);
+            continue;
+          }
+          _capacityKeyUsageMonitorMap.put(capacityKey, monitor);
+        }
+        monitor.update(partitionStats.getOrDefault(capacityKey, EMPTY_USAGE_STATS),
+            topStateStats.getOrDefault(capacityKey, EMPTY_USAGE_STATS));
+      }
+    }
+  }
+
+  private void unregisterAllCapacityKeyUsageMonitors() {
+    synchronized (_capacityKeyUsageMonitorMap) {
+      for (CapacityKeyUsageMonitor monitor : _capacityKeyUsageMonitorMap.values()) {
+        monitor.unregister();
+      }
+      _capacityKeyUsageMonitorMap.clear();
+    }
+  }
+
+  /**
    * Update gauges for resource at instance level
    * @param bestPossibleStates
    * @param resourceMap
@@ -1100,6 +1163,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       unregister(getObjectName(clusterBeanName()));
       unregisterAllEventMonitors();
       unregisterAllTopologyChangeEventMonitors();
+      unregisterAllCapacityKeyUsageMonitors();
       unregisterAllWorkflowsMonitor();
       unregisterAllJobs();
 

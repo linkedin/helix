@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
@@ -383,6 +384,14 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
         // usage is otherwise unmeasured.
         clusterStatusMonitor.updateWeightedCapacityUsageStats(
             computeUsageStats(generalUtilizations), computeUsageStats(topStateUtilizations));
+
+        // The same distribution per capacity key: each instance's utilization of that key alone
+        // instead of its busiest key. The busiest key can differ between instances, so the gauges
+        // above can hide an uneven spread of the load (e.g. the top-state load) on another key.
+        Collection<AssignableNode> nodes = clusterModel.getAssignableNodes().values();
+        clusterStatusMonitor.updateCapacityKeyUsageStats(
+            computeUsageStatsByCapacityKey(nodes, false),
+            computeUsageStatsByCapacityKey(nodes, true));
       } catch (Exception ex) {
         LOG.error("Failed to report instance capacity metrics. Exception message: {}",
             ex.getMessage());
@@ -445,6 +454,38 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
     double mean = stats.getAverage();
     double maxMeanRatio = (mean > 0.0d) ? (max / mean) : 0.0d;
     return new ClusterStatusMonitor.WeightedUsageStats(max, mean, min, maxMeanRatio);
+  }
+
+  /**
+   * Summarizes, for each capacity key, the distribution of the per-instance weighted utilization of
+   * that key alone, in the same way as {@link #computeUsageStats}. An instance's utilization of a
+   * key is its assigned usage of the key divided by its capacity for the key.
+   *
+   * @param nodes    the instances of a WAGED cluster model built from the current assignment
+   * @param topState {@code true} to count only the top-state replicas, {@code false} to count all
+   *                 replicas
+   * @return capacity key -> the {max, mean, min, maxMeanRatio} summary of that key, sorted by key;
+   *         empty when there are no instances or no capacity keys
+   */
+  static Map<String, ClusterStatusMonitor.WeightedUsageStats> computeUsageStatsByCapacityKey(
+      Collection<AssignableNode> nodes, boolean topState) {
+    Map<String, List<Double>> utilizationsByKey = new TreeMap<>();
+    if (nodes != null) {
+      for (AssignableNode node : nodes) {
+        for (String capacityKey : node.getMaxCapacity().keySet()) {
+          // There is no new usage adding to this node, so an empty map is passed in.
+          List<String> scoringKeys = Collections.singletonList(capacityKey);
+          double utilization = topState
+              ? node.getTopStateProjectedHighestUtilization(Collections.emptyMap(), scoringKeys)
+              : node.getGeneralProjectedHighestUtilization(Collections.emptyMap(), scoringKeys);
+          utilizationsByKey.computeIfAbsent(capacityKey, key -> new ArrayList<>()).add(utilization);
+        }
+      }
+    }
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> statsByKey = new TreeMap<>();
+    utilizationsByKey.forEach((key, utilizations) -> statsByKey.put(key,
+        computeUsageStats(utilizations)));
+    return statsByKey;
   }
 
   private void reportResourcePartitionCapacityMetrics(ExecutorService executorService,
