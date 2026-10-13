@@ -73,7 +73,8 @@ public class CustomizedStateConfig extends HelixProperty {
 
   /**
    * Get the AGGREGATION_ENABLED_TYPES field.
-   * @return AGGREGATION_ENABLED_TYPES field.
+   * An unset field disables customized-state aggregation in the controller.
+   * @return configured type names, or null when the field is unset
    */
   public List<String> getAggregationEnabledTypes() {
     return _record
