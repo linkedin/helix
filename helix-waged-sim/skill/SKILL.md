@@ -195,11 +195,17 @@ search:
   tolerateZoneLoss: none       # largest | every: zone down past the window
   nonServing: keep             # remove (gone for good), revive (back from a short maintenance), window (as WAGED sees them)
   requireAtLeast: 4            # optional; FAIL below it
-variants:                      # per variant: searchStrategy, tolerateZoneOutage, outageFeasibleIf, tolerateZoneLoss, nonServing, seed
+variants:                      # per variant: searchStrategy, tolerateZoneOutage, outageFeasibleIf, tolerateZoneLoss, nonServing, seed, scaleCapacity
   mz-balanced: {}
   mz-tightest: {searchStrategy: mz-tightest}
   random-1: {searchStrategy: random, seed: 1}
+  resized: {scaleCapacity: {key: CU, factor: 1.2, min: 15000}}   # capacity recomputed for the instances left
 ```
+
+`scaleCapacity` is for clusters whose operator recomputes instance capacity as instances go: before
+each probe removes k instances, the default capacity of `key` becomes max(`min`, floor(`factor` x
+total requirement / instances left)). Without it, a search keeps today's capacity and answers "how
+many can go before anyone resizes?".
 
 Strategies: `mz-balanced` (zones kept even), `mz-tightest` (worst case for zones), `mz-flatten` (largest
 zones first: best case for surviving a zone loss when instances can be chosen), `mz-single`,

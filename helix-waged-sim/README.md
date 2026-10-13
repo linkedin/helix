@@ -103,11 +103,13 @@ search:
   nonServing: keep              # remove: plan without disabled and offline instances; revive: bring them back up;
                                 # window: revive those within the delay window, remove the rest
   requireAtLeast: 4             # optional: FAIL when fewer can be removed
-variants:                       # per variant: searchStrategy, tolerateZoneOutage, tolerateZoneLoss, nonServing, seed
+variants:                       # per variant: searchStrategy, tolerateZoneOutage, tolerateZoneLoss, nonServing, seed,
+                                # scaleCapacity
   mz-balanced: {}
   survive-zone-outage: {tolerateZoneOutage: largest}
   survive-zone-loss: {tolerateZoneLoss: largest}
   worst-case: {searchStrategy: mz-tightest}
+  resized: {scaleCapacity: {key: CU, factor: 1.2, min: 15000}}
 ```
 
 - **Probe.** Each probe starts from the cluster as it is and takes out the first k serving instances
@@ -189,6 +191,14 @@ variants:                       # per variant: searchStrategy, tolerateZoneOutag
     (for example in an automated maintenance).
   - `nonServing: window` follows WAGED: it revives the ones WAGED still assigns replicas to (down within
     the delay window) and removes the ones it has moved replicas off (down longer).
+
+- **Capacity resized with the scale-down.** Some operators recompute instance capacity when instances
+  go, so that the same total requirement spreads over fewer instances. `scaleCapacity: {key, factor,
+  min}` does that per probe: before taking out k instances, the cluster's default capacity of `key`
+  becomes max(`min`, floor(`factor` x total requirement of `key` / instances left)). The instances left
+  are the serving ones plus those brought back by `nonServing`, minus k. Instance configs that set the
+  key keep their own value. Each probe records the value as `capacity.resized.<key>`, and the capacity
+  bound ignores the key.
 
 The report's "Scale-down search" section has the answer per variant, why the next removal fails (the
 WAGED failure and the hard constraints that blocked it), every probe, and instances and utilization per

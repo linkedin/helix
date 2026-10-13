@@ -621,11 +621,46 @@ public class TestScaleDownSearch {
   }
 
   @Test
+  public void testCapacityResizedWithTheScaleDown() throws Exception {
+    // 12 instances of 1000 CU in 3 zones hold 8400 CU of replicas, 2800 CU per zone. With the capacity
+    // as is, one instance per zone can go. Resized to 1.2 x 8400 CU / instances left, each zone keeps
+    // enough until it has one instance left (3360 CU): 9 can go, and a 10th leaves 2 zones for 3 replicas.
+    ClusterState state = SpecSource.build(spec("TEST_SCALE_CAPACITY"));
+    Scenario scenario = scenario(String.join("\n",
+        "name: scale-capacity",
+        "search:",
+        "  removeNodes: {strategy: mz-balanced, as: delete}",
+        "variants:",
+        "  plain: {}",
+        "  resized: {scaleCapacity: {key: CU, factor: 1.2}}",
+        "  floor: {scaleCapacity: {factor: 0.1, min: 1000}}"));
+    Map<String, Runner.VariantResult> results = run(state, scenario, Files.createTempDirectory("waged-sim-resize"));
+    Assert.assertEquals(results.get("plain").search.get("maxRemovable"), 3, results.get("plain").search.toString());
+    // A floor at today's capacity changes nothing.
+    Assert.assertEquals(results.get("floor").search.get("maxRemovable"), 3, results.get("floor").search.toString());
+    Runner.VariantResult resized = results.get("resized");
+    Assert.assertEquals(resized.search.get("maxRemovable"), 9, resized.search.toString());
+    Assert.assertEquals(number(resized.search.get("scaleCapacity.required")), 8400L);
+    Assert.assertEquals(number(resized.search.get("scaleCapacity.instances")), 12L);
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> probes = (List<Map<String, Object>>) resized.search.get("probes");
+    Map<Integer, Long> resizedAt = new LinkedHashMap<>();
+    probes.forEach(p -> resizedAt.put((Integer) p.get("k"), number(p.get("capacity.resized.CU"))));
+    Assert.assertEquals(resizedAt.get(0), Long.valueOf(840), resizedAt.toString());
+    Assert.assertEquals(resizedAt.get(9), Long.valueOf(3360), resizedAt.toString());
+    // The cluster itself keeps its capacity: each probe resizes a copy.
+    Assert.assertEquals(state.getClusterConfig().getDefaultInstanceCapacityMap().get("CU"), Integer.valueOf(1000));
+  }
+
+  @Test
   public void testScenarioValidation() {
     expectFailure("name: x\nmode: local\nsearch: {}\nvariants: {a: {}}", "dry-run mode only");
     expectFailure("name: x\nsearch: {}\nevents: [{at: 1, kill: node_0}]\nvariants: {a: {}}", "does not take events");
     expectFailure("name: x\nsearch: {removeNodes: {method: random}}\nvariants: {a: {}}", "binary or linear");
     expectFailure("name: x\nsearch: {removeNodes: {strategy: biggest}}\nvariants: {a: {}}", "Unknown removal strategy");
+    expectFailure("name: x\nsearch: {}\nvariants: {a: {scaleCapacity: {key: CU}}}", "needs a factor above 0");
+    expectFailure("name: x\nsearch: {}\nvariants: {a: {scaleCapacity: {factor: 1.2, floor: 1}}}",
+        "Unknown scaleCapacity field 'floor'");
     Scenario scenario = scenario("name: x\nsearch: {feasibleIf: \"rebalanceFailures == 0\"}\nvariants: {a: {}}");
     Assert.assertEquals(scenario.search.describe().get("feasibleIf"), "rebalanceFailures == 0");
     Assert.assertEquals(scenario.search.strategy, RemovalOrder.Strategy.MZ_BALANCED);

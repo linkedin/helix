@@ -74,6 +74,8 @@ public class Scenario {
     public String nonServing;
     /** Seed for random choices, such as a random removal order; overrides the scenario's. */
     public Long seed;
+    /** For a scale-down search: resize the default instance capacity to the instances left. */
+    public CapacityScaling scaleCapacity;
     public Map<String, Object> source = new LinkedHashMap<>();
 
     public EngineSettings apply(EngineSettings base) {
@@ -89,6 +91,28 @@ public class Scenario {
         settings.firstRound = firstRound;
       }
       return settings;
+    }
+  }
+
+  /**
+   * Resizes one capacity key with every scale-down probe, the way an operator recomputes it when
+   * instances go: before removing k instances, the default instance capacity of the key becomes
+   * max(min, floor(factor x total required / instances left)). Instance configs that set the key
+   * themselves keep their value.
+   */
+  public static class CapacityScaling {
+    public String key = "CU";
+    public double factor;
+    public long min;
+
+    /** @return the capacity per instance for the given total requirement and instances left */
+    public long capacity(long required, int instancesLeft) {
+      return Math.max(min, (long) Math.floor(factor * required / Math.max(1, instancesLeft)));
+    }
+
+    @Override
+    public String toString() {
+      return key + " = max(" + min + ", " + factor + " x required / instances left)";
     }
   }
 

@@ -245,11 +245,38 @@ public final class ScenarioLoader {
         case "seed":
           variant.seed = ((Number) value).longValue();
           break;
+        case "scaleCapacity":
+          variant.scaleCapacity = capacityScaling(name, (Map<String, Object>) value);
+          break;
         default:
           throw new IllegalArgumentException("Unknown field '" + entry.getKey() + "' in variant " + name);
       }
     }
     return variant;
+  }
+
+  private static Scenario.CapacityScaling capacityScaling(String variant, Map<String, Object> map) {
+    Scenario.CapacityScaling scaling = new Scenario.CapacityScaling();
+    for (Map.Entry<String, Object> entry : map.entrySet()) {
+      switch (entry.getKey()) {
+        case "key":
+          scaling.key = entry.getValue().toString();
+          break;
+        case "factor":
+          scaling.factor = Double.parseDouble(entry.getValue().toString());
+          break;
+        case "min":
+          scaling.min = Long.parseLong(entry.getValue().toString());
+          break;
+        default:
+          throw new IllegalArgumentException("Unknown scaleCapacity field '" + entry.getKey() + "' in variant "
+              + variant + " (key, factor, min)");
+      }
+    }
+    if (scaling.factor <= 0) {
+      throw new IllegalArgumentException("scaleCapacity in variant " + variant + " needs a factor above 0");
+    }
+    return scaling;
   }
 
   /** @return keep, remove, revive or window */

@@ -75,6 +75,11 @@ class ScaleDownSearch {
   private Condition _outageFeasibleIf;
   /** Whether WAGED places by fault zone; without topology awareness every instance is its own zone. */
   private boolean _faultZones = true;
+  /** Resizes a capacity key to the instances left with every probe; null to keep the capacity as is. */
+  private Scenario.CapacityScaling _scaling;
+  /** For the resize: the total requirement of the key, and the instances holding capacity before removal. */
+  private long _scaledRequired;
+  private int _scaledInstances;
 
   /** One evaluated removal count. */
   static final class Probe {
@@ -188,6 +193,13 @@ class ScaleDownSearch {
       _dropFirst = new ArrayList<>();
       nonServing.forEach(instance -> (expectedBack.contains(instance) ? _reviveFirst : _dropFirst).add(instance));
     }
+    _scaling = variant.scaleCapacity;
+    if (_scaling != null) {
+      _scaledRequired = number(startStats.get("required.all." + _scaling.key));
+      _scaledInstances = candidates.size() + _reviveFirst.size();
+      _console.println("[" + variant.name + "] every probe resizes " + _scaling + ": " + _scaledRequired
+          + " required, " + _scaledInstances + " instances before removal");
+    }
     String zoneLossNote = null;
     boolean zoneChecks = !"none".equals(_zoneLoss) || !"none".equals(_zoneOutage);
     if (zoneChecks && nodes.values().stream().noneMatch(n -> n.zone != null)) {
@@ -218,7 +230,12 @@ class ScaleDownSearch {
     // Start and end both describe WAGED's assignment: with nothing removed, and with the most removed.
     result.start = zero.stats;
     _output.nodes(variant.name, 0, zero.nodes.values(), collector.keys());
-    int bound = capacityBound(order, nodes, startStats, collector.keys(), new TreeSet<>(_dropFirst));
+    List<String> boundKeys = new ArrayList<>(collector.keys());
+    if (_scaling != null) {
+      // The resized key grows with every removal, so only the other keys bound the search.
+      boundKeys.remove(_scaling.key);
+    }
+    int bound = capacityBound(order, nodes, startStats, boundKeys, new TreeSet<>(_dropFirst));
     if (zero.feasible) {
       best = zero;
       if ("linear".equals(_spec.method)) {
@@ -295,6 +312,11 @@ class ScaleDownSearch {
         : "remove".equals(nonServingMode) ? "removed" : "revive".equals(nonServingMode) ? "revived" : "kept");
     summary.put("nonServingRevived", new ArrayList<>(_reviveFirst));
     summary.put("nonServingRemoved", new ArrayList<>(_dropFirst));
+    if (_scaling != null) {
+      summary.put("scaleCapacity", _scaling.toString());
+      summary.put("scaleCapacity.required", _scaledRequired);
+      summary.put("scaleCapacity.instances", _scaledInstances);
+    }
     if (strategy == RemovalOrder.Strategy.RANDOM) {
       summary.put("seed", seed);
     }
@@ -326,6 +348,9 @@ class ScaleDownSearch {
           "zoneConflicts", "moves.replicas", "evacuation.rounds", "evacuation.batches", "evacuation.batchSize",
           "evacuation.waitedForDelayWindow", "evacuation.waitingOnDownInstances", "evacuationStuck", "rounds"}) {
         row.put(stat, probe.stats.get(stat));
+      }
+      if (_scaling != null) {
+        row.put("capacity.resized." + _scaling.key, probe.stats.get("capacity.resized." + _scaling.key));
       }
       probeRows.add(row);
     }
@@ -397,14 +422,33 @@ class ScaleDownSearch {
     return System.currentTimeMillis() - start > _scenario.exit.timeoutMillis;
   }
 
+  /** @return a copy of the state whose default instance capacity has the key set to the capacity */
+  static ClusterState withDefaultCapacity(ClusterState base, String key, long capacity) {
+    ClusterState copy = base.copy();
+    ClusterConfig config = copy.getClusterConfig();
+    Map<String, Integer> defaults = new LinkedHashMap<>(config.getDefaultInstanceCapacityMap());
+    defaults.put(key, (int) Math.min(Integer.MAX_VALUE, capacity));
+    config.setDefaultInstanceCapacityMap(defaults);
+    copy.setClusterConfig(config);
+    return copy;
+  }
+
   private Probe probe(ClusterState base, EngineSettings settings, List<String> order, int k, String variant,
       List<Probe> probes, Map<String, Map<String, Map<String, String>>> startLayout, Probe reference)
       throws Exception {
     List<String> removed = order.subList(0, k);
+    Long resized = null;
+    if (_scaling != null) {
+      resized = _scaling.capacity(_scaledRequired, _scaledInstances - k);
+      base = withDefaultCapacity(base, _scaling.key, resized);
+    }
     Probe probe = evaluate(base, settings, removed, startLayout, reference);
     probe.index = probes.size() + 1;
     probe.k = k;
     probe.stats.put("search.k", k);
+    if (resized != null) {
+      probe.stats.put("capacity.resized." + _scaling.key, resized);
+    }
     if (probe.feasible && !"none".equals(_zoneLoss)) {
       for (Map.Entry<String, List<String>> zone : zonesToLose(probe.nodes).entrySet()) {
         Probe check = evaluate(base, settings, removed, ZoneEvent.LOSS, zone.getValue(), startLayout,
