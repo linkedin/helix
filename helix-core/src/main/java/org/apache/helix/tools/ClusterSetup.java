@@ -76,6 +76,7 @@ import org.apache.helix.zookeeper.impl.client.FederatedZkClient;
 import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
 import org.apache.helix.zookeeper.introspect.CodehausJacksonIntrospector;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
+import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -225,7 +226,19 @@ public class ClusterSetup {
 
   public void addCluster(String clusterName, boolean overwritePrevious, CloudConfig cloudConfig)
       throws HelixException {
-    if (!_admin.addCluster(clusterName, overwritePrevious)) {
+    addCluster(clusterName, overwritePrevious, cloudConfig, null);
+  }
+
+  /**
+   * Adds a cluster whose root and metadata nodes are created with the given ACL.
+   * See {@link HelixAdmin#addCluster(String, boolean, List)} for the ACL semantics and caveats.
+   * Applying a {@code cloudConfig} writes to the cluster config node, so the ACL must grant the
+   * calling client {@code WRITE} in that case.
+   * @param acl ACL for the cluster nodes; {@code null} or empty uses the client default ACL
+   */
+  public void addCluster(String clusterName, boolean overwritePrevious, CloudConfig cloudConfig,
+      List<ACL> acl) throws HelixException {
+    if (!_admin.addCluster(clusterName, overwritePrevious, acl)) {
       String error = "Cluster creation failed for " + clusterName;
       _logger.error(error);
       throw new HelixException(error);

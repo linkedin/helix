@@ -24,6 +24,8 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -36,9 +38,11 @@ import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.helix.HelixException;
+import org.apache.helix.rest.acl.ClusterAclParser;
 import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.server.auditlog.AuditLogger;
 import org.apache.helix.rest.server.auditlog.auditloggers.FileBasedAuditLogger;
+import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
@@ -136,7 +140,7 @@ public class HelixRestMain {
     }
   }
 
-  private static void constructNamespaceFromConfigFile(String filePath, List<HelixRestNamespace> namespaces)
+  static void constructNamespaceFromConfigFile(String filePath, List<HelixRestNamespace> namespaces)
       throws IOException {
     Yaml yaml = new Yaml();
     @SuppressWarnings("unchecked")
@@ -153,8 +157,29 @@ public class HelixRestMain {
           config.get(HelixRestNamespace.HelixRestNamespaceProperty.METADATA_STORE_ADDRESS.name()),
           false, Boolean.parseBoolean(
           config.get(HelixRestNamespace.HelixRestNamespaceProperty.MULTI_ZK_ENABLED.name())),
-          config.get(HelixRestNamespace.HelixRestNamespaceProperty.MSDS_ENDPOINT.name())));
+          config.get(HelixRestNamespace.HelixRestNamespaceProperty.MSDS_ENDPOINT.name()),
+          parseClusterAcl(((Map<?, ?>) config)
+              .get(HelixRestNamespace.HelixRestNamespaceProperty.CLUSTER_ACL.name()))));
     }
+  }
+
+  /**
+   * The manifest value is either a YAML list of {@code scheme:id:permissions} entries or a single
+   * entry. List items are used as is, so ids containing commas need no escaping.
+   */
+  private static List<ACL> parseClusterAcl(Object manifestValue) {
+    if (manifestValue == null) {
+      return Collections.emptyList();
+    }
+    List<String> entries = new ArrayList<>();
+    if (manifestValue instanceof Collection) {
+      for (Object entry : (Collection<?>) manifestValue) {
+        entries.add(String.valueOf(entry));
+      }
+    } else {
+      entries.add(String.valueOf(manifestValue));
+    }
+    return ClusterAclParser.parse(entries);
   }
 
   /**

@@ -73,7 +73,9 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.acl.AclRegister;
+import org.apache.helix.rest.acl.ClusterAclProvider;
 import org.apache.helix.rest.common.ContextPropertyKeys;
+import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.filters.HelixAdminAuth;
@@ -85,6 +87,7 @@ import org.apache.helix.rest.server.service.VirtualTopologyGroupService;
 import org.apache.helix.tools.ClusterSetup;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -195,6 +198,14 @@ public class ClusterAccessor extends AbstractHelixResource {
       }
     }
 
+    List<ACL> clusterAcl;
+    try {
+      clusterAcl = resolveClusterAcl(clusterId);
+    } catch (Exception ex) {
+      LOG.error("Failed to resolve ZooKeeper ACL for cluster {}. Exception: {}.", clusterId, ex);
+      return serverError(ex);
+    }
+
     try {
       getAclRegister().createACL(_servletRequest);
     } catch (Exception ex) {
@@ -203,7 +214,7 @@ public class ClusterAccessor extends AbstractHelixResource {
     }
 
     try {
-      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig);
+      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig, clusterAcl);
     } catch (Exception ex) {
       LOG.error("Failed to create cluster {}. Exception: {}.", clusterId, ex);
       return serverError(ex);
@@ -1303,6 +1314,28 @@ public class ClusterAccessor extends AbstractHelixResource {
 
   private AclRegister getAclRegister() {
     return (AclRegister) _application.getProperties().get(ContextPropertyKeys.ACL_REGISTER.name());
+  }
+
+  /**
+   * Resolves the ZooKeeper ACL for a new cluster: the {@link ClusterAclProvider} wins, then the
+   * namespace's configured cluster ACL. Returns null when neither is set, which keeps the client
+   * default ACL.
+   */
+  private List<ACL> resolveClusterAcl(String clusterId) {
+    ClusterAclProvider provider = (ClusterAclProvider) _application.getProperties()
+        .get(ContextPropertyKeys.CLUSTER_ACL_PROVIDER.name());
+    if (provider != null) {
+      List<ACL> providedAcl = provider.getClusterAcl(_servletRequest, clusterId);
+      if (providedAcl != null && !providedAcl.isEmpty()) {
+        return providedAcl;
+      }
+    }
+    HelixRestNamespace namespace = (HelixRestNamespace) _application.getProperties()
+        .get(ContextPropertyKeys.METADATA.name());
+    if (namespace != null && !namespace.getClusterAcl().isEmpty()) {
+      return namespace.getClusterAcl();
+    }
+    return null;
   }
 
   /**

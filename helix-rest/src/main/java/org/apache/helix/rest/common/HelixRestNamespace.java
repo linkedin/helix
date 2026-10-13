@@ -19,8 +19,13 @@ package org.apache.helix.rest.common;
  * under the License.
  */
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+
+import org.apache.zookeeper.data.ACL;
 
 
 public class HelixRestNamespace {
@@ -36,7 +41,9 @@ public class HelixRestNamespace {
     METADATA_STORE_ADDRESS,
     IS_DEFAULT,
     MULTI_ZK_ENABLED,
-    MSDS_ENDPOINT
+    MSDS_ENDPOINT,
+    // ZooKeeper ACL applied to clusters created in this namespace; see ClusterAclParser for format
+    CLUSTER_ACL
   }
 
   /**
@@ -77,6 +84,12 @@ public class HelixRestNamespace {
    */
   private String _msdsEndpoint;
 
+  /**
+   * ZooKeeper ACL applied to clusters created in this namespace through the REST server.
+   * Empty means the client default ACL.
+   */
+  private List<ACL> _clusterAcl;
+
   public HelixRestNamespace(String metadataStoreAddress) throws IllegalArgumentException {
     this(DEFAULT_NAMESPACE_NAME, HelixMetadataStoreType.ZOOKEEPER, metadataStoreAddress, true);
   }
@@ -89,12 +102,21 @@ public class HelixRestNamespace {
   public HelixRestNamespace(String name, HelixMetadataStoreType metadataStoreType,
       String metadataStoreAddress, boolean isDefault, boolean isMultiZkEnabled,
       String msdsEndpoint) {
+    this(name, metadataStoreType, metadataStoreAddress, isDefault, isMultiZkEnabled, msdsEndpoint,
+        null);
+  }
+
+  public HelixRestNamespace(String name, HelixMetadataStoreType metadataStoreType,
+      String metadataStoreAddress, boolean isDefault, boolean isMultiZkEnabled,
+      String msdsEndpoint, List<ACL> clusterAcl) {
     _name = name;
     _metadataStoreAddress = metadataStoreAddress;
     _metadataStoreType = metadataStoreType;
     _isDefault = isDefault;
     _isMultiZkEnabled = isMultiZkEnabled;
     _msdsEndpoint = msdsEndpoint;
+    _clusterAcl = clusterAcl == null ? Collections.<ACL>emptyList()
+        : Collections.unmodifiableList(new ArrayList<>(clusterAcl));
     validate();
   }
 
@@ -138,5 +160,13 @@ public class HelixRestNamespace {
 
   public String getMsdsEndpoint() {
     return _msdsEndpoint;
+  }
+
+  /**
+   * @return the unmodifiable ACL for clusters created in this namespace; empty if none is set.
+   *         Deliberately not part of {@link #getRestInfo()}.
+   */
+  public List<ACL> getClusterAcl() {
+    return _clusterAcl;
   }
 }
