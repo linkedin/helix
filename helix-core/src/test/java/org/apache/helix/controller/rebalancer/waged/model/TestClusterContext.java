@@ -255,6 +255,33 @@ public class TestClusterContext extends AbstractTestClusterModel {
             preferredScoringKeys, context.getEstimatedMaxUtilization());
   }
 
+  @Test
+  public void testInstanceTagIsolationFlag() throws IOException {
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    Set<AssignableReplica> replicas = generateReplicas(testCache);
+    Set<AssignableNode> nodes = generateNodes(testCache);
+
+    // No cluster config falls back to the default, which is off.
+    Assert.assertFalse(
+        new ClusterContext(replicas, nodes, new HashMap<>(), new HashMap<>())
+            .isInstanceTagIsolationEnabled());
+
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertFalse(
+        new ClusterContext(replicas, nodes, new HashMap<>(), new HashMap<>(), clusterConfig)
+            .isInstanceTagIsolationEnabled());
+
+    clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    Assert.assertTrue(
+        new ClusterContext(replicas, nodes, new HashMap<>(), new HashMap<>(), clusterConfig)
+            .isInstanceTagIsolationEnabled());
+
+    clusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    Assert.assertFalse(
+        new ClusterContext(replicas, nodes, new HashMap<>(), new HashMap<>(), clusterConfig)
+            .isInstanceTagIsolationEnabled());
+  }
+
   private void validateResult(Map<String, Integer> totalCapacity, Map<String, Integer> totalUsage,
                               List<String> preferredScoringKeys, float actualEstimatedMaxUtilization) {
     if (preferredScoringKeys == null || preferredScoringKeys.size() == 0 || !totalCapacity.keySet().contains(preferredScoringKeys.get(0))) {
