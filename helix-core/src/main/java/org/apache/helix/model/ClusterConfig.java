@@ -143,6 +143,7 @@ public class ClusterConfig extends HelixProperty {
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
+    // TOP_STATE_EVENNESS - an additional multiplier for the evenness of the top state usage only.
     REBALANCE_PREFERENCE,
     // Specify if the WAGED rebalancer should asynchronously perform the global rebalance, which is
     // in general slower than the partial rebalance.
@@ -191,6 +192,10 @@ public class ClusterConfig extends HelixProperty {
     EVENNESS,
     LESS_MOVEMENT,
     FORCE_BASELINE_CONVERGE,
+    // Optional. Multiplies the weight of the top state utilization evenness constraint on top of
+    // EVENNESS, so that the top state (e.g. leader) load can be balanced harder, or softer, than
+    // the other evenness goals. The default 1 keeps the configured weight.
+    TOP_STATE_EVENNESS,
   }
 
   private final static int DEFAULT_MAX_CONCURRENT_TASK_PER_INSTANCE = 40;
@@ -208,7 +213,8 @@ public class ClusterConfig extends HelixProperty {
       ImmutableMap.<GlobalRebalancePreferenceKey, Integer>builder()
           .put(GlobalRebalancePreferenceKey.EVENNESS, 1)
           .put(GlobalRebalancePreferenceKey.LESS_MOVEMENT, 1)
-          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0).build();
+          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0)
+          .put(GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS, 1).build();
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
@@ -1211,7 +1217,8 @@ public class ClusterConfig extends HelixProperty {
    *                   The weights will determine the rebalancer's behavior. Note that
    *                   GlobalRebalancePreferenceKey.EVENNESS and
    *                   GlobalRebalancePreferenceKey.LESS_MOVEMENT must be both specified or not
-   *                   specified, or an exception will be thrown.
+   *                   specified, or an exception will be thrown. The other keys are optional; an
+   *                   unspecified key uses its value in DEFAULT_GLOBAL_REBALANCE_PREFERENCE.
    *                   If null, the preference item will be removed from the config.
    */
   public void setGlobalRebalancePreference(Map<GlobalRebalancePreferenceKey, Integer> preference) {
