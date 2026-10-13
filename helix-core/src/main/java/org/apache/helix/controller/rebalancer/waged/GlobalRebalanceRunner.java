@@ -226,7 +226,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
 
-    Map<String, ResourceAssignment> newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm);
+    Map<String, ResourceAssignment> newBaseline =
+        WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, currentBaseline);
     boolean isBaselineChanged =
         _assignmentMetadataStore != null && _assignmentMetadataStore.isBaselineChanged(newBaseline);
     // Write the new baseline to metadata store
