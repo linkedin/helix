@@ -71,6 +71,12 @@ import org.apache.helix.task.TaskFactory;
 import org.apache.helix.task.TaskStateModelFactory;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
@@ -830,6 +836,74 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     };
   }
 
+  @DataProvider(name = "retiredDisabledTypeQuery")
+  public Object[][] retiredDisabledTypeQuery() {
+    return new Object[][] {
+        {"absent", new String[] {}, false},
+        {"legacy", new String[] {"USER_OPERATION"}, true},
+        {"invalid", new String[] {"invalid-value"}, true},
+        {"empty", new String[] {""}, true},
+        {"repeated", new String[] {"", "CLOUD_EVENT"}, true}
+    };
+  }
+
+  @Test(dataProvider = "retiredDisabledTypeQuery")
+  public void testRetiredDisabledTypeWarnsWithoutChangingLegacyCommands(String caseName,
+      String[] disabledTypes, boolean expectWarning) {
+    String cluster = TestHelper.getTestMethodName() + "_" + caseName;
+    String instance = "localhost_9999";
+    List<String> warnings = Collections.synchronizedList(new ArrayList<>());
+    Logger logger = (Logger) LogManager.getLogger(PerInstanceAccessor.class);
+    Level originalLevel = logger.getLevel();
+    AbstractAppender appender =
+        new AbstractAppender(cluster, null, null, false, Property.EMPTY_ARRAY) {
+          @Override
+          public void append(LogEvent event) {
+            String message = event.getMessage().getFormattedMessage();
+            if (event.getLevel() == Level.WARN && message.contains("instanceDisabledType")
+                && message.contains(cluster)) {
+              warnings.add(message);
+            }
+          }
+        };
+    _gSetupTool.addCluster(cluster, true);
+    appender.start();
+    logger.addAppender(appender);
+    logger.setLevel(Level.WARN);
+    try {
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      Entity<String> entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+      int requests = 0;
+      for (String command : new String[] {"disable", "enable"}) {
+        WebTarget request = target("clusters/" + cluster + "/instances/" + instance)
+            .queryParam("command", command).queryParam("instanceDisabledReason", "reason");
+        for (String disabledType : disabledTypes) {
+          request = request.queryParam("instanceDisabledType", disabledType);
+        }
+        try (Response response = request.request().post(entity)) {
+          Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+        }
+        requests++;
+
+        InstanceConfig config = _configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertEquals(config.getInstanceEnabled(), command.equals("enable"));
+        Assert.assertEquals(config.getInstanceDisabledReason(),
+            command.equals("disable") ? "reason" : "");
+        Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
+        Assert.assertEquals(warnings.size(), expectWarning ? requests : 0,
+            "Warn once per request only when the retired parameter is supplied");
+        if (expectWarning) {
+          Assert.assertTrue(warnings.get(requests - 1).contains(instance));
+        }
+      }
+    } finally {
+      logger.removeAppender(appender);
+      logger.setLevel(originalLevel);
+      appender.stop();
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
+
   @Test(dataProvider = "legacyDisableOperations")
   public void testLegacyDisablePreservesInstanceOperations(
       InstanceConstants.InstanceOperation initialOperation,
@@ -845,6 +919,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
           .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
       config.getRecord().setSimpleField(
           InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "stale");
+      config.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
       _configAccessor.setInstanceConfig(cluster, instance, config);
       config = _configAccessor.getInstanceConfig(cluster, instance);
       Assert.assertEquals(config.getInstanceOperation().getOperation(), initialOperation);
@@ -873,6 +948,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         Assert.assertEquals(config.getInstanceDisabledReason(),
             disabledOperation == InstanceConstants.InstanceOperation.DISABLE && reason != null
                 ? reason : "");
+        Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
       }
 
       if (initialOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
@@ -884,8 +960,13 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
             config.getRecord(), "Rejected modern transitions must leave the config unchanged");
       }
 
+      config.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+      _configAccessor.setInstanceConfig(cluster, instance, config);
+      int version = _gZkClient.getStat(configPath).getVersion();
       new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=enable")
           .format(cluster, instance).post(this, entity).close();
+      Assert.assertEquals(_gZkClient.getStat(configPath).getVersion(), version + 1,
+          "Enablement and stale-type cleanup must be written in one atomic update");
       config = _configAccessor.getInstanceConfig(cluster, instance);
       Assert.assertTrue(config.getRecord().getBooleanField(
           InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), false));
@@ -893,6 +974,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
           initialOperation == InstanceConstants.InstanceOperation.DISABLE
               ? InstanceConstants.InstanceOperation.ENABLE : initialOperation);
       Assert.assertEquals(config.getInstanceDisabledReason(), "");
+      Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
       Assert.assertEquals(config.getRecord()
           .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()),
           operations);

@@ -52,6 +52,7 @@ import org.slf4j.LoggerFactory;
  */
 public class InstanceConfig extends HelixProperty {
   private static final Logger logger = LoggerFactory.getLogger(InstanceConfig.class.getName());
+  private static final String RETIRED_DISABLED_TYPE = "HELIX_DISABLED_TYPE";
 
   /**
    * Configurable characteristics of an instance
@@ -477,11 +478,12 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Removes the HELIX_DISABLED_REASON entry from simple field.
+   * Removes the disabled reason and any persisted retired disabled type from simple fields.
    */
   @Deprecated
   public void resetInstanceDisabledTypeAndReason() {
     _record.getSimpleFields().remove(InstanceConfigProperty.HELIX_DISABLED_REASON.name());
+    _record.getSimpleFields().remove(RETIRED_DISABLED_TYPE);
   }
 
   /**
@@ -1214,6 +1216,8 @@ public class InstanceConfig extends HelixProperty {
     _record.getSimpleFields().keySet().removeAll(overwritableProperties);
     _record.getListFields().keySet().removeAll(overwritableProperties);
     _record.getMapFields().keySet().removeAll(overwritableProperties);
+    // Retired fields are removed from the target but must not enter the copy allowlist.
+    _record.getSimpleFields().remove(RETIRED_DISABLED_TYPE);
 
     // Get all overwritable fields from the overwritingInstanceConfig and set them in this record
     overwritingInstanceConfig.getRecord().getSimpleFields().entrySet().stream()

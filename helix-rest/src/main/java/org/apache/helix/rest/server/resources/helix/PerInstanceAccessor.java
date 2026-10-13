@@ -485,10 +485,15 @@ public class PerInstanceAccessor extends AbstractHelixResource {
       @QueryParam("instanceOperationSource") InstanceConstants.InstanceOperationSource instanceOperationSource,
       @QueryParam("reason") String reason,
       @Deprecated @QueryParam("instanceDisabledReason") String disabledReason,
+      @Deprecated @QueryParam("instanceDisabledType") String ignoredDisabledType,
       @QueryParam("force") boolean force,
       @QueryParam("exclusions") String exclusions,
       @DefaultValue("false") @QueryParam("dryRun") boolean dryRun,
       String content) {
+    if (ignoredDisabledType != null) {
+      LOG.warn("Ignoring retired query parameter instanceDisabledType for instance {} in cluster {}.",
+          instanceName, clusterId);
+    }
     Command cmd;
     try {
       cmd = Command.valueOf(command);
