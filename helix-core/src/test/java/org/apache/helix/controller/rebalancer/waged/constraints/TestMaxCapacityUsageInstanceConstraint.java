@@ -74,4 +74,18 @@ public class TestMaxCapacityUsageInstanceConstraint {
             _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext);
     Assert.assertTrue(normalizedScore > 0.99);
   }
+
+  @Test
+  public void testTopStateScoringSettingsDoNotApply() {
+    when(_testNode.getGeneralProjectedHighestUtilization(anyMap(), any())).thenReturn(1.1f);
+    when(_clusterContext.getEstimatedMaxUtilization()).thenReturn(1f);
+    double normalizedScore =
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext);
+
+    when(_clusterContext.getTopStateScoringKeys()).thenReturn(Collections.singletonList("CU"));
+    when(_clusterContext.getTopStateScoringAlpha()).thenReturn(10d);
+    Assert.assertEquals(
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext),
+        normalizedScore, 0d);
+  }
 }

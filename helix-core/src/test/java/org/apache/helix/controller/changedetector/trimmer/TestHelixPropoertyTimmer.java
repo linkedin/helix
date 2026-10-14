@@ -228,6 +228,33 @@ public class TestHelixPropoertyTimmer {
   }
 
   @Test
+  public void testTopStateScoringFieldChangesAreDetected() {
+    _clusterConfig.setTopStateScoringKeys(Collections.singletonList("CU"));
+    _clusterConfig.setTopStateScoringAlpha(10d);
+    _clusterConfig.setPreferredScoringKeys(Collections.singletonList("CU"));
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    // A change to how WAGED scores the top state usage is a cluster config change, which triggers
+    // a global rebalance.
+    _clusterConfig.setTopStateScoringKeys(Collections.singletonList("DISK"));
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 1);
+
+    _clusterConfig.setTopStateScoringAlpha(20d);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 1);
+
+    // The preferred scoring keys stay trimmable, as before.
+    _clusterConfig.setPreferredScoringKeys(Collections.singletonList("DISK"));
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 0);
+  }
+
+  @Test
   public void testIgnoreTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
     ResourceChangeDetector detector = new ResourceChangeDetector(true);

@@ -80,6 +80,19 @@ abstract class UsageSoftConstraint extends SoftConstraint {
    */
   @Override
   protected NormalizeFunction getNormalizeFunction() {
-    return (score) -> SIGMOID.value(-(score - 1) * DEFAULT_ALPHA) * (MAX_SCORE - MIN_SCORE);
+    return (score) -> normalize(score, DEFAULT_ALPHA);
+  }
+
+  /**
+   * The same sigmoid normalization with the given steepness instead of the default one. A smaller
+   * alpha spreads the score over a wider range of usage.
+   * @param alpha the steepness, a positive number
+   */
+  protected NormalizeFunction getSigmoidNormalizeFunction(double alpha) {
+    return (score) -> normalize(score, alpha);
+  }
+
+  private static double normalize(double score, double alpha) {
+    return SIGMOID.value(-(score - 1) * alpha) * (MAX_SCORE - MIN_SCORE);
   }
 }

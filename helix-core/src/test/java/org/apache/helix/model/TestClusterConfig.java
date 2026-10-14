@@ -539,4 +539,55 @@ public class TestClusterConfig {
     Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), -1);
     Assert.assertEquals(clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs(), -1L);
   }
+
+  @Test
+  public void testTopStateScoringKeys() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertNull(clusterConfig.getTopStateScoringKeys());
+
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("CU"));
+    Assert.assertEquals(clusterConfig.getTopStateScoringKeys(), Collections.singletonList("CU"));
+    // The top state scoring keys are separate from the preferred scoring keys.
+    Assert.assertNull(clusterConfig.getPreferredScoringKeys());
+
+    clusterConfig.setTopStateScoringKeys(null);
+    Assert.assertNull(clusterConfig.getTopStateScoringKeys());
+    Assert.assertFalse(clusterConfig.getRecord().getListFields()
+        .containsKey(ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name()));
+  }
+
+  @Test
+  public void testTopStateScoringAlpha() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
+
+    clusterConfig.setTopStateScoringAlpha(10d);
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), 10d, 0d);
+
+    clusterConfig.setTopStateScoringAlpha(null);
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
+    Assert.assertFalse(clusterConfig.getRecord().getSimpleFields()
+        .containsKey(ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name()));
+
+    // A value written to the record directly that is not a positive number reads as not set.
+    for (String invalid : new String[] {"0", "-3", "NaN", "Infinity", "abc"}) {
+      clusterConfig.getRecord().setSimpleField(
+          ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), invalid);
+      Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d, invalid);
+    }
+  }
+
+  @Test
+  public void testSetInvalidTopStateScoringAlpha() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    for (double invalid : new double[] {0d, -1d, Double.NaN, Double.POSITIVE_INFINITY}) {
+      try {
+        clusterConfig.setTopStateScoringAlpha(invalid);
+        Assert.fail("Expected the top state scoring alpha " + invalid + " to be rejected");
+      } catch (IllegalArgumentException expected) {
+        // expected
+      }
+    }
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
+  }
 }
