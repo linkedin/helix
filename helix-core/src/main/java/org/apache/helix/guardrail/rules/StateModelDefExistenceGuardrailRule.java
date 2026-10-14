@@ -34,14 +34,17 @@ import org.apache.helix.model.StateModelDefinition;
  * {@link StateModelDefinition} that does not exist in the cluster's {@code STATEMODELDEFS}.
  * <p>
  * The controller drives every partition's state transitions from the state model named by the
- * resource's {@code STATE_MODEL_DEF_REF}. If that definition is absent, the controller cannot compute
- * any transition for the resource: the ideal state is accepted into ZooKeeper but the resource can
- * never be brought online, and the failure surfaces only later &mdash; on the controller's next
- * pipeline run &mdash; rather than as an error on the write itself. The plain {@code addResource}
- * admin path already rejects a missing state model, but the WAGED add path
- * ({@code addResourceWithWeight}) and the raw ideal-state update path ({@code setResourceIdealState})
- * do not, so an unresolvable {@code STATE_MODEL_DEF_REF} can still reach ZooKeeper through those
- * endpoints. This rule closes that gap by applying the same existence check at pre-write time.
+ * resource's {@code STATE_MODEL_DEF_REF}, so if that definition is absent the controller cannot
+ * compute any transition and the resource can never be brought online. The plain {@code addResource}
+ * admin path already rejects a missing state model up front, but the two helix-rest write paths that
+ * bypass that check each fail worse and later. The ideal-state update path ({@code updateIdealState})
+ * persists the ideal state and returns success, so the failure surfaces only later &mdash; on the
+ * controller's next pipeline run &mdash; rather than as an error on the write. The WAGED add path
+ * ({@code addResourceWithWeight}) fails late, <em>after a partial write</em>: it persists the resource
+ * config and ideal state and only then calls {@code rebalance()}, which throws because the state model
+ * cannot be found, so the caller gets a generic failure while the half-created resource is left behind
+ * in ZooKeeper. This rule closes the gap by applying the same existence check at pre-write time, so
+ * both paths reject the request with a clear, actionable error before any write.
  * <p>
  * The rule is a <em>delta</em> guard, consistent with the other ideal-state rules: it fires only when
  * the write <em>introduces or changes</em> the reference to an unresolvable one. A resource that

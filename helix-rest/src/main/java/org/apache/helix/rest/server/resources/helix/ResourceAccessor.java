@@ -336,9 +336,11 @@ public class ResourceAccessor extends AbstractHelixResource {
         }
 
         // Guard rails: (1) state-model existence (always on) -- reject if the resource's
-        // STATE_MODEL_DEF_REF names a state model absent from STATEMODELDEFS (the controller could
-        // compute no transition, so the resource would be accepted but never come online; the plain
-        // addResource path validates this, but addResourceWithWeight does not); (2) instance
+        // STATE_MODEL_DEF_REF names a state model absent from STATEMODELDEFS (the controller drives
+        // every transition from that state model, so the resource could never come online; the plain
+        // addResource path rejects this up front, but addResourceWithWeight does not -- it persists
+        // the resource config and ideal state and only then rebalances, failing late after a partial
+        // write and leaving a half-created resource in ZooKeeper); (2) instance
         // capacity-key consistency (always on) -- reject if any assignable instance's capacity map
         // omits a cluster-required capacity key (WAGED could not build a model, so the resource would
         // be accepted but silently never place; the admin write path already validates the resource's
@@ -720,7 +722,7 @@ public class ResourceAccessor extends AbstractHelixResource {
         // Guard rails on the merged (post-write) ideal state. (1) StateModelDefExistence is a cheap,
         // always-on check: an edit that points STATE_MODEL_DEF_REF at a state model absent from
         // STATEMODELDEFS is unplaceable -- the controller can compute no transition -- so the resource
-        // would be accepted but never come online (setResourceIdealState does not validate this). (2)
+        // would be accepted but never come online (updateIdealState does not validate this). (2)
         // MinActiveReplicasConsistency is a cheap, always-on field check: an edit that leaves
         // MIN_ACTIVE_REPLICAS greater than REPLICAS is logically inconsistent -- a partition can never
         // have more active replicas than it has replicas -- so every partition is permanently below
