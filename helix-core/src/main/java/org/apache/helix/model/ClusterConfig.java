@@ -36,11 +36,15 @@ import org.apache.helix.api.config.StateTransitionThrottleConfig;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
 import org.apache.helix.api.config.ViewClusterSourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Cluster configurations
  */
 public class ClusterConfig extends HelixProperty {
+  private static final Logger logger = LoggerFactory.getLogger(ClusterConfig.class.getName());
+
   /**
    * Configurable characteristics of a cluster.
    * NOTE: Do NOT use this field name directly, use its corresponding getter/setter in the
@@ -143,6 +147,7 @@ public class ClusterConfig extends HelixProperty {
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
+    // TOP_STATE_EVENNESS - an additional multiplier for the evenness of the top state usage only.
     REBALANCE_PREFERENCE,
     // Specify if the WAGED rebalancer should asynchronously perform the global rebalance, which is
     // in general slower than the partial rebalance.
@@ -191,6 +196,14 @@ public class ClusterConfig extends HelixProperty {
     EVENNESS,
     LESS_MOVEMENT,
     FORCE_BASELINE_CONVERGE,
+    // Optional. An integer multiplier, from 0 to 1000, on the weight of the top state utilization
+    // evenness constraint, on top of EVENNESS, so that the top state (e.g. leader) load can be
+    // balanced harder than the other evenness goals. The default 1 keeps the configured weight,
+    // and 0 turns the constraint off. A higher value moves more top states. The first global
+    // rebalance after raising it can hand off many of them at once, and move some replicas, to
+    // undo the existing skew; later rebalances, e.g. when an instance leaves or comes back, also
+    // move more top states than with the default.
+    TOP_STATE_EVENNESS,
   }
 
   private final static int DEFAULT_MAX_CONCURRENT_TASK_PER_INSTANCE = 40;
@@ -208,7 +221,8 @@ public class ClusterConfig extends HelixProperty {
       ImmutableMap.<GlobalRebalancePreferenceKey, Integer>builder()
           .put(GlobalRebalancePreferenceKey.EVENNESS, 1)
           .put(GlobalRebalancePreferenceKey.LESS_MOVEMENT, 1)
-          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0).build();
+          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0)
+          .put(GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS, 1).build();
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
@@ -1211,7 +1225,8 @@ public class ClusterConfig extends HelixProperty {
    *                   The weights will determine the rebalancer's behavior. Note that
    *                   GlobalRebalancePreferenceKey.EVENNESS and
    *                   GlobalRebalancePreferenceKey.LESS_MOVEMENT must be both specified or not
-   *                   specified, or an exception will be thrown.
+   *                   specified, or an exception will be thrown. The other keys are optional; an
+   *                   unspecified key uses its value in DEFAULT_GLOBAL_REBALANCE_PREFERENCE.
    *                   If null, the preference item will be removed from the config.
    */
   public void setGlobalRebalancePreference(Map<GlobalRebalancePreferenceKey, Integer> preference) {
@@ -1237,6 +1252,11 @@ public class ClusterConfig extends HelixProperty {
 
   /**
    * Get the global rebalancer's assignment preference.
+   * The preference can be written without the checks of setGlobalRebalancePreference, e.g. by a
+   * REST update of the config, and the rebalancer reads it on every rebalance. So a value outside
+   * the valid range (0 to 1000) is clamped to it, and a value that is not an integer is ignored, so
+   * that its key falls back to the default; both are logged. As when one of them is missing, if
+   * EVENNESS or LESS_MOVEMENT is ignored, the other one is ignored too.
    */
   public Map<GlobalRebalancePreferenceKey, Integer> getGlobalRebalancePreference() {
     Map<String, String> preferenceStrMap =
@@ -1245,7 +1265,10 @@ public class ClusterConfig extends HelixProperty {
       Map<GlobalRebalancePreferenceKey, Integer> preference = new HashMap<>();
       for (GlobalRebalancePreferenceKey key : GlobalRebalancePreferenceKey.values()) {
         if (preferenceStrMap.containsKey(key.name())) {
-          preference.put(key, Integer.parseInt(preferenceStrMap.get(key.name())));
+          Integer value = parseGlobalRebalancePreference(key, preferenceStrMap.get(key.name()));
+          if (value != null) {
+            preference.put(key, value);
+          }
         }
       }
       // In case this map is set incorrectly, check for both attributes to ensure strong pairing
@@ -1258,6 +1281,30 @@ public class ClusterConfig extends HelixProperty {
     }
     // If configuration is not complete, return the default one.
     return DEFAULT_GLOBAL_REBALANCE_PREFERENCE;
+  }
+
+  /**
+   * @return the preference value clamped to the valid range, or null if it is not an integer
+   */
+  private Integer parseGlobalRebalancePreference(GlobalRebalancePreferenceKey key, String value) {
+    int preference;
+    try {
+      preference = Integer.parseInt(value == null ? "" : value.trim());
+    } catch (NumberFormatException e) {
+      logger.warn("Ignoring the global rebalance preference {}={} of cluster {}: it must be an "
+              + "integer from {} to {}. The default applies.", key, value, getClusterName(),
+          MIN_REBALANCE_PREFERENCE, MAX_REBALANCE_PREFERENCE);
+      return null;
+    }
+    if (preference < MIN_REBALANCE_PREFERENCE || preference > MAX_REBALANCE_PREFERENCE) {
+      int clamped =
+          Math.max(MIN_REBALANCE_PREFERENCE, Math.min(MAX_REBALANCE_PREFERENCE, preference));
+      logger.warn("Clamping the global rebalance preference {}={} of cluster {} to {}: it must be "
+              + "from {} to {}.", key, preference, getClusterName(), clamped,
+          MIN_REBALANCE_PREFERENCE, MAX_REBALANCE_PREFERENCE);
+      return clamped;
+    }
+    return preference;
   }
 
   /**

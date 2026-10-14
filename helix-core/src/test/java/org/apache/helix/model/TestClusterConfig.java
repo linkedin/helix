@@ -33,6 +33,7 @@ import org.testng.annotations.Test;
 
 import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS;
 import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT;
+import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS;
 
 public class TestClusterConfig {
 
@@ -201,6 +202,74 @@ public class TestClusterConfig {
 
     ClusterConfig testConfig = new ClusterConfig("testId");
     testConfig.setGlobalRebalancePreference(preference);
+  }
+
+  @Test
+  public void testTopStateEvennessPreference() {
+    Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preference = new HashMap<>();
+    preference.put(EVENNESS, 1);
+    preference.put(LESS_MOVEMENT, 2);
+    preference.put(TOP_STATE_EVENNESS, 4);
+
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    testConfig.setGlobalRebalancePreference(preference);
+    Assert.assertEquals(testConfig.getRecord()
+        .getMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name())
+        .get(TOP_STATE_EVENNESS.name()), "4");
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(), preference);
+
+    // Unlike EVENNESS and LESS_MOVEMENT, the key does not need a pair.
+    testConfig.setGlobalRebalancePreference(Collections.singletonMap(TOP_STATE_EVENNESS, 4));
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        Collections.singletonMap(TOP_STATE_EVENNESS, 4));
+
+    // The default keeps the configured weight of the top state evenness constraint.
+    Assert.assertEquals(
+        (int) ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE.get(TOP_STATE_EVENNESS), 1);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testSetTopStateEvennessPreferenceOutOfRange() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    testConfig.setGlobalRebalancePreference(Collections.singletonMap(TOP_STATE_EVENNESS, 1001));
+  }
+
+  @Test
+  public void testGetRebalancePreferenceClampsOutOfRangeValues() {
+    // A REST update of the config writes the record without the checks of the setter.
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "-1");
+    preference.put(LESS_MOVEMENT.name(), "2000");
+    preference.put(TOP_STATE_EVENNESS.name(), "-5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 0, LESS_MOVEMENT, 1000, TOP_STATE_EVENNESS, 0));
+  }
+
+  @Test
+  public void testGetRebalancePreferenceIgnoresValuesThatAreNotIntegers() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "1");
+    preference.put(LESS_MOVEMENT.name(), " 2 ");
+    preference.put(TOP_STATE_EVENNESS.name(), "2.5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    // The key that does not parse is left out, so that it falls back to its default.
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 1, LESS_MOVEMENT, 2));
+
+    // As when one of them is missing, EVENNESS and LESS_MOVEMENT fall back together.
+    preference.put(EVENNESS.name(), "high");
+    preference.put(TOP_STATE_EVENNESS.name(), "4");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(TOP_STATE_EVENNESS, 4));
   }
 
   @Test
