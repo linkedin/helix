@@ -73,6 +73,7 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.acl.AclRegister;
+import org.apache.helix.rest.acl.ClusterAclParser;
 import org.apache.helix.rest.acl.ClusterAclProvider;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.common.HelixRestNamespace;
@@ -178,10 +179,20 @@ public class ClusterAccessor extends AbstractHelixResource {
   public Response createCluster(@PathParam("clusterId") String clusterId,
       @DefaultValue("false") @QueryParam("recreate") String recreate,
       @DefaultValue("false") @QueryParam("addCloudConfig") String addCloudConfig,
+      @QueryParam("acl") List<String> requestAcl,
       String cloudConfigManifest) {
 
     boolean recreateIfExists = Boolean.parseBoolean(recreate);
     boolean cloudConfigIncluded = Boolean.parseBoolean(addCloudConfig);
+
+    List<ACL> parsedRequestAcl;
+    try {
+      parsedRequestAcl = ClusterAclParser.parse(requestAcl);
+    } catch (IllegalArgumentException e) {
+      String errMsg = "Invalid acl query parameter for cluster " + clusterId;
+      LOG.error(errMsg, e);
+      return badRequest(errMsg + ". Exception: " + e.getMessage());
+    }
 
     ClusterSetup clusterSetup = getClusterSetup();
 
@@ -200,7 +211,7 @@ public class ClusterAccessor extends AbstractHelixResource {
 
     List<ACL> clusterAcl;
     try {
-      clusterAcl = resolveClusterAcl(clusterId);
+      clusterAcl = resolveClusterAcl(clusterId, parsedRequestAcl);
     } catch (Exception ex) {
       LOG.error("Failed to resolve ZooKeeper ACL for cluster {}. Exception: {}.", clusterId, ex);
       return serverError(ex);
@@ -1317,11 +1328,14 @@ public class ClusterAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Resolves the ZooKeeper ACL for a new cluster: the {@link ClusterAclProvider} wins, then the
-   * namespace's configured cluster ACL. Returns null when neither is set, which keeps the client
-   * default ACL.
+   * Resolves the ZooKeeper ACL for a new cluster: the request's {@code acl} query parameters win,
+   * then the {@link ClusterAclProvider}, then the namespace's configured cluster ACL. Returns null
+   * when none is set, which keeps the client default ACL.
    */
-  private List<ACL> resolveClusterAcl(String clusterId) {
+  private List<ACL> resolveClusterAcl(String clusterId, List<ACL> requestAcl) {
+    if (!requestAcl.isEmpty()) {
+      return requestAcl;
+    }
     ClusterAclProvider provider = (ClusterAclProvider) _application.getProperties()
         .get(ContextPropertyKeys.CLUSTER_ACL_PROVIDER.name());
     if (provider != null) {

@@ -20,7 +20,9 @@ package org.apache.helix.rest.server;
  */
 
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import javax.ws.rs.core.Response;
@@ -58,13 +60,16 @@ import static org.mockito.ArgumentMatchers.eq;
 /**
  * Verifies the ZooKeeper ACL applied to clusters created through the REST server. The ACLs used
  * here include the unauthenticated test client (world:anyone) so the REST server satisfies them,
- * and differ from the default ACL and from each other so each source can be told apart.
+ * and differ from the default ACL and from each other so each source can be told apart. Sources
+ * are the request's acl query parameters, the provider and the namespace, in that order.
  */
 public class TestClusterAcl extends AbstractTestClass {
   private static final List<ACL> NAMESPACE_ACL =
       ClusterAclParser.parse(Collections.singletonList("world:anyone:cdrw"));
   private static final List<ACL> PROVIDER_ACL =
       ClusterAclParser.parse(Collections.singletonList("world:anyone:cdr"));
+  private static final List<ACL> REQUEST_ACL =
+      ClusterAclParser.parse(Collections.singletonList("world:anyone:cdra"));
 
   private int _port;
 
@@ -147,6 +152,54 @@ public class TestClusterAcl extends AbstractTestClass {
   }
 
   @Test
+  public void testRequestAclOverridesProviderAndNamespaceAcl() throws Exception {
+    String cluster = "TestClusterAcl_request";
+    ClusterAclProvider provider = Mockito.mock(ClusterAclProvider.class);
+    Mockito.when(provider.getClusterAcl(any(), any())).thenReturn(PROVIDER_ACL);
+    HelixRestServer server = startServer(NAMESPACE_ACL, provider);
+    try {
+      Assert.assertEquals(createCluster(cluster, "world:anyone:cdra"),
+          Response.Status.CREATED.getStatusCode());
+      assertClusterAcl(cluster, REQUEST_ACL);
+      Mockito.verify(provider, Mockito.never()).getClusterAcl(any(), any());
+    } finally {
+      server.shutdown();
+      TestHelper.dropCluster(cluster, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testRequestAclWithMultipleEntries() throws Exception {
+    String cluster = "TestClusterAcl_requestMulti";
+    List<String> entries = Arrays.asList("world:anyone:cdr", "ip:127.0.0.1:cdrwa");
+    HelixRestServer server = startServer(null, new NoopClusterAclProvider());
+    try {
+      Assert.assertEquals(createCluster(cluster, entries.toArray(new String[0])),
+          Response.Status.CREATED.getStatusCode());
+      assertClusterAcl(cluster, ClusterAclParser.parse(entries));
+    } finally {
+      server.shutdown();
+      TestHelper.dropCluster(cluster, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testInvalidRequestAclReturnsBadRequest() throws Exception {
+    String cluster = "TestClusterAcl_requestInvalid";
+    HelixRestServer server = startServer(NAMESPACE_ACL, new NoopClusterAclProvider());
+    try {
+      Assert.assertEquals(createCluster(cluster, "world:anyone:z"),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertEquals(createCluster(cluster, "not-an-acl"),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gZkClient.exists("/" + cluster));
+    } finally {
+      server.shutdown();
+      TestHelper.dropCluster(cluster, _gZkClient);
+    }
+  }
+
+  @Test
   public void testServerOutsideAclFailsCreation() throws Exception {
     String cluster = "TestClusterAcl_unauthorized";
     String credentials = "owner:secret";
@@ -189,9 +242,14 @@ public class TestClusterAcl extends AbstractTestClass {
     return server;
   }
 
-  private int createCluster(String cluster) throws IOException {
+  private int createCluster(String cluster, String... requestAcl) throws IOException {
+    StringBuilder query = new StringBuilder();
+    for (String entry : requestAcl) {
+      query.append(query.length() == 0 ? '?' : '&').append("acl=")
+          .append(URLEncoder.encode(entry, "UTF-8"));
+    }
     HttpPut put = new HttpPut("http://" + getBaseUri().getHost() + ":" + _port
-        + getBaseUri().getPath() + "/clusters/" + cluster);
+        + getBaseUri().getPath() + "/clusters/" + cluster + query);
     // A new client per request, since each test restarts the server on the same port and a pooled
     // keep-alive connection to the previous server would be stale.
     try (CloseableHttpClient httpClient = HttpClients.createDefault();

@@ -32,6 +32,8 @@ import org.apache.zookeeper.data.ACL;
  * <p>
  * The REST server's own ZooKeeper identity must be granted {@code CREATE} by the returned ACL,
  * and {@code WRITE} when a cloud config is supplied at creation.
+ * <p>
+ * Not consulted when the creation request itself carries {@code acl} query parameters.
  */
 public interface ClusterAclProvider {
   /**
