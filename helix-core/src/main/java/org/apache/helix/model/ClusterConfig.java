@@ -36,11 +36,15 @@ import org.apache.helix.api.config.StateTransitionThrottleConfig;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
 import org.apache.helix.api.config.ViewClusterSourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Cluster configurations
  */
 public class ClusterConfig extends HelixProperty {
+  private static final Logger logger = LoggerFactory.getLogger(ClusterConfig.class.getName());
+
   /**
    * Configurable characteristics of a cluster.
    * NOTE: Do NOT use this field name directly, use its corresponding getter/setter in the
@@ -1354,6 +1358,8 @@ public class ClusterConfig extends HelixProperty {
    * Set list of preferred scoring keys for cluster.
    * preferredScoringKeys is set as a List to make it generic and accommodate any future use case.
    * preferredScoringKeys will be a singleton list for current use case.
+   * Keys that are not capacity keys of the cluster are ignored, and if none is left, the usage is
+   * scored on all the capacity keys.
    *
    * @param preferredScoringKeys value used in evenness score computation
    */
@@ -1367,7 +1373,8 @@ public class ClusterConfig extends HelixProperty {
    * if set.
    *
    * @return the top state scoring keys, or null if not set; the top state usage is then scored on
-   *         the preferred scoring keys like the other usage scores
+   *         the preferred scoring keys like the other usage scores. Keys that are not capacity keys
+   *         of the cluster are ignored, and if none is left, the preferred scoring keys apply.
    */
   public List<String> getTopStateScoringKeys() {
     return _record.getListField(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name());
@@ -1395,15 +1402,34 @@ public class ClusterConfig extends HelixProperty {
    * @return the steepness, or -1 if it is not set or is not a positive number
    */
   public double getTopStateScoringAlpha() {
-    double alpha =
-        _record.getDoubleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), -1);
-    return alpha > 0 && !Double.isInfinite(alpha) ? alpha : -1;
+    String value = _record.getSimpleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name());
+    if (value == null) {
+      return -1;
+    }
+    double alpha;
+    try {
+      alpha = Double.parseDouble(value);
+    } catch (NumberFormatException e) {
+      alpha = Double.NaN;
+    }
+    if (alpha > 0 && !Double.isInfinite(alpha)) {
+      return alpha;
+    }
+    // Read on every rebalance, so one line rather than a stack trace.
+    logger.warn("Ignoring the top state scoring alpha {} of cluster {}: it must be a positive "
+        + "number. The default applies.", value, getClusterName());
+    return -1;
   }
 
   /**
    * Set the steepness (sigmoid alpha) of the WAGED top state usage evenness score. With the default
    * steepness the instances well above the estimated top state usage all score about the same; a
    * smaller value keeps them ranked, so that a heavily loaded instance is still preferred less.
+   * This matters where single top state replicas are heavy compared with an instance's top state
+   * usage: moving one leaves the receiving instance well above the estimate, which the default
+   * scores like a far busier instance, so the move is not made. A smaller value also tells apart
+   * the instances close to the estimate less sharply, so set it only where the top state usage
+   * stays uneven with the default.
    *
    * @param alpha a positive steepness, or null to remove the setting and use the default
    */
