@@ -69,6 +69,25 @@ public class TestClusterAclParser {
   }
 
   @Test
+  public void testAuthSchemeAllowsEmptyId() {
+    List<ACL> acl = ClusterAclParser.parse(Collections.singletonList("auth::cdrwa"));
+    Assert.assertEquals(acl, Collections.singletonList(new ACL(ZooDefs.Perms.ALL, new Id("auth", ""))));
+  }
+
+  @Test
+  public void testEmptyIdIsRejectedForNonAuthSchemes() {
+    for (String entry : new String[] {"auth::", "auth:", "world::r", "ip::r", "x509::cdrw"}) {
+      try {
+        ClusterAclParser.parse(Collections.singletonList(entry));
+        Assert.fail("Expected \"" + entry + "\" to be rejected");
+      } catch (IllegalArgumentException expected) {
+        Assert.assertTrue(expected.getMessage().contains(ClusterAclParser.ACL_FORMAT_HINT),
+            "Expected the format hint in: " + expected.getMessage());
+      }
+    }
+  }
+
+  @Test
   public void testMalformedEntriesAreRejected() {
     for (String entry : new String[] {
         null, "", "world", "world:anyone", "world:anyone:", ":anyone:r", "world::r",

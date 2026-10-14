@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -29,7 +30,7 @@ import javax.ws.rs.core.Response;
 
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
-import org.apache.helix.rest.acl.ClusterAclParser;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
 import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
@@ -49,26 +50,11 @@ import org.testng.annotations.Test;
 
 /**
  * Verifies the ZooKeeper ACL applied to clusters created through the REST server when the request
- * carries acl query parameters. The ACLs used here include the unauthenticated test client
- * (world:anyone or its ip) so the REST server satisfies them, and differ from the default ACL so
- * the request's ACL can be told apart. world:anyone read is expected on every requested ACL.
+ * carries acl query parameters. The ACLs used here include world:anyone, which the unauthenticated
+ * test client and the REST server's session both match, and differ from the default ACL so the
+ * request's ACL can be told apart. world:anyone read is expected on every requested ACL.
  */
 public class TestClusterAcl extends AbstractTestClass {
-
-  @Test
-  public void testRequestAclIsApplied() throws Exception {
-    String cluster = "TestClusterAcl_request";
-    try {
-      Assert.assertEquals(createCluster(cluster, "ip:127.0.0.1:cdrwa"),
-          Response.Status.CREATED.getStatusCode());
-      // world:anyone read is always added
-      assertClusterAcl(cluster, Arrays.asList(
-          new ACL(ZooDefs.Perms.ALL, new Id("ip", "127.0.0.1")),
-          new ACL(ZooDefs.Perms.READ, new Id("world", "anyone"))));
-    } finally {
-      TestHelper.dropCluster(cluster, _gZkClient);
-    }
-  }
 
   @Test
   public void testWorldReadIsMergedIntoRequestedWorldEntry() throws Exception {
@@ -87,11 +73,27 @@ public class TestClusterAcl extends AbstractTestClass {
   @Test
   public void testRequestAclWithMultipleEntries() throws Exception {
     String cluster = "TestClusterAcl_requestMulti";
-    List<String> entries = Arrays.asList("world:anyone:cdr", "ip:127.0.0.1:cdrwa");
     try {
-      Assert.assertEquals(createCluster(cluster, entries.toArray(new String[0])),
+      Assert.assertEquals(createCluster(cluster, "world:anyone:cdw", "ip:127.0.0.1:cdrwa"),
           Response.Status.CREATED.getStatusCode());
-      assertClusterAcl(cluster, ClusterAclParser.parse(entries));
+      // Entries keep their order, and read is merged into the requested world entry
+      assertClusterAcl(cluster, Arrays.asList(
+          new ACL(ZooDefs.Perms.CREATE | ZooDefs.Perms.DELETE | ZooDefs.Perms.READ
+              | ZooDefs.Perms.WRITE, new Id("world", "anyone")),
+          new ACL(ZooDefs.Perms.ALL, new Id("ip", "127.0.0.1"))));
+    } finally {
+      TestHelper.dropCluster(cluster, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testAuthSchemeWithoutAuthenticatedSessionFails() throws Exception {
+    String cluster = "TestClusterAcl_auth";
+    try {
+      // The REST server's ZK session is unauthenticated, so "auth" has no identity to expand to.
+      Assert.assertEquals(createCluster(cluster, "auth::cdrwa"),
+          Response.Status.INTERNAL_SERVER_ERROR.getStatusCode());
+      Assert.assertFalse(_gZkClient.exists("/" + cluster));
     } finally {
       TestHelper.dropCluster(cluster, _gZkClient);
     }
@@ -168,11 +170,16 @@ public class TestClusterAcl extends AbstractTestClass {
     ZooKeeper zooKeeper =
         ((ZkConnection) ((org.apache.helix.zookeeper.zkclient.ZkClient) _gZkClient)
             .getConnection()).getZookeeper();
-    for (String path : new String[] {
+    List<String> paths = new ArrayList<>(Arrays.asList(
         "/" + cluster, PropertyPathBuilder.idealState(cluster),
         PropertyPathBuilder.clusterConfig(cluster), PropertyPathBuilder.liveInstance(cluster),
-        PropertyPathBuilder.controller(cluster), PropertyPathBuilder.stateModelDef(cluster)
-    }) {
+        PropertyPathBuilder.controller(cluster), PropertyPathBuilder.stateModelDef(cluster)));
+    // ZooKeeper does not inherit ACLs, so each built-in state model definition is checked as well
+    for (BuiltInStateModelDefinitions def : BuiltInStateModelDefinitions.values()) {
+      paths.add(PropertyPathBuilder.stateModelDef(cluster) + "/"
+          + def.getStateModelDefinition().getId());
+    }
+    for (String path : paths) {
       Assert.assertEquals(zooKeeper.getACL(path, new Stat()), expected, "unexpected ACL on " + path);
     }
   }

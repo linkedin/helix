@@ -174,10 +174,15 @@ public class ClusterAccessor extends AbstractHelixResource {
    * <p>
    * The optional, repeatable {@code acl} query parameter sets the ZooKeeper ACL of the nodes
    * created for the cluster. Each value is URL-encoded and has the form
-   * {@code scheme:id:permissions}, for example {@code world:anyone:r} or
-   * {@code x509:servicePrincipal(my-app:cdrw}. Permissions are letters from {@code cdrwa} (create,
+   * {@code scheme:id:permissions}, for example {@code world:anyone:r},
+   * {@code x509:CN=my-service,OU=my-team,O=my-org,C=US:cdrw} or {@code auth::cdrwa}. The id
+   * format of {@code x509} depends on how the ZooKeeper ensemble derives client ids from
+   * certificates. {@code auth} takes an empty id and expands to the authenticated identities of
+   * this server's ZooKeeper session. Permissions are letters from {@code cdrwa} (create,
    * delete, read, write, admin) or {@code all}. When {@code acl} is given, {@code world:anyone}
-   * is always granted read in addition. Without {@code acl} the client default ACL is kept. A
+   * is always granted read in addition. The ACL covers the cluster root, its metadata nodes and
+   * the built-in state model definitions; nodes created later, such as resources and instances,
+   * use the client default ACL. Without {@code acl} the client default ACL is kept. A
    * malformed value returns 400 and nothing is created.
    */
   @NamespaceAuth

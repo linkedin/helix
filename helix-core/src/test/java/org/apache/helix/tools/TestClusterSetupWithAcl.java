@@ -26,6 +26,9 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkUnitTestBase;
 import org.apache.helix.manager.zk.ZKUtil;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.ZkConnection;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
@@ -52,9 +55,49 @@ public class TestClusterSetupWithAcl extends ZkUnitTestBase {
       Assert.assertEquals(getAcl("/" + clusterName), ACL_WITHOUT_ADMIN);
       Assert.assertEquals(getAcl(PropertyPathBuilder.stateModelDef(clusterName)),
           ACL_WITHOUT_ADMIN);
-      // built-in state model definitions are still added to the cluster
-      Assert.assertFalse(
-          _gZkClient.getChildren(PropertyPathBuilder.stateModelDef(clusterName)).isEmpty());
+      assertBuiltInStateModelDefsHaveAcl(clusterName, ACL_WITHOUT_ADMIN);
+    } finally {
+      setup.close();
+      TestHelper.dropCluster(clusterName, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testRecreateClusterWithAclAppliesAclToStateModelDefs() throws Exception {
+    String clusterName = "TestClusterSetupWithAcl_recreate";
+    ClusterSetup setup = new ClusterSetup(ZK_ADDR);
+    try {
+      setup.addCluster(clusterName, false, null);
+      setup.addCluster(clusterName, true, null, ACL_WITHOUT_ADMIN);
+
+      Assert.assertEquals(getAcl("/" + clusterName), ACL_WITHOUT_ADMIN);
+      assertBuiltInStateModelDefsHaveAcl(clusterName, ACL_WITHOUT_ADMIN);
+    } finally {
+      setup.close();
+      TestHelper.dropCluster(clusterName, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testAddStateModelDefWithAcl() throws Exception {
+    String clusterName = "TestClusterSetupWithAcl_stateModelDef";
+    ClusterSetup setup = new ClusterSetup(ZK_ADDR);
+    try {
+      setup.addCluster(clusterName, false, null);
+      StateModelDefinition def = BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
+      String path = PropertyPathBuilder.stateModelDef(clusterName) + "/" + def.getId();
+      Assert.assertEquals(getAcl(path), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+
+      // An existing definition is left untouched unless recreate is requested
+      setup.getClusterManagementTool().addStateModelDef(clusterName, def.getId(), def, false,
+          ACL_WITHOUT_ADMIN);
+      Assert.assertEquals(getAcl(path), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+
+      setup.getClusterManagementTool().addStateModelDef(clusterName, def.getId(), def, true,
+          ACL_WITHOUT_ADMIN);
+      Assert.assertEquals(getAcl(path), ACL_WITHOUT_ADMIN);
+      Assert.assertEquals(new StateModelDefinition(_gZkClient.<ZNRecord>readData(path)).getId(),
+          def.getId());
     } finally {
       setup.close();
       TestHelper.dropCluster(clusterName, _gZkClient);
@@ -75,6 +118,17 @@ public class TestClusterSetupWithAcl extends ZkUnitTestBase {
     } finally {
       setup.close();
       TestHelper.dropCluster(clusterName, _gZkClient);
+    }
+  }
+
+  private static void assertBuiltInStateModelDefsHaveAcl(String clusterName, List<ACL> expected)
+      throws Exception {
+    List<String> children = _gZkClient.getChildren(PropertyPathBuilder.stateModelDef(clusterName));
+    Assert.assertEquals(children.size(), BuiltInStateModelDefinitions.values().length);
+    for (BuiltInStateModelDefinitions def : BuiltInStateModelDefinitions.values()) {
+      String path = PropertyPathBuilder.stateModelDef(clusterName) + "/"
+          + def.getStateModelDefinition().getId();
+      Assert.assertEquals(getAcl(path), expected, "unexpected ACL on " + path);
     }
   }
 

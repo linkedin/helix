@@ -35,17 +35,21 @@ import org.apache.zookeeper.data.Id;
  * The scheme ends at the first colon and the permissions start after the last colon, so ids that
  * contain colons (for example digest ids) or commas (for example x509 subject DNs) are kept
  * intact. Permissions are any combination of {@code c} (create), {@code d} (delete), {@code r}
- * (read), {@code w} (write) and {@code a} (admin), or {@code all}. Examples:
+ * (read), {@code w} (write) and {@code a} (admin), or {@code all}. Only the {@code auth} scheme
+ * may have an empty id. Examples:
  * <pre>
  * x509:CN=my-service,OU=my-team,O=my-org,C=US:cdrwa
  * world:anyone:r
+ * auth::cdrwa
  * </pre>
  */
 public final class ClusterAclParser {
   public static final String ACL_FORMAT_HINT = "Expected scheme:id:permissions, for example "
-      + "world:anyone:r or x509:servicePrincipal(my-app:cdrw. Permissions are letters from "
-      + "c (create), d (delete), r (read), w (write), a (admin), or all.";
+      + "world:anyone:r, x509:CN=my-service,OU=my-team,O=my-org,C=US:cdrw or auth::cdrwa. "
+      + "Permissions are letters from c (create), d (delete), r (read), w (write), a (admin), "
+      + "or all.";
 
+  private static final String AUTH_SCHEME = "auth";
   private static final Id WORLD_ANYONE = new Id("world", "anyone");
 
   private ClusterAclParser() {
@@ -93,12 +97,17 @@ public final class ClusterAclParser {
     }
     int schemeEnd = entry.indexOf(':');
     int permsStart = entry.lastIndexOf(':');
-    if (schemeEnd <= 0 || permsStart <= schemeEnd + 1 || permsStart == entry.length() - 1) {
+    if (schemeEnd <= 0 || permsStart <= schemeEnd || permsStart == entry.length() - 1) {
       throw new IllegalArgumentException(
           "Invalid ACL entry \"" + entry + "\". " + ACL_FORMAT_HINT);
     }
     String scheme = entry.substring(0, schemeEnd);
     String id = entry.substring(schemeEnd + 1, permsStart);
+    // "auth" expands to the caller's authenticated identities, so it takes no id.
+    if (id.isEmpty() && !AUTH_SCHEME.equals(scheme)) {
+      throw new IllegalArgumentException(
+          "Invalid ACL entry \"" + entry + "\". " + ACL_FORMAT_HINT);
+    }
     return new ACL(parsePermissions(entry.substring(permsStart + 1)), new Id(scheme, id));
   }
 

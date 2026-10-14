@@ -230,10 +230,13 @@ public class ClusterSetup {
   }
 
   /**
-   * Adds a cluster whose root and metadata nodes are created with the given ACL.
+   * Adds a cluster whose root, metadata nodes and built-in state model definitions are created
+   * with the given ACL.
    * See {@link HelixAdmin#addCluster(String, boolean, List)} for the ACL semantics and caveats.
-   * Applying a {@code cloudConfig} writes to the cluster config node, so the ACL must grant the
-   * calling client {@code WRITE} in that case.
+   * The ACL must grant the calling client {@code CREATE} (and {@code DELETE} if
+   * {@code overwritePrevious} is true) so the state model definitions can be created.
+   * The cloud config node, if any, is created with the client default ACL. For the Azure cloud
+   * provider the cluster config is also updated, which requires {@code WRITE} on it.
    * @param acl ACL for the cluster nodes; {@code null} or empty uses the client default ACL
    */
   public void addCluster(String clusterName, boolean overwritePrevious, CloudConfig cloudConfig,
@@ -244,8 +247,8 @@ public class ClusterSetup {
       throw new HelixException(error);
     }
     for (BuiltInStateModelDefinitions def : BuiltInStateModelDefinitions.values()) {
-      addStateModelDef(clusterName, def.getStateModelDefinition().getId(),
-          def.getStateModelDefinition(), overwritePrevious);
+      _admin.addStateModelDef(clusterName, def.getStateModelDefinition().getId(),
+          def.getStateModelDefinition(), overwritePrevious, acl);
     }
 
     if (cloudConfig != null) {
