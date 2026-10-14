@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -39,6 +40,7 @@ import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
@@ -337,7 +339,61 @@ public class TestCurrentStateComputationStageForHandlingCapacity {
     Assert.assertEquals(allNonFinite.getMaxMeanRatio(), 0.0d, 0.0d);
   }
 
+  @Test
+  public void testComputeUsageStatsByCapacityKey() {
+    // No instances: no capacity key to summarize.
+    Assert.assertTrue(
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(null, false).isEmpty());
+    Assert.assertTrue(CurrentStateComputationStage
+        .computeUsageStatsByCapacityKey(ImmutableList.of(), true).isEmpty());
+
+    // Each capacity key is summarized on its own, from each instance's utilization of that key:
+    // all replicas when topState is false, top-state replicas only when it is true.
+    List<AssignableNode> nodes = ImmutableList.of(
+        mockNodeUtilization(ImmutableMap.of("CU", 0.8f, "DISK", 0.2f),
+            ImmutableMap.of("CU", 0.6f, "DISK", 0.1f)),
+        mockNodeUtilization(ImmutableMap.of("CU", 0.4f, "DISK", 0.6f),
+            ImmutableMap.of("CU", 0.2f, "DISK", 0.1f)));
+
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> partitionStats =
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(nodes, false);
+    Assert.assertEquals(ImmutableList.copyOf(partitionStats.keySet()),
+        ImmutableList.of("CU", "DISK"));
+    assertUsageStats(partitionStats.get("CU"), 0.8d, 0.6d, 0.4d, 0.8d / 0.6d);
+    assertUsageStats(partitionStats.get("DISK"), 0.6d, 0.4d, 0.2d, 1.5d);
+
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> topStateStats =
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(nodes, true);
+    Assert.assertEquals(ImmutableList.copyOf(topStateStats.keySet()),
+        ImmutableList.of("CU", "DISK"));
+    assertUsageStats(topStateStats.get("CU"), 0.6d, 0.4d, 0.2d, 1.5d);
+    assertUsageStats(topStateStats.get("DISK"), 0.1d, 0.1d, 0.1d, 1.0d);
+  }
+
   // -- static helpers
+  private static AssignableNode mockNodeUtilization(Map<String, Float> utilization,
+      Map<String, Float> topStateUtilization) {
+    AssignableNode node = Mockito.mock(AssignableNode.class);
+    Map<String, Integer> capacity = new HashMap<>();
+    utilization.keySet().forEach(capacityKey -> capacity.put(capacityKey, 100));
+    Mockito.when(node.getMaxCapacity()).thenReturn(capacity);
+    utilization.forEach((capacityKey, value) -> Mockito.when(node
+        .getGeneralProjectedHighestUtilization(Collections.emptyMap(),
+            Collections.singletonList(capacityKey))).thenReturn(value));
+    topStateUtilization.forEach((capacityKey, value) -> Mockito.when(node
+        .getTopStateProjectedHighestUtilization(Collections.emptyMap(),
+            Collections.singletonList(capacityKey))).thenReturn(value));
+    return node;
+  }
+
+  private static void assertUsageStats(ClusterStatusMonitor.WeightedUsageStats stats, double max,
+      double mean, double min, double maxMeanRatio) {
+    Assert.assertEquals(stats.getMax(), max, 1e-6d);
+    Assert.assertEquals(stats.getMean(), mean, 1e-6d);
+    Assert.assertEquals(stats.getMin(), min, 1e-6d);
+    Assert.assertEquals(stats.getMaxMeanRatio(), maxMeanRatio, 1e-6d);
+  }
+
   private Map<String, InstanceConfig> generateInstanceCapacityConfigs() {
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
 

@@ -21,14 +21,23 @@ package org.apache.helix.controller.stages;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.MoreExecutors;
+import java.lang.management.ManagementFactory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
 
 import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.monitoring.mbeans.CapacityKeyUsageMonitor;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -40,6 +49,7 @@ import org.testng.AssertJUnit;
 import org.testng.annotations.Test;
 
 public class TestCurrentStateComputationStage extends BaseStageTest {
+  private static final MBeanServer MBEAN_SERVER = ManagementFactory.getPlatformMBeanServer();
 
   @Test
   public void testEmptyCS() {
@@ -186,4 +196,79 @@ public class TestCurrentStateComputationStage extends BaseStageTest {
     AssertJUnit.assertEquals(taskCurrentState, "INIT");
   }
 
+  @Test
+  public void testCapacityKeyUsageGauges() throws Exception {
+    // A WAGED resource with 2 partitions of 2 replicas on 2 instances, with CU and DISK capacity.
+    String resourceName = "testResourceName";
+    String stateModel = BuiltInStateModelDefinitions.MasterSlave.name();
+    setupIdealState(2, new String[] {resourceName}, 2, 2, IdealState.RebalanceMode.FULL_AUTO,
+        stateModel, WagedRebalancer.class.getName());
+    setupStateModel();
+    setupInstances(2);
+    List<String> instances = setupLiveInstances(2);
+    ClusterConfig clusterConfig = new ClusterConfig(_clusterName);
+    clusterConfig.setInstanceCapacityKeys(ImmutableList.of("CU", "DISK"));
+    clusterConfig.setDefaultInstanceCapacityMap(ImmutableMap.of("CU", 100, "DISK", 100));
+    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("CU", 10, "DISK", 5));
+    setClusterConfig(clusterConfig);
+
+    // Both instances host both partitions; the first one hosts both top-state replicas.
+    for (int i = 0; i < instances.size(); i++) {
+      CurrentState currentState = new CurrentState(resourceName);
+      currentState.setSessionId(SESSION_PREFIX + i);
+      currentState.setStateModelDefRef(stateModel);
+      for (int p = 0; p < 2; p++) {
+        currentState.setState(resourceName + "_" + p, i == 0 ? "MASTER" : "SLAVE");
+      }
+      accessor.setProperty(accessor.keyBuilder()
+          .currentState(instances.get(i), SESSION_PREFIX + i, resourceName), currentState);
+    }
+
+    Map<String, Resource> resourceMap =
+        getResourceMap(new String[] {resourceName}, 2, stateModel);
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    ResourceControllerDataProvider dataCache = new ResourceControllerDataProvider();
+    // Run the asynchronous capacity metrics task inline.
+    dataCache.setAsyncTasksThreadPool(MoreExecutors.newDirectExecutorService());
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), dataCache);
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new CurrentStateComputationStage());
+
+    ObjectName cuObjName = getCapacityKeyUsageObjectName(monitor, "CU");
+    ObjectName diskObjName = getCapacityKeyUsageObjectName(monitor, "DISK");
+    try {
+      // Each instance uses 20 of 100 CU and 10 of 100 DISK, so the all-replica load is even. The
+      // top-state load is all on the first instance: max-to-mean ratio 2.0 on both keys.
+      assertCapacityKeyUsageGauges(cuObjName, 0.2d, 0.2d, 0.2d, 1.0d, 0.2d, 0.1d, 0.0d, 2.0d);
+      assertCapacityKeyUsageGauges(diskObjName, 0.1d, 0.1d, 0.1d, 1.0d, 0.1d, 0.05d, 0.0d, 2.0d);
+    } finally {
+      monitor.reset();
+    }
+    AssertJUnit.assertFalse(MBEAN_SERVER.isRegistered(cuObjName));
+    AssertJUnit.assertFalse(MBEAN_SERVER.isRegistered(diskObjName));
+  }
+
+  private static ObjectName getCapacityKeyUsageObjectName(ClusterStatusMonitor monitor,
+      String capacityKey) throws MalformedObjectNameException {
+    return monitor.getObjectName(String.format("%s=%s,%s=%s", ClusterStatusMonitor.CLUSTER_DN_KEY,
+        monitor.getClusterName(), CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, capacityKey));
+  }
+
+  private static void assertCapacityKeyUsageGauges(ObjectName objectName, double... expected)
+      throws Exception {
+    String[] attributes = new String[] {
+        "WeightedPartitionUsageMaxGauge", "WeightedPartitionUsageMeanGauge",
+        "WeightedPartitionUsageMinGauge", "WeightedPartitionUsageMaxMeanRatioGauge",
+        "WeightedTopStateUsageMaxGauge", "WeightedTopStateUsageMeanGauge",
+        "WeightedTopStateUsageMinGauge", "WeightedTopStateUsageMaxMeanRatioGauge"};
+    AssertJUnit.assertTrue(objectName + " should be registered",
+        MBEAN_SERVER.isRegistered(objectName));
+    for (int i = 0; i < attributes.length; i++) {
+      double value = (double) MBEAN_SERVER.getAttribute(objectName, attributes[i]);
+      AssertJUnit.assertEquals(attributes[i], expected[i], value, 1e-6d);
+    }
+  }
 }

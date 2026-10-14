@@ -1479,4 +1479,125 @@ public class TestClusterStatusMonitor {
 
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
+
+  @Test
+  public void testCapacityKeyUsageStatsGauges() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName cuObjName = getCapacityKeyUsageObjectName(monitor, "CU");
+    ObjectName diskObjName = getCapacityKeyUsageObjectName(monitor, "DISK");
+    Assert.assertFalse(_server.isRegistered(cuObjName));
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+
+    // One MBean per capacity key, each with its own partition and top-state distributions.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.9d, 0.6d, 0.3d, 1.5d),
+            "DISK", new ClusterStatusMonitor.WeightedUsageStats(0.5d, 0.4d, 0.3d, 1.25d)),
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.8d, 0.4d, 0.0d, 2.0d),
+            "DISK", new ClusterStatusMonitor.WeightedUsageStats(0.2d, 0.2d, 0.2d, 1.0d)));
+    Assert.assertTrue(_server.isRegistered(cuObjName));
+    Assert.assertTrue(_server.isRegistered(diskObjName));
+    Assert.assertEquals(_server.getAttribute(cuObjName, "SensorName"),
+        "CapacityKeyUsage." + clusterName + ".CU");
+    assertCapacityKeyUsageGauges(cuObjName, 0.9d, 0.6d, 0.3d, 1.5d, 0.8d, 0.4d, 0.0d, 2.0d);
+    assertCapacityKeyUsageGauges(diskObjName, 0.5d, 0.4d, 0.3d, 1.25d, 0.2d, 0.2d, 0.2d, 1.0d);
+    // The cluster-level gauges are not changed by the per-key ones.
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxMeanRatioGauge(), 0.0d, 0.0d);
+
+    // A later update overwrites the values, a key without top-state data reports 0.0 for those
+    // gauges, and the MBean of a key that is no longer reported is unregistered.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.7d, 0.7d, 0.7d, 1.0d)),
+        Collections.emptyMap());
+    Assert.assertTrue(_server.isRegistered(cuObjName));
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+    assertCapacityKeyUsageGauges(cuObjName, 0.7d, 0.7d, 0.7d, 1.0d, 0.0d, 0.0d, 0.0d, 0.0d);
+
+    // No data (e.g. no capacity keys) unregisters all the per-key MBeans.
+    monitor.updateCapacityKeyUsageStats(null, null);
+    Assert.assertFalse(_server.isRegistered(cuObjName));
+
+    // reset() unregisters the per-key MBeans along with the cluster MBean.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("DISK",
+            new ClusterStatusMonitor.WeightedUsageStats(0.5d, 0.5d, 0.5d, 1.0d)),
+        ImmutableMap.of("DISK",
+            new ClusterStatusMonitor.WeightedUsageStats(0.3d, 0.2d, 0.1d, 1.5d)));
+    assertCapacityKeyUsageGauges(diskObjName, 0.5d, 0.5d, 0.5d, 1.0d, 0.3d, 0.2d, 0.1d, 1.5d);
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+    Assert.assertFalse(_server.isRegistered(monitor.getObjectName(monitor.clusterBeanName())));
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testCapacityKeyUsageStatsGaugesForSpecialKeys() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    // "Q*" and "Q?" would make the ObjectName a pattern, and ':', '=' and ',' are not allowed in an
+    // unquoted value. Such keys are quoted, like resource names, and every key is updated.
+    List<String> specialKeys = ImmutableList.of("Q*", "Q?", "a:b", "a=b", "a,b");
+    List<String> keys = new ArrayList<>(specialKeys);
+    keys.addAll(ImmutableList.of("CU", "DISK", "PARTCOUNT"));
+    for (double scale : new double[] {1.0d, 2.0d}) {
+      Map<String, ClusterStatusMonitor.WeightedUsageStats> stats = new HashMap<>();
+      for (String key : keys) {
+        stats.put(key, new ClusterStatusMonitor.WeightedUsageStats(0.4d * scale, 0.2d * scale,
+            0.1d * scale, 2.0d));
+      }
+      monitor.updateCapacityKeyUsageStats(stats, stats);
+    }
+
+    List<ObjectName> objectNames = new ArrayList<>();
+    for (String key : keys) {
+      String beanKey = specialKeys.contains(key) ? ObjectName.quote(key) : key;
+      ObjectName objectName = monitor.getObjectName(String.format("%s,%s=%s",
+          monitor.clusterBeanName(), CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, beanKey));
+      Assert.assertEquals(_server.getAttribute(objectName, "SensorName"),
+          "CapacityKeyUsage." + clusterName + "." + key);
+      assertCapacityKeyUsageGauges(objectName, 0.8d, 0.4d, 0.2d, 2.0d, 0.8d, 0.4d, 0.2d, 2.0d);
+      objectNames.add(objectName);
+    }
+
+    monitor.reset();
+    for (ObjectName objectName : objectNames) {
+      Assert.assertFalse(_server.isRegistered(objectName), objectName.toString());
+    }
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  private static ObjectName getCapacityKeyUsageObjectName(ClusterStatusMonitor monitor,
+      String capacityKey) throws MalformedObjectNameException {
+    return monitor.getObjectName(String.format("%s,%s=%s", monitor.clusterBeanName(),
+        CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, capacityKey));
+  }
+
+  private static void assertCapacityKeyUsageGauges(ObjectName objectName, double... expected)
+      throws Exception {
+    String[] attributes = new String[] {
+        "WeightedPartitionUsageMaxGauge", "WeightedPartitionUsageMeanGauge",
+        "WeightedPartitionUsageMinGauge", "WeightedPartitionUsageMaxMeanRatioGauge",
+        "WeightedTopStateUsageMaxGauge", "WeightedTopStateUsageMeanGauge",
+        "WeightedTopStateUsageMinGauge", "WeightedTopStateUsageMaxMeanRatioGauge"};
+    Assert.assertEquals(expected.length, attributes.length);
+    for (int i = 0; i < attributes.length; i++) {
+      Object value = _server.getAttribute(objectName, attributes[i]);
+      Assert.assertTrue(value instanceof Double, attributes[i] + " should be a Double");
+      Assert.assertEquals((double) value, expected[i], 0.0d, attributes[i]);
+    }
+  }
 }
