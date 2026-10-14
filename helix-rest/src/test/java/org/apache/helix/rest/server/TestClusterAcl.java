@@ -41,6 +41,7 @@ import org.apache.http.impl.client.HttpClients;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.ACL;
+import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.server.auth.DigestAuthenticationProvider;
 import org.testng.Assert;
@@ -49,19 +50,35 @@ import org.testng.annotations.Test;
 /**
  * Verifies the ZooKeeper ACL applied to clusters created through the REST server when the request
  * carries acl query parameters. The ACLs used here include the unauthenticated test client
- * (world:anyone) so the REST server satisfies them, and differ from the default ACL so the
- * request's ACL can be told apart.
+ * (world:anyone or its ip) so the REST server satisfies them, and differ from the default ACL so
+ * the request's ACL can be told apart. world:anyone read is expected on every requested ACL.
  */
 public class TestClusterAcl extends AbstractTestClass {
 
   @Test
   public void testRequestAclIsApplied() throws Exception {
     String cluster = "TestClusterAcl_request";
-    List<String> entries = Collections.singletonList("world:anyone:cdra");
     try {
-      Assert.assertEquals(createCluster(cluster, entries.toArray(new String[0])),
+      Assert.assertEquals(createCluster(cluster, "ip:127.0.0.1:cdrwa"),
           Response.Status.CREATED.getStatusCode());
-      assertClusterAcl(cluster, ClusterAclParser.parse(entries));
+      // world:anyone read is always added
+      assertClusterAcl(cluster, Arrays.asList(
+          new ACL(ZooDefs.Perms.ALL, new Id("ip", "127.0.0.1")),
+          new ACL(ZooDefs.Perms.READ, new Id("world", "anyone"))));
+    } finally {
+      TestHelper.dropCluster(cluster, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testWorldReadIsMergedIntoRequestedWorldEntry() throws Exception {
+    String cluster = "TestClusterAcl_worldMerge";
+    try {
+      Assert.assertEquals(createCluster(cluster, "world:anyone:cdw"),
+          Response.Status.CREATED.getStatusCode());
+      assertClusterAcl(cluster, Collections.singletonList(new ACL(
+          ZooDefs.Perms.CREATE | ZooDefs.Perms.DELETE | ZooDefs.Perms.READ | ZooDefs.Perms.WRITE,
+          new Id("world", "anyone"))));
     } finally {
       TestHelper.dropCluster(cluster, _gZkClient);
     }

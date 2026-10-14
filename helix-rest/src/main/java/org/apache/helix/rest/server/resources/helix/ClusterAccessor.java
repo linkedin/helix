@@ -169,6 +169,17 @@ public class ClusterAccessor extends AbstractHelixResource {
     return JSONRepresentation(clusterInfo);
   }
 
+  /**
+   * Creates a cluster.
+   * <p>
+   * The optional, repeatable {@code acl} query parameter sets the ZooKeeper ACL of the nodes
+   * created for the cluster. Each value is URL-encoded and has the form
+   * {@code scheme:id:permissions}, for example {@code world:anyone:r} or
+   * {@code x509:servicePrincipal(my-app:cdrw}. Permissions are letters from {@code cdrwa} (create,
+   * delete, read, write, admin) or {@code all}. When {@code acl} is given, {@code world:anyone}
+   * is always granted read in addition. Without {@code acl} the client default ACL is kept. A
+   * malformed value returns 400 and nothing is created.
+   */
   @NamespaceAuth
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
@@ -215,9 +226,9 @@ public class ClusterAccessor extends AbstractHelixResource {
     }
 
     try {
-      // A null ACL keeps the client default ACL
+      // A null ACL keeps the client default ACL, which already grants world read
       clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig,
-          parsedRequestAcl.isEmpty() ? null : parsedRequestAcl);
+          parsedRequestAcl.isEmpty() ? null : ClusterAclParser.withWorldRead(parsedRequestAcl));
     } catch (Exception ex) {
       LOG.error("Failed to create cluster {}. Exception: {}.", clusterId, ex);
       return serverError(ex);

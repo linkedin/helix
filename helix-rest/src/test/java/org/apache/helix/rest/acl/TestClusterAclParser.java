@@ -78,8 +78,48 @@ public class TestClusterAclParser {
         ClusterAclParser.parse(Collections.singletonList(entry));
         Assert.fail("Expected \"" + entry + "\" to be rejected");
       } catch (IllegalArgumentException expected) {
-        // expected
+        Assert.assertTrue(expected.getMessage().contains(ClusterAclParser.ACL_FORMAT_HINT),
+            "Expected the format hint in: " + expected.getMessage());
       }
+    }
+  }
+
+  @Test
+  public void testMalformedEntryMessageNamesTheEntry() {
+    try {
+      ClusterAclParser.parse(Collections.singletonList("not-an-acl"));
+      Assert.fail("Expected the entry to be rejected");
+    } catch (IllegalArgumentException expected) {
+      Assert.assertTrue(expected.getMessage().contains("not-an-acl"), expected.getMessage());
+    }
+  }
+
+  @Test
+  public void testWithWorldReadAppendsReadOnlyWorldEntry() {
+    List<ACL> input = ClusterAclParser.parse(Collections.singletonList("ip:127.0.0.1:cdrwa"));
+    Assert.assertEquals(ClusterAclParser.withWorldRead(input), Arrays.asList(
+        new ACL(ZooDefs.Perms.ALL, new Id("ip", "127.0.0.1")),
+        new ACL(ZooDefs.Perms.READ, new Id("world", "anyone"))));
+    Assert.assertEquals(input.size(), 1, "input must not be modified");
+  }
+
+  @Test
+  public void testWithWorldReadMergesIntoExistingWorldEntry() {
+    List<ACL> input = ClusterAclParser.parse(Arrays.asList("world:anyone:cw", "digest:u:h:cdrwa"));
+    Assert.assertEquals(ClusterAclParser.withWorldRead(input), Arrays.asList(
+        new ACL(ZooDefs.Perms.CREATE | ZooDefs.Perms.WRITE | ZooDefs.Perms.READ,
+            new Id("world", "anyone")),
+        new ACL(ZooDefs.Perms.ALL, new Id("digest", "u:h"))));
+  }
+
+  @Test
+  public void testWithWorldReadResultIsUnmodifiable() {
+    try {
+      ClusterAclParser.withWorldRead(Collections.<ACL>emptyList())
+          .add(new ACL(ZooDefs.Perms.ALL, new Id("world", "anyone")));
+      Assert.fail("Expected the result to be unmodifiable");
+    } catch (UnsupportedOperationException expected) {
+      // expected
     }
   }
 

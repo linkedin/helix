@@ -42,7 +42,34 @@ import org.apache.zookeeper.data.Id;
  * </pre>
  */
 public final class ClusterAclParser {
+  public static final String ACL_FORMAT_HINT = "Expected scheme:id:permissions, for example "
+      + "world:anyone:r or x509:servicePrincipal(my-app:cdrw. Permissions are letters from "
+      + "c (create), d (delete), r (read), w (write), a (admin), or all.";
+
+  private static final Id WORLD_ANYONE = new Id("world", "anyone");
+
   private ClusterAclParser() {
+  }
+
+  /**
+   * @return a copy of {@code acl} that grants read to {@code world:anyone}. Read is merged into an
+   *         existing {@code world:anyone} entry, otherwise a read-only entry is appended.
+   */
+  public static List<ACL> withWorldRead(List<ACL> acl) {
+    List<ACL> result = new ArrayList<>(acl.size() + 1);
+    boolean worldEntryFound = false;
+    for (ACL entry : acl) {
+      if (WORLD_ANYONE.equals(entry.getId())) {
+        result.add(new ACL(entry.getPerms() | ZooDefs.Perms.READ, entry.getId()));
+        worldEntryFound = true;
+      } else {
+        result.add(entry);
+      }
+    }
+    if (!worldEntryFound) {
+      result.add(new ACL(ZooDefs.Perms.READ, WORLD_ANYONE));
+    }
+    return Collections.unmodifiableList(result);
   }
 
   /**
@@ -62,13 +89,13 @@ public final class ClusterAclParser {
 
   private static ACL parseEntry(String entry) {
     if (entry == null) {
-      throw new IllegalArgumentException("ACL entry must not be null");
+      throw new IllegalArgumentException("ACL entry must not be null. " + ACL_FORMAT_HINT);
     }
     int schemeEnd = entry.indexOf(':');
     int permsStart = entry.lastIndexOf(':');
     if (schemeEnd <= 0 || permsStart <= schemeEnd + 1 || permsStart == entry.length() - 1) {
       throw new IllegalArgumentException(
-          "Invalid ACL entry, expected scheme:id:permissions with non-empty parts");
+          "Invalid ACL entry \"" + entry + "\". " + ACL_FORMAT_HINT);
     }
     String scheme = entry.substring(0, schemeEnd);
     String id = entry.substring(schemeEnd + 1, permsStart);
@@ -99,7 +126,7 @@ public final class ClusterAclParser {
           break;
         default:
           throw new IllegalArgumentException(
-              "Invalid ACL permissions \"" + permissions + "\", expected letters from cdrwa or all");
+              "Invalid ACL permissions \"" + permissions + "\". " + ACL_FORMAT_HINT);
       }
     }
     return perms;
