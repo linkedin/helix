@@ -235,6 +235,44 @@ public class TestClusterConfig {
   }
 
   @Test
+  public void testGetRebalancePreferenceClampsOutOfRangeValues() {
+    // A REST update of the config writes the record without the checks of the setter.
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "-1");
+    preference.put(LESS_MOVEMENT.name(), "2000");
+    preference.put(TOP_STATE_EVENNESS.name(), "-5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 0, LESS_MOVEMENT, 1000, TOP_STATE_EVENNESS, 0));
+  }
+
+  @Test
+  public void testGetRebalancePreferenceIgnoresValuesThatAreNotIntegers() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "1");
+    preference.put(LESS_MOVEMENT.name(), " 2 ");
+    preference.put(TOP_STATE_EVENNESS.name(), "2.5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    // The key that does not parse is left out, so that it falls back to its default.
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 1, LESS_MOVEMENT, 2));
+
+    // As when one of them is missing, EVENNESS and LESS_MOVEMENT fall back together.
+    preference.put(EVENNESS.name(), "high");
+    preference.put(TOP_STATE_EVENNESS.name(), "4");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(TOP_STATE_EVENNESS, 4));
+  }
+
+  @Test
   public void testGetInstanceCapacityMap() {
     Map<String, Integer> capacityDataMap = ImmutableMap.of("item1", 1, "item2", 2, "item3", 3);
 

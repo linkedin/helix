@@ -77,6 +77,28 @@ public class TestConstraintBasedAlgorithmFactory {
     Assert.assertEquals(off.get(TOP_STATE).floatValue(), 0f, 0f);
   }
 
+  @Test
+  public void testInvalidTopStateEvennessInTheConfig() throws Exception {
+    // A REST update of the config writes the record without the checks of the setter.
+    ClusterConfig config = new ClusterConfig("testCluster");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "1");
+    preference.put(LESS_MOVEMENT.name(), "2");
+    preference.put(TOP_STATE_EVENNESS.name(), "-5");
+    config.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+    // A negative value is clamped to 0 instead of making the weight negative.
+    Assert.assertEquals(
+        weightsFor(config.getGlobalRebalancePreference()).get(TOP_STATE).floatValue(), 0f, 0f);
+
+    // A value that is not an integer falls back to the default instead of failing the rebalance.
+    preference.put(TOP_STATE_EVENNESS.name(), "2.5");
+    config.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+    Assert.assertEquals(weightsFor(config.getGlobalRebalancePreference()),
+        weightsFor(ImmutableMap.of(EVENNESS, 1, LESS_MOVEMENT, 2)));
+  }
+
   private static Map<Class<?>, Float> weightsFor(
       Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preferences) throws Exception {
     return weights(ConstraintBasedAlgorithmFactory.getInstance(preferences));
