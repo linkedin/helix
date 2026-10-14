@@ -74,9 +74,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.acl.AclRegister;
 import org.apache.helix.rest.acl.ClusterAclParser;
-import org.apache.helix.rest.acl.ClusterAclProvider;
 import org.apache.helix.rest.common.ContextPropertyKeys;
-import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
 import org.apache.helix.rest.server.filters.HelixAdminAuth;
@@ -209,14 +207,6 @@ public class ClusterAccessor extends AbstractHelixResource {
       }
     }
 
-    List<ACL> clusterAcl;
-    try {
-      clusterAcl = resolveClusterAcl(clusterId, parsedRequestAcl);
-    } catch (Exception ex) {
-      LOG.error("Failed to resolve ZooKeeper ACL for cluster {}. Exception: {}.", clusterId, ex);
-      return serverError(ex);
-    }
-
     try {
       getAclRegister().createACL(_servletRequest);
     } catch (Exception ex) {
@@ -225,7 +215,9 @@ public class ClusterAccessor extends AbstractHelixResource {
     }
 
     try {
-      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig, clusterAcl);
+      // A null ACL keeps the client default ACL
+      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig,
+          parsedRequestAcl.isEmpty() ? null : parsedRequestAcl);
     } catch (Exception ex) {
       LOG.error("Failed to create cluster {}. Exception: {}.", clusterId, ex);
       return serverError(ex);
@@ -1325,31 +1317,6 @@ public class ClusterAccessor extends AbstractHelixResource {
 
   private AclRegister getAclRegister() {
     return (AclRegister) _application.getProperties().get(ContextPropertyKeys.ACL_REGISTER.name());
-  }
-
-  /**
-   * Resolves the ZooKeeper ACL for a new cluster: the request's {@code acl} query parameters win,
-   * then the {@link ClusterAclProvider}, then the namespace's configured cluster ACL. Returns null
-   * when none is set, which keeps the client default ACL.
-   */
-  private List<ACL> resolveClusterAcl(String clusterId, List<ACL> requestAcl) {
-    if (!requestAcl.isEmpty()) {
-      return requestAcl;
-    }
-    ClusterAclProvider provider = (ClusterAclProvider) _application.getProperties()
-        .get(ContextPropertyKeys.CLUSTER_ACL_PROVIDER.name());
-    if (provider != null) {
-      List<ACL> providedAcl = provider.getClusterAcl(_servletRequest, clusterId);
-      if (providedAcl != null && !providedAcl.isEmpty()) {
-        return providedAcl;
-      }
-    }
-    HelixRestNamespace namespace = (HelixRestNamespace) _application.getProperties()
-        .get(ContextPropertyKeys.METADATA.name());
-    if (namespace != null && !namespace.getClusterAcl().isEmpty()) {
-      return namespace.getClusterAcl();
-    }
-    return null;
   }
 
   /**

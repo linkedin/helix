@@ -24,5 +24,4 @@ public enum ContextPropertyKeys {
   METADATA,
   ALL_NAMESPACES,
   ACL_REGISTER,
-  CLUSTER_ACL_PROVIDER,
 }
