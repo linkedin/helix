@@ -811,9 +811,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         if (monitor == null) {
           try {
             monitor = new CapacityKeyUsageMonitor(this, capacityKey).register();
-          } catch (JMException e) {
-            LOG.error("Failed to register CapacityKeyUsageMonitor for cluster {} capacityKey {}",
-                _clusterName, capacityKey, e);
+          } catch (JMException | RuntimeException e) {
+            // Retried on every update, so one line rather than a stack trace; a key that cannot be
+            // registered must not stop the other keys from being updated.
+            LOG.error("Failed to register CapacityKeyUsageMonitor for cluster {} capacityKey {}: "
+                + "{}", _clusterName, capacityKey, e.toString());
             continue;
           }
           _capacityKeyUsageMonitorMap.put(capacityKey, monitor);

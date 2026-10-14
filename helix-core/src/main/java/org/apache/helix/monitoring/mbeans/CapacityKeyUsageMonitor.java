@@ -22,6 +22,7 @@ package org.apache.helix.monitoring.mbeans;
 import java.util.ArrayList;
 import java.util.List;
 import javax.management.JMException;
+import javax.management.ObjectName;
 
 import org.apache.helix.monitoring.mbeans.dynamicMBeans.DynamicMBeanProvider;
 import org.apache.helix.monitoring.mbeans.dynamicMBeans.DynamicMetric;
@@ -39,6 +40,9 @@ import org.apache.helix.monitoring.mbeans.dynamicMBeans.SimpleDynamicMetric;
  * instances. The top-state max-to-mean ratio of a key is the evenness of the top-state load (e.g.
  * the leader load) on that key: {@code 1.0} means perfectly even, and it is {@code 0.0} when
  * undefined.
+ *
+ * <p>The MBean is named {@code ClusterStatus:cluster=<cluster>,capacityKey=<key>}. Like a resource
+ * name, a key that contains ',', '=', ':', '*' or '?' is quoted with {@link ObjectName#quote}.
  */
 public class CapacityKeyUsageMonitor extends DynamicMBeanProvider {
   public static final String CAPACITY_KEY_DN_KEY = "capacityKey";
@@ -93,8 +97,12 @@ public class CapacityKeyUsageMonitor extends DynamicMBeanProvider {
   }
 
   private String getBeanName() {
+    // Like a resource name, a key with a character that is special in an ObjectName value is
+    // quoted: e.g. "Q*" would otherwise make the name a pattern, which cannot be registered.
+    String safeCapacityKey = ClusterStatusMonitor.JMX_SPECIAL_CHARS.matcher(_capacityKey).find()
+        ? ObjectName.quote(_capacityKey) : _capacityKey;
     return String.format("%s,%s=%s", _clusterStatusMonitor.clusterBeanName(), CAPACITY_KEY_DN_KEY,
-        _capacityKey);
+        safeCapacityKey);
   }
 
   @Override

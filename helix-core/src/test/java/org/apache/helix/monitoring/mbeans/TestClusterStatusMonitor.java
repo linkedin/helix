@@ -1537,6 +1537,49 @@ public class TestClusterStatusMonitor {
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
+  @Test
+  public void testCapacityKeyUsageStatsGaugesForSpecialKeys() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    // "Q*" and "Q?" would make the ObjectName a pattern, and ':', '=' and ',' are not allowed in an
+    // unquoted value. Such keys are quoted, like resource names, and every key is updated.
+    List<String> specialKeys = ImmutableList.of("Q*", "Q?", "a:b", "a=b", "a,b");
+    List<String> keys = new ArrayList<>(specialKeys);
+    keys.addAll(ImmutableList.of("CU", "DISK", "PARTCOUNT"));
+    for (double scale : new double[] {1.0d, 2.0d}) {
+      Map<String, ClusterStatusMonitor.WeightedUsageStats> stats = new HashMap<>();
+      for (String key : keys) {
+        stats.put(key, new ClusterStatusMonitor.WeightedUsageStats(0.4d * scale, 0.2d * scale,
+            0.1d * scale, 2.0d));
+      }
+      monitor.updateCapacityKeyUsageStats(stats, stats);
+    }
+
+    List<ObjectName> objectNames = new ArrayList<>();
+    for (String key : keys) {
+      String beanKey = specialKeys.contains(key) ? ObjectName.quote(key) : key;
+      ObjectName objectName = monitor.getObjectName(String.format("%s,%s=%s",
+          monitor.clusterBeanName(), CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, beanKey));
+      Assert.assertEquals(_server.getAttribute(objectName, "SensorName"),
+          "CapacityKeyUsage." + clusterName + "." + key);
+      assertCapacityKeyUsageGauges(objectName, 0.8d, 0.4d, 0.2d, 2.0d, 0.8d, 0.4d, 0.2d, 2.0d);
+      objectNames.add(objectName);
+    }
+
+    monitor.reset();
+    for (ObjectName objectName : objectNames) {
+      Assert.assertFalse(_server.isRegistered(objectName), objectName.toString());
+    }
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
   private static ObjectName getCapacityKeyUsageObjectName(ClusterStatusMonitor monitor,
       String capacityKey) throws MalformedObjectNameException {
     return monitor.getObjectName(String.format("%s,%s=%s", monitor.clusterBeanName(),
