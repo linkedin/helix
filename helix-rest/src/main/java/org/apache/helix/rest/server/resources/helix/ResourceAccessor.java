@@ -58,6 +58,7 @@ import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRul
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
 import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
+import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -728,10 +729,15 @@ public class ResourceAccessor extends AbstractHelixResource {
         // have more active replicas than it has replicas -- so every partition is permanently below
         // its minimum active count, defeating delayed rebalance and min-active health guarantees. (3)
         // IdealStateRebalanceFeasibility is an always-on WAGED what-if: it blocks an edit (e.g. a
-        // replica-count increase) that the live instances cannot actually place. All validate the
-        // merged record, the same way the ZK write merges the incoming record into the existing one;
-        // each blocks only edits that introduce or worsen a problem and grandfathers an already-bad
-        // resource. force=true overrides; dryRun=true only reports the verdict without writing.
+        // replica-count increase) that the live instances cannot actually place. (4)
+        // UserDefinedRebalancerClass is a cheap, always-on check for USER_DEFINED resources: an edit
+        // that leaves the resource in USER_DEFINED mode without a loadable REBALANCER_CLASS_NAME that
+        // is a Rebalancer is unplaceable -- the controller resolves a null rebalancer and computes no
+        // assignment -- so the resource would be accepted but never come online (neither
+        // updateIdealState nor IdealState.isValid validates this). All validate the merged record, the
+        // same way the ZK write merges the incoming record into the existing one; each blocks only
+        // edits that introduce or worsen a problem and grandfathers an already-bad resource.
+        // force=true overrides; dryRun=true only reports the verdict without writing.
         HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
         IdealState existingIdealState =
             dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName));
@@ -757,7 +763,8 @@ public class ResourceAccessor extends AbstractHelixResource {
         GuardrailPipeline guardrailPipeline =
             new GuardrailPipeline(new StateModelDefExistenceGuardrailRule(),
                 new MinActiveReplicasConsistencyGuardrailRule(),
-                new IdealStateRebalanceFeasibilityGuardrailRule());
+                new IdealStateRebalanceFeasibilityGuardrailRule(),
+                new UserDefinedRebalancerClassGuardrailRule());
         Optional<Response> preflightResponse =
             preflight(guardrailPipeline, guardrailContext, force, dryRun);
         if (preflightResponse.isPresent()) {
