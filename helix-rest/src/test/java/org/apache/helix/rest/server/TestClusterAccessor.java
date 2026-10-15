@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -1475,7 +1476,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     testList.add("TestURL");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
 
-    // Bad request since Processor has not been defined.
+    // Bad request since the processor name has not been defined.
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.BAD_REQUEST.getStatusCode());
@@ -1483,7 +1484,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
         "TestProcessorName");
 
-    // Now response should be OK since all fields are set
+    // Now response should be OK since all required fields are set
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.OK.getStatusCode());
@@ -1517,6 +1518,62 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertEquals(cloudConfigRest.getCloudInfoProcessorName(), "TestProcessorName");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @DataProvider
+  public Object[][] missingRequiredCloudFields() {
+    return new Object[][]{
+        {CloudConfig.CloudConfigProperty.CLOUD_PROVIDER, CloudProvider.CUSTOMIZED.name()},
+        {CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME, "TestProcessor"}
+    };
+  }
+
+  @Test(dataProvider = "missingRequiredCloudFields")
+  public void testIncompleteCloudConfigRejected(CloudConfig.CloudConfigProperty missingField,
+      String requiredValue) throws Exception {
+    String clusterName =
+        TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName() + "_" + missingField;
+    String cloudConfigPath = "clusters/" + clusterName + "/cloudconfig";
+    ZNRecord record = new ZNRecord(CloudConfig.CLOUD_CONFIG_KW);
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
+        CloudProvider.CUSTOMIZED.name());
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
+        "TestProcessor");
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("TestURL"));
+    record.getSimpleFields().remove(missingField.name());
+
+    try {
+      put("clusters/" + clusterName, ImmutableMap.of("addCloudConfig", "true"),
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getClusters().contains(clusterName));
+
+      _gSetupTool.addCluster(clusterName, false);
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      get(cloudConfigPath, null, Response.Status.NOT_FOUND.getStatusCode(), true);
+
+      record.setSimpleField(missingField.name(), requiredValue);
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      ZNRecord stored =
+          toZNRecord(get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true));
+      Assert.assertEquals(stored.getSimpleFields(), record.getSimpleFields());
+      Assert.assertEquals(stored.getListFields(), record.getListFields());
+
+      record.getSimpleFields().remove(missingField.name());
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertEquals(
+          toZNRecord(get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true)), stored);
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
   }
 
   @Test(dependsOnMethods = "testAddCloudConfig")
