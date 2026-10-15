@@ -481,41 +481,63 @@ public class TestClusterSetup extends ZkUnitTestBase {
 
   @DataProvider
   public Object[][] cloudConfigProviders() {
+    List<String> sources = Collections.singletonList("TestURL");
     return new Object[][]{
-        {new CloudConfig.Builder().setCloudProvider(CloudProvider.CUSTOMIZED),
-            CloudProvider.CUSTOMIZED.name()},
-        {new CloudConfig.Builder(), null}
+        {new CloudConfig.Builder().setCloudEnabled(true).setCloudProvider(CloudProvider.CUSTOMIZED)
+            .setCloudInfoProcessorName("TestProcessorName").setCloudInfoSources(sources).build(),
+            true, CloudProvider.CUSTOMIZED.name(), "TestProcessorName"},
+        {new CloudConfig.Builder().setCloudEnabled(false).setCloudInfoSources(sources).build(),
+            false, null, null}
     };
   }
 
   @Test(dataProvider = "cloudConfigProviders")
-  public void testAddClusterWithDefaultCloudProcessor(CloudConfig.Builder cloudConfigInitBuilder,
-      String expectedProvider) throws Exception {
+  public void testAddClusterPreservesCloudConfig(CloudConfig cloudConfigInit,
+      boolean expectedEnabled, String expectedProvider, String expectedProcessor) throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
-    String clusterName = className + "_" + methodName + "_" + expectedProvider;
+    String clusterName =
+        className + "_" + methodName + "_" + expectedEnabled + "_" + expectedProvider;
 
-    cloudConfigInitBuilder.setCloudEnabled(true);
-    cloudConfigInitBuilder.setCloudInfoSources(Collections.singletonList("TestURL"));
-
-    CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
-
-    _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
     try {
+      _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
       CloudConfig cloudConfigFromZk = new ConfigAccessor(_gZkClient).getCloudConfig(clusterName);
       Assert.assertNotNull(cloudConfigFromZk);
-      Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
+      Assert.assertEquals(cloudConfigFromZk.isCloudEnabled(), expectedEnabled);
       Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), expectedProvider);
       Assert.assertEquals(cloudConfigFromZk.getCloudInfoSources(),
           Collections.singletonList("TestURL"));
-      Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorName());
+      Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), expectedProcessor);
       Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorPackage());
     } finally {
       _clusterSetup.deleteCluster(clusterName);
     }
   }
 
-  @Test(dependsOnMethods = "testAddClusterWithDefaultCloudProcessor")
+  @Test
+  public void testAddClusterRejectsIncompleteCloudConfig() throws Exception {
+    String clusterName =
+        TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    CloudConfig rawConfig = new CloudConfig();
+    rawConfig.setCloudEnabled(true);
+    rawConfig.setCloudInfoSource(Collections.singletonList("TestURL"));
+    rawConfig.getRecord().setSimpleField(
+        CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(), "TestProcessorName");
+
+    try {
+      try {
+        _clusterSetup.addCluster(clusterName, false, rawConfig);
+        Assert.fail("A missing cloud provider must be rejected by the native admin");
+      } catch (HelixException e) {
+        Assert.assertTrue(e.getMessage().contains("Cloud Provider is missing"));
+      }
+      Assert.assertNull(new ConfigAccessor(_gZkClient).getCloudConfig(clusterName));
+    } finally {
+      _clusterSetup.deleteCluster(clusterName);
+    }
+  }
+
+  @Test(dependsOnMethods = "testAddClusterPreservesCloudConfig")
   public void testAddClusterWithValidCloudConfig() throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
@@ -545,7 +567,7 @@ public class TestClusterSetup extends ZkUnitTestBase {
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
   }
 
-  @Test(dependsOnMethods = "testAddClusterWithDefaultCloudProcessor")
+  @Test(dependsOnMethods = "testAddClusterPreservesCloudConfig")
   public void testAddClusterWithFailure() throws Exception {
     HelixAdmin admin = mock(HelixAdmin.class);
     when(admin.addCluster(anyString(), anyBoolean())).thenReturn(Boolean.FALSE);
@@ -558,6 +580,7 @@ public class TestClusterSetup extends ZkUnitTestBase {
     cloudConfigInitBuilder.setCloudEnabled(true);
     cloudConfigInitBuilder.setCloudInfoSources(Collections.singletonList("TestURL"));
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
+    cloudConfigInitBuilder.setCloudInfoProcessorName("TestProcessorName");
 
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 

@@ -24,7 +24,6 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.helix.ConfigAccessor;
-import org.apache.helix.HelixCloudProperty;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.TestHelper;
@@ -102,7 +101,7 @@ public class TestCloudConfig extends ZkUnitTestBase {
     String clusterName = "CLUSTER_" + className;
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
-    // Verify will fail because cloudID has net been defined.
+    // Validation fails because the cloud provider is missing.
     CloudConfig cloudConfig = builder.build();
   }
 
@@ -120,10 +119,9 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig cloudConfig = builder.build();
   }
 
-  @Test
+  @Test(expectedExceptions = HelixException.class,
+      expectedExceptionsMessageRegExp = ".*CloudInfoProcessorName.*")
   public void testCloudConfigBuilderWithoutProcessorName() {
-    // CUSTOMIZED no longer requires a processor name; the engine supplies the default LinkedIn
-    // processor. Building such a config succeeds as long as CloudInfoSources is present.
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
@@ -131,24 +129,17 @@ public class TestCloudConfig extends ZkUnitTestBase {
     List<String> testList = new ArrayList<String>();
     builder.setCloudInfoSources(testList);
     builder.addCloudInfoSource("TestURL");
-    CloudConfig cloudConfig = builder.build();
-    Assert.assertTrue(cloudConfig.isCloudEnabled());
-    Assert.assertEquals(cloudConfig.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
-    // The processor name is not stored in the config; the engine defaults it at consumption time.
-    Assert.assertNull(cloudConfig.getCloudInfoProcessorName());
+    builder.build();
   }
 
-  @Test
-  public void testCloudConfigBuilderLeavesProviderUnspecified() {
+  @Test(expectedExceptions = HelixException.class,
+      expectedExceptionsMessageRegExp = ".*Cloud Provider is missing.*")
+  public void testCloudConfigBuilderWithoutProvider() {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.addCloudInfoSource("TestURL");
-    CloudConfig cloudConfig = builder.build();
-    Assert.assertTrue(cloudConfig.isCloudEnabled());
-    Assert.assertNull(cloudConfig.getCloudProvider());
-    Assert.assertNull(builder.getCloudProvider());
-    Assert.assertEquals(new HelixCloudProperty(cloudConfig).getCloudProvider(),
-        CloudProvider.CUSTOMIZED.name());
+    builder.setCloudInfoProcessorName("TestProcessor");
+    builder.build();
   }
 
   @DataProvider
@@ -165,6 +156,10 @@ public class TestCloudConfig extends ZkUnitTestBase {
 
   @Test(dataProvider = "cloudConfigBuilderInputs")
   public void testBuilderDoesNotMutateInput(ZNRecord record, CloudConfig.Builder builder) {
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
+        CloudProvider.CUSTOMIZED.name());
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
+        "TestProcessor");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
         Collections.singletonList("TestURL"));
     ZNRecord original = new ZNRecord(record);
@@ -173,8 +168,7 @@ public class TestCloudConfig extends ZkUnitTestBase {
 
     Assert.assertEquals(record, original);
     Assert.assertEquals(built.getRecord(), original);
-    Assert.assertEquals(new HelixCloudProperty(built).getCloudProvider(),
-        CloudProvider.CUSTOMIZED.name());
+    Assert.assertNull(built.getCloudInfoProcessorPackage());
   }
 
   @Test(dataProvider = "cloudConfigBuilderInputs")
@@ -183,9 +177,9 @@ public class TestCloudConfig extends ZkUnitTestBase {
 
     try {
       builder.build();
-      Assert.fail("Missing cloud-info sources must be rejected");
+      Assert.fail("A missing cloud provider must be rejected");
     } catch (HelixException e) {
-      Assert.assertTrue(e.getMessage().contains("CloudInfoSources"));
+      Assert.assertTrue(e.getMessage().contains("Cloud Provider is missing"));
     }
     Assert.assertEquals(record, original);
   }

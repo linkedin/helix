@@ -271,15 +271,14 @@ public class CloudConfig extends HelixProperty {
 
     private void validate() {
       if (this.getCloudEnabled()) {
-        // A missing provider is resolved as CUSTOMIZED at consumption time, not persisted here.
-        if (this.getCloudProvider() == null
-            || this.getCloudProvider().equals(CloudProvider.CUSTOMIZED.name())) {
-          // CloudInfoProcessorName is no longer required: when it is absent the engine
-          // (HelixCloudProperty) supplies the default LinkedIn cloud-info processor. CloudInfoSources
-          // still varies per fabric/product and therefore remains required.
-          if (this.getCloudInfoSources() == null || this.getCloudInfoSources().size() == 0) {
+        if (this.getCloudProvider() == null) {
+          throw new HelixException(
+              "This Cloud Configuration is Invalid. The Cloud Provider is missing from the config.");
+        } else if (this.getCloudProvider().equals(CloudProvider.CUSTOMIZED.name())) {
+          if (this.getCloudInfoProcessorName() == null || this.getCloudInfoSources() == null
+              || this.getCloudInfoSources().size() == 0) {
             throw new HelixException(
-                "This Cloud Configuration is Invalid. CUSTOMIZED provider has been chosen without defining CloudInfoSources");
+                "This Cloud Configuration is Invalid. CUSTOMIZED provider has been chosen without defining CloudInfoProcessorName or CloudInfoSources");
           }
         }
       }

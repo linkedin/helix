@@ -46,13 +46,6 @@ public class HelixCloudProperty {
   private static final String CONNECTION_TIMEOUT_MS = "connection_timeout_ms";
   private static final String REQUEST_TIMEOUT_MS = "request_timeout_ms";
 
-  // LinkedIn cloud-info processor coordinates. Every cloud-enabled cluster at LinkedIn uses the
-  // CUSTOMIZED provider with this single processor implementation, so the engine supplies these as
-  // defaults rather than requiring every cluster/provisioner to specify them in CloudConfig.
-  private static final String DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE = "com.linkedin.helix.cloudinfo";
-  private static final String DEFAULT_CLOUD_INFO_PROCESSOR_NAME =
-      "LinkedInCloudInstanceInformationProcessor";
-
   // Denote whether the instance is considered as in a cloud environment.
   private boolean _isCloudEnabled;
 
@@ -103,14 +96,9 @@ public class HelixCloudProperty {
     setCloudEnabled(cloudConfig.isCloudEnabled());
     setCloudId(cloudConfig.getCloudID());
     String cloudProviderStr = cloudConfig.getCloudProvider();
-    // When a cluster is cloud-enabled but no provider is specified, default to the CUSTOMIZED
-    // provider so the engine can supply the cloud-info processor package and name below. This lets
-    // provisioners omit these constant values from CloudConfig.
-    if (cloudProviderStr == null && cloudConfig.isCloudEnabled()) {
-      cloudProviderStr = CloudProvider.CUSTOMIZED.name();
-    }
     setCloudProvider(cloudProviderStr);
     if (cloudProviderStr != null) {
+      String cloudInfoProcessorName = null;
       switch (CloudProvider.valueOf(cloudProviderStr)) {
         case AZURE:
           Properties azureProperties = new Properties();
@@ -136,16 +124,13 @@ public class HelixCloudProperty {
           break;
         case CUSTOMIZED:
           setCloudInfoSources(cloudConfig.getCloudInfoSources());
-          String processorName = cloudConfig.getCloudInfoProcessorName();
-          String processorPackage = cloudConfig.getCloudInfoProcessorPackage();
-          if (processorPackage == null) {
-            // Name-only configs must retain their legacy package.
-            processorPackage = processorName == null ? DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE
-                : DEFAULT_CLOUD_PROCESSOR_PACKAGE_PREFIX + cloudProviderStr.toLowerCase();
-          }
-          setCloudInfoProcessorPackage(processorPackage);
-          setCloudInfoProcessorName(
-              processorName != null ? processorName : DEFAULT_CLOUD_INFO_PROCESSOR_NAME);
+          // Although it is unlikely that cloudInfoProcessorPackage is null, when using the CUSTOMIZED
+          // cloud provider, we will set the processor package to helix cloud package to preserves the
+          // backwards compatibility.
+          setCloudInfoProcessorPackage(cloudConfig.getCloudInfoProcessorPackage() != null
+              ? cloudConfig.getCloudInfoProcessorPackage()
+              : DEFAULT_CLOUD_PROCESSOR_PACKAGE_PREFIX + cloudProviderStr.toLowerCase());
+          setCloudInfoProcessorName(cloudConfig.getCloudInfoProcessorName());
           break;
         default:
           throw new HelixException(
