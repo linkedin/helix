@@ -39,8 +39,9 @@ import static org.mockito.Mockito.when;
  * into a USER_DEFINED configuration whose REBALANCER_CLASS_NAME is unset, unloadable, or not a
  * {@link Rebalancer}, and grandfathers a resource that already referenced that same unresolvable
  * class. The tests mock the metadata store the rule reads back &mdash; the current (pre-write) ideal
- * state keyed by resource name &mdash; and pass the proposed (for an add, the new; for an update, the
- * merged post-write) ideal state through the context. Real classes are used to exercise class
+ * state keyed by resource name &mdash; and pass the proposed ideal state (the merged post-write
+ * record for an update, or simply the new one when there is no current ideal state) through the
+ * context. Real classes are used to exercise class
  * resolution: {@link SemiAutoRebalancer} is loadable and a {@code Rebalancer}; {@code java.lang.String}
  * is loadable but not a {@code Rebalancer}; a made-up name is unloadable.
  */
@@ -109,6 +110,19 @@ public class TestUserDefinedRebalancerClassGuardrailRule {
         rule.validate(context(idealState(IdealState.RebalanceMode.USER_DEFINED, UNLOADABLE), null));
     assertInfeasible(result);
     Assert.assertTrue(result.getViolations().get(0).getMessage().contains(UNLOADABLE));
+  }
+
+  @Test
+  public void testUserDefinedWithPaddedClassNameIsInfeasible() {
+    // A valid Rebalancer name with surrounding whitespace is loaded as-is -- the controller never
+    // trims REBALANCER_CLASS_NAME, so a padded name throws ClassNotFoundException there and the
+    // resource silently never comes online. The rule must mirror that and block it; a trimmed check
+    // would wrongly pass it.
+    String paddedRebalancer = " " + VALID_REBALANCER + " ";
+    ValidationResult result = rule.validate(
+        context(idealState(IdealState.RebalanceMode.USER_DEFINED, paddedRebalancer), null));
+    assertInfeasible(result);
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains(paddedRebalancer));
   }
 
   @Test

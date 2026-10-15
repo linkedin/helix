@@ -43,6 +43,7 @@ import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
+import org.apache.helix.controller.rebalancer.SemiAutoRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
@@ -50,6 +51,7 @@ import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRul
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
 import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
+import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
@@ -1705,6 +1707,85 @@ public class TestResourceAccessor extends AbstractTestClass {
       webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
     }
     return webTarget.request().put(entity);
+  }
+
+  /**
+   * An ideal-state "update" that leaves a resource in USER_DEFINED mode with a REBALANCER_CLASS_NAME
+   * that cannot be resolved to a {@link org.apache.helix.controller.rebalancer.Rebalancer} is
+   * unplaceable: the controller loads that class to drive the resource and, when it cannot be
+   * resolved, computes no assignment, so the resource is accepted into ZooKeeper but never comes
+   * online. The guard rail validates the merged (post-write) ideal state and rejects such a write.
+   * This also proves the rule is actually wired into the updateResourceIdealState pipeline (the unit
+   * tests cover the rule in isolation). It exercises the happy path (switch to USER_DEFINED with a
+   * loadable rebalancer, written), enforcement (400 + verdict naming the rule, unchanged), dry-run
+   * (200 + verdict, unchanged) and force bypass (written). The resource is created and dropped
+   * locally so it does not perturb the other tests that share {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testUpdateResourceIdealStateUserDefinedRebalancerGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String resourceName = "userDefinedRebalancerGuardrailResource";
+    String validRebalancer = SemiAutoRebalancer.class.getName();
+    String unloadableRebalancer = "com.example.NoSuchRebalancer";
+    try {
+      // Baseline: a valid FULL_AUTO resource (not yet USER_DEFINED).
+      _gSetupTool.addResourceToCluster(CLUSTER_NAME, resourceName, 1, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.name());
+
+      // 1) Happy path: switching to USER_DEFINED with a loadable Rebalancer is written.
+      Response valid = postIdealStateUpdate(resourceName,
+          userDefinedUpdate(resourceName, validRebalancer), Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentRebalancerClassName(resourceName), validRebalancer);
+
+      // 2) Enforcement: repointing REBALANCER_CLASS_NAME at an unloadable class is blocked with a 400
+      // infeasible verdict naming the rule, and nothing is written (still the valid rebalancer).
+      Response blocked = postIdealStateUpdate(resourceName,
+          userDefinedUpdate(resourceName, unloadableRebalancer), Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(blockedVerdict.toString()
+          .contains(UserDefinedRebalancerClassGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentRebalancerClassName(resourceName), validRebalancer);
+
+      // 3) Dry-run reports the same infeasible verdict (200) without writing.
+      Response dryRun = postIdealStateUpdate(resourceName,
+          userDefinedUpdate(resourceName, unloadableRebalancer), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(dryRunVerdict.toString()
+          .contains(UserDefinedRebalancerClassGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentRebalancerClassName(resourceName), validRebalancer);
+
+      // 4) force=true bypasses the guard rail: the unresolvable class is actually written.
+      Response forced = postIdealStateUpdate(resourceName,
+          userDefinedUpdate(resourceName, unloadableRebalancer), ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentRebalancerClassName(resourceName), unloadableRebalancer);
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resourceName);
+      } catch (Exception ignored) {
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private String currentRebalancerClassName(String resourceName) {
+    return _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resourceName)
+        .getRebalancerClassName();
+  }
+
+  private static ZNRecord userDefinedUpdate(String resourceName, String rebalancerClassName) {
+    // A partial "update" record switching the resource to USER_DEFINED with the given
+    // REBALANCER_CLASS_NAME; the endpoint merges it into the existing ideal state.
+    IdealState update = new IdealState(resourceName);
+    update.setRebalanceMode(IdealState.RebalanceMode.USER_DEFINED);
+    update.setRebalancerClassName(rebalancerClassName);
+    return update.getRecord();
   }
 
   @Test(dependsOnMethods = "testAddResourceWithWeight")

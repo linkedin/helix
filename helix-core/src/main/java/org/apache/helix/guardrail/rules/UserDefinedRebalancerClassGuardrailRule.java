@@ -65,8 +65,17 @@ import org.apache.helix.util.HelixUtil;
  * when the write <em>introduces or changes</em> the resource into an unresolvable {@code USER_DEFINED}
  * configuration. A resource that already references the same unresolvable class &mdash; e.g. because
  * the class was removed after the resource was created &mdash; is grandfathered, so an edit to an
- * unrelated field of such a resource is not blocked; only an add, a switch to {@code USER_DEFINED},
- * or an edit that points {@code REBALANCER_CLASS_NAME} at a (still) unresolvable class is rejected.
+ * unrelated field of such a resource is not blocked; only a switch to {@code USER_DEFINED}, or an
+ * edit that points an already-{@code USER_DEFINED} resource's {@code REBALANCER_CLASS_NAME} at a
+ * (still) unresolvable class, is rejected.
+ * <p>
+ * The rule is currently wired only into the ideal-state <em>update</em> path
+ * ({@code updateResourceIdealState}, {@code command=update}), which operates on an existing resource
+ * ({@code updateIdealState} rejects a resource that does not yet exist), so in practice it never sees
+ * a brand-new resource: the write it guards is always a modification of an existing ideal state.
+ * Extending the same pre-write check to the plain {@code addResource} path, so a resource cannot be
+ * <em>created</em> directly in an unresolvable {@code USER_DEFINED} configuration, is a natural
+ * follow-up.
  */
 public class UserDefinedRebalancerClassGuardrailRule implements GuardrailRule {
 
@@ -133,25 +142,30 @@ public class UserDefinedRebalancerClassGuardrailRule implements GuardrailRule {
     if (className == null || className.trim().isEmpty()) {
       return "no REBALANCER_CLASS_NAME set";
     }
-    String trimmed = className.trim();
     Class<?> clazz;
     try {
-      clazz = HelixUtil.loadClass(UserDefinedRebalancerClassGuardrailRule.class, trimmed);
+      // Resolve the class name exactly as the controller does -- BestPossibleStateCalcStage passes
+      // getRebalancerClassName() to loadClass as-is. Do NOT trim here: a padded but otherwise valid
+      // name (e.g. from a copy/paste or templated JSON) would pass a trimmed check yet still throw
+      // ClassNotFoundException on the controller, which is exactly the silent, deferred failure this
+      // rule exists to prevent.
+      clazz = HelixUtil.loadClass(UserDefinedRebalancerClassGuardrailRule.class, className);
     } catch (ClassNotFoundException | LinkageError e) {
-      return String.format("REBALANCER_CLASS_NAME \"%s\", which cannot be loaded", trimmed);
+      return String.format("REBALANCER_CLASS_NAME \"%s\", which cannot be loaded", className);
     }
     if (!Rebalancer.class.isAssignableFrom(clazz)) {
-      return String.format("REBALANCER_CLASS_NAME \"%s\", which is not a %s", trimmed,
+      return String.format("REBALANCER_CLASS_NAME \"%s\", which is not a %s", className,
           Rebalancer.class.getName());
     }
     return null;
   }
 
   private static String normalize(String className) {
-    if (className == null) {
-      return "";
-    }
-    return className.trim();
+    // Compare the raw class names (null-safe) when deciding whether an edit changed
+    // REBALANCER_CLASS_NAME. Surrounding whitespace is significant because the controller loads the
+    // name as-is, so an edit that only adds or removes it is a real change and must not be
+    // grandfathered.
+    return className == null ? "" : className;
   }
 
   private static IdealState readIdealState(GuardrailContext context, String resourceName) {
