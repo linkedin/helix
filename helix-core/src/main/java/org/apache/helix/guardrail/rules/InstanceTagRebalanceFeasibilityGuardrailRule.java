@@ -128,11 +128,9 @@ public class InstanceTagRebalanceFeasibilityGuardrailRule implements GuardrailRu
     }
 
     // Pre-filter: a removal can only shrink placement for a resource pinned (INSTANCE_GROUP_TAG) to a
-    // removed tag. If no WAGED resource is pinned to any of these tags, skip the double what-if. The
-    // pinning tag is read from the same merged ResourceConfig-over-IdealState view WAGED uses, so a
-    // resource pinned only through its ResourceConfig is not missed.
+    // removed tag in its IdealState, matching WAGED placement. Otherwise skip the double what-if.
     Set<String> wagedGroupTags =
-        WagedRebalanceFeasibilityWhatIf.collectWagedInstanceGroupTags(dataAccessor, wagedIdealStates);
+        WagedRebalanceFeasibilityWhatIf.collectWagedInstanceGroupTags(wagedIdealStates);
     boolean affectsPinnedResource = false;
     for (String tag : effectiveRemovedTags) {
       if (wagedGroupTags.contains(tag)) {
