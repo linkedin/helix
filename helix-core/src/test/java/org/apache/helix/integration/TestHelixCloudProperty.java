@@ -88,11 +88,11 @@ public class TestHelixCloudProperty {
     Assert.assertEquals(customCloudProperty.getCloudInfoSources(),
         Collections.singletonList("https://custom-cloud.com"));
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorPackage(),
-        "com.linkedin.helix.cloudinfo");
+        "org.apache.helix.cloud.customized");
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorName(),
         "CustomCloudInstanceInfoProcessor");
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorFullyQualifiedClassName(),
-        "com.linkedin.helix.cloudinfo.CustomCloudInstanceInfoProcessor");
+        "org.apache.helix.cloud.customized.CustomCloudInstanceInfoProcessor");
   }
 
   @Test

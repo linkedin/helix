@@ -136,15 +136,16 @@ public class HelixCloudProperty {
           break;
         case CUSTOMIZED:
           setCloudInfoSources(cloudConfig.getCloudInfoSources());
-          // The processor package and name are constant across LinkedIn's cloud-enabled clusters,
-          // so when they are absent from CloudConfig the engine falls back to the LinkedIn defaults.
-          // Explicitly provided values are still respected for backwards compatibility.
-          setCloudInfoProcessorPackage(cloudConfig.getCloudInfoProcessorPackage() != null
-              ? cloudConfig.getCloudInfoProcessorPackage()
-              : DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE);
-          setCloudInfoProcessorName(cloudConfig.getCloudInfoProcessorName() != null
-              ? cloudConfig.getCloudInfoProcessorName()
-              : DEFAULT_CLOUD_INFO_PROCESSOR_NAME);
+          String processorName = cloudConfig.getCloudInfoProcessorName();
+          String processorPackage = cloudConfig.getCloudInfoProcessorPackage();
+          if (processorPackage == null) {
+            // Name-only configs must retain their legacy package.
+            processorPackage = processorName == null ? DEFAULT_CLOUD_INFO_PROCESSOR_PACKAGE
+                : DEFAULT_CLOUD_PROCESSOR_PACKAGE_PREFIX + cloudProviderStr.toLowerCase();
+          }
+          setCloudInfoProcessorPackage(processorPackage);
+          setCloudInfoProcessorName(
+              processorName != null ? processorName : DEFAULT_CLOUD_INFO_PROCESSOR_NAME);
           break;
         default:
           throw new HelixException(

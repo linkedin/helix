@@ -21,6 +21,7 @@ package org.apache.helix.tools;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -57,6 +58,8 @@ import org.testng.annotations.Test;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 public class TestClusterSetup extends ZkUnitTestBase {
@@ -475,23 +478,35 @@ public class TestClusterSetup extends ZkUnitTestBase {
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
-  @Test(expectedExceptions = HelixException.class)
-  public void testAddClusterWithInvalidCloudConfig() throws Exception {
+  @Test
+  public void testAddClusterWithDefaultCloudProcessor() throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
     String clusterName = className + "_" + methodName;
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
+    cloudConfigInitBuilder.setCloudInfoSources(Collections.singletonList("TestURL"));
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
 
-    // Since CloudInfoSources is missing, building this CUSTOMIZED config throws an exception
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 
     _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
+    try {
+      CloudConfig cloudConfigFromZk = new ConfigAccessor(_gZkClient).getCloudConfig(clusterName);
+      Assert.assertNotNull(cloudConfigFromZk);
+      Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
+      Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+      Assert.assertEquals(cloudConfigFromZk.getCloudInfoSources(),
+          Collections.singletonList("TestURL"));
+      Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorName());
+      Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorPackage());
+    } finally {
+      _clusterSetup.deleteCluster(clusterName);
+    }
   }
 
-  @Test(dependsOnMethods = "testAddClusterWithInvalidCloudConfig")
+  @Test(dependsOnMethods = "testAddClusterWithDefaultCloudProcessor")
   public void testAddClusterWithValidCloudConfig() throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
@@ -521,23 +536,30 @@ public class TestClusterSetup extends ZkUnitTestBase {
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
   }
 
-  @Test(dependsOnMethods = "testAddClusterWithInvalidCloudConfig",
-      expectedExceptions = HelixException.class)
+  @Test(dependsOnMethods = "testAddClusterWithDefaultCloudProcessor")
   public void testAddClusterWithFailure() throws Exception {
     HelixAdmin admin = mock(HelixAdmin.class);
     when(admin.addCluster(anyString(), anyBoolean())).thenReturn(Boolean.FALSE);
+    ClusterSetup clusterSetup = new ClusterSetup(_gZkClient, admin);
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
     String clusterName = className + "_" + methodName;
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
+    cloudConfigInitBuilder.setCloudInfoSources(Collections.singletonList("TestURL"));
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
 
-    // Since CloudInfoSources is missing, building this CUSTOMIZED config throws an exception
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 
-    _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
+    try {
+      clusterSetup.addCluster(clusterName, false, cloudConfigInit);
+      Assert.fail("Expected cluster creation to fail");
+    } catch (HelixException e) {
+      Assert.assertEquals(e.getMessage(), "Cluster creation failed for " + clusterName);
+    }
+    verify(admin).addCluster(clusterName, false);
+    verifyNoMoreInteractions(admin);
   }
 
   @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")
