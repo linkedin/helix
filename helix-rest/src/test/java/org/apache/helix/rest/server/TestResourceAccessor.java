@@ -49,6 +49,7 @@ import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailR
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
+import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
@@ -1220,11 +1221,113 @@ public class TestResourceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /**
+   * Guard rail regression: repointing a WAGED resource's {@code STATE_MODEL_DEF_REF} at a state model
+   * absent from the cluster's STATEMODELDEFS must produce exactly ONE verdict violation &mdash; the
+   * clear {@code STATE_MODEL_DEF_NOT_FOUND} from {@link StateModelDefExistenceGuardrailRule} &mdash;
+   * and NOT a second, misleading {@code IDEAL_STATE_REBALANCE_FEASIBILITY} violation. The WAGED
+   * what-if cannot resolve the missing state model, so before
+   * {@link IdealStateRebalanceFeasibilityGuardrailRule}'s short-circuit it surfaced a capacity
+   * violation whose remedy (lower replicas / add capacity) is wrong for a missing state model, which
+   * only drops that one resource. Uses a self-contained, converged WAGED cluster so the feasibility
+   * what-if's baseline is computable and it would actually run were it not short-circuited.
+   */
+  @Test(dependsOnMethods = "testUpdateIdealStateRebalanceFeasibilityGuardrail")
+  public void testUpdateWagedIdealStateMissingStateModelSingleViolation() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterWagedStateModelSingleViolation";
+    String resource = "TestDB_WAGED_SMD";
+    String capacityKey = "CU";
+    String missingStateModel = "NonExistentStateModel";
+    int numNodes = 3;
+    int numPartitions = 3;
+    int replica = 3;
+    try {
+      _gSetupTool.addCluster(cluster, true);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList(capacityKey));
+      clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(capacityKey, 100));
+      clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(capacityKey, 1));
+      _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+      for (int i = 0; i < numNodes; i++) {
+        String instance = cluster + "_localhost_" + (14200 + i);
+        _gSetupTool.addInstanceToCluster(cluster, instance);
+        MockParticipantManager participant =
+            new MockParticipantManager(ZK_ADDR, cluster, instance);
+        participant.syncStart();
+        _mockParticipantManagers.add(participant);
+      }
+      _clusterControllerManagers.add(startController(cluster));
+
+      _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+      IdealState idealState =
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+      idealState.setMinActiveReplicas(1);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+      _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+      try (BestPossibleExternalViewVerifier verifier =
+          new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+        Assert.assertTrue(verifier.verifyByPolling(),
+            "cluster should converge before exercising the guard rail");
+      }
+
+      String endpoint = "clusters/{}/resources/{}/idealState?command=update";
+
+      // 1. Enforcement: repointing to a missing state model is blocked with a 400 infeasible verdict
+      //    that names STATE_MODEL_DEF_NOT_FOUND and NOT IDEAL_STATE_REBALANCE_FEASIBILITY -- a single
+      //    violation, because the feasibility rule defers to the existence rule instead of adding a
+      //    second, misleading capacity violation.
+      Response blocked = new JerseyUriRequestBuilder(endpoint)
+          .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .format(cluster, resource)
+          .post(this, stateModelUpdateEntity(resource, missingStateModel));
+      String blockedBody = blocked.readEntity(String.class);
+      Assert.assertTrue(blockedBody.contains(StateModelDefExistenceGuardrailRule.RULE_ID),
+          "verdict should name the state-model existence rule: " + blockedBody);
+      Assert.assertFalse(blockedBody.contains(IdealStateRebalanceFeasibilityGuardrailRule.RULE_ID),
+          "verdict must not carry a misleading feasibility violation: " + blockedBody);
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getStateModelDefRef(), "MasterSlave", "a blocked update must not be written");
+
+      // 2. dryRun reports the same single-violation verdict (200) without writing.
+      Response dryRun = new JerseyUriRequestBuilder(endpoint + "&dryRun=true")
+          .format(cluster, resource).post(this, stateModelUpdateEntity(resource, missingStateModel));
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(StateModelDefExistenceGuardrailRule.RULE_ID));
+      Assert.assertFalse(
+          dryRunVerdict.toString().contains(IdealStateRebalanceFeasibilityGuardrailRule.RULE_ID),
+          "dryRun verdict must not carry a misleading feasibility violation");
+      Assert.assertEquals(
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource)
+              .getStateModelDefRef(), "MasterSlave", "dryRun must not write");
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   // An ideal-state "update" body carrying only a new REPLICAS count; the endpoint merges it into the
   // existing (WAGED) ideal state, so the guard rail sees the proposed replica count.
   private static Entity replicaUpdateEntity(String resource, int replicas) throws IOException {
     IdealState update = new IdealState(resource);
     update.setReplicas(String.valueOf(replicas));
+    return Entity.entity(OBJECT_MAPPER.writeValueAsString(update.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+  }
+
+  // An ideal-state "update" body carrying only a new STATE_MODEL_DEF_REF; the endpoint merges it into
+  // the existing (WAGED) ideal state, so the guard rails see the proposed state model.
+  private static Entity stateModelUpdateEntity(String resource, String stateModelDefRef)
+      throws IOException {
+    IdealState update = new IdealState(resource);
+    update.setStateModelDefRef(stateModelDefRef);
     return Entity.entity(OBJECT_MAPPER.writeValueAsString(update.getRecord()),
         MediaType.APPLICATION_JSON_TYPE);
   }
@@ -1447,6 +1550,161 @@ public class TestResourceAccessor extends AbstractTestClass {
       webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
     }
     return webTarget.request().post(entity);
+  }
+
+  /**
+   * Guard rail: adding a WAGED resource whose STATE_MODEL_DEF_REF names a state model absent from the
+   * cluster's STATEMODELDEFS is rejected before the resource is written to ZooKeeper. The controller
+   * drives every partition's transitions from that state model, so a resource referencing a missing
+   * one is accepted but can never be brought online. The plain addResource admin path already rejects
+   * this, but addResourceWithWeight does not, so the guard rail closes that gap. Verifies enforcement
+   * (400 + verdict naming the rule, not created) and dry-run (200 + same verdict, not created); both
+   * short-circuit before the write, so they isolate this rule from addResourceWithWeight's own WAGED
+   * capacity validation. The valid-reference happy path and force bypass of this rule are covered by
+   * {@link #testUpdateResourceIdealStateStateModelDefGuardrail}, {@link #testAddResourceWithWeight}
+   * and the unit tests.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testAddWagedResourceStateModelDefGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    Map<String, Map<String, Integer>> withinCapacity = ImmutableMap.of(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 100, "BAR", 100));
+    String missingStateModel = "NonExistentStateModel";
+    String blockedResource = "stateModelDefBlockedWagedResource";
+    try {
+      // 1) Enforcement: a WAGED add whose STATE_MODEL_DEF_REF is absent from STATEMODELDEFS is
+      // blocked with a 400 infeasible verdict naming the rule, before anything is written.
+      Response blocked = putWagedResourceWithStateModel(blockedResource, missingStateModel,
+          wagedResourceConfig(blockedResource, withinCapacity), Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(blockedVerdict.toString()
+          .contains(StateModelDefExistenceGuardrailRule.RULE_ID));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+
+      // 2) Dry-run reports the same infeasible verdict (200) without writing.
+      Response dryRun = putWagedResourceWithStateModel(blockedResource, missingStateModel,
+          wagedResourceConfig(blockedResource, withinCapacity), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(dryRunVerdict.toString()
+          .contains(StateModelDefExistenceGuardrailRule.RULE_ID));
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getResourcesInCluster(CLUSTER_NAME)
+          .contains(blockedResource));
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, blockedResource);
+      } catch (Exception ignored) {
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Guard rail: an ideal-state "update" that repoints STATE_MODEL_DEF_REF at a state model absent
+   * from the cluster's STATEMODELDEFS is rejected before the merged ideal state is written. The
+   * controller cannot compute any transition for a resource whose state model is missing, so it would
+   * be accepted but never come online; updateIdealState does not validate this. The guard rail
+   * validates the merged (post-write) ideal state and, like the other ideal-state rules, fires only
+   * on an edit that introduces the hazard (a pre-existing missing reference is grandfathered).
+   * Exercises the happy path (repoint to another existing model, written), enforcement (400 +
+   * verdict, unchanged), dry-run (200 + verdict, unchanged) and force bypass (written). The resource
+   * is created and dropped locally so it does not perturb the other tests that share
+   * {@value #CLUSTER_NAME}.
+   */
+  @Test(dependsOnMethods = "testAddResourceWithWeight")
+  public void testUpdateResourceIdealStateStateModelDefGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String resourceName = "stateModelDefGuardrailResource";
+    String missingStateModel = "NonExistentStateModel";
+    try {
+      // Baseline: a valid resource on the MasterSlave state model.
+      _gSetupTool.addResourceToCluster(CLUSTER_NAME, resourceName, 1, "MasterSlave",
+          IdealState.RebalanceMode.FULL_AUTO.name());
+      Assert.assertEquals(currentStateModelDefRef(resourceName), "MasterSlave");
+
+      // 1) Happy path: repointing to another state model that exists (LeaderStandby) is written.
+      Response valid = postIdealStateUpdate(resourceName,
+          stateModelDefUpdate(resourceName, "LeaderStandby"), Collections.emptyMap());
+      Assert.assertEquals(valid.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentStateModelDefRef(resourceName), "LeaderStandby");
+
+      // 2) Enforcement: repointing to a state model absent from STATEMODELDEFS is blocked with a 400
+      // infeasible verdict, and nothing is written (still LeaderStandby).
+      Response blocked = postIdealStateUpdate(resourceName,
+          stateModelDefUpdate(resourceName, missingStateModel), Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(blockedVerdict.toString()
+          .contains(StateModelDefExistenceGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentStateModelDefRef(resourceName), "LeaderStandby");
+
+      // 3) Dry-run reports the same infeasible verdict (200) without writing (still LeaderStandby).
+      Response dryRun = postIdealStateUpdate(resourceName,
+          stateModelDefUpdate(resourceName, missingStateModel), ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(dryRunVerdict.toString()
+          .contains(StateModelDefExistenceGuardrailRule.RULE_ID));
+      Assert.assertEquals(currentStateModelDefRef(resourceName), "LeaderStandby");
+
+      // 4) force=true bypasses the guard rail: the missing reference is actually written.
+      Response forced = postIdealStateUpdate(resourceName,
+          stateModelDefUpdate(resourceName, missingStateModel), ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals(currentStateModelDefRef(resourceName), missingStateModel);
+    } finally {
+      try {
+        _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resourceName);
+      } catch (Exception ignored) {
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private String currentStateModelDefRef(String resourceName) {
+    return _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, resourceName)
+        .getStateModelDefRef();
+  }
+
+  private static ZNRecord stateModelDefUpdate(String resourceName, String stateModelDefRef) {
+    // A partial "update" record carrying only STATE_MODEL_DEF_REF; the endpoint merges it into the
+    // existing ideal state, so the other fields are taken from what is already in ZK.
+    IdealState update = new IdealState(resourceName);
+    update.setStateModelDefRef(stateModelDefRef);
+    return update.getRecord();
+  }
+
+  private Response putWagedResourceWithStateModel(String resourceName,
+      String stateModelDefRefOverride, ResourceConfig resourceConfig, Map<String, Object> flags)
+      throws IOException {
+    IdealState idealState = new IdealState(resourceName);
+    idealState.getRecord().getSimpleFields().putAll(_gSetupTool.getClusterManagementTool()
+        .getResourceIdealState(CLUSTER_NAME, RESOURCE_NAME).getRecord().getSimpleFields());
+    idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    idealState.setNumPartitions(1);
+    if (stateModelDefRefOverride != null) {
+      idealState.setStateModelDefRef(stateModelDefRefOverride);
+    }
+    Map<String, ZNRecord> inputMap = ImmutableMap.of(
+        ResourceAccessor.ResourceProperties.idealState.name(), idealState.getRecord(),
+        ResourceAccessor.ResourceProperties.resourceConfig.name(), resourceConfig.getRecord());
+    Entity entity =
+        Entity.entity(OBJECT_MAPPER.writeValueAsString(inputMap), MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/resources/" + resourceName)
+        .queryParam("command", "addWagedResource");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().put(entity);
   }
 
   @Test(dependsOnMethods = "testAddResourceWithWeight")

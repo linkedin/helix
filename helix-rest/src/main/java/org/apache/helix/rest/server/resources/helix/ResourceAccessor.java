@@ -57,6 +57,7 @@ import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailR
 import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
+import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -334,20 +335,27 @@ public class ResourceAccessor extends AbstractHelixResource {
           return structuralError.get();
         }
 
-        // Guard rails: (1) instance capacity-key consistency (always on) -- reject if any assignable
-        // instance's capacity map omits a cluster-required capacity key (WAGED could not build a
-        // model, so the resource would be accepted but silently never place; the admin write path
-        // already validates the resource's own weights, but not the instances'); (2) partition-weight
-        // capacity (opt-in per cluster) -- reject if a partition weight exceeds the largest single
-        // instance's capacity in any dimension (making it permanently unplaceable). force=true
-        // overrides; dryRun=true only reports the verdict without writing.
+        // Guard rails: (1) state-model existence (always on) -- reject if the resource's
+        // STATE_MODEL_DEF_REF names a state model absent from STATEMODELDEFS (the controller drives
+        // every transition from that state model, so the resource could never come online; the plain
+        // addResource path rejects this up front, but addResourceWithWeight does not -- it persists
+        // the resource config and ideal state and only then rebalances, failing late after a partial
+        // write and leaving a half-created resource in ZooKeeper); (2) instance
+        // capacity-key consistency (always on) -- reject if any assignable instance's capacity map
+        // omits a cluster-required capacity key (WAGED could not build a model, so the resource would
+        // be accepted but silently never place; the admin write path already validates the resource's
+        // own weights, but not the instances'); (3) partition-weight capacity (opt-in per cluster) --
+        // reject if a partition weight exceeds the largest single instance's capacity in any dimension
+        // (making it permanently unplaceable). force=true overrides; dryRun=true only reports the
+        // verdict without writing.
         GuardrailContext context = GuardrailContext.newBuilder(clusterId)
             .dataAccessor(getDataAccssor(clusterId))
             .proposedResourceConfig(proposedResourceConfig)
             .proposedIdealState(proposedIdealState)
             .build();
         GuardrailPipeline pipeline =
-            new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule(),
+            new GuardrailPipeline(new StateModelDefExistenceGuardrailRule(),
+                new CapacityKeyConsistencyGuardrailRule(),
                 new PartitionWeightCapacityGuardrailRule());
         Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
         if (preflightResponse.isPresent()) {
@@ -711,16 +719,19 @@ public class ResourceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
       case update: {
-        // Guard rails on the merged (post-write) ideal state. (1) MinActiveReplicasConsistency is a
-        // cheap, always-on field check: an edit that leaves MIN_ACTIVE_REPLICAS greater than
-        // REPLICAS is logically inconsistent -- a partition can never have more active replicas than
-        // it has replicas -- so every partition is permanently below its minimum active count,
-        // defeating delayed rebalance and min-active health guarantees. (2) IdealStateRebalance-
-        // Feasibility is an always-on WAGED what-if: it blocks an edit (e.g. a replica-count increase)
-        // that the live instances cannot actually place. Both validate the merged record, the same
-        // way the ZK write merges the incoming record into the existing one; each blocks only edits
-        // that introduce or worsen a problem and grandfathers an already-bad resource. force=true
-        // overrides; dryRun=true only reports the verdict without writing.
+        // Guard rails on the merged (post-write) ideal state. (1) StateModelDefExistence is a cheap,
+        // always-on check: an edit that points STATE_MODEL_DEF_REF at a state model absent from
+        // STATEMODELDEFS is unplaceable -- the controller can compute no transition -- so the resource
+        // would be accepted but never come online (updateIdealState does not validate this). (2)
+        // MinActiveReplicasConsistency is a cheap, always-on field check: an edit that leaves
+        // MIN_ACTIVE_REPLICAS greater than REPLICAS is logically inconsistent -- a partition can never
+        // have more active replicas than it has replicas -- so every partition is permanently below
+        // its minimum active count, defeating delayed rebalance and min-active health guarantees. (3)
+        // IdealStateRebalanceFeasibility is an always-on WAGED what-if: it blocks an edit (e.g. a
+        // replica-count increase) that the live instances cannot actually place. All validate the
+        // merged record, the same way the ZK write merges the incoming record into the existing one;
+        // each blocks only edits that introduce or worsen a problem and grandfathers an already-bad
+        // resource. force=true overrides; dryRun=true only reports the verdict without writing.
         HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
         IdealState existingIdealState =
             dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName));
@@ -744,7 +755,8 @@ public class ResourceAccessor extends AbstractHelixResource {
             .wagedAssignmentProvider(wagedAssignmentProvider)
             .build();
         GuardrailPipeline guardrailPipeline =
-            new GuardrailPipeline(new MinActiveReplicasConsistencyGuardrailRule(),
+            new GuardrailPipeline(new StateModelDefExistenceGuardrailRule(),
+                new MinActiveReplicasConsistencyGuardrailRule(),
                 new IdealStateRebalanceFeasibilityGuardrailRule());
         Optional<Response> preflightResponse =
             preflight(guardrailPipeline, guardrailContext, force, dryRun);

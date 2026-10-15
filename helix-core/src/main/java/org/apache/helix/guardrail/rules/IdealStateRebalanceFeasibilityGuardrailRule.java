@@ -60,7 +60,10 @@ import org.apache.helix.model.IdealState;
  * Because it is always on, it only blocks when it can attribute a new deficit to the edit: if a
  * baseline WAGED assignment cannot be computed for the cluster at all (the cluster is already unable to
  * rebalance), the rule certifies the edit rather than blocking every edit on an already-unhealthy
- * cluster.
+ * cluster. It likewise certifies when the proposed ideal state's {@code STATE_MODEL_DEF_REF} does not
+ * resolve to a registered state model, deferring that case to {@link StateModelDefExistenceGuardrailRule}
+ * ({@code STATE_MODEL_DEF_NOT_FOUND}) rather than running the what-if (which would fail to resolve the
+ * state model) and surfacing a second, misleading capacity violation.
  */
 public class IdealStateRebalanceFeasibilityGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "IDEAL_STATE_REBALANCE_FEASIBILITY";
@@ -88,6 +91,17 @@ public class IdealStateRebalanceFeasibilityGuardrailRule implements GuardrailRul
 
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+
+    String stateModelDefRef = proposedIdealState.getStateModelDefRef();
+    if (stateModelDefRef != null && !stateModelDefRef.isEmpty()
+        && dataAccessor.getProperty(keyBuilder.stateModelDef(stateModelDefRef)) == null) {
+      // The proposed state model does not resolve. STATE_MODEL_DEF_NOT_FOUND owns that case; running
+      // the WAGED what-if here would only add a second, misleading violation -- its remedy (lower
+      // replicas / add instance capacity) is wrong for a missing state model, which drops just this
+      // one resource rather than stalling the cluster-wide rebalance -- and would run the baseline and
+      // candidate simulation for nothing. Certify feasible and defer to the existence rule.
+      return ValidationResult.feasible();
+    }
 
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
     if (clusterConfig == null) {

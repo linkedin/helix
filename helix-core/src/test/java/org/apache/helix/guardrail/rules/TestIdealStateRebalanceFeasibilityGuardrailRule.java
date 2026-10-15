@@ -128,6 +128,22 @@ public class TestIdealStateRebalanceFeasibilityGuardrailRule {
         .isFeasible());
   }
 
+  @Test
+  public void testUnresolvedStateModelDefersToExistenceRule() {
+    // The proposed ideal state names a state model that is not registered in the cluster. That case
+    // belongs to StateModelDefExistenceGuardrailRule (STATE_MODEL_DEF_NOT_FOUND); running the WAGED
+    // what-if here would only fail to resolve the state model and surface a second, misleading
+    // capacity violation, so the rule certifies feasible WITHOUT running the what-if
+    // (PROVIDER_MUST_NOT_RUN proves it is skipped).
+    IdealState proposed = proposedWagedIdealState(RESOURCE, 3);
+    proposed.setStateModelDefRef("NonExistentStateModel");
+    HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
+    when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
+    doReturn(null).when(dataAccessor).getProperty(BUILDER.stateModelDef("NonExistentStateModel"));
+    Assert.assertTrue(rule.validate(context(dataAccessor, proposed, PROVIDER_MUST_NOT_RUN))
+        .isFeasible());
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Simulation paths.
   // ---------------------------------------------------------------------------------------------
