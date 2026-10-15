@@ -53,6 +53,7 @@ import org.testng.AssertJUnit;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -478,16 +479,24 @@ public class TestClusterSetup extends ZkUnitTestBase {
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
   }
 
-  @Test
-  public void testAddClusterWithDefaultCloudProcessor() throws Exception {
+  @DataProvider
+  public Object[][] cloudConfigProviders() {
+    return new Object[][]{
+        {new CloudConfig.Builder().setCloudProvider(CloudProvider.CUSTOMIZED),
+            CloudProvider.CUSTOMIZED.name()},
+        {new CloudConfig.Builder(), null}
+    };
+  }
+
+  @Test(dataProvider = "cloudConfigProviders")
+  public void testAddClusterWithDefaultCloudProcessor(CloudConfig.Builder cloudConfigInitBuilder,
+      String expectedProvider) throws Exception {
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
-    String clusterName = className + "_" + methodName;
+    String clusterName = className + "_" + methodName + "_" + expectedProvider;
 
-    CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
     cloudConfigInitBuilder.setCloudInfoSources(Collections.singletonList("TestURL"));
-    cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
 
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
 
@@ -496,7 +505,7 @@ public class TestClusterSetup extends ZkUnitTestBase {
       CloudConfig cloudConfigFromZk = new ConfigAccessor(_gZkClient).getCloudConfig(clusterName);
       Assert.assertNotNull(cloudConfigFromZk);
       Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-      Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+      Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), expectedProvider);
       Assert.assertEquals(cloudConfigFromZk.getCloudInfoSources(),
           Collections.singletonList("TestURL"));
       Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorName());

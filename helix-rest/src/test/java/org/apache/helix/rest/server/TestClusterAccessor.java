@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -1358,6 +1359,41 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertEquals(cloudConfigRest.getCloudInfoProcessorName(), "TestProcessorName");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testCloudConfigWithoutProviderRemainsUnspecified() throws Exception {
+    String clusterName = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    String cloudConfigPath = "clusters/" + clusterName + "/cloudconfig";
+    ZNRecord record = new ZNRecord(CloudConfig.CLOUD_CONFIG_KW);
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("TestURL-create"));
+
+    try {
+      put("clusters/" + clusterName, ImmutableMap.of("addCloudConfig", "true"),
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.CREATED.getStatusCode());
+      ZNRecord stored = toZNRecord(
+          get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true));
+      Assert.assertFalse(
+          stored.getSimpleFields().containsKey(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name()));
+      Assert.assertEquals(stored.getListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name()),
+          Collections.singletonList("TestURL-create"));
+
+      record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+          Collections.singletonList("TestURL-update"));
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      stored = toZNRecord(get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true));
+      Assert.assertFalse(
+          stored.getSimpleFields().containsKey(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name()));
+      Assert.assertEquals(stored.getListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name()),
+          Collections.singletonList("TestURL-update"));
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
   }
 
   @Test(dependsOnMethods = "testAddCloudConfig")
