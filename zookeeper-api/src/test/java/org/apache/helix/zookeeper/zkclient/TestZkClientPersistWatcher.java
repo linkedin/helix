@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.helix.zookeeper.impl.TestHelper;
@@ -34,6 +35,7 @@ import org.apache.helix.zookeeper.impl.ZkTestHelper;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
 import org.apache.helix.zookeeper.zkclient.serialize.SerializableSerializer;
+import org.apache.zookeeper.AddWatchMode;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Watcher;
@@ -231,10 +233,53 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
     zkClient.close();
   }
 
+  /**
+   * A persist watch that cannot be added back after a reconnect is added back on the next
+   * reconnect. Its listeners are not resynced until then, as no watch tracks their path.
+   */
+  @Test
+  void testPersistWatchAddedBackOnNextReconnectAfterFailure() throws Exception {
+    AddWatchFailingZkConnection connection = new AddWatchFailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(new ZkClient.Builder().setConnection(connection));
+    String path = "/testPersistWatchAddedBackOnNextReconnectAfterFailure";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+
+    // The new session has no watch, and adding the 3 watches back fails.
+    connection.failAddWatch(true);
+    ZkTestHelper.expireSession(zkClient);
+    Assert.assertTrue(TestHelper.verify(() -> connection.getFailedAddWatchCount() == 3, 10000));
+    zkClient.writeData(path + "/data", "missed");
+    zkClient.create(path + "/child/missed", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/missed", "datat", CreateMode.PERSISTENT);
+    Thread.sleep(1000);
+    Assert.assertTrue(events.isEmpty(), "No event is expected without watches: " + events);
+
+    // The next reconnect adds the watches back and resyncs the listeners.
+    connection.failAddWatch(false);
+    Thread zkEventThread = new Thread(() -> ZkTestHelper.simulateZkStateReconnected(zkClient));
+    zkEventThread.start();
+    zkEventThread.join();
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    events.clear();
+    zkClient.writeData(path + "/data", "newData");
+    zkClient.create(path + "/child/c", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/c", "datat", CreateMode.PERSISTENT);
+    assertEvents(events, "data " + path + "/data NodeDataChanged",
+        "child " + path + "/child NodeChildrenChanged",
+        "recursive " + path + "/recursive/c NodeCreated");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
   private static ZkClient createPersistWatcherZkClient() {
-    ZkClient.Builder builder = new ZkClient.Builder();
-    builder.setZkServer(ZkTestBase.ZK_ADDR).setMonitorRootPathOnly(false)
-        .setUsePersistWatcher(true);
+    return createPersistWatcherZkClient(new ZkClient.Builder().setZkServer(ZkTestBase.ZK_ADDR));
+  }
+
+  private static ZkClient createPersistWatcherZkClient(ZkClient.Builder builder) {
+    builder.setMonitorRootPathOnly(false).setUsePersistWatcher(true);
     ZkClient zkClient = builder.build();
     zkClient.setZkSerializer(new BasicZkSerializer(new SerializableSerializer()));
     return zkClient;
@@ -283,6 +328,34 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
     Set<String> expectedEvents = new HashSet<>(Arrays.asList(expected));
     Assert.assertTrue(TestHelper.verify(() -> events.equals(expectedEvents), 10000),
         "Expected events " + expectedEvents + " but got " + events);
+  }
+
+  // A connection on which adding a watch can be made to fail.
+  private static class AddWatchFailingZkConnection extends ZkConnection {
+    private final AtomicBoolean _failAddWatch = new AtomicBoolean();
+    private final AtomicInteger _failedAddWatchCount = new AtomicInteger();
+
+    AddWatchFailingZkConnection(String zkServers) {
+      super(zkServers);
+    }
+
+    void failAddWatch(boolean fail) {
+      _failAddWatch.set(fail);
+    }
+
+    int getFailedAddWatchCount() {
+      return _failedAddWatchCount.get();
+    }
+
+    @Override
+    public void addWatch(String basePath, Watcher watcher, AddWatchMode mode)
+        throws KeeperException, InterruptedException {
+      if (_failAddWatch.get()) {
+        _failedAddWatchCount.incrementAndGet();
+        throw KeeperException.create(KeeperException.Code.NOAUTH, basePath);
+      }
+      super.addWatch(basePath, watcher, mode);
+    }
   }
 
   @Test

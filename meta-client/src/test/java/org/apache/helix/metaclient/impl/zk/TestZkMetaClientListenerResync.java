@@ -26,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Arrays;
+import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -35,6 +36,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.helix.metaclient.MetaClientTestUtil;
 import org.apache.helix.metaclient.api.ConnectStateChangeListener;
 import org.apache.helix.metaclient.api.MetaClientInterface.ConnectState;
+import org.apache.helix.metaclient.factories.MetaClientCacheConfig;
 import org.apache.helix.metaclient.impl.zk.factory.ZkMetaClientConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -43,7 +45,7 @@ import org.testng.annotations.Test;
 /**
  * ZooKeeper persistent watches miss the changes made while the client is disconnected
  * (ZOOKEEPER-4698) and do not survive a new session. These tests verify that MetaClient listeners
- * are resynced in both cases.
+ * and the MetaClient cache are resynced in both cases.
  */
 public class TestZkMetaClientListenerResync extends ZkMetaClientTestBase {
   private static final long TIMEOUT_MS = 30000;
@@ -61,17 +63,7 @@ public class TestZkMetaClientListenerResync extends ZkMetaClientTestBase {
       createEntries(writer, root);
       writer.create(root + "/deleted", "v0");
 
-      Set<String> states = ConcurrentHashMap.newKeySet();
-      client.subscribeStateChanges(new ConnectStateChangeListener() {
-        @Override
-        public void handleConnectStateChanged(ConnectState prevState, ConnectState currentState) {
-          states.add(currentState.name());
-        }
-
-        @Override
-        public void handleConnectionEstablishmentError(Throwable error) {
-        }
-      });
+      Set<String> states = subscribeConnectStates(client);
       Set<String> events = subscribeListeners(client, root);
       client.subscribeDataChange(root + "/deleted",
           (key, data, changeType) -> events.add("DATA " + changeType + " " + key), false);
@@ -89,7 +81,7 @@ public class TestZkMetaClientListenerResync extends ZkMetaClientTestBase {
       proxy.open();
       assertEvents(events, "DATA ENTRY_UPDATE " + root + "/data",
           "DATA ENTRY_DELETED " + root + "/deleted", "DIRECT_CHILD " + root + "/directChild",
-          "CHILD ENTRY_DATA_CHANGE " + root + "/tree");
+          "CHILD ENTRY_RESYNC " + root + "/tree");
       Assert.assertEquals(client.getZkClient().getSessionId(), sessionId,
           "The client should have reconnected on the same session");
 
@@ -109,7 +101,7 @@ public class TestZkMetaClientListenerResync extends ZkMetaClientTestBase {
 
       TestUtil.expireSession(client);
       assertEvents(events, "DATA ENTRY_UPDATE " + root + "/data",
-          "DIRECT_CHILD " + root + "/directChild", "CHILD ENTRY_DATA_CHANGE " + root + "/tree");
+          "DIRECT_CHILD " + root + "/directChild", "CHILD ENTRY_RESYNC " + root + "/tree");
 
       events.clear();
       writer.set(root + "/data", "v1", -1);
@@ -120,6 +112,97 @@ public class TestZkMetaClientListenerResync extends ZkMetaClientTestBase {
 
       writer.recursiveDelete(root);
     }
+  }
+
+  @Test
+  public void testCacheRebuiltAfterReconnect() throws Exception {
+    String root = "/testCacheRebuiltAfterReconnect";
+    try (ZkProxy proxy = new ZkProxy(ZK_ADDR);
+        ZkMetaClient<String> writer = createZkMetaClient();
+        ZkMetaClientCache<String> cache = createZkMetaClientCache(proxy, root)) {
+      writer.connect();
+      writer.create(root, "v0");
+      writer.create(root + "/updated", "v0");
+      writer.create(root + "/deleted", "v0");
+      writer.create(root + "/deleted/child", "v0");
+      cache.connect();
+      Set<String> states = subscribeConnectStates(cache);
+      Assert.assertEquals(cache.get(root + "/deleted/child"), "v0");
+
+      proxy.cut();
+      Assert.assertTrue(MetaClientTestUtil.verify(
+          () -> states.contains(ConnectState.DISCONNECTED.name()), TIMEOUT_MS));
+      writer.set(root + "/updated", "v1", -1);
+      writer.recursiveDelete(root + "/deleted");
+      writer.create(root + "/created", "v0");
+      writer.create(root + "/created/child", "v0");
+
+      proxy.open();
+      Set<String> expectedKeys = new HashSet<>(
+          Arrays.asList(root, root + "/updated", root + "/created", root + "/created/child"));
+      Set<String> expectedChildren = new HashSet<>(Arrays.asList("updated", "created"));
+      // The cache trie is not thread-safe, so a read can fail while the cache is rebuilt.
+      // Children of root + "/created" are read only once it is cached, as reading a key that is
+      // not cached adds it to the trie.
+      Assert.assertTrue(MetaClientTestUtil.verify(() -> {
+        try {
+          return cache.getDataCacheMap().keySet().equals(expectedKeys)
+              && "v1".equals(cache.get(root + "/updated"))
+              && new HashSet<>(cache.getDirectChildrenKeys(root)).equals(expectedChildren)
+              && cache.getDirectChildrenKeys(root + "/created").equals(Arrays.asList("child"));
+        } catch (ConcurrentModificationException e) {
+          return false;
+        }
+      }, TIMEOUT_MS), "Cache is not rebuilt: " + cache.getDataCacheMap());
+
+      writer.recursiveDelete(root);
+    }
+  }
+
+  @Test
+  public void testCacheClearedAfterRootDeletedWhileDisconnected() throws Exception {
+    String root = "/testCacheClearedAfterRootDeletedWhileDisconnected";
+    try (ZkProxy proxy = new ZkProxy(ZK_ADDR);
+        ZkMetaClient<String> writer = createZkMetaClient();
+        ZkMetaClientCache<String> cache = createZkMetaClientCache(proxy, root)) {
+      writer.connect();
+      writer.create(root, "v0");
+      writer.create(root + "/child", "v0");
+      cache.connect();
+      Set<String> states = subscribeConnectStates(cache);
+      Assert.assertEquals(cache.get(root + "/child"), "v0");
+
+      proxy.cut();
+      Assert.assertTrue(MetaClientTestUtil.verify(
+          () -> states.contains(ConnectState.DISCONNECTED.name()), TIMEOUT_MS));
+      writer.recursiveDelete(root);
+
+      proxy.open();
+      Assert.assertTrue(MetaClientTestUtil.verify(
+          () -> cache.getDataCacheMap().isEmpty() && cache.countDirectChildren(root) == 0,
+          TIMEOUT_MS), "Cache should be empty but has " + cache.getDataCacheMap().keySet());
+    }
+  }
+
+  private static ZkMetaClientCache<String> createZkMetaClientCache(ZkProxy proxy, String root) {
+    return new ZkMetaClientCache<>(new ZkMetaClientConfig.ZkMetaClientConfigBuilder()
+        .setConnectionAddress(proxy.getAddress()).build(),
+        new MetaClientCacheConfig(root, true, true));
+  }
+
+  private static Set<String> subscribeConnectStates(ZkMetaClient<String> client) {
+    Set<String> states = ConcurrentHashMap.newKeySet();
+    client.subscribeStateChanges(new ConnectStateChangeListener() {
+      @Override
+      public void handleConnectStateChanged(ConnectState prevState, ConnectState currentState) {
+        states.add(currentState.name());
+      }
+
+      @Override
+      public void handleConnectionEstablishmentError(Throwable error) {
+      }
+    });
+    return states;
   }
 
   private static void createEntries(ZkMetaClient<String> writer, String root) {

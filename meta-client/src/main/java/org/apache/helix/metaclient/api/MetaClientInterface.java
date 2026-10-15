@@ -553,8 +553,8 @@ public interface MetaClientInterface<T> {
    * The listener should be permanent until it's unsubscribed.
    * Changes made while the client is disconnected are not delivered one by one. Instead, after
    * the client reconnects, the listener is invoked once with the subscribed key and
-   * ENTRY_DATA_CHANGE to signal that anything under the key may have changed. This may happen
-   * even if nothing changed.
+   * ENTRY_RESYNC to signal that anything under the key may have changed. This may happen even if
+   * nothing changed.
    * For hierarchy key spaces like zookeeper, it would watch the whole tree structure.
    * For flat key spaces, it would watch for keys with certain prefix.
    * @param key key to identify the entry.
