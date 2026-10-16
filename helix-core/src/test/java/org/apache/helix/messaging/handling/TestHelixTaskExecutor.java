@@ -51,6 +51,7 @@ import org.apache.helix.mock.MockClusterMessagingService;
 import org.apache.helix.mock.MockManager;
 import org.apache.helix.mock.statemodel.MockMasterSlaveStateModel;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageState;
 import org.apache.helix.participant.HelixStateMachineEngine;
@@ -1094,6 +1095,13 @@ public class TestHelixTaskExecutor {
         stateTransitionFactory);
 
     NotificationContext changeContext = new NotificationContext(manager);
+
+    // Register this instance as a live cluster member: HelixStateTransitionHandler#onError()
+    // guards its ERROR current-state write against dropped/never-registered instances, so this
+    // test's instance needs an InstanceConfig, matching what a real participant would always
+    // have in place by the time it can receive and fail a STATE_TRANSITION message.
+    dataAccessor.setProperty(keyBuilder.instanceConfig(manager.getInstanceName()),
+        new InstanceConfig(manager.getInstanceName()));
 
     Message msg = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
     msg.setTgtSessionId(manager.getSessionId());
