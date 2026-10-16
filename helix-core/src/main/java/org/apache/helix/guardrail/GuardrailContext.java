@@ -53,6 +53,7 @@ public class GuardrailContext {
   private final ClusterConfig currentClusterConfig;
   private final ClusterConfig proposedClusterConfig;
   private final MinActiveReplicaChecker minActiveReplicaChecker;
+  private final boolean wagedEnableForAllResources;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
@@ -68,6 +69,7 @@ public class GuardrailContext {
     this.currentClusterConfig = builder.currentClusterConfig;
     this.proposedClusterConfig = builder.proposedClusterConfig;
     this.minActiveReplicaChecker = builder.minActiveReplicaChecker;
+    this.wagedEnableForAllResources = builder.wagedEnableForAllResources;
   }
 
   public String getClusterName() {
@@ -170,6 +172,17 @@ public class GuardrailContext {
     return minActiveReplicaChecker;
   }
 
+  /**
+   * Whether the mutation proposes to enable WAGED rebalancing for every resource in the cluster (the
+   * bulk {@code enableWagedRebalanceForAllResources} command) rather than a single resource. Like the
+   * single-resource flip and the resource-add paths this newly subjects resources to the WAGED
+   * capacity model, so the capacity-key guard rail must run; but because it targets the whole cluster
+   * the resulting verdict names no single resource. {@code false} for every other mutation type.
+   */
+  public boolean isWagedEnableForAllResources() {
+    return wagedEnableForAllResources;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -188,6 +201,7 @@ public class GuardrailContext {
     private ClusterConfig currentClusterConfig;
     private ClusterConfig proposedClusterConfig;
     private MinActiveReplicaChecker minActiveReplicaChecker;
+    private boolean wagedEnableForAllResources;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -251,6 +265,11 @@ public class GuardrailContext {
 
     public Builder minActiveReplicaChecker(MinActiveReplicaChecker minActiveReplicaChecker) {
       this.minActiveReplicaChecker = minActiveReplicaChecker;
+      return this;
+    }
+
+    public Builder wagedEnableForAllResources(boolean wagedEnableForAllResources) {
+      this.wagedEnableForAllResources = wagedEnableForAllResources;
       return this;
     }
 

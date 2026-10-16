@@ -318,6 +318,124 @@ public class TestClusterAccessor extends AbstractTestClass {
     _configAccessor.setInstanceConfig(cluster, instance, instanceConfig);
   }
 
+  /**
+   * Guard rail: the bulk {@code enableWagedRebalanceForAllResources} command flips EVERY resource in
+   * the cluster to WAGED through the same unvalidated admin path as the single-resource flip, so when
+   * some assignable instance omits a cluster-required capacity key WAGED cannot build a cluster model
+   * and every flipped resource would be accepted but silently never place -- cluster-wide. Verifies
+   * enforcement (400 + a cluster-scoped verdict naming the starved instance, nothing flipped),
+   * dry-run (200 + the same infeasible verdict, nothing flipped), force bypass (flipped despite the
+   * gap), and the fully-covered happy path (flipped). Uses a dedicated cluster so flipping all of its
+   * resources to WAGED does not perturb the other tests.
+   */
+  @Test
+  public void testEnableWagedRebalanceForAllResourcesCapacityKeyGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestClusterEnableWagedAllCapacityKeyGuardrail";
+    _gSetupTool.addCluster(clusterName, true);
+    String coveredInstance = clusterName + "_instance0";
+    String starvedInstance = clusterName + "_instance1";
+    String blockedResource = "enableWagedAllBlockedResource";
+    String forcedResource = "enableWagedAllForcedResource";
+    String validResource = "enableWagedAllValidResource";
+    String uri = "clusters/" + clusterName;
+    try {
+      // Two assignable instances; both declare FOO but only one declares BAR. The cluster already
+      // requires both keys, so the starved instance is an instance-side gap for WAGED.
+      _gSetupTool.addInstanceToCluster(clusterName, coveredInstance);
+      _gSetupTool.addInstanceToCluster(clusterName, starvedInstance);
+      setInstanceCapacity(clusterName, coveredInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100));
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+      // Two non-WAGED resources to flip; each starts on SEMI_AUTO, not WagedRebalancer.
+      for (String resource : Arrays.asList(blockedResource, forcedResource)) {
+        _gSetupTool.getClusterManagementTool()
+            .addResource(clusterName, resource, 1, "OnlineOffline");
+        Assert.assertFalse(isResourceWagedRebalanced(clusterName, resource));
+      }
+
+      // 1) Enforcement: 400 + a verdict naming the starved instance, and nothing flipped.
+      Response blocked = post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name()),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode(), true);
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(starvedInstance));
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, blockedResource));
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, forcedResource));
+
+      // 2) Dry-run: 200 with the same infeasible verdict, and still nothing flipped.
+      Response dryRun = post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name(),
+              "dryRun", "true"),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode(), true);
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, blockedResource));
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, forcedResource));
+
+      // 3) force=true bypasses the guard rail: every resource is flipped despite the gap.
+      post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name(),
+              "force", "true"),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      Assert.assertTrue(isResourceWagedRebalanced(clusterName, blockedResource));
+      Assert.assertTrue(isResourceWagedRebalanced(clusterName, forcedResource));
+
+      // 4) Close the gap (the starved instance now declares BAR) and add a fresh non-WAGED resource;
+      //    the bulk flip now passes the guard rail and the new resource is flipped to WAGED.
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      _gSetupTool.getClusterManagementTool()
+          .addResource(clusterName, validResource, 1, "OnlineOffline");
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, validResource));
+      post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name()),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      Assert.assertTrue(isResourceWagedRebalanced(clusterName, validResource));
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * The force / dryRun flags on the cluster-update (POST) endpoint are only meaningful for the
+   * guard-rail-backed enableWagedRebalanceForAllResources command. For any other command they are
+   * rejected up front with a 400 so a caller is never misled into thinking, e.g., a maintenance-mode
+   * toggle was simulated (dryRun) or its verdict overridden (force) -- neither of which that command
+   * honors. The request is rejected before the command runs, so no maintenance mode is toggled.
+   */
+  @Test
+  public void testDryRunAndForceRejectedForNonBulkWagedClusterCommand() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    for (String flag : Arrays.asList("dryRun", "force")) {
+      Response response = post("clusters/" + TEST_CLUSTER,
+          ImmutableMap.of("command", Command.enableMaintenanceMode.name(), flag, "true"),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode(), true);
+      Assert.assertTrue(
+          response.readEntity(String.class).contains("enableWagedRebalanceForAllResources"));
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private boolean isResourceWagedRebalanced(String cluster, String resource) {
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    return WagedRebalancer.class.getName().equals(idealState.getRebalancerClassName());
+  }
+
   @Test(dependsOnMethods = "testValidateClusterConfigChange")
   public void testGetClusters() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
