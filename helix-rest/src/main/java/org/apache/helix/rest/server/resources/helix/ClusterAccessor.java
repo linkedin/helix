@@ -73,6 +73,7 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.acl.AclRegister;
+import org.apache.helix.rest.acl.ClusterAclParser;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -85,6 +86,7 @@ import org.apache.helix.rest.server.service.VirtualTopologyGroupService;
 import org.apache.helix.tools.ClusterSetup;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -167,6 +169,22 @@ public class ClusterAccessor extends AbstractHelixResource {
     return JSONRepresentation(clusterInfo);
   }
 
+  /**
+   * Creates a cluster.
+   * <p>
+   * The optional, repeatable {@code acl} query parameter sets the ZooKeeper ACL of the nodes
+   * created for the cluster. Each value is URL-encoded and has the form
+   * {@code scheme:id:permissions}, for example {@code world:anyone:r},
+   * {@code x509:CN=my-service,OU=my-team,O=my-org,C=US:cdrw} or {@code auth::cdrwa}. The id
+   * format of {@code x509} depends on how the ZooKeeper ensemble derives client ids from
+   * certificates. {@code auth} takes an empty id and expands to the authenticated identities of
+   * this server's ZooKeeper session. Permissions are letters from {@code cdrwa} (create,
+   * delete, read, write, admin) or {@code all}. When {@code acl} is given, {@code world:anyone}
+   * is always granted read in addition. The ACL covers the cluster root, its metadata nodes and
+   * the built-in state model definitions; nodes created later, such as resources and instances,
+   * use the client default ACL. Without {@code acl} the client default ACL is kept. A
+   * malformed value returns 400 and nothing is created.
+   */
   @NamespaceAuth
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
@@ -175,10 +193,20 @@ public class ClusterAccessor extends AbstractHelixResource {
   public Response createCluster(@PathParam("clusterId") String clusterId,
       @DefaultValue("false") @QueryParam("recreate") String recreate,
       @DefaultValue("false") @QueryParam("addCloudConfig") String addCloudConfig,
+      @QueryParam("acl") List<String> requestAcl,
       String cloudConfigManifest) {
 
     boolean recreateIfExists = Boolean.parseBoolean(recreate);
     boolean cloudConfigIncluded = Boolean.parseBoolean(addCloudConfig);
+
+    List<ACL> parsedRequestAcl;
+    try {
+      parsedRequestAcl = ClusterAclParser.parse(requestAcl);
+    } catch (IllegalArgumentException e) {
+      String errMsg = "Invalid acl query parameter for cluster " + clusterId;
+      LOG.error(errMsg, e);
+      return badRequest(errMsg + ". Exception: " + e.getMessage());
+    }
 
     ClusterSetup clusterSetup = getClusterSetup();
 
@@ -203,7 +231,9 @@ public class ClusterAccessor extends AbstractHelixResource {
     }
 
     try {
-      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig);
+      // A null ACL keeps the client default ACL, which already grants world read
+      clusterSetup.addCluster(clusterId, recreateIfExists, cloudConfig,
+          parsedRequestAcl.isEmpty() ? null : ClusterAclParser.withWorldRead(parsedRequestAcl));
     } catch (Exception ex) {
       LOG.error("Failed to create cluster {}. Exception: {}.", clusterId, ex);
       return serverError(ex);
