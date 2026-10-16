@@ -442,7 +442,18 @@ public class HelixStateTransitionHandler extends MessageHandler {
             _isTaskMessage && !_isTaskCurrentStatePathDisabled ? keyBuilder
                 .taskCurrentState(instanceName, _message.getTgtSessionId(), resourceName)
                 : keyBuilder.currentState(instanceName, _message.getTgtSessionId(), resourceName);
-        if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
+
+        // Re-validate immediately before the actual ZK write, same as updateZKCurrentState():
+        // this is a separate, framework-level error-handling write path (not routed through
+        // updateZKCurrentState()), so it needs its own guard to avoid resurrecting a dropped
+        // instance's ZK node with an ERROR current state.
+        if (!isInstanceRegistered(accessor, instanceName)) {
+          logger.warn(
+              "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                  + "Skipping ERROR current state ZK update for resource {} partition {} to avoid "
+                  + "resurrecting a dropped instance's ZK node.", instanceName, resourceName,
+              partition);
+        } else if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
           logger.error("Fails to persist ERROR current state to ZK for resource " + resourceName
               + " partition: " + partition);
         }

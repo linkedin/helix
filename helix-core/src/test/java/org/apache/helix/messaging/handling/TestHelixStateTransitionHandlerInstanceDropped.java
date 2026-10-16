@@ -29,6 +29,7 @@ import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageType;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
+import org.apache.helix.participant.statemachine.StateTransitionError;
 import org.mockito.ArgumentCaptor;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
@@ -121,6 +122,76 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
    * what {@link HelixTaskExecutor} does after a state transition method returns successfully.
    */
   private void runStateTransitionAndCompleteSuccessfully() throws Exception {
+    HelixStateTransitionHandler handler = newHandler(new StateModel() {
+    });
+
+    HelixTaskResult taskResult = new HelixTaskResult();
+    taskResult.setSuccess(true);
+    taskResult.setInfo("");
+    taskResult.setCompleteTime(System.currentTimeMillis());
+    // _notificationContext is protected on MessageHandler; accessible here since this test is in
+    // the same package.
+    handler._notificationContext
+        .add(NotificationContext.MapKey.HELIX_TASK_RESULT.toString(), taskResult);
+
+    // Package-private; same-package test can invoke it directly, mirroring what
+    // HelixStateTransitionHandler#handleMessage() does in production.
+    handler.postHandleMessage();
+  }
+
+  /**
+   * Regression tests for the same orphan-resurrection race, but on the separate
+   * {@link HelixStateTransitionHandler#onError} write path (ERROR current state), which does not
+   * go through {@code updateZKCurrentState()} and therefore needs its own, independent guard.
+   */
+  @Test
+  public void testOnErrorSkipsCurrentStateWriteWhenInstanceConfigRemoved() {
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME))).thenReturn(null);
+
+    newHandler(new StateModel() {
+    }).onError(new Exception("transition failed"), MessageHandler.ErrorCode.ERROR,
+        MessageHandler.ErrorType.FRAMEWORK);
+
+    verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
+  }
+
+  @Test
+  public void testOnErrorWritesCurrentStateWhenInstanceStillRegistered() {
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME)))
+        .thenReturn(new HelixProperty.Stat(0, 0L, 0L, 0L));
+
+    newHandler(new StateModel() {
+    }).onError(new Exception("transition failed"), MessageHandler.ErrorCode.ERROR,
+        MessageHandler.ErrorType.FRAMEWORK);
+
+    ArgumentCaptor<PropertyKey> keyCaptor = ArgumentCaptor.forClass(PropertyKey.class);
+    verify(_accessor, times(1)).updateProperty(keyCaptor.capture(), any(HelixProperty.class));
+    Assert.assertTrue(keyCaptor.getValue().getPath().contains(INSTANCE_NAME));
+  }
+
+  @Test
+  public void testOnErrorStillRollsBackLocalStateModelWhenInstanceConfigRemoved() {
+    // Even when the ZK write is skipped, local state-model rollback must still happen: the new
+    // guard must not short-circuit the surrounding try/finally in onError().
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME))).thenReturn(null);
+
+    final boolean[] rolledBack = {false};
+    StateModel stateModel = new StateModel() {
+      @Override
+      public void rollbackOnError(Message message, NotificationContext context,
+          StateTransitionError error) {
+        rolledBack[0] = true;
+      }
+    };
+
+    newHandler(stateModel).onError(new Exception("transition failed"),
+        MessageHandler.ErrorCode.ERROR, MessageHandler.ErrorType.FRAMEWORK);
+
+    verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
+    Assert.assertTrue(rolledBack[0], "rollbackOnError() must still run when the ZK write is skipped");
+  }
+
+  private HelixStateTransitionHandler newHandler(StateModel stateModel) {
     Message message = new Message(MessageType.STATE_TRANSITION, "msg1");
     message.setPartitionName(PARTITION_NAME);
     message.setResourceName(RESOURCE_NAME);
@@ -132,8 +203,6 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     NotificationContext context = new NotificationContext(_manager);
 
-    StateModel stateModel = new StateModel() {
-    };
     StateModelFactory<StateModel> stateModelFactory = new StateModelFactory<StateModel>() {
       @Override
       public StateModel createNewStateModel(String resourceName, String partitionName) {
@@ -144,17 +213,7 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
     CurrentState currentStateDelta = new CurrentState(RESOURCE_NAME);
     currentStateDelta.setState(PARTITION_NAME, "OFFLINE");
 
-    HelixStateTransitionHandler handler = new HelixStateTransitionHandler(stateModelFactory,
-        stateModel, message, context, currentStateDelta);
-
-    HelixTaskResult taskResult = new HelixTaskResult();
-    taskResult.setSuccess(true);
-    taskResult.setInfo("");
-    taskResult.setCompleteTime(System.currentTimeMillis());
-    context.add(NotificationContext.MapKey.HELIX_TASK_RESULT.toString(), taskResult);
-
-    // Package-private; same-package test can invoke it directly, mirroring what
-    // HelixStateTransitionHandler#handleMessage() does in production.
-    handler.postHandleMessage();
+    return new HelixStateTransitionHandler(stateModelFactory, stateModel, message, context,
+        currentStateDelta);
   }
 }
