@@ -175,7 +175,6 @@ public class InstanceValidationUtil {
 
   /**
    * Method to check if the instance has valid configuration.
-   * Instance stability check requires PERSIST_INTERMEDIATE_ASSIGNMENT turned on!
    *
    * @param dataAccessor
    * @param clusterId
@@ -188,12 +187,6 @@ public class InstanceValidationUtil {
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
     if (clusterConfig == null) {
       _logger.error("Cluster config is missing in cluster " + clusterId);
-      return false;
-    }
-    if (!clusterConfig.isPersistIntermediateAssignment()) {
-      _logger.error(
-          "Cluster config {} is not turned on, which is required for instance stability check.",
-          ClusterConfig.ClusterConfigProperty.PERSIST_INTERMEDIATE_ASSIGNMENT.toString());
       return false;
     }
     PropertyKey propertyKey = keyBuilder.instanceConfig(instanceName);

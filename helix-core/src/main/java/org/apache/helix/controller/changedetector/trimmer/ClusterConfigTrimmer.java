@@ -36,8 +36,6 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
 
   /**
    * The following fields are considered as non-topology related.
-   * PERSIST_BEST_POSSIBLE_ASSIGNMENT,
-   * PERSIST_INTERMEDIATE_ASSIGNMENT,
    * STATE_TRANSITION_THROTTLE_CONFIGS,
    * STATE_TRANSITION_CANCELLATION_ENABLED,
    * MISS_TOP_STATE_DURATION_THRESHOLD,

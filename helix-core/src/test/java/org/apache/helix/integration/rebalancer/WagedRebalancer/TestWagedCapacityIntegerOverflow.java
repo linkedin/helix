@@ -164,7 +164,6 @@ public class TestWagedCapacityIntegerOverflow extends ZkTestBase {
     _controller.syncStart();
 
     // Enable persist best possible assignment
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // Initialize cluster verifier
     _clusterVerifier = new StrictMatchExternalViewVerifier.Builder(CLUSTER_NAME)

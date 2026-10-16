@@ -141,7 +141,6 @@ public class TestRoutingTableProviderFromTargetEV extends ZkTestBase {
   public void testExternalViewDiffFromTargetExternalView() throws Exception {
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
     clusterConfig.enableTargetExternalView(true);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
     Thread.sleep(2000);
 

@@ -111,7 +111,6 @@ public class TestCrushAutoRebalanceNonRack extends ZkStandAloneCMTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
   }
 
   @AfterClass
@@ -213,7 +212,6 @@ public class TestCrushAutoRebalanceNonRack extends ZkStandAloneCMTestBase {
   public void testLackEnoughLiveInstances(String rebalanceStrategyName,
       String rebalanceStrategyClass) throws Exception {
     System.out.println("TestLackEnoughLiveInstances " + rebalanceStrategyName);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // shutdown participants, keep only two left
     for (int i = 2; i < _participants.size(); i++) {
@@ -261,7 +259,6 @@ public class TestCrushAutoRebalanceNonRack extends ZkStandAloneCMTestBase {
   public void testLackEnoughInstances(String rebalanceStrategyName, String rebalanceStrategyClass)
       throws Exception {
     System.out.println("TestLackEnoughInstances " + rebalanceStrategyName);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     // Drop instance from admin tools and controller sending message to the same instance are
     // fundamentally async. The race condition can also happen in production.  For now we stabilize
