@@ -54,6 +54,10 @@ import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
 import org.apache.helix.zookeeper.zkclient.ZkServer;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.data.Stat;
 import org.testng.Assert;
@@ -719,6 +723,151 @@ public class TestInstanceOperationMaintenanceHandler {
           _expiresAt));
     }
     Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.ENABLE);
+  }
+
+  @Test
+  public void testUnexpectedFailureWritesNothing() {
+    int before = version(instance(0));
+
+    Map<String, Outcome> outcomes = apply(instances -> {
+      throw new IllegalStateException("guardrail failed at org.apache.helix.Foo");
+    }, InstanceOperation.EVACUATE, instance(0), instance(1));
+
+    assertStatuses(outcomes, Status.ERROR, Status.ERROR);
+    // Java exception text stays in the server log.
+    Assert.assertEquals(outcomes.get(instance(1)).getMessage(), "Nothing was written: the request "
+        + "failed. Resend the request; if it keeps failing, check the Helix REST server log.");
+    Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes),
+        outcomes.get(instance(1)).getMessage());
+    Assert.assertEquals(version(instance(0)), before);
+
+    // A ZooKeeper failure is named by its error code, however deep it is wrapped.
+    outcomes = apply(instances -> {
+      throw new IllegalStateException(
+          new ZkException(KeeperException.create(KeeperException.Code.NOAUTH, "/x")));
+    }, InstanceOperation.EVACUATE, instance(0));
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Nothing was written: the request "
+        + "failed (ZooKeeper error NOAUTH). Resend the request; if it keeps failing, check the "
+        + "Helix REST server log.");
+    outcomes = apply(instances -> {
+      throw new ZkTimeoutException("Unable to connect to zookeeper server within timeout: 30000");
+    }, InstanceOperation.EVACUATE, instance(0));
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Nothing was written: the request "
+        + "failed (ZooKeeper timed out). Resend the request; if it keeps failing, check the Helix "
+        + "REST server log.");
+    Assert.assertEquals(version(instance(0)), before);
+  }
+
+  @Test
+  public void testFailureAfterACommitWasSentIsUnknown() {
+    RealmAwareZkClient failingMulti = withMulti(ops -> {
+      throw new ZkException(KeeperException.create(KeeperException.Code.CONNECTIONLOSS));
+    });
+    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(failingMulti, SAFE)
+        .apply(CLUSTER, Collections.singletonList(instance(0)),
+            operation(InstanceOperation.EVACUATE), _expiresAt);
+    assertStatuses(outcomes, Status.ERROR);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Failed after the commit was sent "
+        + "(ZooKeeper error CONNECTIONLOSS), so whether it was written is unknown. Resend the "
+        + "request to settle it.");
+
+    // A commit that lost a race may have landed before a connection loss, so a failure on the
+    // next attempt is unknown too.
+    AtomicInteger calls = new AtomicInteger();
+    outcomes = apply(instances -> {
+      if (calls.incrementAndGet() == 1) {
+        touchClusterConfig();
+        return ValidationResult.feasible();
+      }
+      throw new IllegalStateException("connection lost");
+    }, InstanceOperation.EVACUATE, instance(0));
+    assertStatuses(outcomes, Status.ERROR);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Failed after the commit was sent, "
+        + "so whether it was written is unknown. Resend the request to settle it.");
+  }
+
+  @Test
+  public void testCommitThatLandedButWasReportedLostIsFoundApplied() {
+    // As when the client resends a multi after a connection loss and the resend finds its own
+    // write: the multi lands, then reports a version conflict.
+    AtomicInteger commits = new AtomicInteger();
+    RealmAwareZkClient landsThenConflicts = withMulti(ops -> {
+      commits.incrementAndGet();
+      _zkClient.multi(ops);
+      throw new ZkBadVersionException("resent after a connection loss");
+    });
+    int before = version(instance(0));
+
+    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(landsThenConflicts,
+        SAFE).apply(CLUSTER, Collections.singletonList(instance(0)),
+        operation(InstanceOperation.EVACUATE), _expiresAt);
+
+    // The next attempt finds the request already applied and writes nothing more.
+    assertStatuses(outcomes, Status.APPLIED);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "EVACUATE was already set by "
+        + "AUTOMATION. Kept its live maintenance marker, which runs until " + at(_expiresAt) + ".");
+    Assert.assertEquals(commits.get(), 1);
+    Assert.assertEquals(version(instance(0)), before + 1);
+  }
+
+  @Test
+  public void testCommitOverTheSizeLimitIsABadRequest() {
+    char[] pad = new char[InstanceOperationMaintenanceHandler.MAX_COMMIT_BYTES / 5];
+    Arrays.fill(pad, 'x');
+    for (int i = 0; i < 6; i++) {
+      ZNRecord record = read(i).getRecord();
+      record.setSimpleField("PAD", new String(pad));
+      _accessor.set(path(i), record, AccessOption.PERSISTENT);
+    }
+    int before = version(instance(0));
+
+    assertBadRequest(() -> apply(SAFE, InstanceOperation.EVACUATE, instance(0), instance(1),
+        instance(2), instance(3), instance(4), instance(5)));
+    Assert.assertEquals(version(instance(0)), before);
+    assertStatuses(apply(SAFE, InstanceOperation.EVACUATE, instance(0)), Status.APPLIED);
+  }
+
+  @Test
+  public void testExpiryPassingBeforeTheCommitWritesNothing() {
+    int before = version(instance(0));
+    long expiresAt = System.currentTimeMillis() + 500L;
+    Function<Collection<String>, ValidationResult> slowGuardrail = instances -> {
+      while (System.currentTimeMillis() <= expiresAt) {
+        try {
+          Thread.sleep(10L);
+        } catch (InterruptedException e) {
+          throw new IllegalStateException(e);
+        }
+      }
+      return ValidationResult.feasible();
+    };
+
+    Map<String, Outcome> outcomes = handler(slowGuardrail).apply(CLUSTER,
+        Collections.singletonList(instance(0)), operation(InstanceOperation.EVACUATE), expiresAt);
+
+    assertStatuses(outcomes, Status.ERROR);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Nothing was written: the marker "
+        + "expiry " + at(expiresAt) + " passed before the commit. Resend with a later expiry.");
+    Assert.assertEquals(version(instance(0)), before);
+
+    // A cluster default too short to outlast the request says so.
+    ClusterConfig config = _configAccessor.getClusterConfig(CLUSTER);
+    config.setDefaultInstanceOperationMaintenanceDurationMs(300L);
+    _configAccessor.setClusterConfig(CLUSTER, config);
+    outcomes = handler(instances -> {
+      try {
+        Thread.sleep(600L);
+      } catch (InterruptedException e) {
+        throw new IllegalStateException(e);
+      }
+      return ValidationResult.feasible();
+    }).apply(CLUSTER, Collections.singletonList(instance(0)),
+        operation(InstanceOperation.EVACUATE), InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY);
+    assertStatuses(outcomes, Status.ERROR);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Nothing was written: the cluster "
+        + "default marker duration of 300 ms ran out before the commit. Give an expiry, or raise "
+        + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS for cluster " + CLUSTER + ".");
+    Assert.assertEquals(version(instance(0)), before);
   }
 
   /** A client whose multi runs the given action instead; every other call goes to ZooKeeper. */

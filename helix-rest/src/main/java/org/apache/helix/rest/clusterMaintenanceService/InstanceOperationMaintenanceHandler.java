@@ -55,6 +55,8 @@ import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.common.PathUtils;
 import org.apache.zookeeper.data.Stat;
@@ -93,7 +95,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>An operation its source already holds is not set again, so repeating a request never
  * reorders the operation stack, and a request that changes nothing writes nothing. Repeating a
- * request is always safe.
+ * request is always safe, and is how a caller settles an unknown outcome.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -101,6 +103,11 @@ public class InstanceOperationMaintenanceHandler {
 
   private static final int MAX_QUOTED_LENGTH = 200;
   static final int MAX_ATTEMPTS = 5;
+  /**
+   * Half the default jute.maxbuffer. ZooKeeper drops a larger multi together with the connection,
+   * and the client resends it until its retry timeout.
+   */
+  static final int MAX_COMMIT_BYTES = 512 * 1024;
   /** Expiry that takes the cluster's default marker duration. */
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
@@ -146,13 +153,18 @@ public class InstanceOperationMaintenanceHandler {
     NOT_APPLIED,
     /** Lost the race to concurrent writers on every attempt. Resend. */
     CONFLICT,
-    /** The guardrail could not be evaluated, so this instance was not written. Resend. */
+    /**
+     * Failed on an unexpected error, such as a ZooKeeper failure or a guardrail that could not be
+     * evaluated. The message says whether the commit may have landed. Resend to settle it.
+     */
     ERROR
   }
 
   /**
    * Per-instance result. Every {@link Status#APPLIED} instance was written in one commit, and no
-   * other instance was. Every outcome carries a message, written to be shown to an operator as is.
+   * other instance was. A CONFLICT or ERROR normally wrote nothing, but after a ZooKeeper
+   * connection loss the commit may have landed; repeating the request settles it. Every outcome
+   * carries a message, written to be shown to an operator as is.
    */
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public static final class Outcome {
@@ -194,6 +206,13 @@ public class InstanceOperationMaintenanceHandler {
   public static class BadRequestException extends RuntimeException {
     public BadRequestException(String message) {
       super(message);
+    }
+  }
+
+  /** A commit was sent and something failed after it, so whether it landed is unknown. */
+  private static final class UnknownCommitException extends RuntimeException {
+    private UnknownCommitException(RuntimeException cause) {
+      super(cause);
     }
   }
 
@@ -254,8 +273,9 @@ public class InstanceOperationMaintenanceHandler {
    * @param expiresAtMillis marker expiry: a future epoch time, {@link #DEFAULT_EXPIRY}, or with no
    *     operation {@link #CLEAR_MARKER}. Ignored for ENABLE.
    * @throws BadRequestException if the operation or source is not supported, the instance list
-   *     is empty or has a name that is not a valid znode name, the cluster does not exist, or the
-   *     expiry is in the past or the default with no positive cluster default.
+   *     is empty or has a name that is not a valid znode name, the cluster does not exist, the
+   *     expiry is in the past or the default with no positive cluster default, or the configs to
+   *     write exceed {@link #MAX_COMMIT_BYTES}.
    */
   public Map<String, Outcome> apply(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
@@ -281,11 +301,12 @@ public class InstanceOperationMaintenanceHandler {
       throw new BadRequestException("Cluster " + clusterId + " does not exist.");
     }
     long expiresAt = expiresAtMillis;
+    long defaultDurationMs = -1L;
     if (operation == null ? expiresAtMillis == CLEAR_MARKER
         : operation.getOperation() == InstanceConstants.InstanceOperation.ENABLE) {
       expiresAt = InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET;
     } else if (expiresAtMillis == DEFAULT_EXPIRY) {
-      long defaultDurationMs = new ClusterConfig(clusterRecord)
+      defaultDurationMs = new ClusterConfig(clusterRecord)
           .getDefaultInstanceOperationMaintenanceDurationMs();
       if (defaultDurationMs <= 0L) {
         throw new BadRequestException("expiresAtMillis is missing or 0, which asks for the "
@@ -308,7 +329,18 @@ public class InstanceOperationMaintenanceHandler {
 
     List<String> names = new ArrayList<>(new LinkedHashSet<>(instances));
     String requestId = UUID.randomUUID().toString();
-    Map<String, Outcome> outcomes = commit(clusterId, names, operation, expiresAt, requestId);
+    Map<String, Outcome> outcomes;
+    try {
+      outcomes = commit(clusterId, names, operation, expiresAt, defaultDurationMs, requestId);
+    } catch (BadRequestException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      boolean unknown = e instanceof UnknownCommitException;
+      Throwable failure = unknown ? e.getCause() : e;
+      LOG.warn("Request {} failed to apply to {} in cluster {}", requestId, names, clusterId,
+          failure);
+      outcomes = all(names, new Outcome(Status.ERROR, failureMessage(failure, unknown)));
+    }
     LOG.info("Instance operation maintenance request {} in cluster {}, operation {}, marker "
             + "expiry {}: {} {}", requestId, clusterId,
         operation == null ? "none" : operation.getOperation() + " by " + operation.getSource(),
@@ -316,10 +348,48 @@ public class InstanceOperationMaintenanceHandler {
     return outcomes;
   }
 
+  /**
+   * The message for a request that failed on an unexpected error. It names the ZooKeeper error
+   * when there is one and never carries Java exception text, which the server log keeps.
+   *
+   * @param unknown whether a commit was sent before the failure, so it may have landed.
+   */
+  public static String failureMessage(Throwable failure, boolean unknown) {
+    String cause = zooKeeperCause(failure);
+    String detail = cause == null ? "" : " (" + cause + ")";
+    return unknown
+        ? "Failed after the commit was sent" + detail + ", so whether it was written is unknown. "
+            + "Resend the request to settle it."
+        : "Nothing was written: the request failed" + detail + ". Resend the request; if it "
+            + "keeps failing, check the Helix REST server log.";
+  }
+
+  private static String zooKeeperCause(Throwable failure) {
+    Throwable cause = failure;
+    for (int depth = 0; cause != null && depth < 20; depth++, cause = cause.getCause()) {
+      if (cause instanceof KeeperException) {
+        return "ZooKeeper error " + ((KeeperException) cause).code();
+      }
+      if (cause instanceof ZkTimeoutException) {
+        return "ZooKeeper timed out";
+      }
+    }
+    return null;
+  }
+
   private Map<String, Outcome> commit(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAt, String requestId) {
+      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs,
+      String requestId) {
     for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      Map<String, Outcome> outcomes = tryCommit(clusterId, instances, operation, expiresAt);
+      Map<String, Outcome> outcomes;
+      try {
+        outcomes = tryCommit(clusterId, instances, operation, expiresAt, defaultDurationMs);
+      } catch (BadRequestException | UnknownCommitException e) {
+        throw e;
+      } catch (RuntimeException e) {
+        // A commit that lost a race may still have landed before a connection loss.
+        throw attempt == 1 ? e : new UnknownCommitException(e);
+      }
       if (outcomes != null) {
         return outcomes;
       }
@@ -332,7 +402,7 @@ public class InstanceOperationMaintenanceHandler {
 
   /** Reads, judges and commits the request once. Returns null when the commit lost a race. */
   private Map<String, Outcome> tryCommit(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAt) {
+      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs) {
     List<String> paths = instances.stream()
         .map(instance -> PropertyPathBuilder.instanceConfig(clusterId, instance))
         .collect(Collectors.toList());
@@ -356,6 +426,8 @@ public class InstanceOperationMaintenanceHandler {
     Map<String, Outcome> outcomes = new LinkedHashMap<>();
     // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
     Map<String, Op> staged = new LinkedHashMap<>();
+    int writes = 0;
+    long bytes = 0L;
     for (int i = 0; i < instances.size(); i++) {
       String instance = instances.get(i);
       if (records.get(i) == null) {
@@ -418,14 +490,21 @@ public class InstanceOperationMaintenanceHandler {
           applied(config, operation, holds, expiresAt, before, wasLive),
           config.isUnderInstanceOperationMaintenance(nowMs) ? until : null));
       if (!holds || until != before) {
-        staged.put(instance, Op.setData(paths.get(i),
-            _zkClient.serialize(config.getRecord(), paths.get(i)), stats.get(i).getVersion()));
+        byte[] data = _zkClient.serialize(config.getRecord(), paths.get(i));
+        writes++;
+        bytes += data.length;
+        staged.put(instance, Op.setData(paths.get(i), data, stats.get(i).getVersion()));
       } else {
         // Held as is, so the commit fails if it changed since it was judged.
         staged.put(instance, Op.check(paths.get(i), stats.get(i).getVersion()));
       }
     }
 
+    if (bytes > MAX_COMMIT_BYTES) {
+      throw new BadRequestException(String.format("The %d instance configs to write take %d "
+          + "bytes, over the %d byte limit of one commit. Send fewer instances per request.",
+          writes, bytes, MAX_COMMIT_BYTES));
+    }
     if (!changingByLogicalId.isEmpty()) {
       Collection<String> changing = changingByLogicalId.values();
       ValidationResult verdict = _guardrail.apply(changing);
@@ -471,13 +550,29 @@ public class InstanceOperationMaintenanceHandler {
     if (ops.isEmpty()) {
       return outcomes;
     }
+    if (expiresAt > 0L && expiresAt <= System.currentTimeMillis()) {
+      Outcome error = new Outcome(Status.ERROR, defaultDurationMs > 0L
+          ? "Nothing was written: the cluster default marker duration of " + defaultDurationMs
+              + " ms ran out before the commit. Give an expiry, or raise "
+              + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS for cluster " + clusterId + "."
+          : "Nothing was written: the marker expiry " + Instant.ofEpochMilli(expiresAt)
+              + " passed before the commit. Resend with a later expiry.");
+      outcomes.replaceAll((instance, outcome) ->
+          outcome.getStatus() == Status.APPLIED ? error : outcome);
+      return outcomes;
+    }
+
     ops.addAll(checks);
     ops.add(Op.check(clusterConfigPath, clusterStat.getVersion()));
     try {
       _zkClient.multi(ops);
       return outcomes;
     } catch (ZkBadVersionException | ZkNoNodeException e) {
+      // Also covers a resend of a multi that already landed; the next attempt finds the request
+      // already applied, and says so.
       return null;
+    } catch (RuntimeException e) {
+      throw new UnknownCommitException(e);
     }
   }
 
