@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.LogUtil;
@@ -132,6 +133,11 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
 
       String resourceName = resource.getResourceName();
       _failingPartitionsInfoMap.clear();
+      Map<String, MissingMinActiveReplicaRecord> recoveryRecords =
+          missingMinActiveReplicaMap.get(resourceName);
+      if (recoveryRecords != null) {
+        recoveryRecords.keySet().removeIf(name -> resource.getPartition(name) == null);
+      }
 
       for (Partition partition : resource.getPartitions()) {
         String currentTopStateInstance =
@@ -167,7 +173,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         // Track how long the partition stays below its minActiveReplicas count, independent of
         // top state presence.
         updatePartitionRecoveryStatus(cache, clusterStatusMonitor, resourceName, partition,
-            currentStateOutput, stateModelDef, recoveryDurationThreshold);
+            currentStateOutput, stateModelDef, recoveryDurationThreshold, currentStateMemo);
       }
 
       if (!_failingPartitionsInfoMap.isEmpty()) {
@@ -182,18 +188,20 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
 
   /**
    * Track how long a partition remains below its {@code minActiveReplicas} count ("recovery
-   * duration"). An edge detector runs once per pipeline execution per partition:
+   * duration"). Each reported observation handles these cases:
    * <ul>
-   *   <li>healthy -&gt; degraded: stamp the detection time as the recovery start (Option B). The
+   *   <li>healthy -&gt; degraded: record the detection time as the recovery start. The
    *       transition is confirmed against the previously published ExternalView so that a partition
    *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
    *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
-   *   <li>degraded -&gt; degraded: mark it once for alerting if it exceeds the threshold.</li>
+   *   <li>degraded -&gt; degraded: keep participant execution timing needed for the calculation.</li>
    *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
    * </ul>
    * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
-   * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. helixLatency
-   * attribution is a follow-up, so the end-to-end duration is emitted with a negative helixLatency.
+   * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. Helix-only
+   * latency uses the replica that brings the active count back to the minimum and excludes
+   * participant execution on its recovery path. Work on other replicas must not hide controller
+   * delay. If the data cannot determine the path, pass -1 so the monitor skips the latency sample.
    *
    * @param cache cluster data cache
    * @param clusterStatusMonitor monitor object
@@ -202,13 +210,21 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    * @param currentStateOutput current state output
    * @param stateModelDef state model def object
    * @param recoveryDurationThreshold recovery duration threshold for the beyond-threshold counter
+   * @param currentStateMemo participant current states shared with top-state monitoring in this run
    */
   private void updatePartitionRecoveryStatus(ResourceControllerDataProvider cache,
       ClusterStatusMonitor clusterStatusMonitor, String resourceName, Partition partition,
       CurrentStateOutput currentStateOutput, StateModelDefinition stateModelDef,
-      long recoveryDurationThreshold) {
+      long recoveryDurationThreshold,
+      Map<String, Map<String, CurrentState>> currentStateMemo) {
     IdealState idealState = cache.getIdealState(resourceName);
     if (idealState == null || !idealState.isEnabled() || cache.isMaintenanceModeEnabled()) {
+      Map<String, MissingMinActiveReplicaRecord> records =
+          cache.getMissingMinActiveReplicaMap().get(resourceName);
+      if (records != null && records.containsKey(partition.getPartitionName())) {
+        records.get(partition.getPartitionName())
+            .invalidateAttribution("recovery observation was suspended");
+      }
       // Skip resources with no IdealState or that are disabled. A disabled resource is not
       // expected to maintain its replicas, so a drop below min while disabled is not a real
       // recovery -- mirrors ResourceMonitor#updateResourceState.
@@ -243,19 +259,39 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         // clearMonitoringRecords() on a leadership change). Only open a recovery window when the
         // previously published ExternalView confirms the partition was at or above min, so bring-up
         // time is not mis-counted as a recovery. Stamp the detection time as the recovery start.
-        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new HashMap<>())
-            .put(partitionName, new MissingMinActiveReplicaRecord(System.currentTimeMillis()));
+        record = new MissingMinActiveReplicaRecord(System.currentTimeMillis());
+        missingMinActiveReplicaMap.computeIfAbsent(resourceName, k -> new ConcurrentHashMap<>())
+            .put(partitionName, record);
+      }
+      if (record != null && clusterStatusMonitor != null) {
+        record.observeConfiguration(minActiveReplica, stateModelDef.getId(),
+            stateModelDef.getInitialState(), getActiveStates(stateModelDef));
+        observeRecoveryExecution(cache, currentStateOutput, currentStateMemo, resourceName,
+            partition, record);
       }
       // Still degraded: keep waiting. The breach is counted once at recovery (below), not while in
       // flight, so the monotonic counter reliably captures it even across scrape gaps.
     } else if (record != null) {
       // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
       missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
-      long totalDuration = System.currentTimeMillis() - record.getStartTimeStamp();
+      long recoveryEnd = System.currentTimeMillis();
+      long totalDuration = recoveryEnd - record.getStartTimeStamp();
       if (clusterStatusMonitor != null) {
-        // helixLatency attribution is a follow-up; pass a negative value to skip that gauge.
-        clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration, -1L,
-            true);
+        if (!record.hasObservation()) {
+          record.invalidateAttribution("recovery has no degraded-state observation");
+        }
+        record.observeConfiguration(minActiveReplica, stateModelDef.getId(),
+            stateModelDef.getInitialState(), getActiveStates(stateModelDef));
+        observeRecoveryExecution(cache, currentStateOutput, currentStateMemo, resourceName,
+            partition, record);
+        long helixLatency = record.getHelixLatency(recoveryEnd);
+        if (helixLatency < 0) {
+          LogUtil.logDebug(LOG, _eventId, String.format(
+              "Helix recovery latency unavailable for %s/%s: %s",
+              resourceName, partitionName, record.getUnavailableReason()));
+        }
+        clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration,
+            helixLatency, true);
         if (totalDuration > recoveryDurationThreshold) {
           LogUtil.logDebug(LOG, _eventId, String.format(
               "Partition %s of resource %s stayed below minActiveReplicas for %s ms, beyond "
@@ -265,6 +301,74 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         }
       }
     }
+  }
+
+  private void observeRecoveryExecution(ResourceControllerDataProvider cache,
+      CurrentStateOutput currentStateOutput,
+      Map<String, Map<String, CurrentState>> currentStateMemo, String resourceName,
+      Partition partition, MissingMinActiveReplicaRecord record) {
+    if (record.isAttributionInvalid()) {
+      return;
+    }
+    long epoch = currentStateOutput.getRecoveryObservationEpoch();
+    if (epoch != cache.getRecoveryObservationEpoch()) {
+      record.invalidateAttribution("controller monitoring epoch changed");
+      return;
+    }
+    long sequence = currentStateOutput.getRecoveryObservationSequence(record);
+    long matchingSequence =
+        record.matchingObservation(currentStateOutput, resourceName, partition, cache);
+    if (sequence < 0 && !record.hasObservation()) {
+      sequence = matchingSequence;
+    }
+    if (sequence < 0 || sequence != matchingSequence) {
+      record.invalidateAttribution("partition transition snapshot is stale");
+      return;
+    }
+    // Count changes to this recovery's data, not unrelated pipeline runs.
+    record.observeSequence(sequence);
+    if (record.isAttributionInvalid()) {
+      return;
+    }
+    for (Map.Entry<String, String> entry :
+        currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet()) {
+      String instance = entry.getKey();
+      if (entry.getValue() == null) {
+        record.invalidateAttribution("participant current state is unavailable");
+        return;
+      }
+      LiveInstance liveInstance = cache.getLiveInstances().get(instance);
+      if (liveInstance == null) {
+        record.invalidateAttribution("participant is no longer live");
+        return;
+      }
+      String session = currentStateOutput.getParticipantSession(instance);
+      if (session == null || !session.equals(liveInstance.getEphemeralOwner())) {
+        record.invalidateAttribution("participant session changed since the snapshot");
+        return;
+      }
+      CurrentState currentState =
+          resolveCurrentStates(cache, currentStateMemo, instance, session).get(resourceName);
+      if (currentState == null
+          || !entry.getValue().equals(currentState.getState(partition.getPartitionName()))
+          || currentState.getEndTime(partition.getPartitionName())
+              != currentStateOutput.getEndTime(resourceName, partition, instance)) {
+        record.invalidateAttribution("participant current state no longer matches the observation");
+        return;
+      }
+      String partitionName = partition.getPartitionName();
+      record.observeParticipant(instance, session, entry.getValue(),
+          currentState.getPreviousState(partitionName), currentState.getStartTime(partitionName),
+          currentState.getEndTime(partitionName));
+      if (record.isAttributionInvalid()) {
+        return;
+      }
+    }
+    if (epoch != cache.getRecoveryObservationEpoch()
+        || sequence != record.matchingObservation(currentStateOutput, resourceName, partition, cache)) {
+      record.invalidateAttribution("partition transition snapshot changed during recovery observation");
+    }
+    record.finishObservation(currentStateOutput.getCurrentStateMap(resourceName, partition).keySet());
   }
 
   /**
@@ -314,10 +418,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     if (stateMap == null) {
       return 0;
     }
-    Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
-    activeStates.remove(stateModelDef.getInitialState());
-    activeStates.remove(HelixDefinedState.DROPPED.name());
-    activeStates.remove(HelixDefinedState.ERROR.name());
+    Set<String> activeStates = getActiveStates(stateModelDef);
 
     int activeReplicaCount = 0;
     for (String state : stateMap.values()) {
@@ -326,6 +427,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       }
     }
     return activeReplicaCount;
+  }
+
+  private Set<String> getActiveStates(StateModelDefinition stateModelDef) {
+    Set<String> activeStates = new HashSet<>(stateModelDef.getStatesPriorityList());
+    activeStates.remove(stateModelDef.getInitialState());
+    activeStates.remove(HelixDefinedState.DROPPED.name());
+    activeStates.remove(HelixDefinedState.ERROR.name());
+    return activeStates;
   }
 
   /**
