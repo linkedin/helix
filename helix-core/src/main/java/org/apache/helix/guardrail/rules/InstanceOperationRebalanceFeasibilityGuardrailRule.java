@@ -19,7 +19,10 @@
 
 package org.apache.helix.guardrail.rules;
 
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
@@ -53,7 +56,8 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
  * partitions whose placeable replica count drops between them, so a pre-existing deficit is never
  * blamed on this operation. Because the what-if runs the real {@code ReadOnlyWagedRebalancer}, the diff
  * already reflects WAGED's own hard constraints (capacity, replica-count, fault-zone); the rule adds no
- * separate capacity math of its own.
+ * separate capacity math of its own. A batch ({@link GuardrailContext#getInstanceNames()}) is judged
+ * in one what-if with every target drained, so a set that only fails together is still blocked.
  * <p>
  * <b>Behavior.</b> Opt-in via
  * {@link ClusterConfig#setInstanceOperationRebalanceGuardrailEnabled(boolean)}, disabled by default;
@@ -74,9 +78,9 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
 
   @Override
   public ValidationResult validate(GuardrailContext context) {
-    String instanceName = context.getInstanceName();
+    Collection<String> instanceNames = context.getInstanceNames();
     InstanceConstants.InstanceOperation proposedOp = context.getProposedInstanceOperation();
-    if (instanceName == null || proposedOp == null) {
+    if (instanceNames.isEmpty() || proposedOp == null) {
       // Not an instance-operation mutation; nothing for this rule to certify.
       return ValidationResult.feasible();
     }
@@ -104,30 +108,34 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
       return ValidationResult.feasible();
     }
 
-    InstanceConfig currentConfig =
-        dataAccessor.getProperty(keyBuilder.instanceConfig(instanceName));
-    if (currentConfig == null) {
-      // No config to change; let the write path reject a missing instance.
-      return ValidationResult.feasible();
+    Map<String, InstanceConfig> currentConfigs = new LinkedHashMap<>();
+    Map<String, InstanceConfig> candidateConfigs = new LinkedHashMap<>();
+    for (String instanceName : instanceNames) {
+      InstanceConfig currentConfig =
+          dataAccessor.getProperty(keyBuilder.instanceConfig(instanceName));
+      // A missing instance has no config to change (the write path rejects it), and one already
+      // outside the assignable pool removes no capacity (covers SWAP_IN and any change out of an
+      // already non-assignable state).
+      if (currentConfig == null || !currentConfig.isAssignable()) {
+        continue;
+      }
+      // Candidate config = the target with the proposed operation applied. Copy the ZNRecord so the
+      // baseline config object is never mutated.
+      InstanceConfig candidateConfig = new InstanceConfig(new ZNRecord(currentConfig.getRecord()));
+      candidateConfig.setInstanceOperation(proposedOp);
+      // An operation that keeps the instance in the assignable pool (ENABLE / DISABLE) relocates no
+      // replicas, so WAGED placement feasibility is unchanged.
+      if (!candidateConfig.isAssignable()) {
+        currentConfigs.put(instanceName, currentConfig);
+        candidateConfigs.put(instanceName, candidateConfig);
+      }
     }
-    if (!currentConfig.isAssignable()) {
-      // The instance is already outside the assignable pool, so the operation removes no capacity
-      // (covers SWAP_IN and any change out of an already non-assignable state).
+    if (candidateConfigs.isEmpty()) {
       return ValidationResult.feasible();
     }
 
-    // Candidate config = the target with the proposed operation applied. Copy the ZNRecord so the
-    // baseline config object (read above and reused below) is never mutated.
-    InstanceConfig candidateConfig = new InstanceConfig(new ZNRecord(currentConfig.getRecord()));
-    candidateConfig.setInstanceOperation(proposedOp);
-    if (candidateConfig.isAssignable()) {
-      // The operation keeps the instance in the assignable pool (ENABLE / DISABLE), so no replicas
-      // need to relocate and WAGED placement feasibility is unchanged.
-      return ValidationResult.feasible();
-    }
-
-    // From here: currently assignable, proposed non-assignable -> the operation drains this
-    // instance's capacity from the pool, forcing its replicas elsewhere. Simulate to see if they fit.
+    // From here: each candidate is currently assignable and proposed non-assignable, so the batch
+    // drains their capacity from the pool and forces their replicas elsewhere. Simulate the fit.
     List<IdealState> wagedIdealStates =
         WagedRebalanceFeasibilityWhatIf.collectWagedIdealStates(dataAccessor);
     if (wagedIdealStates.isEmpty()) {
@@ -135,8 +143,8 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
       return ValidationResult.feasible();
     }
 
-    return WagedRebalanceFeasibilityWhatIf.evaluate(context, clusterConfig, instanceName,
-        currentConfig, candidateConfig, wagedIdealStates, "operation " + proposedOp,
+    return WagedRebalanceFeasibilityWhatIf.evaluate(context, clusterConfig, currentConfigs,
+        candidateConfigs, wagedIdealStates, "operation " + proposedOp,
         "Free up assignable capacity, or add instances to the assignable pool", RULE_ID);
   }
 }
