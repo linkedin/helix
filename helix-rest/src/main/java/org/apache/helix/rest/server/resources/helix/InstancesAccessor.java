@@ -53,6 +53,8 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.ReusingWagedAssignmentProvider;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConfig;
@@ -525,9 +527,13 @@ public class InstancesAccessor extends AbstractHelixResource {
         operation == null ? null : operation.getOperation();
     Map<String, InstanceOperationMaintenanceHandler.Outcome> outcomes;
     try {
+      // Every guardrail call this request makes shares the cluster's current assignment.
+      WagedAssignmentProvider assignments =
+          new ReusingWagedAssignmentProvider(wagedAssignmentProvider());
       InstanceOperationMaintenanceHandler handler = new InstanceOperationMaintenanceHandler(
           getRealmAwareZkClient(),
-          changing -> validateInstanceOperation(clusterId, changing, proposed));
+          changing -> validateInstanceOperation(clusterId, changing, proposed, false, assignments),
+          subset -> validateInstanceOperation(clusterId, subset, proposed, true, assignments));
       outcomes = handler.apply(clusterId, instances, operation,
           expiresAtMillis.asLong(InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY));
     } catch (InstanceOperationMaintenanceHandler.BadRequestException e) {
