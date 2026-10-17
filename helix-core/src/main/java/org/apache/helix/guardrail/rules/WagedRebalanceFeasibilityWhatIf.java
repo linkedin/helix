@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -127,9 +128,9 @@ final class WagedRebalanceFeasibilityWhatIf {
    * @param context the guard-rail context (supplies the {@link WagedAssignmentProvider}, the
    *     read-only accessor and the cluster name)
    * @param clusterConfig the cluster config to simulate against (already read by the caller)
-   * @param instanceName the target instance whose config the mutation changes
-   * @param currentConfig the target's current {@link InstanceConfig} (baseline)
-   * @param candidateConfig the target's {@link InstanceConfig} with the mutation applied (candidate)
+   * @param currentConfigs the targets' current {@link InstanceConfig}s (baseline), by instance name
+   * @param candidateConfigs the targets' {@link InstanceConfig}s with the mutation applied
+   *     (candidate), keyed like {@code currentConfigs}; every target is mutated in one candidate run
    * @param wagedIdealStates the non-empty WAGED ideal states from
    *     {@link #collectWagedIdealStates(ReadOnlyDataAccessor)}
    * @param mutationDescription a human-readable noun phrase for the mutation used in messages, e.g.
@@ -140,9 +141,11 @@ final class WagedRebalanceFeasibilityWhatIf {
    * @param ruleId the reporting rule's id, used to tag every {@link Violation}
    */
   static ValidationResult evaluate(GuardrailContext context, ClusterConfig clusterConfig,
-      String instanceName, InstanceConfig currentConfig, InstanceConfig candidateConfig,
+      Map<String, InstanceConfig> currentConfigs, Map<String, InstanceConfig> candidateConfigs,
       List<IdealState> wagedIdealStates, String mutationDescription, String remedyHint,
       String ruleId) {
+    String targets = (candidateConfigs.size() == 1 ? "instance " : "instances ")
+        + String.join(", ", candidateConfigs.keySet());
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     WagedAssignmentProvider provider = context.getWagedAssignmentProvider();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
@@ -169,26 +172,25 @@ final class WagedRebalanceFeasibilityWhatIf {
       liveInstances = Collections.emptyList();
     }
 
-    // Candidate instance-config list = baseline with the target replaced by its mutated copy.
+    // Candidate instance-config list = baseline with each target replaced by its mutated copy.
     List<InstanceConfig> candidateInstanceConfigs =
-        new ArrayList<>(baselineInstanceConfigs.size() + 1);
-    boolean replaced = false;
+        new ArrayList<>(baselineInstanceConfigs.size() + candidateConfigs.size());
+    Set<String> missing = new LinkedHashSet<>(candidateConfigs.keySet());
     for (InstanceConfig instanceConfig : baselineInstanceConfigs) {
-      if (instanceConfig != null && instanceName.equals(instanceConfig.getInstanceName())) {
-        candidateInstanceConfigs.add(candidateConfig);
-        replaced = true;
-      } else {
-        candidateInstanceConfigs.add(instanceConfig);
-      }
+      boolean target = instanceConfig != null && missing.remove(instanceConfig.getInstanceName());
+      candidateInstanceConfigs.add(
+          target ? candidateConfigs.get(instanceConfig.getInstanceName()) : instanceConfig);
     }
-    if (!replaced) {
-      // The target's config was not in the bulk instance-config read (a race with a concurrent
+    if (!missing.isEmpty()) {
+      // A target's config was not in the bulk instance-config read (a race with a concurrent
       // change). Keep the two simulations symmetric: the candidate must include the mutated copy,
       // and the baseline must include the target as it is now. Otherwise the diff could falsely
       // pass. Including both makes the diff reflect only this mutation.
-      candidateInstanceConfigs.add(candidateConfig);
       baselineInstanceConfigs = new ArrayList<>(baselineInstanceConfigs);
-      baselineInstanceConfigs.add(currentConfig);
+      for (String instanceName : missing) {
+        candidateInstanceConfigs.add(candidateConfigs.get(instanceName));
+        baselineInstanceConfigs.add(currentConfigs.get(instanceName));
+      }
     }
 
     // Simulate against a copy of the cluster config with delayed rebalance disabled, so the what-if
@@ -210,10 +212,10 @@ final class WagedRebalanceFeasibilityWhatIf {
       return ValidationResult.infeasible(Violation.newBuilder(ruleId)
           .message(String.format(
               "Could not compute a baseline WAGED assignment for cluster %s to validate %s on "
-                  + "instance %s against (%s). The cluster may already be unable to compute a WAGED "
+                  + "%s against (%s). The cluster may already be unable to compute a WAGED "
                   + "assignment. Resolve the cluster's rebalance health, or retry with force=true to "
                   + "override this guard rail.", context.getClusterName(), mutationDescription,
-              instanceName, e.getMessage()))
+              targets, e.getMessage()))
           .build());
     }
 
@@ -226,10 +228,10 @@ final class WagedRebalanceFeasibilityWhatIf {
       // cluster-wide CAPACITY_DEFICIT) -- the strongest signal that it breaks placement.
       return ValidationResult.infeasible(Violation.newBuilder(ruleId)
           .message(String.format(
-              "Applying %s to instance %s makes the WAGED rebalancer unable to compute an "
+              "Applying %s to %s makes the WAGED rebalancer unable to compute an "
                   + "assignment for cluster %s (%s), which would stall the cluster-wide WAGED "
                   + "rebalance. %s, or retry with force=true if this is an intentional operational "
-                  + "override.", mutationDescription, instanceName, context.getClusterName(),
+                  + "override.", mutationDescription, targets, context.getClusterName(),
               e.getMessage(), remedyHint))
           .build());
     }
@@ -261,11 +263,11 @@ final class WagedRebalanceFeasibilityWhatIf {
               .resource(resourceName)
               .partition(partition.getPartitionName())
               .message(String.format(
-                  "%s on instance %s reduces the placeable replicas of partition %s from %d to %d: "
+                  "%s on %s reduces the placeable replicas of partition %s from %d to %d: "
                       + "the WAGED rebalancer cannot re-place all of its replicas on the remaining "
                       + "assignable instances. %s, then retry; use force=true only if the resulting "
                       + "under-replication is an accepted operational tradeoff.", mutationDescription,
-                  instanceName, partition.getPartitionName(), baselineReplicas, candidateReplicas,
+                  targets, partition.getPartitionName(), baselineReplicas, candidateReplicas,
                   remedyHint))
               .build());
         }
@@ -279,10 +281,10 @@ final class WagedRebalanceFeasibilityWhatIf {
       int reported = violations.size();
       violations.add(Violation.newBuilder(ruleId)
           .message(String.format(
-              "Showing the first %d of %d partitions that would lose replicas from %s on instance "
-                  + "%s; %d were omitted to bound the response size. Fix the reported shortfall and "
+              "Showing the first %d of %d partitions that would lose replicas from %s on %s; "
+                  + "%d were omitted to bound the response size. Fix the reported shortfall and "
                   + "resubmit.", reported, totalViolations, mutationDescription,
-              instanceName, totalViolations - reported))
+              targets, totalViolations - reported))
           .build());
     }
     return ValidationResult.of(violations);

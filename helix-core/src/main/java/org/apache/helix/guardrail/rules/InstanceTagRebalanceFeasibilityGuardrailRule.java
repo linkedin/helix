@@ -20,6 +20,7 @@
 package org.apache.helix.guardrail.rules;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -151,8 +152,9 @@ public class InstanceTagRebalanceFeasibilityGuardrailRule implements GuardrailRu
       candidateConfig.removeTag(tag);
     }
 
-    return WagedRebalanceFeasibilityWhatIf.evaluate(context, clusterConfig, instanceName,
-        currentConfig, candidateConfig, wagedIdealStates,
+    return WagedRebalanceFeasibilityWhatIf.evaluate(context, clusterConfig,
+        Collections.singletonMap(instanceName, currentConfig),
+        Collections.singletonMap(instanceName, candidateConfig), wagedIdealStates,
         "removal of instance tag(s) " + effectiveRemovedTags,
         "Add the removed tag(s) " + effectiveRemovedTags + " to another live instance, or lower the "
             + "replica count of the WAGED resource(s) pinned to them", RULE_ID);
