@@ -540,8 +540,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             // The WAGED what-if context is shared with the batch instanceOperationMaintenance path;
             // the min-active rule reads the single instanceName, so set it too.
             GuardrailContext.Builder setInstanceOperationContextBuilder = instanceOperationContext(
-                clusterId, Collections.singletonList(instanceName), instanceOperation)
-                .instanceName(instanceName);
+                clusterId, Collections.singletonList(instanceName), instanceOperation,
+                wagedAssignmentProvider()).instanceName(instanceName);
             List<GuardrailRule> setInstanceOperationRules = new ArrayList<>();
             if (drainsInPlace) {
               // Same read-only ExternalView min-active-replica what-if as command=disable; DISABLE

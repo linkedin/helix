@@ -445,6 +445,25 @@ public class TestClusterConfig {
   }
 
   @Test
+  public void testInstanceOperationMaintenanceFitSearchMaxChecks() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(),
+        ClusterConfig.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS);
+    clusterConfig.setInstanceOperationMaintenanceFitSearchMaxChecks(0);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(), 0);
+    try {
+      clusterConfig.setInstanceOperationMaintenanceFitSearchMaxChecks(-1);
+      Assert.fail("A negative bound must throw");
+    } catch (IllegalArgumentException expected) {
+      Assert.assertTrue(expected.getMessage().contains("must not be negative"));
+    }
+    clusterConfig.getRecord().setIntField(ClusterConfig.ClusterConfigProperty
+        .INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS.name(), -3);
+    Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(),
+        ClusterConfig.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS);
+  }
+
+  @Test
   public void testInstanceOperationMaintenanceAbsoluteBudgetRoundTrip() throws Exception {
     ClusterConfig clusterConfig = new ClusterConfig("testCluster");
     clusterConfig.setInstanceOperationMaintenanceBudget(20);

@@ -1107,7 +1107,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
   /**
    * End to end through the real rebalance-feasibility guard rail. Four instances host three
    * replicas of every partition, so draining one is feasible but draining two together is not.
-   * A request commits every instance or none.
+   * A request commits every instance or none, and a rejected one says which instances fit.
    */
   @Test
   public void testInstanceOperationMaintenance() throws Exception {
@@ -1157,26 +1157,29 @@ public class TestInstancesAccessor extends AbstractTestClass {
       JsonNode response = postInstanceOperationMaintenanceResponse(cluster,
           "{\"instances\":[\"" + first + "\",\"" + second + evacuate);
       Assert.assertEquals(response.get("message").asText(),
-          "Applied to 0 of 2 instances (2 GUARDRAIL_REJECTED).");
+          "Applied to 1 of 2 instances (1 GUARDRAIL_REJECTED).");
+      // The first fits alone, so it is applied; the second does not fit with it and is not written.
       JsonNode outcomes = response.get("instances");
-      for (String instance : Arrays.asList(first, second)) {
-        Assert.assertEquals(outcomes.get(instance).get("status").asText(), "GUARDRAIL_REJECTED");
-        // One readable line naming the rule and the short partitions, not the raw verdict JSON.
-        String message = outcomes.get(instance).get("message").asText();
-        Assert.assertTrue(message.startsWith("Rejected by guardrail "
-            + InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID + ": EVACUATE on the 2 "
-            + "instances this request changes would leave partitions unable to place all their "
-            + "replicas, including " + resource + "_"), message);
-        Assert.assertFalse(message.contains("force"), message);
-      }
-      // Alone, the first fits; an instance that is not found does not hold it back.
+      Assert.assertEquals(outcomes.get(first), applied("EVACUATE is now set by AUTOMATION. Took a "
+          + "maintenance marker until " + Instant.ofEpochMilli(expiresAt) + ".", expiresAt));
+      Assert.assertEquals(outcomes.get(second).get("status").asText(), "GUARDRAIL_REJECTED");
+      // One readable line naming the rule and the short partitions, not the raw verdict JSON.
+      String message = outcomes.get(second).get("message").asText();
+      Assert.assertTrue(message.startsWith("Rejected by guardrail "
+          + InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID + ": EVACUATE on this "
+          + "instance together with 1 instance of this request that fits would leave partitions "
+          + "unable to place all their replicas, including " + resource + "_"), message);
+      Assert.assertTrue(message.endsWith(". Resend it once the instances that fit are done."),
+          message);
+      Assert.assertFalse(message.contains("force"), message);
+      // An instance that is not found does not hold back the rest.
       response = postInstanceOperationMaintenanceResponse(cluster,
           "{\"instances\":[\"" + first + "\",\"missing" + evacuate);
       Assert.assertEquals(response.get("message").asText(),
           "Applied to 1 of 2 instances (1 INSTANCE_NOT_FOUND).");
-      Assert.assertEquals(response.get("instances").get(first), applied("EVACUATE is now set by "
-          + "AUTOMATION. Took a maintenance marker until " + Instant.ofEpochMilli(expiresAt) + ".",
-          expiresAt));
+      Assert.assertEquals(response.get("instances").get(first), applied("EVACUATE was already set "
+          + "by AUTOMATION. Kept its live maintenance marker, which runs until "
+          + Instant.ofEpochMilli(expiresAt) + ".", expiresAt));
       Assert.assertEquals(response.get("instances").get("missing").get("status").asText(),
           "INSTANCE_NOT_FOUND");
       InstanceConfig drained = _configAccessor.getInstanceConfig(cluster, first);
@@ -1233,7 +1236,15 @@ public class TestInstancesAccessor extends AbstractTestClass {
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
           toSecond + expiresAt + ",\"expiresAtMilis\":" + expiresAt + "}"),
           "Unknown field \"expiresAtMilis\". The fields are instances, instanceOperation, "
-              + "instanceOperationSource, reason, expiresAtMillis.");
+              + "instanceOperationSource, reason, expiresAtMillis, fitInstances.");
+      for (String fit : Arrays.asList("\"" + second + "\"", "[1]", "[[\"" + second + "\"]]")) {
+        Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
+            toSecond + expiresAt + ",\"fitInstances\":" + fit + "}"), "fitInstances must be a "
+            + "list of instance names: the FITS instances of a request that ran out of time.");
+      }
+      Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
+          toSecond + expiresAt + ",\"fitInstances\":[\"" + first + "\"]}"), "fitInstances names ["
+          + first + "], not in instances. It may only name instances of this request.");
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
           toSecond + expiresAt + ",\"reason\":\"drain\"}"), "reason is recorded with an "
           + "operation, so it needs instanceOperation and instanceOperationSource.");

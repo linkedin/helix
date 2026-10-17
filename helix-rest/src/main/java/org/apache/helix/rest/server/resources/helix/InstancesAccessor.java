@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -54,6 +55,8 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.guardrail.ReusingWagedAssignmentProvider;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.ClusterConfig;
@@ -83,7 +86,9 @@ public class InstancesAccessor extends AbstractHelixResource {
   private final static Logger _logger = LoggerFactory.getLogger(InstancesAccessor.class);
 
   private static final List<String> MAINTENANCE_FIELDS = Arrays.asList("instances",
-      "instanceOperation", "instanceOperationSource", "reason", "expiresAtMillis");
+      "instanceOperation", "instanceOperationSource", "reason", "expiresAtMillis", "fitInstances");
+  private static final String FIT_INSTANCES_FORMAT = "fitInstances must be a list of instance "
+      + "names: the FITS instances of a request that ran out of time.";
 
   public enum InstancesProperties {
     instances,
@@ -466,7 +471,10 @@ public class InstancesAccessor extends AbstractHelixResource {
    * without them only the marker is written. {@code reason} is optional. {@code expiresAtMillis}
    * defaults to 0, the cluster's default marker duration. Without an operation, -1 clears the
    * marker. ENABLE ignores it and clears the marker. A live marker is never extended or
-   * shortened; it runs until the expiry it was taken with.
+   * shortened; it runs until the expiry it was taken with. {@code fitInstances}, optional, names
+   * the FITS instances of a request that ran out of time, resent among {@code instances} to
+   * resume its search for the instances that fit. Send it on every such resend, empty if there
+   * were no FITS instances: present, it makes the search start past them.
    * <pre>{@code
    * { "instances": ["h1", "h2"], "instanceOperation": "EVACUATE",
    *   "instanceOperationSource": "AUTOMATION", "reason": "...", "expiresAtMillis": 1776385800000 }
@@ -504,6 +512,20 @@ public class InstancesAccessor extends AbstractHelixResource {
       return badRequest("expiresAtMillis must be an integer: an epoch time in milliseconds, 0 for "
           + "the cluster default, or -1 to clear the marker.");
     }
+    JsonNode fitNode = node.path("fitInstances");
+    List<String> fitInstances = null;
+    if (!fitNode.isMissingNode()) {
+      if (!fitNode.isArray()) {
+        return badRequest(FIT_INSTANCES_FORMAT);
+      }
+      fitInstances = new ArrayList<>();
+      for (JsonNode element : fitNode) {
+        if (!element.isTextual()) {
+          return badRequest(FIT_INSTANCES_FORMAT);
+        }
+        fitInstances.add(element.asText());
+      }
+    }
     InstanceConfig.InstanceOperation operation = null;
     if (node.has("instanceOperation") || node.has("instanceOperationSource")) {
       String operationName = node.path("instanceOperation").asText("");
@@ -527,12 +549,17 @@ public class InstancesAccessor extends AbstractHelixResource {
         operation == null ? null : operation.getOperation();
     Map<String, InstanceOperationMaintenanceHandler.Outcome> outcomes;
     try {
+      // Every guardrail call this request makes shares the cluster's current assignment.
+      WagedAssignmentProvider assignments =
+          new ReusingWagedAssignmentProvider(wagedAssignmentProvider());
       InstanceOperationMaintenanceHandler handler = new InstanceOperationMaintenanceHandler(
           getRealmAwareZkClient(),
-          changing -> validateInstanceOperation(clusterId, changing, proposed),
+          changing -> validateInstanceOperation(clusterId, changing, proposed, false, assignments),
+          subset -> validateInstanceOperation(clusterId, subset, proposed, true, assignments),
           SharedMetricRegistries.getOrCreate(getNamespace()));
       outcomes = handler.apply(clusterId, instances, operation,
-          expiresAtMillis.asLong(InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY));
+          expiresAtMillis.asLong(InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY),
+          fitInstances);
     } catch (InstanceOperationMaintenanceHandler.BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {

@@ -93,6 +93,9 @@ public class ClusterConfig extends HelixProperty {
     // when the caller omits expiresAtMillis. When unset (-1), callers must always supply an
     // explicit expiresAtMillis; otherwise the write is rejected.
     DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
+    // How many guardrail checks each attempt of an instance-operation maintenance request may
+    // run, after its first, to find which of its instances fit when they do not all fit together.
+    INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS,
 
     TARGET_EXTERNALVIEW_ENABLED,
     // Restrict load balance to downward transitions when the number of error partitions exceeds
@@ -225,6 +228,7 @@ public class ClusterConfig extends HelixProperty {
   public final static String TASK_QUOTA_RATIO_NOT_SET = "-1";
 
   public static final long OFFLINE_DURATION_FOR_PURGE_NOT_SET = -1L;
+  public static final int DEFAULT_INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS = 4;
 
   // Default preference for all the aspects should be the same to ensure balanced setup.
   public final static Map<GlobalRebalancePreferenceKey, Integer>
@@ -648,6 +652,30 @@ public class ClusterConfig extends HelixProperty {
   public long getDefaultInstanceOperationMaintenanceDurationMs() {
     return _record.getLongField(
         ClusterConfigProperty.DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS.name(), -1L);
+  }
+
+  /**
+   * Set how many guardrail checks each attempt of an instance-operation maintenance request may
+   * run, after its first, to find which of its instances fit when they do not all fit together.
+   * An attempt retried after a lost race checks again. 0 turns the search off, so such a request
+   * applies none of them.
+   */
+  public void setInstanceOperationMaintenanceFitSearchMaxChecks(int maxChecks) {
+    if (maxChecks < 0) {
+      throw new IllegalArgumentException("The fit-search check bound must not be negative, got "
+          + maxChecks);
+    }
+    _record.setIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS.name(),
+        maxChecks);
+  }
+
+  /** @return the fit-search check bound, or the default when unset or negative. */
+  public int getInstanceOperationMaintenanceFitSearchMaxChecks() {
+    int maxChecks = _record.getIntField(
+        ClusterConfigProperty.INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS.name(), -1);
+    return maxChecks < 0 ? DEFAULT_INSTANCE_OPERATION_MAINTENANCE_FIT_SEARCH_MAX_CHECKS
+        : maxChecks;
   }
 
   /**
