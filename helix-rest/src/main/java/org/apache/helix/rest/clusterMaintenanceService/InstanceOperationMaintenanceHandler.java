@@ -37,6 +37,7 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import com.codahale.metrics.MetricRegistry;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
@@ -108,6 +109,12 @@ public class InstanceOperationMaintenanceHandler {
    * and the client resends it until its retry timeout.
    */
   static final int MAX_COMMIT_BYTES = 512 * 1024;
+  /** Histogram of the instances in each valid request. */
+  static final String BATCH_SIZE_METRIC =
+      "org.apache.helix.rest.instanceOperationMaintenance.batchSize";
+  /** Histogram of the instance-config bytes each commit writes. */
+  static final String COMMIT_BYTES_METRIC =
+      "org.apache.helix.rest.instanceOperationMaintenance.commitBytes";
   /** Expiry that takes the cluster's default marker duration. */
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
@@ -253,17 +260,20 @@ public class InstanceOperationMaintenanceHandler {
   private final RealmAwareZkClient _zkClient;
   private final BaseDataAccessor<ZNRecord> _accessor;
   private final Function<Collection<String>, ValidationResult> _guardrail;
+  private final MetricRegistry _metrics;
 
   /**
    * @param guardrail given the instances whose operation changes, judges whether the requested
    *     operation is safe on them together. Runs once per attempt, on the instances that passed
    *     every other check.
+   * @param metrics where to record batch and commit sizes, or null to record none.
    */
   public InstanceOperationMaintenanceHandler(RealmAwareZkClient zkClient,
-      Function<Collection<String>, ValidationResult> guardrail) {
+      Function<Collection<String>, ValidationResult> guardrail, MetricRegistry metrics) {
     _zkClient = Objects.requireNonNull(zkClient, "zkClient");
     _accessor = new ZkBaseDataAccessor<>(zkClient);
     _guardrail = Objects.requireNonNull(guardrail, "guardrail");
+    _metrics = metrics;
   }
 
   /**
@@ -329,6 +339,7 @@ public class InstanceOperationMaintenanceHandler {
     }
 
     List<String> names = new ArrayList<>(new LinkedHashSet<>(instances));
+    record(BATCH_SIZE_METRIC, names.size());
     String requestId = UUID.randomUUID().toString();
     Map<String, Outcome> outcomes;
     try {
@@ -427,8 +438,7 @@ public class InstanceOperationMaintenanceHandler {
     Map<String, Outcome> outcomes = new LinkedHashMap<>();
     // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
     Map<String, Op> staged = new LinkedHashMap<>();
-    int writes = 0;
-    long bytes = 0L;
+    Map<String, Integer> writeBytes = new HashMap<>();
     for (int i = 0; i < instances.size(); i++) {
       String instance = instances.get(i);
       if (records.get(i) == null) {
@@ -492,8 +502,7 @@ public class InstanceOperationMaintenanceHandler {
           config.isUnderInstanceOperationMaintenance(nowMs) ? until : null));
       if (!holds || until != before) {
         byte[] data = _zkClient.serialize(config.getRecord(), paths.get(i));
-        writes++;
-        bytes += data.length;
+        writeBytes.put(instance, data.length);
         staged.put(instance, Op.setData(paths.get(i), data, stats.get(i).getVersion()));
       } else {
         // Held as is, so the commit fails if it changed since it was judged.
@@ -501,10 +510,11 @@ public class InstanceOperationMaintenanceHandler {
       }
     }
 
+    long bytes = writeBytes.values().stream().mapToLong(Integer::longValue).sum();
     if (bytes > MAX_COMMIT_BYTES) {
       throw new BadRequestException(String.format("The %d instance configs to write take %d "
           + "bytes, over the %d byte limit of one commit. Send fewer instances per request.",
-          writes, bytes, MAX_COMMIT_BYTES));
+          writeBytes.size(), bytes, MAX_COMMIT_BYTES));
     }
     if (!changingByLogicalId.isEmpty()) {
       Collection<String> changing = changingByLogicalId.values();
@@ -563,6 +573,9 @@ public class InstanceOperationMaintenanceHandler {
       return outcomes;
     }
 
+    record(COMMIT_BYTES_METRIC, writeBytes.entrySet().stream()
+        .filter(e -> outcomes.get(e.getKey()).getStatus() == Status.APPLIED)
+        .mapToLong(Map.Entry::getValue).sum());
     ops.addAll(checks);
     ops.add(Op.check(clusterConfigPath, clusterStat.getVersion()));
     try {
@@ -574,6 +587,12 @@ public class InstanceOperationMaintenanceHandler {
       return null;
     } catch (RuntimeException e) {
       throw new UnknownCommitException(e);
+    }
+  }
+
+  private void record(String histogram, long value) {
+    if (_metrics != null) {
+      _metrics.histogram(histogram).update(value);
     }
   }
 
