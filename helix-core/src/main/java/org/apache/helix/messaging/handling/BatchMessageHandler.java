@@ -38,6 +38,7 @@ import org.apache.helix.PropertyKey;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.Attributes;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -117,7 +118,7 @@ public class BatchMessageHandler extends MessageHandler {
       // persistence for batched current-state updates actually happens (see
       // HelixStateTransitionHandler#updateZKCurrentState()). Skipping the write here avoids
       // silently resurrecting a dropped instance's ZK subtree as an orphan node.
-      if (!isInstanceRegistered(accessor, manager.getInstanceName())) {
+      if (!InstanceValidationUtil.isInstanceRegistered(accessor, manager.getInstanceName())) {
         LOG.warn(
             "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
                 + "Skipping {} batched current state ZK update(s) to avoid resurrecting a "
@@ -227,17 +228,6 @@ public class BatchMessageHandler extends MessageHandler {
     for (MessageHandler handler : _subMessageHandlers) {
       handler.onError(e, code, type);
     }
-  }
-
-  /**
-   * Checks whether this instance is still a registered member of the cluster, i.e. its
-   * InstanceConfig has not been removed. See
-   * {@code HelixStateTransitionHandler#isInstanceRegistered} for the full rationale; this is
-   * duplicated here (rather than shared) since it guards the deferred batch current-state write
-   * below, which is a distinct, later ZK operation from any per-sub-message check.
-   */
-  private boolean isInstanceRegistered(HelixDataAccessor accessor, String instanceName) {
-    return accessor.getPropertyStat(accessor.keyBuilder().instanceConfig(instanceName)) != null;
   }
 
   // TODO: optimize this based on the fact that each cs update is for a

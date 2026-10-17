@@ -26,6 +26,7 @@ import org.apache.helix.PropertyKey;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.task.TaskResult.Status;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -211,6 +212,22 @@ public class TaskRunner implements Runnable {
     LOG.debug(
         String.format("Updating current state %s for partition %s.", state, partition));
     try {
+      // Re-validate immediately before the actual ZK write: the instance may have been cleanly
+      // dropped (InstanceConfig + /INSTANCES/{instance} removed, e.g. during a hardware swap)
+      // while this task was still running and ignoring cancellation. The underlying ZK accessor
+      // recursively recreates any missing parent znodes as a side effect of a write, so writing
+      // here after a drop would silently resurrect the dropped instance's ZK subtree as an
+      // orphan TaskCurrentState/CurrentState node. This check is not atomic with the write below,
+      // so it narrows (does not eliminate) that race window -- see
+      // InstanceValidationUtil#isInstanceRegistered for the full rationale.
+      if (!InstanceValidationUtil.isInstanceRegistered(accessor, instance)) {
+        LOG.warn(String.format(
+            "Instance %s is no longer a registered cluster member (InstanceConfig not found). "
+                + "Skipping current state ZK update to %s for partition %s to avoid "
+                + "resurrecting a dropped instance's ZK node.", instance, state, partition));
+        return false;
+      }
+
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
       PropertyKey key =
           Boolean.getBoolean(SystemPropertyKeys.TASK_CURRENT_STATE_PATH_DISABLED) ? keyBuilder

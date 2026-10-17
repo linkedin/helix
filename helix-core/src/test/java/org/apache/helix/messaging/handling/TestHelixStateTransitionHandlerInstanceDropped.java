@@ -114,7 +114,8 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     ArgumentCaptor<PropertyKey> keyCaptor = ArgumentCaptor.forClass(PropertyKey.class);
     verify(_accessor, times(1)).updateProperty(keyCaptor.capture(), any(HelixProperty.class));
-    Assert.assertTrue(keyCaptor.getValue().getPath().contains(INSTANCE_NAME));
+    Assert.assertEquals(keyCaptor.getValue().getPath(),
+        _keyBuilder.currentState(INSTANCE_NAME, SESSION_ID, RESOURCE_NAME).getPath());
   }
 
   /**
@@ -166,7 +167,8 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     ArgumentCaptor<PropertyKey> keyCaptor = ArgumentCaptor.forClass(PropertyKey.class);
     verify(_accessor, times(1)).updateProperty(keyCaptor.capture(), any(HelixProperty.class));
-    Assert.assertTrue(keyCaptor.getValue().getPath().contains(INSTANCE_NAME));
+    Assert.assertEquals(keyCaptor.getValue().getPath(),
+        _keyBuilder.currentState(INSTANCE_NAME, SESSION_ID, RESOURCE_NAME).getPath());
   }
 
   @Test

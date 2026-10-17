@@ -44,6 +44,7 @@ import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelParser;
 import org.apache.helix.participant.statemachine.StateTransitionError;
 import org.apache.helix.task.TaskStateModel;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.util.StatusUpdateUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.ZNRecordBucketizer;
@@ -213,29 +214,6 @@ public class HelixStateTransitionHandler extends MessageHandler {
     updateZKCurrentState();
   }
 
-  /**
-   * Checks whether this instance is still a registered member of the cluster, i.e. its
-   * InstanceConfig has not been removed.
-   * <p>
-   * The underlying ZK data accessor recursively recreates any missing parent znodes as a side
-   * effect of a current state write. If an instance is cleanly dropped from the cluster
-   * (InstanceConfig and /INSTANCES/{instance} removed, e.g. during a hardware swap) while this
-   * process is still alive and in the middle of completing a state transition, simply persisting
-   * the current state would silently resurrect the dropped instance's ZK subtree as an orphan
-   * node that no longer has a live instance or InstanceConfig backing it. Guard against that race
-   * by skipping the ZK write entirely once the instance is no longer registered.
-   * <p>
-   * This check is not transactional with the write it guards: {@code accessor.updateProperty()}
-   * (via {@code org.apache.helix.GroupCommit} / {@code ZkBaseDataAccessor#doSet}) is a separate,
-   * later ZK operation, so an instance drop that lands strictly between this stat read and that
-   * write can still slip through. Callers should therefore invoke this immediately before the
-   * real persistence call (not just once, early, before unrelated local computation) to keep
-   * that window as small as the accessor API allows.
-   */
-  private boolean isInstanceRegistered(HelixDataAccessor accessor, String instanceName) {
-    return accessor.getPropertyStat(accessor.keyBuilder().instanceConfig(instanceName)) != null;
-  }
-
   // Update the ZK current state of the node
   private void updateZKCurrentState(){
     HelixDataAccessor accessor = _manager.getHelixDataAccessor();
@@ -245,7 +223,7 @@ public class HelixStateTransitionHandler extends MessageHandler {
     String instanceName = _manager.getInstanceName();
 
     try {
-      if (!isInstanceRegistered(accessor, instanceName)) {
+      if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
         logger.warn(
             "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
                 + "Skipping current state ZK update for resource {} partition {} to avoid "
@@ -272,7 +250,7 @@ public class HelixStateTransitionHandler extends MessageHandler {
         // removed by a concurrent clean drop between the early check above and this point.
         // This narrows the race window as much as possible given the non-transactional
         // accessor.updateProperty() write path below.
-        if (!isInstanceRegistered(accessor, instanceName)) {
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
           logger.warn(
               "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
                   + "Skipping current state ZK update for resource {} partition {} to avoid "
@@ -447,7 +425,7 @@ public class HelixStateTransitionHandler extends MessageHandler {
         // this is a separate, framework-level error-handling write path (not routed through
         // updateZKCurrentState()), so it needs its own guard to avoid resurrecting a dropped
         // instance's ZK node with an ERROR current state.
-        if (!isInstanceRegistered(accessor, instanceName)) {
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
           logger.warn(
               "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
                   + "Skipping ERROR current state ZK update for resource {} partition {} to avoid "

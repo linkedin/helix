@@ -57,6 +57,7 @@ public class TestBatchMessageHandlerInstanceDropped {
   private static final String INSTANCE_NAME = "localhost_12918";
   private static final String RESOURCE_NAME = "TestResource";
   private static final String PARTITION_NAME = "TestResource_0";
+  private static final String SESSION_ID = "session_1";
 
   private HelixManager _manager;
   private HelixDataAccessor _accessor;
@@ -101,7 +102,8 @@ public class TestBatchMessageHandlerInstanceDropped {
 
     ArgumentCaptor<PropertyKey> keyCaptor = ArgumentCaptor.forClass(PropertyKey.class);
     verify(_accessor, times(1)).updateProperty(keyCaptor.capture(), any(HelixProperty.class));
-    Assert.assertTrue(keyCaptor.getValue().getPath().contains(INSTANCE_NAME));
+    Assert.assertEquals(keyCaptor.getValue().getPath(),
+        _keyBuilder.currentState(INSTANCE_NAME, SESSION_ID, RESOURCE_NAME).getPath());
   }
 
   /**
@@ -121,7 +123,7 @@ public class TestBatchMessageHandlerInstanceDropped {
     NotificationContext context = new NotificationContext(_manager);
 
     PropertyKey currentStateKey =
-        _keyBuilder.currentState(INSTANCE_NAME, "session_1", RESOURCE_NAME);
+        _keyBuilder.currentState(INSTANCE_NAME, SESSION_ID, RESOURCE_NAME);
     CurrentState currentStateDelta = new CurrentState(RESOURCE_NAME);
     currentStateDelta.setState(PARTITION_NAME, "OFFLINE");
 

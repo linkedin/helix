@@ -105,6 +105,30 @@ public class InstanceValidationUtil {
   }
 
   /**
+   * Method to check if the instance is still a registered member of the cluster, i.e. its
+   * InstanceConfig has not been removed (e.g. by a clean instance drop/decommission such as a
+   * hardware swap). Uses a stat-only read (no full deserialization) since this is intended to be
+   * used as a cheap guard immediately before persisting a ZK write that targets a path under
+   * {@code /INSTANCES/{instanceName}} -- the underlying ZK accessor recursively recreates any
+   * missing parent znodes as a side effect of a write, so writing after a drop would otherwise
+   * silently resurrect the dropped instance's ZK subtree as an orphan with no live instance or
+   * InstanceConfig backing it.
+   * <p>
+   * This check is NOT atomic with whatever write it guards: the instance can still be dropped in
+   * the window between this read and the real persistence call, since neither this check nor the
+   * write go through a single transactional ZK operation. Callers should invoke this as
+   * immediately as possible before the real write (not just once, early, before unrelated local
+   * computation) to keep that window as small as the accessor API allows.
+   * @param dataAccessor
+   * @param instanceName
+   * @return true if the instance's InstanceConfig still exists in ZK
+   */
+  public static boolean isInstanceRegistered(HelixDataAccessor dataAccessor, String instanceName) {
+    return dataAccessor.getPropertyStat(dataAccessor.keyBuilder().instanceConfig(instanceName))
+        != null;
+  }
+
+  /**
    * Method to check if the instance is up and running by configuration
    * @param dataAccessor
    * @param instanceName
