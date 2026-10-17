@@ -44,6 +44,7 @@ import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelParser;
 import org.apache.helix.participant.statemachine.StateTransitionError;
 import org.apache.helix.task.TaskStateModel;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.util.StatusUpdateUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.ZNRecordBucketizer;
@@ -222,6 +223,14 @@ public class HelixStateTransitionHandler extends MessageHandler {
     String instanceName = _manager.getInstanceName();
 
     try {
+      if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+        logger.warn(
+            "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                + "Skipping current state ZK update for resource {} partition {} to avoid "
+                + "resurrecting a dropped instance's ZK node.", instanceName, resource,
+            partitionKey);
+        return;
+      }
       // We did not update _stateModel for DROPPED state, so it won't match _stateModel.
       if (!_stateModel.getCurrentState().equals(_currentStateDelta.getState(partitionKey))
           && !_currentStateDelta.getState(partitionKey)
@@ -237,13 +246,29 @@ public class HelixStateTransitionHandler extends MessageHandler {
           .currentState(instanceName, sessionId, resource, bucketizer.getBucketName(partitionKey));
       if (_message.getAttribute(Attributes.PARENT_MSG_ID) == null) {
         // normal message
+        // Re-validate immediately before the actual ZK write: InstanceConfig could have been
+        // removed by a concurrent clean drop between the early check above and this point.
+        // This narrows the race window as much as possible given the non-transactional
+        // accessor.updateProperty() write path below.
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+          logger.warn(
+              "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                  + "Skipping current state ZK update for resource {} partition {} to avoid "
+                  + "resurrecting a dropped instance's ZK node.", instanceName, resource,
+              partitionKey);
+          return;
+        }
         if (!accessor.updateProperty(key, _currentStateDelta)) {
           throw new HelixException(
               "Fails to persist current state back to ZK for resource " + resource + " partition: "
                   + _message.getPartitionName());
         }
       } else {
-        // sub-message of a batch message
+        // sub-message of a batch message: the actual ZK persistence for this delta happens
+        // later, in BatchMessageHandler#postHandleMessage(), once all sub-messages have been
+        // processed and the per-partition deltas are merged. That is where cluster membership
+        // is re-validated immediately before the real write, since by the time that write
+        // happens here-and-now registration checks would be stale.
         ConcurrentHashMap<String, CurrentStateUpdate> csUpdateMap =
             (ConcurrentHashMap<String, CurrentStateUpdate>) _notificationContext
                 .get(MapKey.CURRENT_STATE_UPDATE.toString());
@@ -395,7 +420,18 @@ public class HelixStateTransitionHandler extends MessageHandler {
             _isTaskMessage && !_isTaskCurrentStatePathDisabled ? keyBuilder
                 .taskCurrentState(instanceName, _message.getTgtSessionId(), resourceName)
                 : keyBuilder.currentState(instanceName, _message.getTgtSessionId(), resourceName);
-        if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
+
+        // Re-validate immediately before the actual ZK write, same as updateZKCurrentState():
+        // this is a separate, framework-level error-handling write path (not routed through
+        // updateZKCurrentState()), so it needs its own guard to avoid resurrecting a dropped
+        // instance's ZK node with an ERROR current state.
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+          logger.warn(
+              "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                  + "Skipping ERROR current state ZK update for resource {} partition {} to avoid "
+                  + "resurrecting a dropped instance's ZK node.", instanceName, resourceName,
+              partition);
+        } else if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
           logger.error("Fails to persist ERROR current state to ZK for resource " + resourceName
               + " partition: " + partition);
         }

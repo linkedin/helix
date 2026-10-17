@@ -29,6 +29,7 @@ import org.apache.helix.mock.MockManager;
 import org.apache.helix.mock.statemodel.MockMasterSlaveStateModel;
 import org.apache.helix.mock.statemodel.MockStateModelAnnotated;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageType;
 import org.apache.helix.model.StateModelDefinition;
@@ -45,9 +46,8 @@ public class TestHelixTaskHandler {
     Message message = new Message(MessageType.STATE_TRANSITION, "Some unique id");
 
     message.setSrcName("cm-instance-0");
-    message.setTgtSessionId("1234");
-    message.setFromState("Offline");
-    message.setToState("Slave");
+    message.setFromState("OFFLINE");
+    message.setToState("SLAVE");
     message.setPartitionName("TestDB_0");
     message.setMsgId("Some unique message id");
     message.setResourceName("TestDB");
@@ -57,11 +57,22 @@ public class TestHelixTaskHandler {
     MockMasterSlaveStateModel stateModel = new MockMasterSlaveStateModel();
     NotificationContext context;
     MockManager manager = new MockManager("clusterName");
+    // postHandleMessage() skips the ZK current-state write entirely if the message's target
+    // session id doesn't match the manager's current session (treated as a stale message from
+    // an expired session), so the message must carry the manager's actual (randomly-generated)
+    // session id for the write path below to be exercised.
+    message.setTgtSessionId(manager.getSessionId());
     HelixDataAccessor accessor = manager.getHelixDataAccessor();
     StateModelDefinition stateModelDef =
         new StateModelDefinition(StateModelConfigGenerator.generateConfigForMasterSlave());
     Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.stateModelDef("MasterSlave"), stateModelDef);
+    // A participant cannot receive and process a STATE_TRANSITION message before it has joined
+    // the cluster (which always provisions an InstanceConfig first), so the target instance
+    // must be a registered cluster member for the ZK current-state write below to proceed. Note
+    // the ZK write path keys off manager.getInstanceName(), not the message's target name.
+    accessor.setProperty(keyBuilder.instanceConfig(manager.getInstanceName()),
+        new InstanceConfig(manager.getInstanceName()));
 
     context = new NotificationContext(manager);
     CurrentState currentStateDelta = new CurrentState("TestDB");
@@ -73,6 +84,11 @@ public class TestHelixTaskHandler {
     handler = new HelixTask(message, context, stHandler, executor);
     handler.call();
     AssertJUnit.assertTrue(stateModel.stateModelInvoked);
+    // Guard against the ZK current-state write silently being skipped (e.g. by the
+    // instance-registration check in HelixStateTransitionHandler treating the manager's instance
+    // as not a registered cluster member): confirm the write actually reached ZK.
+    AssertJUnit.assertNotNull(accessor.getProperty(
+        keyBuilder.currentState(manager.getInstanceName(), manager.getSessionId(), "TestDB")));
     System.out.println("END TestCMTaskHandler.testInvocation() at "
         + new Date(System.currentTimeMillis()));
   }
@@ -84,9 +100,8 @@ public class TestHelixTaskHandler {
     HelixTaskExecutor executor = new HelixTaskExecutor();
     Message message = new Message(MessageType.STATE_TRANSITION, "Some unique id");
     message.setSrcName("cm-instance-0");
-    message.setTgtSessionId("1234");
-    message.setFromState("Offline");
-    message.setToState("Slave");
+    message.setFromState("OFFLINE");
+    message.setToState("SLAVE");
     message.setPartitionName("TestDB_0");
     message.setMsgId("Some unique message id");
     message.setResourceName("TestDB");
@@ -97,12 +112,23 @@ public class TestHelixTaskHandler {
     NotificationContext context;
 
     MockManager manager = new MockManager("clusterName");
+    // postHandleMessage() skips the ZK current-state write entirely if the message's target
+    // session id doesn't match the manager's current session (treated as a stale message from
+    // an expired session), so the message must carry the manager's actual (randomly-generated)
+    // session id for the write path below to be exercised.
+    message.setTgtSessionId(manager.getSessionId());
     HelixDataAccessor accessor = manager.getHelixDataAccessor();
 
     StateModelDefinition stateModelDef =
         new StateModelDefinition(StateModelConfigGenerator.generateConfigForMasterSlave());
     Builder keyBuilder = accessor.keyBuilder();
     accessor.setProperty(keyBuilder.stateModelDef("MasterSlave"), stateModelDef);
+    // A participant cannot receive and process a STATE_TRANSITION message before it has joined
+    // the cluster (which always provisions an InstanceConfig first), so the target instance
+    // must be a registered cluster member for the ZK current-state write below to proceed. Note
+    // the ZK write path keys off manager.getInstanceName(), not the message's target name.
+    accessor.setProperty(keyBuilder.instanceConfig(manager.getInstanceName()),
+        new InstanceConfig(manager.getInstanceName()));
 
     context = new NotificationContext(manager);
 
@@ -127,6 +153,11 @@ public class TestHelixTaskHandler {
     HelixTask handler = new HelixTask(message, context, stHandler, executor);
     handler.call();
     AssertJUnit.assertTrue(stateModel.stateModelInvoked);
+    // Guard against the ZK current-state write silently being skipped (e.g. by the
+    // instance-registration check in HelixStateTransitionHandler treating the manager's instance
+    // as not a registered cluster member): confirm the write actually reached ZK.
+    AssertJUnit.assertNotNull(accessor.getProperty(
+        keyBuilder.currentState(manager.getInstanceName(), manager.getSessionId(), "TestDB")));
     System.out.println("END TestCMTaskHandler.testInvocationAnnotated() at "
         + new Date(System.currentTimeMillis()));
   }
