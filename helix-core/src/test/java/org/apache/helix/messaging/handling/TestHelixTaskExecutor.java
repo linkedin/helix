@@ -58,6 +58,7 @@ import org.apache.helix.participant.HelixStateMachineEngine;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
+import org.apache.helix.task.TaskConstants;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.AssertJUnit;
@@ -1126,6 +1127,129 @@ public class TestHelixTaskExecutor {
     Assert.assertNotNull(currentState);
     Assert.assertEquals(currentState.getState(msg.getPartitionName()),
         HelixDefinedState.ERROR.toString());
+    System.out.println("END " + TestHelper.getTestMethodName());
+  }
+
+  @Test(dependsOnMethods = "testStateTransitionMsgScheduleFailure")
+  public void testCurStateMetaCreationSkippedWhenInstanceDropped() {
+    System.out.println("START " + TestHelper.getTestMethodName());
+
+    HelixTaskExecutor executor = new HelixTaskExecutor();
+    HelixManager manager = new MockClusterManager();
+    HelixDataAccessor dataAccessor = manager.getHelixDataAccessor();
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+
+    TestStateTransitionHandlerFactory stateTransitionFactory =
+        new TestStateTransitionHandlerFactory(Message.MessageType.STATE_TRANSITION.name());
+    executor.registerMessageHandlerFactory(Message.MessageType.STATE_TRANSITION.name(),
+        stateTransitionFactory);
+
+    NotificationContext changeContext = new NotificationContext(manager);
+
+    // Deliberately do NOT register an InstanceConfig for this instance: this simulates the
+    // instance having been cleanly dropped (e.g. by ACM) after the message was assigned but
+    // before HelixTaskExecutor#onMessage() reaches the cur-state metadata creation step
+    // (accessor.createChildren(createCurStateKeys, metaCurStates)).
+    Message msg = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
+    msg.setTgtSessionId(manager.getSessionId());
+    msg.setPartitionName("P1");
+    msg.setResourceName("testCurStateMetaCreationSkippedWhenInstanceDropped");
+    msg.setTgtName("Localhost_1123");
+    msg.setSrcName("127.101.1.23_2234");
+    // Matches TestStateTransitionHandlerFactory's hardcoded currentStateDelta state ("SLAVE"
+    // for any resource other than "testStaledMessageResource"), so the message passes
+    // staleMessageValidator() and is actually scheduled instead of being discarded as stale.
+    msg.setFromState("SLAVE");
+    msg.setToState("MASTER");
+    msg.setStateModelDef("DummyMasterSlave");
+
+    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
+    executor.onMessage(manager.getInstanceName(), Collections.singletonList(msg), changeContext);
+
+    // The cur-state metadata znode must not have been created: creating it would have
+    // recursively recreated the dropped instance's /INSTANCES/{instance} subtree as an orphan.
+    CurrentState currentState = dataAccessor.getProperty(keyBuilder
+        .currentState(manager.getInstanceName(), manager.getSessionId(), msg.getResourceName()));
+    Assert.assertNull(currentState);
+    System.out.println("END " + TestHelper.getTestMethodName());
+  }
+
+  @Test(dependsOnMethods = "testCurStateMetaCreationSkippedWhenInstanceDropped")
+  public void testTaskCurStateMetaCreationSkippedWhenInstanceDropped() {
+    System.out.println("START " + TestHelper.getTestMethodName());
+
+    HelixTaskExecutor executor = new HelixTaskExecutor();
+    HelixManager manager = new MockClusterManager();
+    HelixDataAccessor dataAccessor = manager.getHelixDataAccessor();
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+
+    TestStateTransitionHandlerFactory stateTransitionFactory =
+        new TestStateTransitionHandlerFactory(Message.MessageType.STATE_TRANSITION.name());
+    executor.registerMessageHandlerFactory(Message.MessageType.STATE_TRANSITION.name(),
+        stateTransitionFactory);
+
+    NotificationContext changeContext = new NotificationContext(manager);
+
+    // Same scenario as testCurStateMetaCreationSkippedWhenInstanceDropped, but for the Task
+    // current-state path (TASKCURRENTSTATES) -- the second cur-state metadata path that shares
+    // the same unguarded accessor.createChildren() call.
+    Message msg = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
+    msg.setTgtSessionId(manager.getSessionId());
+    msg.setPartitionName("P1");
+    msg.setResourceName("testTaskCurStateMetaCreationSkippedWhenInstanceDropped");
+    msg.setTgtName("Localhost_1123");
+    msg.setSrcName("127.101.1.23_2234");
+    msg.setFromState("SLAVE");
+    msg.setToState("MASTER");
+    msg.setStateModelDef(TaskConstants.STATE_MODEL_NAME);
+
+    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
+    executor.onMessage(manager.getInstanceName(), Collections.singletonList(msg), changeContext);
+
+    CurrentState taskCurrentState = dataAccessor.getProperty(keyBuilder
+        .taskCurrentState(manager.getInstanceName(), manager.getSessionId(),
+            msg.getResourceName()));
+    Assert.assertNull(taskCurrentState);
+    System.out.println("END " + TestHelper.getTestMethodName());
+  }
+
+  @Test(dependsOnMethods = "testTaskCurStateMetaCreationSkippedWhenInstanceDropped")
+  public void testCurStateMetaCreatedWhenInstanceRegistered() {
+    System.out.println("START " + TestHelper.getTestMethodName());
+
+    HelixTaskExecutor executor = new HelixTaskExecutor();
+    HelixManager manager = new MockClusterManager();
+    HelixDataAccessor dataAccessor = manager.getHelixDataAccessor();
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+
+    TestStateTransitionHandlerFactory stateTransitionFactory =
+        new TestStateTransitionHandlerFactory(Message.MessageType.STATE_TRANSITION.name());
+    executor.registerMessageHandlerFactory(Message.MessageType.STATE_TRANSITION.name(),
+        stateTransitionFactory);
+
+    NotificationContext changeContext = new NotificationContext(manager);
+
+    // Sanity-check the inverse: a still-registered instance must not have its cur-state
+    // metadata creation blocked by the new guard.
+    dataAccessor.setProperty(keyBuilder.instanceConfig(manager.getInstanceName()),
+        new InstanceConfig(manager.getInstanceName()));
+
+    Message msg = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
+    msg.setTgtSessionId(manager.getSessionId());
+    msg.setPartitionName("P1");
+    msg.setResourceName("testCurStateMetaCreatedWhenInstanceRegistered");
+    msg.setTgtName("Localhost_1123");
+    msg.setSrcName("127.101.1.23_2234");
+    msg.setFromState("SLAVE");
+    msg.setToState("MASTER");
+    msg.setStateModelDef("DummyMasterSlave");
+
+    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
+    executor.onMessage(manager.getInstanceName(), Collections.singletonList(msg), changeContext);
+
+    CurrentState currentState = dataAccessor.getProperty(keyBuilder
+        .currentState(manager.getInstanceName(), manager.getSessionId(), msg.getResourceName()));
+    Assert.assertNotNull(currentState);
     System.out.println("END " + TestHelper.getTestMethodName());
   }
 
