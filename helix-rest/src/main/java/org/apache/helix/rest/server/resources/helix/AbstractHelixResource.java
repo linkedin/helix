@@ -176,12 +176,18 @@ public class AbstractHelixResource extends AbstractResource {
   /**
    * Whether setting {@code operation} on every instance at once would leave WAGED partitions unable
    * to place all their replicas, for callers that report the verdict in their own response.
+   *
+   * @param dryRun whether the verdict only probes which instances fit, so a failure counts as a
+   *     dry run rather than a blocked write
+   * @param assignments computes the WAGED assignments the verdict compares
    */
   protected ValidationResult validateInstanceOperation(String clusterId,
-      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
+      boolean dryRun, WagedAssignmentProvider assignments) {
     return validateAndRecord(
         new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule()),
-        instanceOperationContext(clusterId, instanceNames, operation).build(), false, false);
+        instanceOperationContext(clusterId, instanceNames, operation, assignments).build(), false,
+        dryRun);
   }
 
   private ValidationResult validateAndRecord(GuardrailPipeline pipeline, GuardrailContext context,
@@ -196,13 +202,9 @@ public class AbstractHelixResource extends AbstractResource {
     return result;
   }
 
-  /**
-   * The guardrail context for setting {@code operation} on {@code instanceNames}, with the WAGED
-   * what-if wired to this cluster's metadata store.
-   */
-  protected GuardrailContext.Builder instanceOperationContext(String clusterId,
-      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
-    WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
+  /** Computes WAGED target assignments from this cluster's metadata store. */
+  protected WagedAssignmentProvider wagedAssignmentProvider() {
+    return new WagedAssignmentProvider() {
       @Override
       public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
           List<InstanceConfig> instanceConfigs, List<String> liveInstances,
@@ -223,11 +225,20 @@ public class AbstractHelixResource extends AbstractResource {
             ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
       }
     };
+  }
+
+  /**
+   * The guardrail context for setting {@code operation} on {@code instanceNames}, with the WAGED
+   * what-if computed by {@code assignments}.
+   */
+  protected GuardrailContext.Builder instanceOperationContext(String clusterId,
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
+      WagedAssignmentProvider assignments) {
     return GuardrailContext.newBuilder(clusterId)
         .dataAccessor(getDataAccssor(clusterId))
         .instanceNames(instanceNames)
         .proposedInstanceOperation(operation)
-        .wagedAssignmentProvider(wagedAssignmentProvider);
+        .wagedAssignmentProvider(assignments);
   }
 
   /**
