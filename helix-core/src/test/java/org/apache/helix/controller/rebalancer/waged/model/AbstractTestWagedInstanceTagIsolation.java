@@ -46,7 +46,9 @@ import org.apache.helix.model.ResourceConfig;
  * The broadest suites on this fixture:
  * <ul>
  *   <li>{@link TestWagedInstanceTagIsolationCore} covers isolation, atomic rollback,
- *       determinism and parity with the default global mode.</li>
+ *       determinism and parity with the default global mode,</li>
+ *   <li>{@link TestWagedInstanceTagIsolationCapacity} covers cluster wide capacity deficit
+ *       attribution.</li>
  * </ul>
  *
  * The cluster-model builders, assertion helpers and constants the subclasses share live here.
