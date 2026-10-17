@@ -303,6 +303,27 @@ public class TestInstanceConfig {
   }
 
   @Test
+  public void testGetInstanceOperationBySource() {
+    InstanceConfig config = new InstanceConfig("instance");
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.EVACUATE)
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+
+    // Returned whether or not it is the active operation.
+    Assert.assertEquals(config.getInstanceOperation(
+        InstanceConstants.InstanceOperationSource.AUTOMATION).getOperation(),
+        InstanceConstants.InstanceOperation.EVACUATE);
+    Assert.assertEquals(config.getInstanceOperation(
+        InstanceConstants.InstanceOperationSource.USER).getOperation(),
+        InstanceConstants.InstanceOperation.DISABLE);
+    Assert.assertNull(
+        config.getInstanceOperation(InstanceConstants.InstanceOperationSource.ADMIN));
+  }
+
+  @Test
   public void testGetTargetTaskThreadPoolSize() {
     InstanceConfig testConfig = new InstanceConfig("testConfig");
     testConfig.getRecord().setIntField(
