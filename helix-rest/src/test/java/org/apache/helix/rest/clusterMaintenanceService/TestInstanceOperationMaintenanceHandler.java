@@ -29,8 +29,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
@@ -470,15 +472,19 @@ public class TestInstanceOperationMaintenanceHandler {
         Status.GUARDRAIL_REJECTED, Status.APPLIED);
     Assert.assertEquals(outcomes.get(instance(1)).getMessage(), "Rejected by guardrail RULE: "
         + "EVACUATE on the 2 instances this request changes would leave partitions unable to "
-        + "place all their replicas, including db_0. Change fewer instances at once, or add "
-        + "assignable capacity.");
+        + "place all their replicas, including db_0. This one does not fit even alone. Add "
+        + "assignable capacity before resending it.");
+    Assert.assertEquals(outcomes.get(instance(2)).getMessage(),
+        outcomes.get(instance(1)).getMessage());
     Assert.assertEquals(outcomes.get(instance(3)).getMessage(), "EVACUATE was already set by "
         + "AUTOMATION. The maintenance marker already runs until " + at(_expiresAt) + ".");
     Assert.assertEquals(outcomes.get("missing").getMessage(),
         "No such instance in cluster " + CLUSTER + ". Remove it from the request.");
     Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes), "Applied to 1 of "
         + "4 instances (1 INSTANCE_NOT_FOUND, 2 GUARDRAIL_REJECTED).");
-    Assert.assertEquals(judged, Collections.singletonList(Arrays.asList(instance(1), instance(2))));
+    // Neither fits even alone, so each was probed once more after the two were judged together.
+    Assert.assertEquals(judged, Arrays.asList(Arrays.asList(instance(1), instance(2)),
+        Collections.singletonList(instance(1)), Collections.singletonList(instance(2))));
 
     Assert.assertEquals(version(instance(0)), before[0]);
     Assert.assertEquals(version(instance(1)), before[1]);
@@ -590,8 +596,8 @@ public class TestInstanceOperationMaintenanceHandler {
         InstanceOperation.EVACUATE, instance(0));
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Rejected by guardrail RULE: "
         + "EVACUATE on the 1 instance this request changes would leave partitions unable to place "
-        + "all their replicas, including db_0, db_1, db_2 and more. Change fewer instances at "
-        + "once, or add assignable capacity.");
+        + "all their replicas, including db_0, db_1, db_2 and more. Add assignable capacity "
+        + "before resending it.");
     Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes),
         "Applied to 0 of 1 instance (1 GUARDRAIL_REJECTED).");
 
@@ -612,8 +618,7 @@ public class TestInstanceOperationMaintenanceHandler {
     Assert.assertEquals(guardrailMessage("Applying EVACUATE to [h] makes the WAGED rebalancer "
         + "unable to compute an assignment for cluster c (boom). ... retry with force=true ..."),
         "Rejected by guardrail RULE: " + subject + " would leave WAGED unable to compute any "
-            + "assignment for the cluster. Change fewer instances at once, or add assignable "
-            + "capacity.");
+            + "assignment for the cluster. Add assignable capacity before resending it.");
     // Text it does not know is quoted, never guessed at, on one bounded line.
     Assert.assertEquals(guardrailMessage("Some\n new   verdict."),
         "Rejected by guardrail RULE: Some new verdict.");
@@ -683,6 +688,181 @@ public class TestInstanceOperationMaintenanceHandler {
         + "5 instances (1 GUARDRAIL_REJECTED, 2 BUDGET_EXHAUSTED, 1 NOT_APPLIED).");
     Assert.assertEquals(read(5).getInstanceOperationMaintenanceUntilMs(), _expiresAt);
     Assert.assertTrue(read(0).isAssignable());
+  }
+
+  @Test
+  public void testGuardrailRejectionCommitsTheInstancesThatFit() {
+    for (int i = 6; i < 10; i++) {
+      _setupTool.addInstanceToCluster(CLUSTER, instance(i));
+    }
+    String[] all = new String[10];
+    int[] before = new int[10];
+    for (int i = 0; i < 10; i++) {
+      all[i] = instance(i);
+      before[i] = version(instance(i));
+    }
+    List<Collection<String>> judged = new ArrayList<>();
+
+    Map<String, Outcome> outcomes = apply(capacity(9, 3, judged), InstanceOperation.EVACUATE, all);
+
+    Status[] expected = new Status[10];
+    Arrays.fill(expected, Status.APPLIED);
+    expected[9] = Status.GUARDRAIL_REJECTED;
+    assertStatuses(outcomes, expected);
+    Assert.assertEquals(outcomes.get(instance(9)).getMessage(), "Rejected by guardrail RULE: "
+        + "EVACUATE on the 10 instances this request changes would leave partitions unable to "
+        + "place all their replicas, including db_0. Taken in request order, 9 of them fit "
+        + "together and were applied. This one does not fit with them. Add assignable capacity "
+        + "before resending it.");
+    Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes),
+        "Applied to 9 of 10 instances (1 GUARDRAIL_REJECTED).");
+    // The whole request, then halving: 5, 7, 8 and 9 instances.
+    Assert.assertEquals(judged.stream().map(Collection::size).collect(Collectors.toList()),
+        Arrays.asList(10, 5, 7, 8, 9));
+    // The nine that fit are written, and the misfit is not.
+    for (int i = 0; i < 9; i++) {
+      Assert.assertEquals(version(instance(i)), before[i] + 1);
+    }
+    Assert.assertEquals(read(8).getInstanceOperation().getOperation(), InstanceOperation.EVACUATE);
+    Assert.assertEquals(version(instance(9)), before[9]);
+  }
+
+  @Test
+  public void testInstanceThatDoesNotFitDoesNotBlockTheOnesAfterIt() {
+    // Instances 0 to 2 share a zone that can drain only two of them.
+    List<Collection<String>> judged = new ArrayList<>();
+    Map<String, Outcome> outcomes = apply(capacity(6, 2, judged), InstanceOperation.EVACUATE,
+        instance(0), instance(1), instance(2), instance(3), instance(4));
+
+    assertStatuses(outcomes, Status.APPLIED, Status.APPLIED, Status.GUARDRAIL_REJECTED,
+        Status.APPLIED, Status.APPLIED);
+    Assert.assertTrue(outcomes.get(instance(2)).getMessage().endsWith(". Taken in request order, "
+        + "4 of them fit together and were applied. This one does not fit with them. Add "
+        + "assignable capacity before resending it."));
+    Assert.assertEquals(judged.get(judged.size() - 1),
+        Arrays.asList(instance(0), instance(1), instance(3), instance(4)));
+
+    // A cluster whose own assignment fails rejects every subset alike, so none is probed.
+    judged.clear();
+    outcomes = apply(instances -> {
+      judged.add(instances);
+      return ValidationResult.infeasible(Violation.newBuilder("RULE").message("Could not compute "
+          + "a baseline WAGED assignment for cluster c to validate EVACUATE (boom).").build());
+    }, InstanceOperation.EVACUATE, instance(2), instance(5));
+    assertStatuses(outcomes, Status.GUARDRAIL_REJECTED, Status.GUARDRAIL_REJECTED);
+    Assert.assertEquals(judged.size(), 1);
+  }
+
+  @Test
+  public void testSearchStopsAtAProbeThatCannotJudge() {
+    // Neither a guardrail that fails to evaluate nor a baseline that fails mid-search says the
+    // probed instances do not fit.
+    for (String cannotJudge : Arrays.asList("Rule evaluation failed: timed out",
+        "Could not compute a baseline WAGED assignment for cluster " + CLUSTER + ".")) {
+      beforeMethod();
+      List<Collection<String>> probed = new ArrayList<>();
+      Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(_zkClient,
+          capacity(0, 3, new ArrayList<>()), instances -> {
+            probed.add(new ArrayList<>(instances));
+            return probed.size() == 1 ? ValidationResult.feasible() : ValidationResult.infeasible(
+                Violation.newBuilder("RULE").message(cannotJudge).build());
+          }).apply(CLUSTER, Arrays.asList(instance(0), instance(1), instance(2), instance(3)),
+          operation(InstanceOperation.EVACUATE), _expiresAt);
+
+      // Only what a probe judged to fit is applied; the rest were never judged alone.
+      assertStatuses(outcomes, Status.APPLIED, Status.APPLIED, Status.NOT_APPLIED,
+          Status.NOT_APPLIED);
+      Assert.assertEquals(outcomes.get(instance(3)).getMessage(), "Not judged: the guardrail "
+          + "rejected the instances this request changes together, and the search for those that "
+          + "fit ended before deciding this one. Resend it.", cannotJudge);
+      Assert.assertTrue(read(2).isAssignable(), cannotJudge);
+      Assert.assertEquals(probed, Arrays.asList(Arrays.asList(instance(0), instance(1)),
+          Arrays.asList(instance(0), instance(1), instance(2))), cannotJudge);
+    }
+  }
+
+  @Test
+  public void testInstancesThatDoNotFitGiveBackTheirCapRoom() {
+    setCap(3, -1);
+    Map<String, Outcome> outcomes = apply(capacity(1, 3, new ArrayList<>()),
+        InstanceOperation.EVACUATE, instance(0), instance(1), instance(2), instance(3),
+        instance(4));
+
+    // Only instance 0 fits, so the two the cap turned away get their room and are NOT_APPLIED.
+    assertStatuses(outcomes, Status.APPLIED, Status.GUARDRAIL_REJECTED,
+        Status.GUARDRAIL_REJECTED, Status.NOT_APPLIED, Status.NOT_APPLIED);
+    Assert.assertTrue(outcomes.get(instance(1)).getMessage().endsWith(" 1 of them fits and was "
+        + "applied. This one does not fit with it. Add assignable capacity before resending "
+        + "it."));
+  }
+
+  @Test
+  public void testSearchStopsAtTheFirstMisfitUnlessAllAfterItFit() {
+    List<Collection<String>> judged = new ArrayList<>();
+    Map<String, Outcome> outcomes = apply(capacity(3, 3, judged), InstanceOperation.EVACUATE,
+        instance(0), instance(1), instance(2), instance(3), instance(4), instance(5));
+
+    assertStatuses(outcomes, Status.APPLIED, Status.APPLIED, Status.APPLIED,
+        Status.GUARDRAIL_REJECTED, Status.NOT_APPLIED, Status.NOT_APPLIED);
+    Assert.assertTrue(outcomes.get(instance(3)).getMessage().contains("This one does not fit "
+        + "with them."));
+    Assert.assertTrue(outcomes.get(instance(5)).getMessage().startsWith("Not judged: "));
+    // The whole request, the first 3 and 4, then the first 3 with everything after the misfit.
+    Assert.assertEquals(judged.stream().map(Collection::size).collect(Collectors.toList()),
+        Arrays.asList(6, 3, 4, 5));
+  }
+
+  @Test
+  public void testGuardrailBudgetCoversTheWholeRequest() {
+    // Each guardrail call takes 20 s, so after the first call one probe fits in the budget.
+    AtomicLong now = new AtomicLong();
+    List<Collection<String>> judged = new ArrayList<>();
+    Function<Collection<String>, ValidationResult> capacity = capacity(4, 3, judged);
+    Function<Collection<String>, ValidationResult> slow = instances -> {
+      now.addAndGet(20_000L);
+      return capacity.apply(instances);
+    };
+    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(_zkClient, slow, slow,
+        now::get).apply(CLUSTER, Arrays.asList(instance(0), instance(1), instance(2), instance(3),
+        instance(4), instance(5)), operation(InstanceOperation.EVACUATE), _expiresAt);
+
+    assertStatuses(outcomes, Status.APPLIED, Status.APPLIED, Status.APPLIED,
+        Status.NOT_APPLIED, Status.NOT_APPLIED, Status.NOT_APPLIED);
+    Assert.assertEquals(judged.stream().map(Collection::size).collect(Collectors.toList()),
+        Arrays.asList(6, 3));
+
+    // An attempt after a lost race does not start a call that would end past the budget.
+    int before = version(instance(3));
+    AtomicInteger calls = new AtomicInteger();
+    RealmAwareZkClient beaten = withMulti(ops -> {
+      touchClusterConfig();
+      _zkClient.multi(ops);
+    });
+    outcomes = new InstanceOperationMaintenanceHandler(beaten, instances -> {
+      calls.incrementAndGet();
+      now.addAndGet(30_000L);
+      return ValidationResult.feasible();
+    }, SAFE, now::get).apply(CLUSTER, Collections.singletonList(instance(3)),
+        operation(InstanceOperation.EVACUATE), _expiresAt);
+
+    assertStatuses(outcomes, Status.CONFLICT);
+    Assert.assertEquals(outcomes.get(instance(3)).getMessage(), "Concurrent writes to this "
+        + "cluster won the race, and too little time was left to run the guardrail again. Resend "
+        + "the request.");
+    Assert.assertEquals(calls.get(), 1);
+    Assert.assertEquals(version(instance(3)), before);
+  }
+
+  /** Feasible for at most max instances, at most zoneMax of them among instances 0 to 2. */
+  private static Function<Collection<String>, ValidationResult> capacity(int max, int zoneMax,
+      List<Collection<String>> judged) {
+    List<String> zone = Arrays.asList(instance(0), instance(1), instance(2));
+    return instances -> {
+      judged.add(new ArrayList<>(instances));
+      return instances.size() <= max && instances.stream().filter(zone::contains).count() <= zoneMax
+          ? ValidationResult.feasible()
+          : ValidationResult.infeasible(Violation.newBuilder("RULE").partition("db_0").build());
+    };
   }
 
   @Test
@@ -772,9 +952,10 @@ public class TestInstanceOperationMaintenanceHandler {
     RealmAwareZkClient failingMulti = withMulti(ops -> {
       throw new ZkException(KeeperException.create(KeeperException.Code.CONNECTIONLOSS));
     });
-    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(failingMulti, SAFE)
-        .apply(CLUSTER, Collections.singletonList(instance(0)),
-            operation(InstanceOperation.EVACUATE), _expiresAt);
+    Map<String, Outcome> outcomes =
+        new InstanceOperationMaintenanceHandler(failingMulti, SAFE, SAFE)
+            .apply(CLUSTER, Collections.singletonList(instance(0)),
+                operation(InstanceOperation.EVACUATE), _expiresAt);
     assertStatuses(outcomes, Status.ERROR);
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Failed after the commit was sent "
         + "(ZooKeeper error CONNECTIONLOSS), so whether it was written is unknown. Resend the "
@@ -808,7 +989,7 @@ public class TestInstanceOperationMaintenanceHandler {
     int before = version(instance(0));
 
     Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(landsThenConflicts,
-        SAFE).apply(CLUSTER, Collections.singletonList(instance(0)),
+        SAFE, SAFE).apply(CLUSTER, Collections.singletonList(instance(0)),
         operation(InstanceOperation.EVACUATE), _expiresAt);
 
     // The next attempt finds the request already applied and writes nothing more.
@@ -909,13 +1090,13 @@ public class TestInstanceOperationMaintenanceHandler {
 
   private Map<String, Outcome> marker(RealmAwareZkClient zkClient, long expiresAt,
       String... instances) {
-    return new InstanceOperationMaintenanceHandler(zkClient, SAFE).apply(CLUSTER,
+    return new InstanceOperationMaintenanceHandler(zkClient, SAFE, SAFE).apply(CLUSTER,
         Arrays.asList(instances), null, expiresAt);
   }
 
   private InstanceOperationMaintenanceHandler handler(
       Function<Collection<String>, ValidationResult> guardrail) {
-    return new InstanceOperationMaintenanceHandler(_zkClient, guardrail);
+    return new InstanceOperationMaintenanceHandler(_zkClient, guardrail, guardrail);
   }
 
   private static InstanceConfig.InstanceOperation operation(InstanceOperation operation) {

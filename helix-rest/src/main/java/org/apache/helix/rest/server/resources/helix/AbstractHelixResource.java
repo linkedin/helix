@@ -173,35 +173,46 @@ public class AbstractHelixResource extends AbstractResource {
       boolean force, boolean dryRun) {
     return preflight(
         new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule()),
-        instanceOperationContext(clusterId, instanceNames, operation), force, dryRun);
+        instanceOperationContext(clusterId, instanceNames, operation, wagedAssignmentProvider()),
+        force, dryRun);
   }
 
   /**
    * The verdict {@link #preflightInstanceOperation} acts on, for callers that report it in their
    * own response.
+   *
+   * @param dryRun whether the verdict only probes which instances fit, so a failure is counted as
+   *     a dry run rather than a blocked write
+   * @param assignments computes the WAGED assignments the verdict compares, from
+   *     {@link #wagedAssignmentProvider()}
    */
   protected ValidationResult validateInstanceOperation(String clusterId,
-      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
+      boolean dryRun, WagedAssignmentProvider assignments) {
     GuardrailPipeline pipeline =
         new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
-    ValidationResult result =
-        pipeline.validate(instanceOperationContext(clusterId, instanceNames, operation));
-    recordGuardrailMetrics(pipeline, result, false, false);
+    ValidationResult result = pipeline.validate(
+        instanceOperationContext(clusterId, instanceNames, operation, assignments));
+    recordGuardrailMetrics(pipeline, result, false, dryRun);
     return result;
   }
 
+  /** Computes WAGED target assignments from this cluster's metadata store. */
+  protected WagedAssignmentProvider wagedAssignmentProvider() {
+    return (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+        .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+            new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+            liveInstances, idealStates, resourceConfigs);
+  }
+
   private GuardrailContext instanceOperationContext(String clusterId,
-      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
-    WagedAssignmentProvider wagedAssignmentProvider =
-        (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-            .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
-                new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                liveInstances, idealStates, resourceConfigs);
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
+      WagedAssignmentProvider assignments) {
     return GuardrailContext.newBuilder(clusterId)
         .dataAccessor(getDataAccssor(clusterId))
         .instanceNames(instanceNames)
         .proposedInstanceOperation(operation)
-        .wagedAssignmentProvider(wagedAssignmentProvider)
+        .wagedAssignmentProvider(assignments)
         .build();
   }
 
