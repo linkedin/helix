@@ -102,6 +102,10 @@ class GlobalRebalanceRunner implements AutoCloseable {
   // Retry unresolved baseline work on the next relevant event, not on every pipeline pass.
   private final AtomicReference<Set<String>> _isolationResourcesToRetry =
       new AtomicReference<>(Collections.emptySet());
+  // The retry set recorded by the last published baseline, and the last baseline submitted. They
+  // let a pipeline with no baseline due re-report what the published baseline skips.
+  private volatile Set<String> _committedIsolationRetries;
+  private volatile Future<Boolean> _lastBaseline;
 
   public GlobalRebalanceRunner(AssignmentManager assignmentManager,
       AssignmentMetadataStore assignmentMetadataStore,
@@ -181,6 +185,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
         _baselineComputeStatusReporter.accept(true);
         return true;
       });
+      _lastBaseline = result;
       if (waitForGlobalRebalance) {
         try {
           if (!result.get()) {
@@ -200,6 +205,27 @@ class GlobalRebalanceRunner implements AutoCloseable {
               HelixRebalanceException.FailureCategory.ASYNC_EXECUTION, e);
         }
       }
+    } else if (clusterData.getClusterConfig().isWagedInstanceTagIsolationEnabled()) {
+      republishIsolationSkips(algorithm);
+    }
+  }
+
+  /**
+   * Re-report what the published baseline skips. A monitor reset that does not also reset the
+   * rebalancer would otherwise hide it until the next relevant change.
+   */
+  private void republishIsolationSkips(RebalanceAlgorithm algorithm) {
+    Future<Boolean> lastBaseline = _lastBaseline;
+    // Only once the last baseline is done, so this cannot overwrite a newer report.
+    if (lastBaseline == null || !lastBaseline.isDone()) {
+      return;
+    }
+    // A failed baseline or a reset leaves a set that no published baseline recorded.
+    Set<String> retries = _isolationResourcesToRetry.get();
+    if (retries == _committedIsolationRetries && !retries.isEmpty()) {
+      Set<String> skipped = Collections.unmodifiableSet(retries);
+      algorithm.onAssignmentComputed(ClusterModel.RebalanceScopeType.GLOBAL_BASELINE, skipped,
+          skipped);
     }
   }
 
@@ -222,6 +248,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
     Set<String> inFlightRetries =
         isolationEnabled ? new HashSet<>(resourceMap.keySet()) : Collections.emptySet();
     Set<String> nextRetries = isolationEnabled ? new HashSet<>() : Collections.emptySet();
+    Set<String> evaluated = isolationEnabled ? new HashSet<>() : Collections.emptySet();
     RebalanceAlgorithm calculationAlgorithm = algorithm;
     if (isolationEnabled) {
       // A whole-calculation or write failure must not consume the only change event for a resource.
@@ -248,8 +275,9 @@ class GlobalRebalanceRunner implements AutoCloseable {
         @Override
         public void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
             Set<String> evaluatedResources, Set<String> skippedResources) {
+          // Reported below, only after the baseline write succeeds or is not needed.
+          evaluated.addAll(evaluatedResources);
           nextRetries.addAll(skippedResources);
-          algorithm.onAssignmentComputed(scope, evaluatedResources, skippedResources);
         }
       };
     } else {
@@ -290,8 +318,19 @@ class GlobalRebalanceRunner implements AutoCloseable {
     } else {
       LOG.debug("Assignment Metadata Store is null. Skip persisting the baseline assignment.");
     }
-    if (isolationEnabled) {
-      _isolationResourcesToRetry.compareAndSet(inFlightRetries, nextRetries);
+    // Publish only after the write above succeeds or is not needed. A failed exchange means a
+    // reset raced this calculation.
+    if (isolationEnabled
+        && _isolationResourcesToRetry.compareAndSet(inFlightRetries, nextRetries)) {
+      if (clusterModel.getContext().isInstanceTagIsolationEnabled()) {
+        // A resource without replicas has nothing left to place or carry forward.
+        Map<String, String> modelled = clusterModel.getContext().getResourceInstanceGroupTags();
+        resourceMap.keySet().stream().filter(resource -> !modelled.containsKey(resource))
+            .forEach(evaluated::add);
+      }
+      algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(), evaluated,
+          Collections.unmodifiableSet(nextRetries));
+      _committedIsolationRetries = nextRetries;
     }
     _baselineCalcLatency.endMeasuringLatency();
     LOG.info("Global baseline calculation completed and has been persisted into metadata store.");
