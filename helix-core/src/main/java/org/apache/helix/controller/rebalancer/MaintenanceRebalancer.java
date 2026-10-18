@@ -22,11 +22,15 @@ package org.apache.helix.controller.rebalancer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolver;
 import org.apache.helix.controller.stages.CurrentStateOutput;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
@@ -51,6 +55,10 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
    * messages for it; this is what enforces "no new bootstrap under MM" regardless of
    * which upstream rebalancer wrote the original listFields entry or what state model
    * the resource uses.
+   *
+   * <p>Replicas on evacuating instances that have reached the initial state stay there.
+   * They remain in the preference list, but maintenance must not reverse their drain.
+   * Serving replicas on evacuating instances retain the normal maintenance behavior.
    */
   @Override
   public IdealState computeNewIdealState(String resourceName, IdealState currentIdealState,
@@ -161,5 +169,30 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
 
     LOG.info("End computing ideal state for resource {} in maintenance mode.", resourceName);
     return currentIdealState;
+  }
+
+  @Override
+  protected Map<String, String> computeBestPossibleStateForPartition(Set<String> liveInstances,
+      StateModelDefinition stateModelDef, List<String> preferenceList,
+      CurrentStateOutput currentStateOutput, Set<String> disabledInstancesForPartition,
+      IdealState idealState, ClusterConfig clusterConfig, Partition partition,
+      MonitoredAbnormalResolver monitoredResolver, ResourceControllerDataProvider cache) {
+    Set<String> instancesToKeepOffline = disabledInstancesForPartition;
+    if (cache != null) {
+      Map<String, String> currentStates =
+          currentStateOutput.getCurrentStateMap(idealState.getResourceName(), partition);
+      for (String instance : cache.getEvacuatingInstances()) {
+        if (stateModelDef.getInitialState().equals(currentStates.get(instance))) {
+          if (instancesToKeepOffline == disabledInstancesForPartition) {
+            instancesToKeepOffline = new HashSet<>(disabledInstancesForPartition);
+          }
+          instancesToKeepOffline.add(instance);
+        }
+      }
+    }
+    // Reuse disabled-replica mapping so drained replicas do not consume active-state slots.
+    return super.computeBestPossibleStateForPartition(liveInstances, stateModelDef, preferenceList,
+        currentStateOutput, instancesToKeepOffline, idealState, clusterConfig, partition,
+        monitoredResolver, cache);
   }
 }
