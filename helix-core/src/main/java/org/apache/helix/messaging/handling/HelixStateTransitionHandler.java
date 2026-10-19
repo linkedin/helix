@@ -223,14 +223,13 @@ public class HelixStateTransitionHandler extends MessageHandler {
     String instanceName = _manager.getInstanceName();
 
     try {
-      if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
-        logger.warn(
-            "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
-                + "Skipping current state ZK update for resource {} partition {} to avoid "
-                + "resurrecting a dropped instance's ZK node.", instanceName, resource,
-            partitionKey);
-        return;
-      }
+      // Note: cluster-membership registration is intentionally NOT re-validated here. Doing so
+      // would add a synchronous ZK stat read for every partition, including batch sub-messages
+      // below, whose delta is only staged in-memory here and persisted later (and re-validated)
+      // in BatchMessageHandler#postHandleMessage() -- an early check here would be redundant
+      // for those and wouldn't narrow the actual check-to-write race window at all. The direct
+      // (non-batch) write path below does its own single check immediately before the real ZK
+      // write, which is the only place that matters.
       // We did not update _stateModel for DROPPED state, so it won't match _stateModel.
       if (!_stateModel.getCurrentState().equals(_currentStateDelta.getState(partitionKey))
           && !_currentStateDelta.getState(partitionKey)
@@ -246,10 +245,11 @@ public class HelixStateTransitionHandler extends MessageHandler {
           .currentState(instanceName, sessionId, resource, bucketizer.getBucketName(partitionKey));
       if (_message.getAttribute(Attributes.PARENT_MSG_ID) == null) {
         // normal message
-        // Re-validate immediately before the actual ZK write: InstanceConfig could have been
-        // removed by a concurrent clean drop between the early check above and this point.
-        // This narrows the race window as much as possible given the non-transactional
-        // accessor.updateProperty() write path below.
+        // Re-validate cluster membership immediately before the actual ZK write: the instance
+        // may have been cleanly dropped (InstanceConfig + /INSTANCES/{instance} removed) at any
+        // point up to this point. This is the only registration check for this write path, kept
+        // as close to the real accessor.updateProperty() call as possible to minimize the
+        // remaining check-to-write race window.
         if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
           logger.warn(
               "Instance {} is no longer a registered cluster member (InstanceConfig not found). "

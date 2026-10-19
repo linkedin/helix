@@ -88,23 +88,9 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     runStateTransitionAndCompleteSuccessfully();
 
-    verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
-  }
-
-  @Test
-  public void testSkipsCurrentStateWriteWhenInstanceDroppedBetweenCheckAndPersist()
-      throws Exception {
-    // Simulate the actual race: InstanceConfig is still present for the first (early) stat
-    // read, then a clean drop (ACM/cluster-management removing InstanceConfig +
-    // /INSTANCES/{instance}) lands before the real persistence point is reached. The guard
-    // immediately preceding accessor.updateProperty() must catch this and skip the write, even
-    // though an earlier check saw the instance as registered.
-    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME)))
-        .thenReturn(new HelixProperty.Stat(0, 0L, 0L, 0L), (HelixProperty.Stat) null);
-
-    runStateTransitionAndCompleteSuccessfully();
-
-    verify(_accessor, times(2)).getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME));
+    // Only a single registration read should happen for the direct (non-batch) write path --
+    // immediately before the real ZK write -- not an earlier, redundant one as well.
+    verify(_accessor, times(1)).getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME));
     verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
   }
 
@@ -116,6 +102,7 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     runStateTransitionAndCompleteSuccessfully();
 
+    verify(_accessor, times(1)).getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME));
     ArgumentCaptor<PropertyKey> keyCaptor = ArgumentCaptor.forClass(PropertyKey.class);
     verify(_accessor, times(1)).updateProperty(keyCaptor.capture(), any(HelixProperty.class));
     Assert.assertEquals(keyCaptor.getValue().getPath(),
