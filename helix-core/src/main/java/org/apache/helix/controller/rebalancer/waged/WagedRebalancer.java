@@ -838,6 +838,45 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     return _assignmentManager.getBestPossibleAssignment(assignmentMetadataStore, currentStateOutput, resources);
   }
 
+  /**
+   * Read-only, accept-only feasibility probe: reuses WAGED's partial rebalance (best-possible seed,
+   * drained node excluded from the active set) to re-place only {@code drainedInstanceName}'s
+   * replicas. A clean return proves the drain is feasible; a thrown {@link HelixRebalanceException}
+   * is inconclusive -- a partial rebalance is more constrained than a global one, so failure is not
+   * proof of infeasibility -- and callers must never block a drain on it.
+   *
+   * @param clusterData fully refreshed cluster data cache
+   * @param resourceMap the WAGED resources to consider
+   * @param currentStateOutput the computed current state (fallback seed)
+   * @param drainedInstanceName the instance being evacuated; must be in the active pool
+   * @return {@code true} iff the partial rebalance placed every drained replica
+   * @throws HelixRebalanceException if the replicas could not be placed or the model could not be built
+   */
+  public boolean isInstanceDrainFeasibleViaPartialRebalance(
+      ResourceControllerDataProvider clusterData, Map<String, Resource> resourceMap,
+      CurrentStateOutput currentStateOutput, String drainedInstanceName)
+      throws HelixRebalanceException {
+    Set<String> activeNodes = new HashSet<>(
+        DelayedRebalanceUtil.getActiveNodes(clusterData.getAssignableInstances(),
+            clusterData.getEnabledLiveInstances(), clusterData.getInstanceOfflineTimeMap(),
+            clusterData.getAssignableLiveInstances().keySet(),
+            clusterData.getAssignableInstanceConfigMap(), clusterData.getClusterConfig()));
+    // Inconclusive if the drained instance is not in the active pool: we cannot model its removal.
+    if (!activeNodes.remove(drainedInstanceName)) {
+      throw new HelixRebalanceException(
+          "Instance " + drainedInstanceName + " is not in the active assignable pool; cannot model "
+              + "its drain via partial rebalance.", HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+    }
+    // Best-possible seed (same as the controller's partial rebalance), passed as both ideal and
+    // current so surviving replicas are pinned and only the drained node's replicas are re-placed.
+    Map<String, ResourceAssignment> seedAssignment = _assignmentManager
+        .getBestPossibleAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
+    ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForPartialRebalance(
+        clusterData, resourceMap, activeNodes, seedAssignment, seedAssignment);
+    WagedRebalanceUtil.calculateAssignment(clusterModel, _rebalanceAlgorithm);
+    return true;
+  }
+
   private void persistBestPossibleAssignment(Map<String, ResourceAssignment> bestPossibleAssignment)
       throws HelixRebalanceException {
     // It is only persisted if the assignment is different from the currently cached assignment or the

@@ -126,7 +126,7 @@ final class WagedRebalanceFeasibilityWhatIf {
   static ValidationResult evaluate(GuardrailContext context, ClusterConfig clusterConfig,
       String instanceName, InstanceConfig currentConfig, InstanceConfig candidateConfig,
       List<IdealState> wagedIdealStates, String mutationDescription, String remedyHint,
-      String ruleId) {
+      String ruleId, boolean attemptDrainFastPath) {
     ReadOnlyDataAccessor dataAccessor = context.getDataAccessor();
     WagedAssignmentProvider provider = context.getWagedAssignmentProvider();
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
@@ -182,6 +182,15 @@ final class WagedRebalanceFeasibilityWhatIf {
     ClusterConfig simulationClusterConfig =
         new ClusterConfig(new ZNRecord(clusterConfig.getRecord()));
     simulationClusterConfig.setDelayRebalaceEnabled(false);
+
+    // Opt-in accept-only fast path (drains only): a cheap WAGED partial rebalance that re-places only
+    // the drained instance's replicas. A FEASIBLE result certifies without the full what-if; anything
+    // else is inconclusive and falls through below. Never blocks.
+    if (attemptDrainFastPath && provider.attemptDrainFeasibilityShortCircuit(simulationClusterConfig,
+        baselineInstanceConfigs, liveInstances, wagedIdealStates, wagedResourceConfigs, instanceName)
+        == WagedAssignmentProvider.DrainFeasibility.FEASIBLE) {
+      return ValidationResult.feasible();
+    }
 
     Map<String, ResourceAssignment> baseline;
     try {

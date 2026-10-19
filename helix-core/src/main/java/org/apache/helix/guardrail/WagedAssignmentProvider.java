@@ -59,4 +59,35 @@ public interface WagedAssignmentProvider {
   Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig clusterConfig,
       List<InstanceConfig> instanceConfigs, List<String> liveInstances, List<IdealState> idealStates,
       List<ResourceConfig> resourceConfigs) throws Exception;
+
+  /**
+   * Outcome of the accept-only drain-feasibility fast path: {@code FEASIBLE} may short-circuit the
+   * full what-if, {@code INCONCLUSIVE} means fall back to it. There is deliberately no infeasible
+   * verdict -- the fast path never blocks a write.
+   */
+  enum DrainFeasibility {
+    FEASIBLE,
+    INCONCLUSIVE
+  }
+
+  /**
+   * Optional accept-only fast path for an instance drain: try a cheap WAGED partial rebalance that
+   * re-places only the drained instance's replicas, letting the caller skip the full what-if on a
+   * {@link DrainFeasibility#FEASIBLE}. The default is {@link DrainFeasibility#INCONCLUSIVE} (always
+   * fall back); overrides must stay read-only and must never block a write.
+   *
+   * @param clusterConfig the cluster config to evaluate against
+   * @param instanceConfigs the instance configs with the target still in the assignable pool
+   * @param liveInstances names of the live instances
+   * @param idealStates the WAGED resources' ideal states
+   * @param resourceConfigs the WAGED resources' configs
+   * @param drainedInstanceName the instance being drained
+   * @return {@link DrainFeasibility#FEASIBLE} iff every drained replica was placed, else
+   *     {@link DrainFeasibility#INCONCLUSIVE}
+   */
+  default DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig clusterConfig,
+      List<InstanceConfig> instanceConfigs, List<String> liveInstances, List<IdealState> idealStates,
+      List<ResourceConfig> resourceConfigs, String drainedInstanceName) {
+    return DrainFeasibility.INCONCLUSIVE;
+  }
 }
