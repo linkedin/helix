@@ -1019,21 +1019,25 @@ public class HelixTaskExecutor implements MessageListener, TaskExecutor {
 
     // batch create curState meta
     if (createCurStateKeys.size() > 0) {
-      // Re-validate immediately before the actual ZK write: the instance may have been dropped
-      // (e.g. by a clean ACM decommission) between message retrieval and this point, and
-      // accessor.createChildren() would otherwise recursively recreate the dropped instance's
-      // /INSTANCES/{instanceName} subtree as an orphan.
-      if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
-        LOG.warn(
-            "Skip creating cur-state znodes for instance {} because it is no longer a registered "
-                + "cluster member (InstanceConfig not found). Messages: {}", instanceName,
-            msgsToBeUpdated);
-      } else {
-        try {
+      try {
+        // Re-validate immediately before the actual ZK write: the instance may have been dropped
+        // (e.g. by a clean ACM decommission) between message retrieval and this point, and
+        // accessor.createChildren() would otherwise recursively recreate the dropped instance's
+        // /INSTANCES/{instanceName} subtree as an orphan. The check is inside this try/catch
+        // (rather than guarding it) so that a failure reading the InstanceConfig's stat (e.g. a
+        // ZK read timeout, which is not caught inside isInstanceRegistered()) is handled the same
+        // way a createChildren() failure always was: logged and swallowed, instead of aborting
+        // message-state updates and task scheduling for the rest of this callback's batch.
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+          LOG.warn(
+              "Skip creating cur-state znodes for instance {} because it is no longer a "
+                  + "registered cluster member (InstanceConfig not found). Messages: {}",
+              instanceName, msgsToBeUpdated);
+        } else {
           accessor.createChildren(createCurStateKeys, metaCurStates);
-        } catch (Exception e) {
-          LOG.error("fail to create cur-state znodes for messages: " + msgsToBeUpdated, e);
         }
+      } catch (Exception e) {
+        LOG.error("fail to create cur-state znodes for messages: " + msgsToBeUpdated, e);
       }
     }
 

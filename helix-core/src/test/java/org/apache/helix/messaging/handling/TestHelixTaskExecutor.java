@@ -40,6 +40,7 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
+import org.apache.helix.HelixProperty;
 import org.apache.helix.InstanceType;
 import org.apache.helix.MockAccessor;
 import org.apache.helix.NotificationContext;
@@ -59,6 +60,7 @@ import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.task.TaskConstants;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.AssertJUnit;
@@ -1250,6 +1252,61 @@ public class TestHelixTaskExecutor {
     CurrentState currentState = dataAccessor.getProperty(keyBuilder
         .currentState(manager.getInstanceName(), manager.getSessionId(), msg.getResourceName()));
     Assert.assertNotNull(currentState);
+    System.out.println("END " + TestHelper.getTestMethodName());
+  }
+
+  @Test(dependsOnMethods = "testCurStateMetaCreatedWhenInstanceRegistered")
+  public void testCurStateMetaCreationFailureDoesNotAbortMessageProcessing()
+      throws InterruptedException {
+    System.out.println("START " + TestHelper.getTestMethodName());
+
+    HelixTaskExecutor executor = new HelixTaskExecutor();
+    // Simulate a failed registration-check read (e.g. a ZK read timeout), which is not caught
+    // inside InstanceValidationUtil#isInstanceRegistered(). This must be handled the same way a
+    // createChildren() failure always was: logged and swallowed, not propagated out of
+    // onMessage() and aborting message-state updates / task scheduling for the rest of the batch.
+    HelixManager manager = new MockClusterManager() {
+      private final HelixDataAccessor _throwingAccessor = new MockAccessor() {
+        @Override
+        public HelixProperty.Stat getPropertyStat(PropertyKey key) {
+          throw new ZkTimeoutException("Simulated ZK read timeout");
+        }
+      };
+
+      @Override
+      public HelixDataAccessor getHelixDataAccessor() {
+        return _throwingAccessor;
+      }
+    };
+    HelixDataAccessor dataAccessor = manager.getHelixDataAccessor();
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+
+    TestStateTransitionHandlerFactory stateTransitionFactory =
+        new TestStateTransitionHandlerFactory(Message.MessageType.STATE_TRANSITION.name());
+    executor.registerMessageHandlerFactory(Message.MessageType.STATE_TRANSITION.name(),
+        stateTransitionFactory);
+
+    NotificationContext changeContext = new NotificationContext(manager);
+
+    Message msg = new Message(Message.MessageType.STATE_TRANSITION, UUID.randomUUID().toString());
+    msg.setTgtSessionId(manager.getSessionId());
+    msg.setPartitionName("P1");
+    msg.setResourceName("testCurStateMetaCreationFailureDoesNotAbortMessageProcessing");
+    msg.setTgtName("Localhost_1123");
+    msg.setSrcName("127.101.1.23_2234");
+    msg.setFromState("SLAVE");
+    msg.setToState("MASTER");
+    msg.setStateModelDef("DummyMasterSlave");
+    dataAccessor.setProperty(msg.getKey(keyBuilder, manager.getInstanceName()), msg);
+
+    changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
+    executor.onMessage(manager.getInstanceName(), Collections.singletonList(msg), changeContext);
+
+    Thread.sleep(200);
+
+    // Despite the registration check throwing, the message must still have been scheduled and
+    // processed: the failure is scoped to the (skipped) metadata creation only.
+    Assert.assertTrue(stateTransitionFactory._processedMsgIds.containsKey(msg.getMsgId()));
     System.out.println("END " + TestHelper.getTestMethodName());
   }
 
