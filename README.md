@@ -115,6 +115,8 @@ Read-only WAGED assignment utilities still complete global and partial calculati
 synchronously through their internal constructor, independently of cluster
 metadata. Partial-rebalance configuration is unchanged. No persisted fields are
 deleted or migrated, and generic raw-record APIs remain unchanged.
+ExternalView verification uses the controller's stored baseline rather than
+calculating a new independent baseline on each verification attempt.
 
 ## WHAT IS HELIX
 
