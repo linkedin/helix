@@ -34,6 +34,7 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,8 +57,9 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
    * which upstream rebalancer wrote the original listFields entry or what state model
    * the resource uses.
    *
-   * <p>Replicas on evacuating instances that have reached the initial state stay there.
-   * They remain in the preference list, but maintenance must not reverse their drain.
+   * <p>Replicas on evacuating instances that have reached the initial state stay there
+   * only when other live, assignable replicas satisfy the full replica count and state
+   * requirements without pending transitions. Otherwise normal recovery is preserved.
    * Serving replicas on evacuating instances retain the normal maintenance behavior.
    */
   @Override
@@ -189,10 +191,44 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
           instancesToKeepOffline.add(instance);
         }
       }
+      if (instancesToKeepOffline != disabledInstancesForPartition
+          && !hasHealthyReplacementReplicas(cache, idealState, stateModelDef, partition,
+          currentStateOutput, liveInstances, disabledInstancesForPartition)) {
+        instancesToKeepOffline = disabledInstancesForPartition;
+      }
     }
     // Reuse disabled-replica mapping so drained replicas do not consume active-state slots.
     return super.computeBestPossibleStateForPartition(liveInstances, stateModelDef, preferenceList,
         currentStateOutput, instancesToKeepOffline, idealState, clusterConfig, partition,
         monitoredResolver, cache);
+  }
+
+  private boolean hasHealthyReplacementReplicas(ResourceControllerDataProvider cache,
+      IdealState idealState, StateModelDefinition stateModelDef, Partition partition,
+      CurrentStateOutput currentStateOutput, Set<String> liveInstances,
+      Set<String> disabledInstancesForPartition) {
+    int replicas = idealState.getReplicaCount(cache.getAssignableLiveInstances().size());
+    if (replicas <= 0) {
+      return false;
+    }
+    // Do not cap the requirement to currently available replicas during an outage.
+    Map<String, Integer> requiredStates = stateModelDef.getStateCountMap(replicas, replicas);
+    if (requiredStates.isEmpty()) {
+      return false;
+    }
+    String resource = idealState.getResourceName();
+    Set<String> unhealthyStates =
+        InstanceValidationUtil.getUnhealthyStates(cache.getResourceConfig(resource), stateModelDef);
+    for (Map.Entry<String, String> replica :
+        currentStateOutput.getCurrentStateMap(resource, partition).entrySet()) {
+      String instance = replica.getKey();
+      String state = replica.getValue();
+      if (liveInstances.contains(instance) && cache.getAssignableLiveInstances().containsKey(instance)
+          && !disabledInstancesForPartition.contains(instance) && !unhealthyStates.contains(state)
+          && currentStateOutput.getPendingMessage(resource, partition, instance) == null) {
+        requiredStates.computeIfPresent(state, (key, count) -> count > 1 ? count - 1 : null);
+      }
+    }
+    return requiredStates.isEmpty();
   }
 }
