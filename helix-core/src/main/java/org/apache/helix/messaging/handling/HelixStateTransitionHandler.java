@@ -436,6 +436,16 @@ public class HelixStateTransitionHandler extends MessageHandler {
               + " partition: " + partition);
         }
       }
+    } catch (Exception validationOrPersistException) {
+      // isInstanceRegistered() only swallows ZkNoNodeException internally; anything else (e.g. a
+      // ZK read timeout) must be caught here rather than left to propagate. onError() is invoked
+      // in a loop over sibling sub-message handlers by BatchMessageHandler#onError(); letting an
+      // exception escape here would abort that loop, silently skipping the ERROR current-state
+      // update *and* the rollbackOnError() call (in the finally below) for every remaining
+      // sub-handler, not just this one.
+      logger.error("Failed to validate instance registration or persist ERROR current state to "
+          + "ZK for resource " + resourceName + " partition: " + partition,
+          validationOrPersistException);
     } finally {
       StateTransitionError error = new StateTransitionError(type, code, e);
       _stateModel.rollbackOnError(_message, _notificationContext, error);

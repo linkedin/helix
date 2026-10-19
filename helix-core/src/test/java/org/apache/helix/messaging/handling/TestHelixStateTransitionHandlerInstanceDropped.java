@@ -19,6 +19,9 @@ package org.apache.helix.messaging.handling;
  * under the License.
  */
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixProperty;
@@ -30,6 +33,7 @@ import org.apache.helix.model.Message.MessageType;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateTransitionError;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.mockito.ArgumentCaptor;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
@@ -191,6 +195,74 @@ public class TestHelixStateTransitionHandlerInstanceDropped {
 
     verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
     Assert.assertTrue(rolledBack[0], "rollbackOnError() must still run when the ZK write is skipped");
+  }
+
+  @Test
+  public void testOnErrorStillRollsBackLocalStateModelWhenRegistrationCheckThrows() {
+    // Simulate a ZK read failure (e.g. a timeout) while checking instance registration, as
+    // opposed to a clean "instance not registered" result. isInstanceRegistered() only swallows
+    // ZkNoNodeException internally, so anything else propagates unless onError() itself catches
+    // it. onError() must not let this exception escape: doing so would (in production) abort
+    // BatchMessageHandler#onError()'s loop over sibling sub-handlers -- see the next test.
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME)))
+        .thenThrow(new ZkTimeoutException("timed out reading InstanceConfig stat"));
+
+    final boolean[] rolledBack = {false};
+    StateModel stateModel = new StateModel() {
+      @Override
+      public void rollbackOnError(Message message, NotificationContext context,
+          StateTransitionError error) {
+        rolledBack[0] = true;
+      }
+    };
+
+    // Must not throw: the exception from the registration check has to be caught inside
+    // onError(), not left to propagate past it.
+    newHandler(stateModel).onError(new Exception("transition failed"),
+        MessageHandler.ErrorCode.ERROR, MessageHandler.ErrorType.FRAMEWORK);
+
+    verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
+    Assert.assertTrue(rolledBack[0],
+        "rollbackOnError() must still run when the registration check throws");
+  }
+
+  @Test
+  public void testOnErrorRollsBackAllSubHandlersWhenOneThrowsDuringRegistrationCheck() {
+    // Mirrors BatchMessageHandler#onError(), which loops over one MessageHandler per batched
+    // sub-message/partition and calls onError() on each in turn. Before this fix, if an earlier
+    // sub-handler's registration check threw (e.g. a ZK read timeout), the uncaught exception
+    // would propagate out of that loop iteration, and every later sub-handler in the loop would
+    // receive neither its ERROR current-state update nor its rollbackOnError() call.
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME)))
+        .thenThrow(new ZkTimeoutException("timed out reading InstanceConfig stat"));
+
+    int numSubHandlers = 3;
+    final boolean[] rolledBack = new boolean[numSubHandlers];
+    List<MessageHandler> subHandlers = new ArrayList<>();
+    for (int i = 0; i < numSubHandlers; i++) {
+      final int idx = i;
+      StateModel stateModel = new StateModel() {
+        @Override
+        public void rollbackOnError(Message message, NotificationContext context,
+            StateTransitionError error) {
+          rolledBack[idx] = true;
+        }
+      };
+      subHandlers.add(newHandler(stateModel));
+    }
+
+    // Same loop as BatchMessageHandler#onError(): no try/catch around each call, so a single
+    // throwing sub-handler would previously have stopped the loop entirely.
+    for (MessageHandler handler : subHandlers) {
+      handler.onError(new Exception("transition failed"), MessageHandler.ErrorCode.ERROR,
+          MessageHandler.ErrorType.FRAMEWORK);
+    }
+
+    for (int i = 0; i < numSubHandlers; i++) {
+      Assert.assertTrue(rolledBack[i],
+          "sub-handler " + i + "'s rollbackOnError() must still run even though an earlier "
+              + "sub-handler's registration check threw");
+    }
   }
 
   private HelixStateTransitionHandler newHandler(StateModel stateModel) {
