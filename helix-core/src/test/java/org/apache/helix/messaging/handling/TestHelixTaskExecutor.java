@@ -1397,8 +1397,7 @@ public class TestHelixTaskExecutor {
   }
 
   @Test(dependsOnMethods = "testCurStateMetaCreatedWhenInstanceRegistered")
-  public void testCurStateMetaCreationFailureDoesNotAbortMessageProcessing()
-      throws InterruptedException {
+  public void testCurStateMetaCreationFailureDoesNotAbortMessageProcessing() throws Exception {
     System.out.println("START " + TestHelper.getTestMethodName());
 
     HelixTaskExecutor executor = new HelixTaskExecutor();
@@ -1443,11 +1442,13 @@ public class TestHelixTaskExecutor {
     changeContext.setChangeType(HelixConstants.ChangeType.MESSAGE);
     executor.onMessage(manager.getInstanceName(), Collections.singletonList(msg), changeContext);
 
-    Thread.sleep(200);
-
     // Despite the registration check throwing, the message must still have been scheduled and
-    // processed: the failure is scoped to the (skipped) metadata creation only.
-    Assert.assertTrue(stateTransitionFactory._processedMsgIds.containsKey(msg.getMsgId()));
+    // processed: the failure is scoped to the (skipped) metadata creation only. onMessage()
+    // schedules the handler asynchronously, so poll instead of using a fixed sleep (a loaded
+    // worker could otherwise take longer than a short fixed wait).
+    Assert.assertTrue(
+        TestHelper.verify(() -> stateTransitionFactory._processedMsgIds.containsKey(msg.getMsgId()),
+            TestHelper.WAIT_DURATION));
     System.out.println("END " + TestHelper.getTestMethodName());
   }
 

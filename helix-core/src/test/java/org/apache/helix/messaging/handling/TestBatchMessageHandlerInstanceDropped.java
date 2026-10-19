@@ -30,6 +30,7 @@ import org.apache.helix.PropertyKey;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Message.MessageType;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.mockito.ArgumentCaptor;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
@@ -87,6 +88,23 @@ public class TestBatchMessageHandlerInstanceDropped {
     // batch write is about to be flushed.
     when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME))).thenReturn(null);
 
+    postHandleBatchMessageWithPendingCurrentStateUpdate();
+
+    verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));
+  }
+
+  @Test
+  public void testSkipsBatchedCurrentStateWriteWhenRegistrationCheckThrows() {
+    // Simulate a ZK read failure (e.g. a timeout) while checking instance registration, as
+    // opposed to a clean "instance not registered" result. isInstanceRegistered() only swallows
+    // ZkNoNodeException internally, so anything else must be caught here: postHandleMessage()
+    // runs after handleMessage() has already computed a successful HelixTaskResult, so letting
+    // the exception escape would make HelixTask#call() discard that successful result and
+    // replace it with a failure instead of just skipping this flush.
+    when(_accessor.getPropertyStat(_keyBuilder.instanceConfig(INSTANCE_NAME)))
+        .thenThrow(new ZkTimeoutException("timed out reading InstanceConfig stat"));
+
+    // Must not throw.
     postHandleBatchMessageWithPendingCurrentStateUpdate();
 
     verify(_accessor, never()).updateProperty(any(PropertyKey.class), any(HelixProperty.class));

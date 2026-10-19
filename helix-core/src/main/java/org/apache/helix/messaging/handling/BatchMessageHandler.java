@@ -118,7 +118,26 @@ public class BatchMessageHandler extends MessageHandler {
       // persistence for batched current-state updates actually happens (see
       // HelixStateTransitionHandler#updateZKCurrentState()). Skipping the write here avoids
       // silently resurrecting a dropped instance's ZK subtree as an orphan node.
-      if (!InstanceValidationUtil.isInstanceRegistered(accessor, manager.getInstanceName())) {
+      //
+      // The check itself is wrapped here (rather than left to throw) because postHandleMessage()
+      // runs after handleMessage() has already computed a successful HelixTaskResult: an
+      // uncaught exception at this point (e.g. a ZK read timeout, which
+      // isInstanceRegistered() doesn't swallow) would propagate out of handleMessage() entirely,
+      // and HelixTask#call() would then discard that successful result and replace it with a
+      // failure -- skipping relay-message forwarding for a batch that otherwise fully succeeded.
+      // A registration-check failure should only skip this flush, not fail the whole batch.
+      boolean instanceRegistered;
+      try {
+        instanceRegistered =
+            InstanceValidationUtil.isInstanceRegistered(accessor, manager.getInstanceName());
+      } catch (Exception e) {
+        LOG.error("Failed to validate whether instance " + manager.getInstanceName()
+            + " is still a registered cluster member; skipping the batched current state ZK "
+            + "update(s) for this flush.", e);
+        instanceRegistered = false;
+      }
+
+      if (!instanceRegistered) {
         LOG.warn(
             "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
                 + "Skipping {} batched current state ZK update(s) to avoid resurrecting a "
