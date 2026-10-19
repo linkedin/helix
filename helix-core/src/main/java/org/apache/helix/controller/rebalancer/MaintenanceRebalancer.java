@@ -183,8 +183,11 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     if (cache != null) {
       Map<String, String> currentStates =
           currentStateOutput.getCurrentStateMap(idealState.getResourceName(), partition);
-      for (String instance : cache.getEvacuatingInstances()) {
-        if (stateModelDef.getInitialState().equals(currentStates.get(instance))) {
+      Set<String> evacuatingInstances = cache.getEvacuatingInstances();
+      for (Map.Entry<String, String> replica : currentStates.entrySet()) {
+        String instance = replica.getKey();
+        if (stateModelDef.getInitialState().equals(replica.getValue())
+            && evacuatingInstances.contains(instance)) {
           if (instancesToKeepOffline == disabledInstancesForPartition) {
             instancesToKeepOffline = new HashSet<>(disabledInstancesForPartition);
           }
@@ -193,7 +196,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
       }
       if (instancesToKeepOffline != disabledInstancesForPartition
           && !hasHealthyReplacementReplicas(cache, idealState, stateModelDef, partition,
-          currentStateOutput, liveInstances, disabledInstancesForPartition)) {
+              currentStateOutput, liveInstances, disabledInstancesForPartition)) {
         instancesToKeepOffline = disabledInstancesForPartition;
       }
     }
@@ -207,7 +210,8 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
       IdealState idealState, StateModelDefinition stateModelDef, Partition partition,
       CurrentStateOutput currentStateOutput, Set<String> liveInstances,
       Set<String> disabledInstancesForPartition) {
-    int replicas = idealState.getReplicaCount(cache.getAssignableLiveInstances().size());
+    Set<String> assignableLiveInstances = cache.getAssignableLiveInstances().keySet();
+    int replicas = idealState.getReplicaCount(assignableLiveInstances.size());
     if (replicas <= 0) {
       return false;
     }
@@ -223,7 +227,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
         currentStateOutput.getCurrentStateMap(resource, partition).entrySet()) {
       String instance = replica.getKey();
       String state = replica.getValue();
-      if (liveInstances.contains(instance) && cache.getAssignableLiveInstances().containsKey(instance)
+      if (liveInstances.contains(instance) && assignableLiveInstances.contains(instance)
           && !disabledInstancesForPartition.contains(instance) && !unhealthyStates.contains(state)
           && currentStateOutput.getPendingMessage(resource, partition, instance) == null) {
         requiredStates.computeIfPresent(state, (key, count) -> count > 1 ? count - 1 : null);
