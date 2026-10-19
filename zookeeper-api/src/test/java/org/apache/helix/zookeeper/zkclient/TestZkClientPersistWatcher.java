@@ -19,12 +19,18 @@ package org.apache.helix.zookeeper.zkclient;
  * under the License.
  */
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.helix.zookeeper.impl.TestHelper;
 import org.apache.helix.zookeeper.impl.ZkTestBase;
+import org.apache.helix.zookeeper.impl.ZkTestHelper;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
 import org.apache.helix.zookeeper.zkclient.serialize.SerializableSerializer;
@@ -168,6 +174,115 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
 
     zkClient.deleteRecursively(path);
     zkClient.close();
+  }
+
+  /**
+   * ZooKeeper does not deliver the changes made while the client was disconnected to persistent
+   * watches (ZOOKEEPER-4698), so all persist listeners must be notified on a same-session
+   * reconnect.
+   */
+  @Test
+  void testPersistListenersResyncOnSameSessionReconnect() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testPersistListenersResyncOnSameSessionReconnect";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    long sessionId = zkClient.getSessionId();
+
+    // Deliver the state events from another thread, as ZooKeeper does. ZkClient rejects ZK
+    // operations from the thread that delivers them.
+    Thread zkEventThread = new Thread(() -> ZkTestHelper.simulateZkStateReconnected(zkClient));
+    zkEventThread.start();
+    zkEventThread.join();
+
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+    Assert.assertEquals(zkClient.getSessionId(), sessionId);
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A new session does not inherit the persistent watches of the expired one, so they must be
+   * re-added for the persist listeners to keep receiving events.
+   */
+  @Test
+  void testPersistListenersSurviveSessionExpiry() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testPersistListenersSurviveSessionExpiry";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    long sessionId = zkClient.getSessionId();
+
+    ZkTestHelper.expireSession(zkClient);
+
+    Assert.assertTrue(zkClient.getSessionId() != sessionId, "Session should have expired");
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    events.clear();
+    zkClient.writeData(path + "/data", "newData");
+    zkClient.create(path + "/child/c", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/c", "datat", CreateMode.PERSISTENT);
+    assertEvents(events, "data " + path + "/data NodeDataChanged",
+        "child " + path + "/child NodeChildrenChanged",
+        "recursive " + path + "/recursive/c NodeCreated");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  private static ZkClient createPersistWatcherZkClient() {
+    ZkClient.Builder builder = new ZkClient.Builder();
+    builder.setZkServer(ZkTestBase.ZK_ADDR).setMonitorRootPathOnly(false)
+        .setUsePersistWatcher(true);
+    ZkClient zkClient = builder.build();
+    zkClient.setZkSerializer(new BasicZkSerializer(new SerializableSerializer()));
+    return zkClient;
+  }
+
+  // Subscribes a data, a child and a recursive persist listener under the path and returns the
+  // set the listeners record their events into.
+  private static Set<String> subscribePersistListeners(ZkClient zkClient, String path) {
+    zkClient.createPersistent(path + "/data", true);
+    zkClient.createPersistent(path + "/child", true);
+    zkClient.createPersistent(path + "/recursive", true);
+    Set<String> events = ConcurrentHashMap.newKeySet();
+    zkClient.subscribeDataChanges(path + "/data", new IZkDataListener() {
+      @Override
+      public void handleDataChange(String dataPath, Object data) {
+      }
+
+      @Override
+      public void handleDataChange(String dataPath, Object data,
+          Watcher.Event.EventType eventType) {
+        events.add("data " + dataPath + " " + eventType);
+      }
+
+      @Override
+      public void handleDataDeleted(String dataPath) {
+        events.add("data " + dataPath + " deleted");
+      }
+    });
+    zkClient.subscribeChildChanges(path + "/child", new IZkChildListener() {
+      @Override
+      public void handleChildChange(String parentPath, List<String> currentChilds) {
+      }
+
+      @Override
+      public void handleChildChange(String parentPath, List<String> currentChilds,
+          Watcher.Event.EventType eventType) {
+        events.add("child " + parentPath + " " + eventType);
+      }
+    });
+    zkClient.subscribePersistRecursiveListener(path + "/recursive",
+        (dataPath, eventType) -> events.add("recursive " + dataPath + " " + eventType));
+    return events;
+  }
+
+  private static void assertEvents(Set<String> events, String... expected) throws Exception {
+    Set<String> expectedEvents = new HashSet<>(Arrays.asList(expected));
+    Assert.assertTrue(TestHelper.verify(() -> events.equals(expectedEvents), 10000),
+        "Expected events " + expectedEvents + " but got " + events);
   }
 
   @Test
