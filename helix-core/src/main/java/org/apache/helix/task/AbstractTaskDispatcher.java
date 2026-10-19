@@ -507,6 +507,9 @@ public abstract class AbstractTaskDispatcher {
     _clusterStatusMonitor.updateJobCounters(jobCfg, TaskState.TIMED_OUT);
     _rebalanceScheduler.removeScheduledRebalance(jobResource);
     TaskUtil.cleanupJobIdealStateExtView(_manager.getHelixDataAccessor(), jobResource);
+    // Aggregate the terminal state of every task into a job-level summary (computed after INIT
+    // tasks are marked TASK_ABORTED above so the counts reflect the final states).
+    jobCtx.updateTaskStatusSummary();
     // New pipeline trigger for workflow status update
     // TODO: Enhance the pipeline and remove this because this operation is expansive
     RebalanceUtil.scheduleOnDemandPipeline(_manager.getClusterName(),0L,false);
@@ -529,6 +532,10 @@ public abstract class AbstractTaskDispatcher {
     // New pipeline trigger for workflow status update
     // TODO: Enhance the pipeline and remove this because this operation is expansive
     RebalanceUtil.scheduleOnDemandPipeline(_manager.getClusterName(),0L,false);
+
+    // Aggregate the terminal state of every task into a job-level summary (computed after INIT
+    // tasks are marked TASK_ABORTED above so the counts reflect the final states).
+    jobContext.updateTaskStatusSummary();
   }
 
   // Compute real assignment from theoretical calculation with applied throttling
@@ -600,20 +607,9 @@ public abstract class AbstractTaskDispatcher {
         taskAssignmentCal.getTaskAssignment(currStateOutput, liveInstances, jobCfg, jobCtx,
             workflowConfig, workflowCtx, filteredTaskPartitionNumbers, cache.getIdealStates());
 
-    if (!TaskUtil.isGenericTaskJob(jobCfg) && jobCfg.isRebalanceRunningTask()) {
-      // TODO: Revisit the logic for isRebalanceRunningTask() and valid use cases for it
-      // TODO: isRebalanceRunningTask() was originally put in place to allow users to move
-      // ("rebalance") long-running tasks, but there hasn't been a clear use case for this
-      // Previously, there was a bug in the condition above (it was || where it should have been &&)
-      dropRebalancedRunningTasks(tgtPartitionAssignments, currentInstanceToTaskAssignments, paMap,
-          jobCtx);
-    }
-
-    // If this is a targeted job and if there was a live instance change
+    // Targeted tasks follow changed target assignments after live-instance, state or message changes.
     if (!TaskUtil.isGenericTaskJob(jobCfg)
         && existsLiveInstanceOrCurrentStateOrMessageChangeChange) {
-      // Drop current jobs only if they are assigned to a different instance, regardless of
-      // the jobCfg.isRebalanceRunningTask() setting
       dropRebalancedRunningTasks(tgtPartitionAssignments, currentInstanceToTaskAssignments, paMap,
           jobCtx);
     }
@@ -935,6 +931,10 @@ public abstract class AbstractTaskDispatcher {
       reportControllerInducedDelay(dataProvider, _clusterStatusMonitor, workflowConfig, jobConfig,
           currentTime);
     }
+
+    // Aggregate the terminal state of every task into a job-level summary so that partial failures
+    // remain visible even though the job itself is COMPLETED (e.g. FailureThreshold set high).
+    jobContext.updateTaskStatusSummary();
   }
 
   protected void markJobFailed(String jobName, JobContext jobContext, WorkflowConfig workflowConfig,
@@ -952,8 +952,6 @@ public abstract class AbstractTaskDispatcher {
       workflowContext.setFinishTime(currentTime);
       updateWorkflowMonitor(workflowContext, workflowConfig);
     }
-    scheduleJobCleanUp(jobConfigMap.get(jobName).getTerminalStateExpiry(), workflowConfig,
-        currentTime);
   }
 
   protected void scheduleJobCleanUp(long expiry, WorkflowConfig workflowConfig,

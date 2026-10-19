@@ -39,7 +39,6 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixProperty;
 import org.apache.helix.PropertyKey;
-import org.apache.helix.api.rebalancer.constraint.AbnormalStateResolver;
 import org.apache.helix.common.caches.AbstractDataCache;
 import org.apache.helix.common.caches.CurrentStateCache;
 import org.apache.helix.common.caches.InstanceMessagesCache;
@@ -63,9 +62,7 @@ import org.apache.helix.model.PauseSignal;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
-import org.apache.helix.util.HelixUtil;
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.zookeeper.zkclient.DataUpdater;
+import org.apache.helix.util.InstanceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -154,11 +151,6 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   private DerivedInstanceCache _derivedInstanceCache =
       new DerivedInstanceCache(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(),
           new HashSet<>());
-  private final Map<String, MonitoredAbnormalResolver> _abnormalStateResolverMap = new HashMap<>();
-  private final Set<String> _timedOutInstanceDuringMaintenance = new HashSet<>();
-  private Map<String, LiveInstance> _allLiveInstanceExcludeTimedOutForMaintenance = new HashMap<>();
-  private Map<String, LiveInstance> _assignableLiveInstanceExcludeTimedOutForMaintenance =
-      new HashMap<>();
 
   public BaseControllerDataProvider() {
     this(AbstractDataCache.UNKNOWN_CLUSTER, AbstractDataCache.UNKNOWN_PIPELINE);
@@ -281,54 +273,11 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     if (_propertyDataChangedMap.get(HelixConstants.ChangeType.CLUSTER_CONFIG).getAndSet(false)) {
       _clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
       refreshedType.add(HelixConstants.ChangeType.CLUSTER_CONFIG);
-      // TODO: This is a temp function to clean up incompatible batched disabled instances format.
-      // Remove in later version.
-      if (_clusterConfig!=null && needCleanUpBatchedDisabledInstance(_clusterConfig.getRecord())
-          && cleanBatchDisableMapField(accessor)) {
-        LogUtil.logInfo(logger, getClusterEventId(), String
-            .format("Clean ClusterConfig mapField for cluster %s, pipeline %s", _clusterName,
-                getPipelineName()));
-      }
-      refreshAbnormalStateResolverMap(_clusterConfig);
     } else {
       LogUtil.logDebug(logger, getClusterEventId(), String
           .format("No ClusterConfig change for cluster %s, pipeline %s", _clusterName,
               getPipelineName()));
     }
-  }
-
-  // TODO: This function is used to clean up batched disabled instances for
-  // "DISABLED_INSTANCES" introduced in 1.0.3.0. This temp change should be reverted after 1.0.5.0 \
-  // or later version.
-  private boolean cleanBatchDisableMapField(final HelixDataAccessor accessor) {
-    boolean successful =
-        accessor.updateProperty(accessor.keyBuilder().clusterConfig(), new DataUpdater<ZNRecord>() {
-          @Override
-          public ZNRecord update(ZNRecord currentData) {
-            if (currentData == null) {
-              throw new HelixException(
-                  "Cluster: " + _clusterConfig.getClusterName() + ": cluster config is null");
-            }
-            ZNRecord newRecord = new ZNRecord(currentData);
-            String batchDisabledInstanceMapFieldKey =
-                ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name();
-            if (needCleanUpBatchedDisabledInstance(currentData)) {
-              newRecord.getMapFields().remove(batchDisabledInstanceMapFieldKey);
-            }
-            return newRecord;
-          }
-        }, null);
-    if (!successful) {
-      LogUtil.logError(logger, getClusterEventId(), String
-          .format("Failed to clean ClusterConfig change for cluster %s, pipeline %s", _clusterName,
-              getPipelineName()));
-    }
-    return successful;
-  }
-
-  private boolean needCleanUpBatchedDisabledInstance(ZNRecord record) {
-    return record!=null && record.getMapFields()!=null && record.getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name());
   }
 
   private void refreshIdealState(final HelixDataAccessor accessor,
@@ -476,45 +425,6 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     // The following flag is to guarantee that there's only one update per pineline run because we
     // check for whether maintenance recovery could happen twice every pipeline
     _hasMaintenanceSignalChanged = false;
-
-    // If maintenance mode has exited, clear cached timed-out nodes
-    if (!_isMaintenanceModeEnabled) {
-      _timedOutInstanceDuringMaintenance.clear();
-      _allLiveInstanceExcludeTimedOutForMaintenance.clear();
-      _assignableLiveInstanceExcludeTimedOutForMaintenance.clear();
-    }
-  }
-
-  private void timeoutNodesDuringMaintenance(final HelixDataAccessor accessor, ClusterConfig clusterConfig, boolean isMaintenanceModeEnabled) {
-    // If maintenance mode is enabled and timeout window is specified, filter 'new' live nodes
-    // for timed-out nodes
-    long timeOutWindow = -1;
-    if (clusterConfig != null) {
-      timeOutWindow = clusterConfig.getOfflineNodeTimeOutForMaintenanceMode();
-    }
-    if (timeOutWindow >= 0 && isMaintenanceModeEnabled) {
-      for (String instance : _allLiveInstanceCache.getPropertyMap().keySet()) {
-        // 1. Check timed-out cache and don't do repeated work;
-        // 2. Check for nodes that didn't exist in the last iteration, because it has been checked;
-        // 3. For all other nodes, check if it's timed-out.
-        // When maintenance mode is first entered, all nodes will be checked as a result.
-        if (!_timedOutInstanceDuringMaintenance.contains(instance)
-            && !_allLiveInstanceExcludeTimedOutForMaintenance.containsKey(instance)
-            && isInstanceTimedOutDuringMaintenance(accessor, instance, timeOutWindow)) {
-          _timedOutInstanceDuringMaintenance.add(instance);
-        }
-      }
-    }
-    if (isMaintenanceModeEnabled) {
-      _allLiveInstanceExcludeTimedOutForMaintenance =
-          _allLiveInstanceCache.getPropertyMap().entrySet().stream()
-              .filter(e -> !_timedOutInstanceDuringMaintenance.contains(e.getKey()))
-              .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-      _assignableLiveInstanceExcludeTimedOutForMaintenance =
-          _derivedInstanceCache._assignableLiveInstancesMap.entrySet().stream()
-              .filter(e -> !_timedOutInstanceDuringMaintenance.contains(e.getKey()))
-              .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-    }
   }
 
   private void updateIdealRuleMap(ClusterConfig clusterConfig) {
@@ -551,7 +461,6 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     _stateModelDefinitionCache.refresh(accessor);
     _clusterConstraintsCache.refresh(accessor);
     refreshManagementSignals(accessor);
-    timeoutNodesDuringMaintenance(accessor, _clusterConfig, _isMaintenanceModeEnabled);
 
     // TODO: once controller gets split, only one controller should update offline instance history
     updateOfflineInstanceHistory(accessor);
@@ -602,7 +511,6 @@ public class BaseControllerDataProvider implements ControlContextProvider {
 
   public void setClusterConfig(ClusterConfig clusterConfig) {
     _clusterConfig = clusterConfig;
-    refreshAbnormalStateResolverMap(_clusterConfig);
     updateIdealRuleMap(_clusterConfig);
     updateInstanceSets(_allInstanceConfigCache.getPropertyMap(), _allLiveInstanceCache.getPropertyMap(),
         _clusterConfig);
@@ -656,31 +564,20 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
-   * Returns the assignable LiveInstances for each of the instances that are currently up and running,
-   * excluding the instances that are considered offline during maintenance mode. Instances
-   * are timed-out if they have been offline for a while before going live during maintenance mode.
+   * Returns the assignable LiveInstances for each of the instances that are currently up and
+   * running.
    * @return A map of LiveInstances to their instance names
    */
   public Map<String, LiveInstance> getAssignableLiveInstances() {
-    if (isMaintenanceModeEnabled()) {
-      return Collections.unmodifiableMap(_assignableLiveInstanceExcludeTimedOutForMaintenance);
-    }
-
     return Collections.unmodifiableMap(_derivedInstanceCache._assignableLiveInstancesMap);
   }
 
   /**
-   * Returns the LiveInstances for each of the instances that are currently up and running,
-   * excluding the instances that are considered offline during maintenance mode. Instances are
-   * timed-out if they have been offline for a while before going live during maintenance mode.
+   * Returns the LiveInstances for each of the instances that are currently up and running.
    *
    * @return A map of LiveInstances to their instance names
    */
   public Map<String, LiveInstance> getLiveInstances() {
-    if (isMaintenanceModeEnabled()) {
-      return Collections.unmodifiableMap(_allLiveInstanceExcludeTimedOutForMaintenance);
-    }
-
     return _allLiveInstanceCache.getPropertyMap();
   }
 
@@ -759,16 +656,10 @@ public class BaseControllerDataProvider implements ControlContextProvider {
    * auto Maintenance Mode (MAX_OFFLINE_INSTANCES_ALLOWED at entry,
    * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT at exit).
    *
-   * <p>An instance counts when all three conditions hold:
-   * <ul>
-   *   <li>Its InstanceOperation is routable, i.e. not in
-   *       {@link InstanceConstants#UNROUTABLE_INSTANCE_OPERATIONS}.</li>
-   *   <li>It is not currently enabled-and-live.</li>
-   *   <li>It does not carry a valid (unexpired) instance-operation maintenance marker.</li>
-   * </ul>
-   * EVACUATE and DISABLE instances are included because they cannot accept new ONLINE
-   * replicas; ENABLE+offline instances are included for the same reason. SWAP_IN and
-   * UNKNOWN are excluded because they do not represent assignable cluster capacity.
+   * <p>Membership rules live in
+   * {@link InstanceUtil#getInstancesUnableToAcceptOnlineReplicas(Map, java.util.Collection, long)}
+   * so that the controller and the read-only helix-rest endpoint that reports this number to
+   * clients share one implementation.
    *
    * <p>Used by both BestPossibleStateCalcStage (MM entry) and MaintenanceRecoveryStage
    * (MM exit) so that the same population is measured against each threshold.
@@ -777,18 +668,8 @@ public class BaseControllerDataProvider implements ControlContextProvider {
    * @return a fresh modifiable set of instance names.
    */
   public Set<String> getInstancesUnableToAcceptOnlineReplicas(long nowMs) {
-    Map<String, InstanceConfig> instanceConfigMap = getInstanceConfigMap();
-    Set<String> result = instanceConfigMap.entrySet().stream()
-        .filter(e -> !InstanceConstants.UNROUTABLE_INSTANCE_OPERATIONS.contains(
-            e.getValue().getInstanceOperation().getOperation()))
-        .map(Map.Entry::getKey)
-        .collect(Collectors.toCollection(HashSet::new));
-    result.removeAll(getEnabledLiveInstances());
-    result.removeIf(name -> {
-      InstanceConfig cfg = instanceConfigMap.get(name);
-      return cfg != null && cfg.isUnderInstanceOperationMaintenance(nowMs);
-    });
-    return result;
+    return InstanceUtil.getInstancesUnableToAcceptOnlineReplicas(getInstanceConfigMap(),
+        getLiveInstances().keySet(), nowMs);
   }
 
   /**
@@ -1159,62 +1040,6 @@ public class BaseControllerDataProvider implements ControlContextProvider {
     }
   }
 
-  /*
-   * Check if the instance is timed-out during maintenance mode. An instance is timed-out if it has
-   * been offline for longer than the user defined timeout window.
-   * @param timeOutWindow - the timeout window; guaranteed to be non-negative
-   */
-  private boolean isInstanceTimedOutDuringMaintenance(HelixDataAccessor accessor, String instance,
-      long timeOutWindow) {
-    ParticipantHistory history =
-        accessor.getProperty(accessor.keyBuilder().participantHistory(instance));
-    if (history == null) {
-      LogUtil.logWarn(logger, getClusterEventId(), "Participant history is null for instance " + instance);
-      return false;
-    }
-    List<Long> onlineTimestamps = history.getOnlineTimestampsAsMilliseconds();
-    List<Long> offlineTimestamps = history.getOfflineTimestampsAsMilliseconds();
-
-    onlineTimestamps.add(System.currentTimeMillis());
-    // Hop between each pair of online timestamps and find the maximum offline window
-    for (int onlineTimestampIndex = onlineTimestamps.size() - 1, offlineTimestampIndex =
-        offlineTimestamps.size() - 1; onlineTimestampIndex >= 0 && offlineTimestampIndex >= 0;
-        onlineTimestampIndex--) {
-      long onlineWindowRight = onlineTimestamps.get(onlineTimestampIndex);
-      // We don't care about offline windows before maintenance mode starts
-      if (onlineWindowRight <= _maintenanceSignal.getTimestamp()) {
-        break;
-      }
-      long onlineWindowLeft = 0L;
-      if (onlineTimestampIndex > 0) {
-        onlineWindowLeft = onlineTimestamps.get(onlineTimestampIndex - 1);
-      }
-
-      // If the offline timestamp isn't within this pair of online timestamp, continue
-      if (offlineTimestamps.get(offlineTimestampIndex) <= onlineWindowLeft) {
-        continue;
-      }
-
-      // Goes left until the next offline timestamp surpasses the window left
-      while (offlineTimestampIndex >= 0
-          && offlineTimestamps.get(offlineTimestampIndex) > onlineWindowLeft) {
-        offlineTimestampIndex--;
-      }
-
-      long offlineTimeStamp = offlineTimestamps.get(offlineTimestampIndex + 1);
-      // Check the largest offline window against the timeout window
-      if (onlineWindowRight - offlineTimeStamp > timeOutWindow) {
-        LogUtil.logWarn(logger, getClusterEventId(), String.format(
-            "During maintenance mode, instance %s is timed-out due to its offline time. Online time: "
-                + "%s, Offline time: %s, Timeout window: %s", instance, onlineWindowRight,
-            offlineTimeStamp, timeOutWindow));
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   /**
    * Indicate that a full read should be done on the next refresh
    */
@@ -1243,61 +1068,10 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   public MonitoredAbnormalResolver getAbnormalStateResolver(String stateModel) {
-    return _abnormalStateResolverMap
-        .getOrDefault(stateModel, MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
-  }
-
-  private void refreshAbnormalStateResolverMap(ClusterConfig clusterConfig) {
-    if (clusterConfig == null) {
-      logger.debug("Skip refreshing abnormal state resolvers because the ClusterConfig is missing");
-      return;
-    }
-
-    Map<String, String> resolverMap = clusterConfig.getAbnormalStateResolverMap();
-    logger.info("Start loading the abnormal state resolvers with configuration {}", resolverMap);
-    // Calculate all the resolvers to be removed.
-    Map<String, MonitoredAbnormalResolver> removingResolverWraps =
-        new HashMap<>(_abnormalStateResolverMap);
-    removingResolverWraps.keySet().removeAll(resolverMap.keySet());
-    for (MonitoredAbnormalResolver monitoredAbnormalResolver : removingResolverWraps.values()) {
-      monitoredAbnormalResolver.close();
-    }
-
-    // Reload the resolver classes into cache based on the configuration.
-    _abnormalStateResolverMap.keySet().retainAll(resolverMap.keySet());
-    for (String stateModel : resolverMap.keySet()) {
-      String resolverClassName = resolverMap.get(stateModel);
-      if (resolverClassName == null || resolverClassName.isEmpty()) {
-        // skip the empty definition.
-        continue;
-      }
-
-      MonitoredAbnormalResolver currentMonitoredResolver =
-          _abnormalStateResolverMap.get(stateModel);
-      if (currentMonitoredResolver == null || !resolverClassName
-          .equals(currentMonitoredResolver.getResolverClass().getName())) {
-
-        if (currentMonitoredResolver != null) {
-          // Clean up the existing monitored resolver.
-          // We must close the existing object first to ensure the metric being removed before the
-          // new one can be registered normally.
-          currentMonitoredResolver.close();
-        }
-
-        try {
-          AbnormalStateResolver newResolver = AbnormalStateResolver.class
-              .cast(HelixUtil.loadClass(getClass(), resolverClassName).newInstance());
-          _abnormalStateResolverMap.put(stateModel,
-              new MonitoredAbnormalResolver(newResolver, _clusterName, stateModel));
-        } catch (Exception e) {
-          throw new HelixException(String
-              .format("Failed to instantiate the abnormal state resolver %s for state model %s",
-                  resolverClassName, stateModel));
-        }
-      } // else, nothing to update since the same resolver class has been loaded.
-    }
-
-    logger.info("Finish loading the abnormal state resolvers {}", _abnormalStateResolverMap);
+    // The configurable abnormal state resolver feature has been removed. The rebalancer path
+    // retains this hook but always uses the no-op resolver, preserving prior behavior for all
+    // clusters (none of which configured a resolver).
+    return MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER;
   }
 
   public boolean isMaintenanceModeEnabled() {

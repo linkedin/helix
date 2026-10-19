@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -37,19 +38,30 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
+import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
@@ -59,8 +71,15 @@ import org.apache.helix.task.TaskFactory;
 import org.apache.helix.task.TaskStateModelFactory;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestPerInstanceAccessor extends AbstractTestClass {
@@ -584,18 +603,17 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   @Test(dependsOnMethods = "testDeleteInstance")
   public void updateInstance() throws Exception {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    // Disable instance
+    // Disable instance. CLUSTER_NAME's fixture sets minActiveReplicas (3) above the replica count
+    // (2), so the always-on disable min-active guard rail would block a plain disable; this test
+    // only exercises the disable/enable write path, so bypass the guard rail with force=true.
     Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
 
     new JerseyUriRequestBuilder(
-        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=reason1")
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=reason1&force=true")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
 
     Assert.assertFalse(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-    Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
     Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "reason1");
@@ -607,19 +625,11 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
     Assert.assertEquals(
-        _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledType(),
-        InstanceConstants.INSTANCE_NOT_DISABLED);
-    Assert.assertEquals(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceDisabledReason(),
         "");
 
-    // We should see no instance disable related field in to clusterConfig
-    ClusterConfig cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
-
-    // disable instance with no reason input
-    new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable")
+    // disable instance with no reason input (force=true bypasses the disable min-active guard rail)
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=disable&force=true")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
 
     Assert.assertFalse(
@@ -629,11 +639,6 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
     Assert.assertTrue(
         _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME).getInstanceEnabled());
-
-    // Disable instance should see no field write to clusterConfig
-    cls = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertFalse(cls.getRecord().getMapFields()
-        .containsKey(ClusterConfig.ClusterConfigProperty.DISABLED_INSTANCES.name()));
 
     // AddTags
     List<String> tagList = ImmutableList.of("tag3", "tag1", "tag2");
@@ -818,6 +823,275 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     }, TestHelper.WAIT_DURATION);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @DataProvider(name = "legacyDisableOperations")
+  public Object[][] legacyDisableOperations() {
+    return new Object[][] {
+        {InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.DISABLE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.EVACUATE, InstanceConstants.InstanceOperation.DISABLE},
+        {InstanceConstants.InstanceOperation.SWAP_IN, InstanceConstants.InstanceOperation.SWAP_IN},
+        {InstanceConstants.InstanceOperation.UNKNOWN, InstanceConstants.InstanceOperation.UNKNOWN}
+    };
+  }
+
+  @DataProvider(name = "retiredDisabledTypeQuery")
+  public Object[][] retiredDisabledTypeQuery() {
+    return new Object[][] {
+        {"absent", new String[] {}, false},
+        {"legacy", new String[] {"USER_OPERATION"}, true},
+        {"invalid", new String[] {"invalid-value"}, true},
+        {"empty", new String[] {""}, true},
+        {"repeated", new String[] {"", "CLOUD_EVENT"}, true}
+    };
+  }
+
+  @Test(dataProvider = "retiredDisabledTypeQuery")
+  public void testRetiredDisabledTypeWarnsWithoutChangingLegacyCommands(String caseName,
+      String[] disabledTypes, boolean expectWarning) {
+    String cluster = TestHelper.getTestMethodName() + "_" + caseName;
+    String instance = "localhost_9999";
+    List<String> warnings = Collections.synchronizedList(new ArrayList<>());
+    Logger logger = (Logger) LogManager.getLogger(PerInstanceAccessor.class);
+    Level originalLevel = logger.getLevel();
+    AbstractAppender appender =
+        new AbstractAppender(cluster, null, null, false, Property.EMPTY_ARRAY) {
+          @Override
+          public void append(LogEvent event) {
+            String message = event.getMessage().getFormattedMessage();
+            if (event.getLevel() == Level.WARN && message.contains("instanceDisabledType")
+                && message.contains(cluster)) {
+              warnings.add(message);
+            }
+          }
+        };
+    _gSetupTool.addCluster(cluster, true);
+    appender.start();
+    logger.addAppender(appender);
+    logger.setLevel(Level.WARN);
+    try {
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      Entity<String> entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+      int requests = 0;
+      for (String command : new String[] {"disable", "enable"}) {
+        WebTarget request = target("clusters/" + cluster + "/instances/" + instance)
+            .queryParam("command", command).queryParam("instanceDisabledReason", "reason");
+        for (String disabledType : disabledTypes) {
+          request = request.queryParam("instanceDisabledType", disabledType);
+        }
+        try (Response response = request.request().post(entity)) {
+          Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
+        }
+        requests++;
+
+        InstanceConfig config = _configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertEquals(config.getInstanceEnabled(), command.equals("enable"));
+        Assert.assertEquals(config.getInstanceDisabledReason(),
+            command.equals("disable") ? "reason" : "");
+        Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
+        Assert.assertEquals(warnings.size(), expectWarning ? requests : 0,
+            "Warn once per request only when the retired parameter is supplied");
+        if (expectWarning) {
+          Assert.assertTrue(warnings.get(requests - 1).contains(instance));
+        }
+      }
+    } finally {
+      logger.removeAppender(appender);
+      logger.setLevel(originalLevel);
+      appender.stop();
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
+
+  @Test(dataProvider = "legacyDisableOperations")
+  public void testLegacyDisablePreservesInstanceOperations(
+      InstanceConstants.InstanceOperation initialOperation,
+      InstanceConstants.InstanceOperation disabledOperation) {
+    String cluster = TestHelper.getTestMethodName() + "_" + initialOperation;
+    String instance = "localhost_9999";
+    _gSetupTool.addCluster(cluster, true);
+    try {
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      InstanceConfig config = new InstanceConfig(instance);
+      config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+          .setOperation(initialOperation)
+          .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+      config.getRecord().setSimpleField(
+          InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "stale");
+      config.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+      _configAccessor.setInstanceConfig(cluster, instance, config);
+      config = _configAccessor.getInstanceConfig(cluster, instance);
+      Assert.assertEquals(config.getInstanceOperation().getOperation(), initialOperation);
+      List<String> operations = new ArrayList<>(config.getRecord()
+          .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()));
+      String configPath = PropertyPathBuilder.instanceConfig(cluster, instance);
+      Entity<String> entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+      for (String reason : new String[] {"reason1", "reason2", null, ""}) {
+        int version = _gZkClient.getStat(configPath).getVersion();
+        String query = "clusters/{}/instances/{}?command=disable&instanceDisabledType=USER_OPERATION";
+        if (reason != null) {
+          query += "&instanceDisabledReason=" + reason;
+        }
+        new JerseyUriRequestBuilder(query).format(cluster, instance).post(this, entity).close();
+
+        Assert.assertEquals(_gZkClient.getStat(configPath).getVersion(), version + 1,
+            "Disablement and its reason must be written in one atomic update");
+        config = _configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertFalse(config.getRecord().getBooleanField(
+            InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), true));
+        Assert.assertEquals(config.getInstanceOperation().getOperation(), disabledOperation);
+        Assert.assertEquals(config.getRecord()
+            .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()),
+            operations, "Legacy disable must not rewrite modern instance operations");
+        Assert.assertEquals(config.getInstanceDisabledReason(),
+            disabledOperation == InstanceConstants.InstanceOperation.DISABLE && reason != null
+                ? reason : "");
+        Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
+      }
+
+      if (initialOperation == InstanceConstants.InstanceOperation.SWAP_IN) {
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE")
+            .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+            .format(cluster, instance).post(this, entity).close();
+        Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, instance).getRecord(),
+            config.getRecord(), "Rejected modern transitions must leave the config unchanged");
+      }
+
+      config.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+      _configAccessor.setInstanceConfig(cluster, instance, config);
+      int version = _gZkClient.getStat(configPath).getVersion();
+      new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=enable")
+          .format(cluster, instance).post(this, entity).close();
+      Assert.assertEquals(_gZkClient.getStat(configPath).getVersion(), version + 1,
+          "Enablement and stale-type cleanup must be written in one atomic update");
+      config = _configAccessor.getInstanceConfig(cluster, instance);
+      Assert.assertTrue(config.getRecord().getBooleanField(
+          InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), false));
+      Assert.assertEquals(config.getInstanceOperation().getOperation(),
+          initialOperation == InstanceConstants.InstanceOperation.DISABLE
+              ? InstanceConstants.InstanceOperation.ENABLE : initialOperation);
+      Assert.assertEquals(config.getInstanceDisabledReason(), "");
+      Assert.assertFalse(config.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
+      Assert.assertEquals(config.getRecord()
+          .getListField(InstanceConfig.InstanceConfigProperty.HELIX_INSTANCE_OPERATIONS.name()),
+          operations);
+    } finally {
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
+
+  /**
+   * Verifies the opt-in instance-operation rebalance-feasibility guard rail on
+   * {@code setInstanceOperation}. Uses a self-contained WAGED cluster whose replica count equals
+   * the assignable-instance count, so moving any one instance out of the assignable pool (EVACUATE)
+   * leaves too few instances to place every replica -> a deterministic placement deficit the guard
+   * rail must catch before writing to ZooKeeper.
+   */
+  @Test(dependsOnMethods = "updateInstance")
+  public void setInstanceOperationRebalanceFeasibilityGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterInstanceOpGuardrail";
+    try {
+      verifyInstanceOperationRebalanceFeasibilityGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyInstanceOperationRebalanceFeasibilityGuardrail(String cluster) throws Exception {
+    String capacityKey = "CU";
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+
+    _gSetupTool.addCluster(cluster, true);
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceCapacityKeys(Collections.singletonList(capacityKey));
+    clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(capacityKey, 100));
+    clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(capacityKey, 1));
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13100 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    String resource = "TestDB_WAGED";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+        IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(1);
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before enabling the guard rail");
+    }
+
+    // Enable the opt-in guard rail.
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(true);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. Enabled: EVACUATE would leave a partition under-placed -> 400 and nothing written.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "EVACUATE must not be written when the guard rail blocks it");
+
+    // 2. dryRun: returns a 200 verdict naming the rule, still writes nothing.
+    Response dryRunResponse = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    String verdictBody = dryRunResponse.readEntity(String.class);
+    Assert.assertTrue(
+        verdictBody.contains(InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID),
+        "dry-run verdict should carry the rule id, but was: " + verdictBody);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the verdict and writes EVACUATE.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&force=true")
+        .format(cluster, target).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, target).getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.EVACUATE, "force=true should write EVACUATE");
+
+    // 4. Disabled flag: the same otherwise-blocked operation is allowed (guard rail short-circuits).
+    clusterConfig = _configAccessor.getClusterConfig(cluster);
+    clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(false);
+    _configAccessor.setClusterConfig(cluster, clusterConfig);
+    String secondTarget = instances.get(1);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE")
+        .format(cluster, secondTarget).post(this, entity);
+    Assert.assertEquals(
+        _configAccessor.getInstanceConfig(cluster, secondTarget).getInstanceOperation()
+            .getOperation(), InstanceConstants.InstanceOperation.EVACUATE,
+        "with the guard rail disabled, EVACUATE should be written");
+
   }
 
   /**
@@ -1015,6 +1289,132 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     // The live participant was not dropped, so its config must still be present.
     Assert.assertNotNull(_configAccessor.getInstanceConfig(STOPPABLE_CLUSTER, instanceToDelete));
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the updateInstanceConfig "update" endpoint's capacity-reduction path.
+   * Declares a single WAGED capacity dimension, gives all instances capacity 100 (supply 1000), and
+   * plants a WAGED resource committing demand 950 (10 partitions * 1 replica * weight 95), leaving
+   * only 50 units of headroom. It then verifies: (1) an over-cut reduction is blocked (400 + verdict,
+   * nothing written); (2) the same reduction under dryRun always returns 200 with the verdict and is
+   * still not written; (3) force=true bypasses the guard rail and the unsafe reduction is written;
+   * (4) a within-headroom reduction passes and is written. Cluster/instance capacity config and the
+   * demand resource are saved and torn down so the shared cluster is left unperturbed.
+   */
+  @Test
+  public void testUpdateInstanceConfigCapacityHeadroomGuardrail() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String targetInstance = CLUSTER_NAME + "localhost_12919";
+    String demandResource = "guardrailHeadroomDemandResource";
+
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
+    List<String> originalCapacityKeys = clusterConfig.getInstanceCapacityKeys();
+    List<String> instances = admin.getInstancesInCluster(CLUSTER_NAME);
+    Map<String, Map<String, Integer>> originalCapacities = new HashMap<>();
+    for (String instance : instances) {
+      originalCapacities.put(instance,
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, instance).getInstanceCapacityMap());
+    }
+
+    try {
+      // supply = (# instances) * 100 in dimension FOO. With 10 instances that is 1000.
+      clusterConfig.setInstanceCapacityKeys(Collections.singletonList("FOO"));
+      // The guard rail is opt-in (disabled by default); enable it for this cluster so the endpoint
+      // actually enforces the capacity-reduction check below.
+      clusterConfig.setInstanceCapacityHeadroomGuardrailEnabled(true);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+
+      // Committed demand = 10 partitions * 1 replica * weight 95 = 950, leaving 50 of headroom.
+      admin.addResource(CLUSTER_NAME, demandResource, 10, "OnlineOffline", "FULL_AUTO");
+      IdealState idealState = admin.getResourceIdealState(CLUSTER_NAME, demandResource);
+      idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+      idealState.setReplicas("1");
+      admin.setResourceIdealState(CLUSTER_NAME, demandResource, idealState);
+      ResourceConfig resourceConfig = new ResourceConfig(demandResource);
+      resourceConfig.setPartitionCapacityMap(
+          ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("FOO", 95)));
+      _configAccessor.setResourceConfig(CLUSTER_NAME, demandResource, resourceConfig);
+
+      // 1. Enforcement: reducing to 30 drops supply to 930 < 950, so the freed load has no home.
+      Response blocked = postCapacityDelta(targetInstance, 30, Collections.emptyMap());
+      Assert.assertEquals(blocked.getStatus(), Response.Status.BAD_REQUEST.getStatusCode());
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 2. Dry-run: always 200 with the same infeasible verdict, still nothing written.
+      Response dryRun = postCapacityDelta(targetInstance, 30, ImmutableMap.of("dryRun", true));
+      Assert.assertEquals(dryRun.getStatus(), Response.Status.OK.getStatusCode());
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(InstanceCapacityHeadroomGuardrailRule.RULE_ID));
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 100);
+
+      // 3. force=true bypasses the guard rail: the unsafe reduction is actually written.
+      Response forced = postCapacityDelta(targetInstance, 30, ImmutableMap.of("force", true));
+      Assert.assertEquals(forced.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 30);
+
+      // Restore the target to 100 before exercising the happy path.
+      InstanceConfig restoreTarget =
+          _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance);
+      restoreTarget.setInstanceCapacityMap(ImmutableMap.of("FOO", 100));
+      _configAccessor.setInstanceConfig(CLUSTER_NAME, targetInstance, restoreTarget);
+
+      // 4. A within-headroom reduction (100 -> 60 leaves supply 960 >= 950) passes and is written.
+      Response allowed = postCapacityDelta(targetInstance, 60, Collections.emptyMap());
+      Assert.assertEquals(allowed.getStatus(), Response.Status.OK.getStatusCode());
+      Assert.assertEquals((int) _configAccessor.getInstanceConfig(CLUSTER_NAME, targetInstance)
+          .getInstanceCapacityMap().get("FOO"), 60);
+    } finally {
+      try {
+        admin.dropResource(CLUSTER_NAME, demandResource);
+      } catch (Exception ignored) {
+        // best-effort teardown
+      }
+      ClusterConfig restore = _configAccessor.getClusterConfig(CLUSTER_NAME);
+      restore.setInstanceCapacityKeys(
+          originalCapacityKeys == null ? new ArrayList<>() : originalCapacityKeys);
+      restore.setInstanceCapacityHeadroomGuardrailEnabled(false);
+      _configAccessor.setClusterConfig(CLUSTER_NAME, restore);
+      for (String instance : instances) {
+        InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+        instanceConfig.setInstanceCapacityMap(originalCapacities.get(instance));
+        _configAccessor.setInstanceConfig(CLUSTER_NAME, instance, instanceConfig);
+      }
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * POST an InstanceConfig capacity delta ({@code {"FOO": fooCapacity}}) to the updateInstanceConfig
+   * "update" endpoint, threading through any guard-rail query flags (e.g. {@code dryRun},
+   * {@code force}), and return the raw {@link Response} so the caller can assert on status and body.
+   */
+  private Response postCapacityDelta(String instance, int fooCapacity, Map<String, Object> flags)
+      throws IOException {
+    InstanceConfig delta = new InstanceConfig(instance);
+    delta.setInstanceCapacityMap(ImmutableMap.of("FOO", fooCapacity));
+    Entity<String> entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    WebTarget webTarget = target("clusters/" + CLUSTER_NAME + "/instances/" + instance + "/configs")
+        .queryParam("command", "update");
+    for (Map.Entry<String, Object> flag : flags.entrySet()) {
+      webTarget = webTarget.queryParam(flag.getKey(), flag.getValue());
+    }
+    return webTarget.request().post(entity);
   }
 
   /**
@@ -1483,6 +1883,58 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /**
+   * When the CURRENTSTATES/{sessionId} znode is absent, getChildNames() returns an immutable
+   * Collections.emptyList(), and the subsequent addAll() of a non-empty task current state list
+   * used to throw UnsupportedOperationException, which surfaced as an HTTP 500.
+   */
+  @Test(dependsOnMethods = "testGetResourcesOnInstance")
+  public void testGetResourcesOnInstanceWithOnlyTaskCurrentStates() throws JsonProcessingException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = "localhost_" + TestHelper.getTestMethodName();
+    addParticipant(CLUSTER_NAME, instanceName);
+
+    try {
+      HelixDataAccessor accessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
+      LiveInstance liveInstance =
+          accessor.getProperty(accessor.keyBuilder().liveInstance(instanceName));
+      Assert.assertNotNull(liveInstance);
+      String sessionId = liveInstance.getEphemeralOwner();
+
+      // Remove CURRENTSTATES/{sessionId} so that getChildNames() hits ZkNoNodeException and
+      // returns the immutable Collections.emptyList(). Note that a znode which merely exists
+      // with zero children yields a mutable list and would not reproduce this.
+      String currentStatesPath =
+          accessor.keyBuilder().currentStates(instanceName, sessionId).getPath();
+      _baseAccessor.remove(currentStatesPath, 0);
+      // Assert the znode is absent rather than merely childless: getChildNames() returns an
+      // immutable list only for an absent znode, so an existing-but-empty znode would not
+      // reproduce the failure even though it is also empty.
+      Assert.assertFalse(_baseAccessor.exists(currentStatesPath, 0));
+
+      // Give the instance a task current state so that addAll()'s argument is non-empty.
+      String taskResource = "TaskResource_" + TestHelper.getTestMethodName();
+      CurrentState taskCurrentState = new CurrentState(taskResource);
+      taskCurrentState.setSessionId(sessionId);
+      taskCurrentState.setStateModelDefRef("Task");
+      taskCurrentState.setState("0", "COMPLETED");
+      Assert.assertTrue(accessor.setProperty(
+          accessor.keyBuilder().taskCurrentState(instanceName, sessionId, taskResource),
+          taskCurrentState));
+
+      String body = new JerseyUriRequestBuilder("clusters/{}/instances/{}/resources")
+          .isBodyReturnExpected(true).format(CLUSTER_NAME, instanceName).get(this);
+      JsonNode node = OBJECT_MAPPER.readTree(body);
+      ArrayNode resources =
+          (ArrayNode) node.get(PerInstanceAccessor.PerInstanceProperties.resources.name());
+      Assert.assertEquals(resources.size(), 1);
+      Assert.assertEquals(resources.get(0).asText(), taskResource);
+    } finally {
+      dropParticipant(CLUSTER_NAME, instanceName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testGetResourcesOnInstance")
   public void testForceKillInstance() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -1594,6 +2046,125 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     dropParticipant(CLUSTER_NAME, instanceToKill);
     _bestPossibleClusterVerifier.verifyByPolling();
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /*
+   * Guard rail coverage for the "disable" instance command. A plain instance disable drains the
+   * instance's replicas but historically ran no availability check -- unlike EVACUATE, which is
+   * guarded. This stands up a self-contained MasterSlave cluster whose minActiveReplicas equals the
+   * replica count, so every partition sits on all instances at exactly its minimum: disabling any
+   * one instance would push each hosted partition below minActiveReplicas, a deterministic violation
+   * the always-on guard rail must catch before writing HELIX_ENABLED=false. It verifies: (1) the
+   * disable is blocked (400 + verdict, instance stays enabled); (2) dryRun returns a 200 verdict and
+   * writes nothing; (3) force bypasses the guard rail and actually disables; and (4) once
+   * minActiveReplicas is lowered so the drain is safe, a plain disable passes and is written.
+   */
+  @Test(dependsOnMethods = "setInstanceOperationRebalanceFeasibilityGuardrail")
+  public void disableInstanceMinActiveReplicaGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterDisableMinActive";
+    try {
+      verifyDisableInstanceMinActiveReplicaGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyDisableInstanceMinActiveReplicaGuardrail(String cluster) throws Exception {
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+
+    _gSetupTool.addCluster(cluster, true);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13200 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    String resource = "TestDB_MinActive";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave",
+        IdealState.RebalanceMode.FULL_AUTO.toString(), null);
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    // minActiveReplicas == replica: every partition sits on all instances at exactly its minimum,
+    // so dropping any one instance underflows minActiveReplicas on the remaining siblings.
+    idealState.setMinActiveReplicas(replica);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before exercising the guard rail");
+    }
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. Blocked: disabling target would drop every hosted partition below minActiveReplicas.
+    Response blocked = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+    Assert.assertFalse(blockedVerdict.get("feasible").asBoolean(),
+        "a disable that underflows minActiveReplicas must be infeasible");
+    Assert.assertTrue(
+        blockedVerdict.toString().contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "verdict should carry the rule id, but was: " + blockedVerdict);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "a blocked disable must not write HELIX_ENABLED=false");
+
+    // 2. dryRun: always 200 with the verdict, still writes nothing.
+    Response dryRun = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+    Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean(),
+        "dryRun verdict should report the disable as infeasible");
+    Assert.assertTrue(
+        dryRunVerdict.toString().contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "dryRun verdict should carry the rule id, but was: " + dryRunVerdict);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the guard rail and actually disables the instance.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test&force=true")
+        .format(cluster, target).post(this, entity);
+    Assert.assertFalse(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "force=true should bypass the guard rail and write HELIX_ENABLED=false");
+
+    // Restore the instance and lower minActiveReplicas so a drain is safe, then reconverge.
+    _gSetupTool.getClusterManagementTool().enableInstance(cluster, target, true);
+    idealState = _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(1);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should reconverge after lowering minActiveReplicas");
+    }
+
+    // 4. Feasible: with minActiveReplicas=1, disabling still leaves enough active replicas -> allowed.
+    String feasibleTarget = instances.get(1);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=disable&instanceDisabledReason=guardrail-test")
+        .format(cluster, feasibleTarget).post(this, entity);
+    Assert.assertFalse(
+        _configAccessor.getInstanceConfig(cluster, feasibleTarget).getInstanceEnabled(),
+        "a disable that respects minActiveReplicas should pass and be written");
   }
 
   private Map<String, ExternalView> getEVs() {

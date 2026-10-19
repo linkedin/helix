@@ -297,6 +297,16 @@ public class ZkTestBase {
     configAccessor.setClusterConfig(clusterName, clusterConfig);
   }
 
+  protected void enableTopologyAwareRebalance(HelixZkClient zkClient, String clusterName,
+      Boolean enabled, String topology, String faultZoneType) {
+    ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setTopologyAwareEnabled(enabled);
+    clusterConfig.setTopology(topology);
+    clusterConfig.setFaultZoneType(faultZoneType);
+    configAccessor.setClusterConfig(clusterName, clusterConfig);
+  }
+
   protected void enableDelayRebalanceInCluster(HelixZkClient zkClient, String clusterName,
       boolean enabled) {
     ConfigAccessor configAccessor = new ConfigAccessor(zkClient);
@@ -412,28 +422,6 @@ public class ZkTestBase {
     idealState = _gSetupTool.getClusterManagementTool().getResourceIdealState(clusterName, db);
 
     return idealState;
-  }
-
-  protected IdealState createIdealState(String resourceGroupName, String instanceGroupTag,
-      List<String> instanceNames, int numPartition, int replica, String rebalanceMode,
-      String stateModelDef) {
-    IdealState is = _gSetupTool.createIdealStateForResourceGroup(resourceGroupName,
-        instanceGroupTag, numPartition, replica, rebalanceMode, stateModelDef);
-
-    // setup initial partition->instance mapping.
-    int nodeIdx = 0;
-    int numNode = instanceNames.size();
-    assert (numNode >= replica);
-    for (int i = 0; i < numPartition; i++) {
-      String partitionName = resourceGroupName + "_" + i;
-      for (int j = 0; j < replica; j++) {
-        is.setPartitionState(partitionName, instanceNames.get((nodeIdx + j) % numNode),
-            OnlineOfflineSMD.States.ONLINE.toString());
-      }
-      nodeIdx++;
-    }
-
-    return is;
   }
 
   protected void createDBInSemiAuto(ClusterSetup clusterSetup, String clusterName, String dbName,

@@ -1,11 +1,15 @@
 package org.apache.helix.integration.paticipant;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
+import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixManagerProperty;
+import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.api.cloud.CloudInstanceInformation;
@@ -15,13 +19,16 @@ import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.model.CloudConfig;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ConfigScope;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.builder.ConfigScopeBuilder;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
+import org.apache.helix.util.ConfigStringUtil;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /*
@@ -46,6 +53,77 @@ import org.testng.annotations.Test;
 public class TestInstanceAutoJoin extends ZkStandAloneCMTestBase {
   String db2 = TEST_DB + "2";
   String db3 = TEST_DB + "3";
+
+  @DataProvider
+  public Object[][] cloudAutoRegistrationModes() {
+    return new Object[][] {{false}, {true}};
+  }
+
+  @Test(dataProvider = "cloudAutoRegistrationModes")
+  public void testAutoRegistrationWithLegacyCloudEventMetadata(boolean cloudEnabled)
+      throws Exception {
+    String cluster = CLUSTER_NAME + "_LegacyCloudEvent_" + cloudEnabled;
+    String instance = "localhost_279703";
+    _gSetupTool.addCluster(cluster, true);
+    ZKHelixManager participant = null;
+    try {
+      ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+      ClusterConfig clusterConfig = configAccessor.getClusterConfig(cluster);
+      clusterConfig.getRecord().setBooleanField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, true);
+      Map<String, String> disabledInfo = new HashMap<>();
+      disabledInfo.put("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+      disabledInfo.put("HELIX_DISABLED_REASON", "legacy cloud event");
+      disabledInfo.put("HELIX_ENABLED_DISABLE_TIMESTAMP", "1");
+      Map<String, String> legacyEvents =
+          Collections.singletonMap(instance, ConfigStringUtil.concatenateMapping(disabledInfo));
+      clusterConfig.getRecord().setMapField("DISABLED_INSTANCES_WITH_INFO", legacyEvents);
+      configAccessor.setClusterConfig(cluster, clusterConfig);
+
+      CloudConfig cloudConfig =
+          new CloudConfig.Builder().setCloudEnabled(cloudEnabled)
+              .setCloudProvider(CloudProvider.CUSTOMIZED)
+              .setCloudInfoProcessorPackageName("org.apache.helix.integration.paticipant")
+              .setCloudInfoProcessorName("CustomCloudInstanceInformationProcessor")
+              .setCloudInfoSources(Collections.singletonList("https://cloud.com")).build();
+      _gSetupTool.getClusterManagementTool().addCloudConfig(cluster, cloudConfig);
+
+      participant = new ZKHelixManager(cluster, instance, InstanceType.PARTICIPANT, ZK_ADDR);
+      PropertyKey.Builder keyBuilder = new PropertyKey.Builder(cluster);
+      for (int cycle = 0; cycle < 2; cycle++) {
+        participant.connect();
+        Assert.assertTrue(participant.isConnected());
+        Assert.assertNotNull(
+            participant.getHelixDataAccessor().getProperty(keyBuilder.liveInstance(instance)));
+        InstanceConfig instanceConfig = configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertEquals(instanceConfig.getInstanceEnabled(), cycle == 0,
+            "Reconnecting must preserve a manual disable");
+        if (cloudEnabled) {
+          Assert.assertEquals(instanceConfig.getDomainAsString(),
+              CustomCloudInstanceInformation._cloudInstanceInfo
+                  .get(CloudInstanceInformation.CloudInstanceField.FAULT_DOMAIN.name()));
+          Assert.assertEquals(instanceConfig.getInstanceInfoMap(),
+              CustomCloudInstanceInformation._cloudInstanceInfo);
+        } else {
+          Assert.assertNull(instanceConfig.getDomainAsString());
+          Assert.assertTrue(instanceConfig.getInstanceInfoMap().isEmpty());
+        }
+        Assert.assertFalse(_gSetupTool.getClusterManagementTool().isInMaintenanceMode(cluster));
+        Assert.assertEquals(configAccessor.getClusterConfig(cluster).getRecord()
+            .getMapField("DISABLED_INSTANCES_WITH_INFO"), legacyEvents);
+        if (cycle == 0) {
+          _gSetupTool.getClusterManagementTool().enableInstance(cluster, instance, false);
+        }
+        participant.disconnect();
+        Assert.assertTrue(TestHelper.verify(
+            () -> !_gZkClient.exists(keyBuilder.liveInstance(instance).getPath()), 2000));
+      }
+    } finally {
+      if (participant != null) {
+        participant.disconnect();
+      }
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
 
   @Test
   public void testInstanceAutoJoin() throws Exception {

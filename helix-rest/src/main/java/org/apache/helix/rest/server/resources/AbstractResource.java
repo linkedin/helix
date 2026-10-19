@@ -73,6 +73,8 @@ public class AbstractResource {
     delete,
     stoppable,
     instanceOperationMaintenance,
+    getInstancesUnableToAcceptOnlineReplicas,
+    getInstancesUnderInstanceOperationMaintenance,
     rebalance,
     reset,
     resetPartitions,

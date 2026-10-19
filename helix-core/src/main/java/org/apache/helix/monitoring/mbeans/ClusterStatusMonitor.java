@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import javax.management.JMException;
 import javax.management.MBeanServer;
@@ -94,6 +95,30 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private AtomicLong _rebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousResourceRebalanceFailureCount = new AtomicLong(0L);
   private AtomicLong _continuousTaskRebalanceFailureCount = new AtomicLong(0L);
+  // DEFAULT controller cluster-event pipeline backlog. Near 0 on a healthy controller (the queue
+  // dedups by event type); climbs when the controller still holds leadership but stops draining
+  // events, surfacing the "zombie leader" failure mode.
+  private AtomicLong _controllerEventQueueSizeGauge = new AtomicLong(0L);
+  // Wall-clock time (ms) of the last completed DEFAULT controller pipeline run, reported by
+  // GenericHelixController. Paired with the queue-size gauge to derive
+  // ControllerPipelineStalledGauge. 0 until the first pipeline completes (treated as "no data").
+  private AtomicLong _lastPipelineEndTimestamp = new AtomicLong(0L);
+  // Stall threshold (ms): a non-empty event queue whose pipeline has not completed within this many
+  // ms is treated as a wedged ("zombie leader") controller. Sourced from ClusterConfig
+  // (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) and pushed by GenericHelixController each pipeline run;
+  // uses the default until first reported. Deliberately larger than the worst-case single pipeline
+  // run so a long-but-healthy rebalance (which can legitimately take minutes) is not mis-flagged;
+  // detection of a truly stuck-but-alive thread is therefore bounded by this threshold, while a dead
+  // pipeline thread is caught immediately via the liveness check below.
+  private static final long DEFAULT_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
+  private AtomicLong _pipelineStallThresholdMs =
+      new AtomicLong(DEFAULT_PIPELINE_STALL_THRESHOLD_MS);
+  // Liveness check for the DEFAULT controller-event pipeline thread, wired by GenericHelixController
+  // as () -> _eventThread == null || _eventThread.isAlive(). Read lazily at gauge-read time so a
+  // dead processing thread is detected even though the thread itself can no longer report anything.
+  // Null when not wired (e.g. unit tests or a controller without the DEFAULT pipeline), in which
+  // case the gauge falls back to the stall-threshold signal alone.
+  private volatile BooleanSupplier _pipelineLivenessSupplier = null;
 
   // WAGED per-FailureCategory counters. Populated in the constructor with a zero AtomicLong per
   // enum value so reads on never-incremented categories return 0 instead of NPE.
@@ -126,6 +151,21 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // run from the current assignment; stays 0.0 when no WAGED capacity is configured.
   private volatile double _estimatedMaxClusterCapacityUsage = 0.0d;
 
+  // Cluster-level distribution (max / mean / min / max-to-mean ratio) of per-instance WAGED weighted
+  // capacity utilization, computed from the OBSERVED current-state assignment -- the live
+  // capacity-weighted load that WAGED's capacity-usage soft constraints balance (which converges to,
+  // but is not, WAGED's computed ideal/best-possible target). "Partition" counts all replicas;
+  // "topState" counts replicas currently in the top state only. Refreshed every pipeline run.
+  // Ratios are >= 1.0 when defined, or 0.0 (undefined) when there is no instance or usage (mean 0).
+  private volatile double _weightedPartitionUsageMax = 0.0d;
+  private volatile double _weightedPartitionUsageMean = 0.0d;
+  private volatile double _weightedPartitionUsageMin = 0.0d;
+  private volatile double _weightedPartitionUsageMaxMeanRatio = 0.0d;
+  private volatile double _weightedTopStateUsageMax = 0.0d;
+  private volatile double _weightedTopStateUsageMean = 0.0d;
+  private volatile double _weightedTopStateUsageMin = 0.0d;
+  private volatile double _weightedTopStateUsageMaxMeanRatio = 0.0d;
+
   // WAGED per-HardConstraint failure counters. Pre-populated for every HardConstraint.Type so
   // reads return 0 instead of NPE for constraints that have not yet fired.
   private final Map<HardConstraint.Type, AtomicLong> _wagedHardConstraintFailureCounters =
@@ -142,6 +182,9 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private final Map<InstanceConstants.InstanceOperation, AtomicLong> _perOperationInstanceCount =
       new ConcurrentHashMap<>();
 
+  // Cluster-level count of instances under a valid instance-operation maintenance marker
+  private final AtomicLong _instancesUnderInstanceOperationMaintenance = new AtomicLong(0L);
+
   private final ConcurrentHashMap<String, ResourceMonitor> _resourceMonitorMap =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, InstanceMonitor> _instanceMonitorMap =
@@ -154,6 +197,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // ClusterEventType -> topologyChangeEventMonitor (one entry per topology event type)
   protected final ConcurrentHashMap<ClusterEventType, TopologyChangeEventMonitor>
       _topologyChangeEventMonitorMap = new ConcurrentHashMap<>();
+
+  // capacity key -> CapacityKeyUsageMonitor (one entry per WAGED capacity key of the cluster)
+  private final ConcurrentHashMap<String, CapacityKeyUsageMonitor> _capacityKeyUsageMonitorMap =
+      new ConcurrentHashMap<>();
+  // Reported for a capacity key that has no data for one of the two (partition / top-state) views.
+  private static final WeightedUsageStats EMPTY_USAGE_STATS = new WeightedUsageStats(0, 0, 0, 0);
 
   private CustomizedViewMonitor _customizedViewMonitor;
 
@@ -297,6 +346,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         InstanceConstants.InstanceOperation.UNKNOWN, new AtomicLong(0L)).get();
   }
 
+  @Override
+  public long getInstancesUnderInstanceOperationMaintenanceGauge() {
+    return _instancesUnderInstanceOperationMaintenance.get();
+  }
+
   private void register(Object bean, ObjectName name) {
     try {
       if (_beanServer.isRegistered(name)) {
@@ -333,7 +387,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    * @param disabledPartitions a map of instance name to the set of partitions disabled on it
    * @param tags a map of instance name to the set of tags on it
    * @param instanceMessageMap a map of pending messages from each live instance
-   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation tracking)
+   * @param instanceConfigMap a map of instance name to InstanceConfig (for operation and
+   *          instance-operation maintenance marker tracking)
    * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
    */
   public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
@@ -341,6 +396,32 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
       Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
       Map<String, Long> errorPartitionCounts) {
+    setClusterInstanceStatus(liveInstanceSet, instanceSet, disabledInstanceSet, disabledPartitions,
+        oldDisabledPartitions, tags, instanceMessageMap, instanceConfigMap, errorPartitionCounts,
+        null, null);
+  }
+
+  /**
+   * Update the gauges for all instances in the cluster, including the CurrentState-derived
+   * actual partition gauges.
+   * <p>
+   * The actual partition counts are applied in the same {@code _instanceMonitorMap} critical
+   * section that registers and unregisters the instance beans. Updating them separately would leave
+   * a window in which a bean is registered but its actual partition gauges have not been populated
+   * yet, so a live instance could briefly publish 0 for partitions it really holds.
+   * @param errorPartitionCounts a map of instance name to the count of partitions in ERROR state
+   * @param actualPartitionCounts instance name to the number of partitions the instance actually
+   *          holds according to CurrentState, or null to leave the actual partition gauges
+   *          untouched
+   * @param actualTopStatePartitionCounts instance name to number of top-state partitions, or
+   *          null to leave the actual top-state partition gauges untouched
+   */
+  public void setClusterInstanceStatus(Set<String> liveInstanceSet, Set<String> instanceSet,
+      Set<String> disabledInstanceSet, Map<String, Map<String, List<String>>> disabledPartitions,
+      Map<String, List<String>> oldDisabledPartitions, Map<String, Set<String>> tags,
+      Map<String, Set<Message>> instanceMessageMap, Map<String, InstanceConfig> instanceConfigMap,
+      Map<String, Long> errorPartitionCounts, Map<String, Long> actualPartitionCounts,
+      Map<String, Long> actualTopStatePartitionCounts) {
     synchronized (_instanceMonitorMap) {
       // Unregister beans for instances that are no longer configured
       Set<String> toUnregister = Sets.newHashSet(_instanceMonitorMap.keySet());
@@ -447,6 +528,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
         count.set(0L);
       }
 
+      // Counted into a local and published once, so a concurrent read never sees a partial count.
+      long instancesUnderMaintenance = 0L;
       if (instanceConfigMap != null) {
         for (Map.Entry<String, InstanceConfig> entry : instanceConfigMap.entrySet()) {
           InstanceConfig config = entry.getValue();
@@ -463,6 +546,29 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
           } else {
             // If operation is not in the map (shouldn't happen), default to ENABLE
             _perOperationInstanceCount.get(InstanceConstants.InstanceOperation.ENABLE).incrementAndGet();
+          }
+
+          if (config != null && config.isUnderInstanceOperationMaintenance(now)) {
+            instancesUnderMaintenance++;
+          }
+        }
+      }
+      _instancesUnderInstanceOperationMaintenance.set(instancesUnderMaintenance);
+
+      // Apply the CurrentState-derived actual partition gauges while still holding the lock,
+      // so that bean registration and gauge population are observed together. Registered instances
+      // absent from the supplied maps (for example, instances that are no longer live) are reset
+      // to 0 rather than left holding a stale value.
+      if (actualPartitionCounts != null || actualTopStatePartitionCounts != null) {
+        for (Map.Entry<String, InstanceMonitor> entry : _instanceMonitorMap.entrySet()) {
+          String instanceName = entry.getKey();
+          InstanceMonitor bean = entry.getValue();
+          if (actualPartitionCounts != null) {
+            bean.updateActualPartitionCount(actualPartitionCounts.getOrDefault(instanceName, 0L));
+          }
+          if (actualTopStatePartitionCounts != null) {
+            bean.updateActualTopStatePartitionCount(
+                actualTopStatePartitionCounts.getOrDefault(instanceName, 0L));
           }
         }
       }
@@ -611,6 +717,122 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
    */
   public void updateClusterCapacityUsage(double estimatedMaxClusterCapacityUsage) {
     _estimatedMaxClusterCapacityUsage = estimatedMaxClusterCapacityUsage;
+  }
+
+  /**
+   * Immutable holder for the cluster-level distribution summary of per-instance weighted capacity
+   * utilization: the maximum, arithmetic mean, minimum, and max-to-mean ratio across live instances.
+   * The ratio is {@code >= 1.0} when defined, or {@code 0.0} when undefined (no instances, or a
+   * mean of {@code 0}).
+   */
+  public static final class WeightedUsageStats {
+    private final double _max;
+    private final double _mean;
+    private final double _min;
+    private final double _maxMeanRatio;
+
+    public WeightedUsageStats(double max, double mean, double min, double maxMeanRatio) {
+      _max = max;
+      _mean = mean;
+      _min = min;
+      _maxMeanRatio = maxMeanRatio;
+    }
+
+    public double getMax() {
+      return _max;
+    }
+
+    public double getMean() {
+      return _mean;
+    }
+
+    public double getMin() {
+      return _min;
+    }
+
+    public double getMaxMeanRatio() {
+      return _maxMeanRatio;
+    }
+  }
+
+  /**
+   * Updates the cluster-level WAGED weighted capacity-usage distribution gauges for both the
+   * all-replica ("partition") and top-state dimensions. See the {@code getWeightedPartitionUsage*}
+   * and {@code getWeightedTopStateUsage*} methods on {@link ClusterStatusMonitorMBean} for the value
+   * semantics and range.
+   *
+   * @param partitionStats distribution of per-instance general (all-replica) weighted utilization
+   * @param topStateStats  distribution of per-instance top-state-only weighted utilization
+   */
+  public void updateWeightedCapacityUsageStats(WeightedUsageStats partitionStats,
+      WeightedUsageStats topStateStats) {
+    _weightedPartitionUsageMax = partitionStats.getMax();
+    _weightedPartitionUsageMean = partitionStats.getMean();
+    _weightedPartitionUsageMin = partitionStats.getMin();
+    _weightedPartitionUsageMaxMeanRatio = partitionStats.getMaxMeanRatio();
+    _weightedTopStateUsageMax = topStateStats.getMax();
+    _weightedTopStateUsageMean = topStateStats.getMean();
+    _weightedTopStateUsageMin = topStateStats.getMin();
+    _weightedTopStateUsageMaxMeanRatio = topStateStats.getMaxMeanRatio();
+  }
+
+  /**
+   * Updates the per-capacity-key WAGED weighted capacity-usage distribution gauges: one
+   * {@link CapacityKeyUsageMonitor} MBean per capacity key, with the same gauges as
+   * {@link #updateWeightedCapacityUsageStats} computed on that key alone. A monitor is registered
+   * for each new key and unregistered once its key is no longer reported, e.g. after the key is
+   * removed from the cluster's capacity keys.
+   *
+   * @param partitionStatsByKey distribution of per-instance general (all-replica) weighted
+   *                            utilization, per capacity key
+   * @param topStateStatsByKey  distribution of per-instance top-state-only weighted utilization,
+   *                            per capacity key
+   */
+  public void updateCapacityKeyUsageStats(Map<String, WeightedUsageStats> partitionStatsByKey,
+      Map<String, WeightedUsageStats> topStateStatsByKey) {
+    Map<String, WeightedUsageStats> partitionStats =
+        partitionStatsByKey == null ? Collections.emptyMap() : partitionStatsByKey;
+    Map<String, WeightedUsageStats> topStateStats =
+        topStateStatsByKey == null ? Collections.emptyMap() : topStateStatsByKey;
+    Set<String> capacityKeys = new HashSet<>(partitionStats.keySet());
+    capacityKeys.addAll(topStateStats.keySet());
+    synchronized (_capacityKeyUsageMonitorMap) {
+      Iterator<Map.Entry<String, CapacityKeyUsageMonitor>> iterator =
+          _capacityKeyUsageMonitorMap.entrySet().iterator();
+      while (iterator.hasNext()) {
+        Map.Entry<String, CapacityKeyUsageMonitor> entry = iterator.next();
+        if (!capacityKeys.contains(entry.getKey())) {
+          entry.getValue().unregister();
+          iterator.remove();
+        }
+      }
+      for (String capacityKey : capacityKeys) {
+        CapacityKeyUsageMonitor monitor = _capacityKeyUsageMonitorMap.get(capacityKey);
+        if (monitor == null) {
+          try {
+            monitor = new CapacityKeyUsageMonitor(this, capacityKey).register();
+          } catch (JMException | RuntimeException e) {
+            // Retried on every update, so one line rather than a stack trace; a key that cannot be
+            // registered must not stop the other keys from being updated.
+            LOG.error("Failed to register CapacityKeyUsageMonitor for cluster {} capacityKey {}: "
+                + "{}", _clusterName, capacityKey, e.toString());
+            continue;
+          }
+          _capacityKeyUsageMonitorMap.put(capacityKey, monitor);
+        }
+        monitor.update(partitionStats.getOrDefault(capacityKey, EMPTY_USAGE_STATS),
+            topStateStats.getOrDefault(capacityKey, EMPTY_USAGE_STATS));
+      }
+    }
+  }
+
+  private void unregisterAllCapacityKeyUsageMonitors() {
+    synchronized (_capacityKeyUsageMonitorMap) {
+      for (CapacityKeyUsageMonitor monitor : _capacityKeyUsageMonitorMap.values()) {
+        monitor.unregister();
+      }
+      _capacityKeyUsageMonitorMap.clear();
+    }
   }
 
   /**
@@ -859,6 +1081,43 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     }
   }
 
+  /**
+   * Records capacity rejections observed during one mapping-calculation pass.
+   * <p>
+   * The attribution is split across the two MBeans that already exist rather than emitting one
+   * attribute per (resource, instance) pair: {@code ResourceMonitor} answers "this resource is
+   * being refused" and {@code InstanceMonitor} answers "this instance is refusing placements".
+   * That keeps both halves of the attribution at R + I attributes instead of R x I, and avoids
+   * adding unbounded, never-decaying instance-named attributes to every resource MBean.
+   *
+   * @param rejectionsByResource Resource name to (instance name to rejection count for this pass)
+   */
+  public void recordMappingCapacityRejections(
+      Map<String, Map<String, Long>> rejectionsByResource) {
+    Map<String, Long> perInstanceTotals = new HashMap<>();
+    for (Map.Entry<String, Map<String, Long>> resourceEntry : rejectionsByResource.entrySet()) {
+      long resourceTotal = 0L;
+      for (Map.Entry<String, Long> instanceEntry : resourceEntry.getValue().entrySet()) {
+        long count = instanceEntry.getValue();
+        resourceTotal += count;
+        perInstanceTotals.merge(instanceEntry.getKey(), count, Long::sum);
+      }
+      ResourceMonitor resourceMonitor = getOrCreateResourceMonitor(resourceEntry.getKey());
+      if (resourceMonitor != null) {
+        resourceMonitor.incrementMappingCapacityRejectionCounter(resourceTotal);
+      }
+    }
+
+    for (Map.Entry<String, Long> entry : perInstanceTotals.entrySet()) {
+      // Instance monitors are registered from the live instance list, so an instance that just
+      // left the cluster may have no monitor. Skipping it is correct: nothing is left to report.
+      InstanceMonitor instanceMonitor = _instanceMonitorMap.get(entry.getKey());
+      if (instanceMonitor != null) {
+        instanceMonitor.incrementMappingCapacityRejectionCounter(entry.getValue());
+      }
+    }
+  }
+
   private ResourceMonitor getOrCreateResourceMonitor(String resourceName) {
     try {
       if (!_resourceMonitorMap.containsKey(resourceName)) {
@@ -906,6 +1165,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       unregister(getObjectName(clusterBeanName()));
       unregisterAllEventMonitors();
       unregisterAllTopologyChangeEventMonitors();
+      unregisterAllCapacityKeyUsageMonitors();
       unregisterAllWorkflowsMonitor();
       unregisterAllJobs();
 
@@ -914,6 +1174,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _disabledInstances.clear();
       _disabledPartitions.clear();
       _oldDisabledPartitions.clear();
+      _instancesUnderInstanceOperationMaintenance.set(0L);
       _rebalanceFailure = false;
       _maxInstanceMsgQueueSize.set(0L);
       _totalPastDueMsgSize.set(0L);
@@ -935,6 +1196,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
       _wagedRebalanceOverwriteFailing = false;
+      // Zero the DEFAULT controller-event pipeline backlog gauge on leadership change, for the
+      // same reason as the counters above: the ClusterStatusMonitor instance is reused across
+      // leadership periods, so a stale depth from a prior leader must not be re-reported by the
+      // re-registered bean after re-election (it would otherwise persist until the next
+      // enqueue/dequeue refreshes it).
+      _controllerEventQueueSizeGauge.set(0L);
+      // Reset the pipeline-progress timestamp for the same reason: a stale value from a prior
+      // leadership period must not make the re-registered bean report a spurious stall.
+      _lastPipelineEndTimestamp.set(0L);
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1484,6 +1754,46 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     _continuousTaskRebalanceFailureCount.set(newValue);
   }
 
+  /**
+   * Surface the DEFAULT controller cluster-event pipeline backlog as a JMX gauge. A healthy
+   * controller drains events quickly so this stays near 0 (the queue dedups by event type); a
+   * wedged controller that still holds leadership but stops processing lets it climb, making the
+   * "zombie leader" failure mode detectable.
+   */
+  public void setControllerEventQueueSizeGauge(long size) {
+    _controllerEventQueueSizeGauge.set(size);
+  }
+
+  /**
+   * Report the wall-clock time (ms) of the most recent completed DEFAULT controller pipeline run.
+   * Consumed by {@link #getControllerPipelineStalledGauge()} to tell a wedged controller (queue
+   * not draining) apart from a healthy idle or busy-but-progressing one.
+   */
+  public void setLastPipelineEndTimestamp(long timestampMs) {
+    _lastPipelineEndTimestamp.set(timestampMs);
+  }
+
+  /**
+   * Set the wedged-controller stall threshold (ms), sourced from ClusterConfig
+   * (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) by GenericHelixController. Non-positive values are
+   * ignored so a misconfiguration cannot silently disable {@link #getControllerPipelineStalledGauge()}.
+   */
+  public void setPipelineStallThresholdMs(long thresholdMs) {
+    if (thresholdMs > 0) {
+      _pipelineStallThresholdMs.set(thresholdMs);
+    }
+  }
+
+  /**
+   * Wire the DEFAULT controller-event pipeline liveness check used by
+   * {@link #getControllerPipelineStalledGauge()}. Supplied by GenericHelixController as
+   * {@code () -> _eventThread == null || _eventThread.isAlive()} so a dead processing thread on a
+   * still-leader controller is reported as wedged immediately, independent of the stall threshold.
+   */
+  public void setPipelineLivenessSupplier(BooleanSupplier livenessSupplier) {
+    _pipelineLivenessSupplier = livenessSupplier;
+  }
+
   @Override
   public long getRebalanceFailureCounter() {
     return _rebalanceFailureCount.get();
@@ -1497,6 +1807,38 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getContinuousTaskRebalanceFailureCount() {
     return _continuousTaskRebalanceFailureCount.get();
+  }
+
+  @Override
+  public long getControllerEventQueueSizeGauge() {
+    return _controllerEventQueueSizeGauge.get();
+  }
+
+  @Override
+  public long getControllerPipelineStalledGauge() {
+    // Healthy when there is no pending work: an empty queue means the pipeline is keeping up (or is
+    // legitimately idle), so nothing to flag.
+    if (_controllerEventQueueSizeGauge.get() <= 0) {
+      return 0L;
+    }
+    // Definitive zombie: the controller still holds queued events (and, since this MBean is only
+    // registered while it is the leader, still holds leadership) but the DEFAULT pipeline thread is
+    // dead. This is caught immediately, with no dependence on the stall threshold, and does not
+    // false-positive on a busy controller (whose thread is always alive).
+    BooleanSupplier liveness = _pipelineLivenessSupplier;
+    if (liveness != null && !liveness.getAsBoolean()) {
+      return 1L;
+    }
+    // Best-effort fallback for a thread that is alive but not making progress (e.g. hung or looping
+    // inside a run, or not picking the next event off the queue): no pipeline run has completed
+    // within the stall threshold. The threshold is set above the worst-case healthy run so a long
+    // legitimate rebalance is not mis-flagged; a truly stuck-but-alive thread is caught once the
+    // threshold elapses. Computed lazily on read so it stays correct even without any setter firing.
+    long lastEnd = _lastPipelineEndTimestamp.get();
+    if (lastEnd > 0 && (System.currentTimeMillis() - lastEnd) > _pipelineStallThresholdMs.get()) {
+      return 1L;
+    }
+    return 0L;
   }
 
   @Override
@@ -1657,6 +1999,46 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public double getEstimatedMaxClusterCapacityUsageGauge() {
     return _estimatedMaxClusterCapacityUsage;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMaxGauge() {
+    return _weightedPartitionUsageMax;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMeanGauge() {
+    return _weightedPartitionUsageMean;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMinGauge() {
+    return _weightedPartitionUsageMin;
+  }
+
+  @Override
+  public double getWeightedPartitionUsageMaxMeanRatioGauge() {
+    return _weightedPartitionUsageMaxMeanRatio;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMaxGauge() {
+    return _weightedTopStateUsageMax;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMeanGauge() {
+    return _weightedTopStateUsageMean;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMinGauge() {
+    return _weightedTopStateUsageMin;
+  }
+
+  @Override
+  public double getWeightedTopStateUsageMaxMeanRatioGauge() {
+    return _weightedTopStateUsageMaxMeanRatio;
   }
 
   @Override

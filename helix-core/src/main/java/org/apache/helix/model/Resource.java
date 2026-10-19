@@ -37,7 +37,6 @@ public class Resource {
   private String _stateModelFactoryName;
   private int _bucketSize = 0;
   private boolean _batchMessageMode = false;
-  private String _resourceGroupName;
   private String _resourceTag;
 
   /**
@@ -176,22 +175,6 @@ public class Resource {
    */
   public void setResourceTag(String resourceTag) {
     _resourceTag = resourceTag;
-  }
-
-  /**
-   * Get resource group name
-   * @return the resource group name
-   */
-  public String getResourceGroupName() {
-    return _resourceGroupName;
-  }
-
-  /**
-   * Set resource group name
-   * @param resourceGroupName
-   */
-  public void setResourceGroupName(String resourceGroupName) {
-    _resourceGroupName = resourceGroupName;
   }
 
   /**

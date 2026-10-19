@@ -148,9 +148,6 @@ public class MessageUtil {
     // TODO: make the retry count configurable in ClusterConfig or IdealState
     message.setRetryCount(DEFAULT_STATE_TRANSITION_MESSAGE_RETRY_COUNT);
 
-    if (resource.getResourceGroupName() != null) {
-      message.setResourceGroupName(resource.getResourceGroupName());
-    }
     if (resource.getResourceTag() != null) {
       message.setResourceTag(resource.getResourceTag());
     }

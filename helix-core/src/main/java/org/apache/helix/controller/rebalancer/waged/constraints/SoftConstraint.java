@@ -76,7 +76,17 @@ abstract class SoftConstraint {
    */
   double getAssignmentNormalizedScore(AssignableNode node, AssignableReplica replica,
       ClusterContext clusterContext) {
-    return getNormalizeFunction().scale(getAssignmentScore(node, replica, clusterContext));
+    return getNormalizeFunction(clusterContext)
+        .scale(getAssignmentScore(node, replica, clusterContext));
+  }
+
+  /**
+   * The function that normalizes the assignment score for the given cluster context. A child class
+   * overrides it when the normalization can be configured per cluster.
+   * @return {@link #getNormalizeFunction()} by default, which does not depend on the cluster
+   */
+  protected NormalizeFunction getNormalizeFunction(ClusterContext clusterContext) {
+    return getNormalizeFunction();
   }
 
   /**

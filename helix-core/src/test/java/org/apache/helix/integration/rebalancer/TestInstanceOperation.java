@@ -102,7 +102,7 @@ public class TestInstanceOperation extends ZkTestBase {
   private ZkHelixClusterVerifier _clusterVerifier;
   private BestPossibleExternalViewVerifier _bestPossibleClusterVerifier;
   private ConfigAccessor _configAccessor;
-  private long _stateModelDelay = 3L;
+  private volatile long _stateModelDelay = 3L;
 
   private final long DEFAULT_RESOURCE_DELAY_TIME = 1800000L;
   private HelixAdmin _admin;
@@ -172,6 +172,8 @@ public class TestInstanceOperation extends ZkTestBase {
     _routingTableProviderEV.shutdown();
     _routingTableProviderCS.shutdown();
     _spectator.disconnect();
+    _clusterVerifier.close();
+    _bestPossibleClusterVerifier.close();
   }
 
   @BeforeMethod
@@ -1729,6 +1731,8 @@ public class TestInstanceOperation extends ZkTestBase {
     MockParticipantManager toDisableThenEvacuateParticipant = _participants.get(_participants.size() - 1);
 
     List<String> testResources = Arrays.asList(testCrushedDBName, testWagedDBName);
+    // Include these resources in convergence checks before sampling transition counters.
+    _allDBs.addAll(testResources);
     createResourceWithDelayedRebalance(CLUSTER_NAME, testCrushedDBName, "MasterSlave",
         PARTITIONS, REPLICA, REPLICA-1, 200000, CrushEdRebalanceStrategy.class.getName());
     createResourceWithWagedRebalance(CLUSTER_NAME, testWagedDBName, "MasterSlave", PARTITIONS,
@@ -1800,9 +1804,7 @@ public class TestInstanceOperation extends ZkTestBase {
 
 
     // Clean up test resources
-    for (String resource : testResources) {
-      _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, resource);
-    }
+    dropTestDBs(new HashSet<>(testResources));
     // Clean up test participant
     toDisableThenEvacuateParticipant.syncStop();
   }
@@ -2166,8 +2168,9 @@ public class TestInstanceOperation extends ZkTestBase {
 
     private void sleepWhileNotCanceled(long sleepTime) throws InterruptedException{
       while(sleepTime >0 && !isCancelled()) {
-        Thread.sleep(TIMEOUT);
-        sleepTime = sleepTime - TIMEOUT;
+        long sleepInterval = Math.min(sleepTime, TIMEOUT);
+        Thread.sleep(sleepInterval);
+        sleepTime -= sleepInterval;
       }
       if (isCancelled()) {
         _cancelled = false;

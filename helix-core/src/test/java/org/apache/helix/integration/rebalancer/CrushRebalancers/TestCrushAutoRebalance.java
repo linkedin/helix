@@ -81,7 +81,11 @@ public class TestCrushAutoRebalance extends ZkTestBase {
       _gSetupTool.addInstanceToCluster(CLUSTER_NAME, storageNodeName);
       String zone = "zone-" + i % 3;
       String tag = "tag-" + i % 2;
-      _gSetupTool.getClusterManagementTool().setInstanceZoneId(CLUSTER_NAME, storageNodeName, zone);
+      InstanceConfig instanceConfig =
+          _gSetupTool.getClusterManagementTool().getInstanceConfig(CLUSTER_NAME, storageNodeName);
+      instanceConfig.setDomain("zone=" + zone + ",instance=" + storageNodeName);
+      _gSetupTool.getClusterManagementTool().setInstanceConfig(CLUSTER_NAME, storageNodeName,
+          instanceConfig);
       _gSetupTool.getClusterManagementTool().addInstanceTag(CLUSTER_NAME, storageNodeName, tag);
       _nodeToZoneMap.put(storageNodeName, zone);
       _nodeToTagMap.put(storageNodeName, tag);
@@ -101,7 +105,7 @@ public class TestCrushAutoRebalance extends ZkTestBase {
     _controller.syncStart();
 
     enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
-    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true);
+    enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true, "/zone/instance", "zone");
   }
 
   @DataProvider(name = "rebalanceStrategies")

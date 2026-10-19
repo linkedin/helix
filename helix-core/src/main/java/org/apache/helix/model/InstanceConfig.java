@@ -52,6 +52,7 @@ import org.slf4j.LoggerFactory;
  */
 public class InstanceConfig extends HelixProperty {
   private static final Logger logger = LoggerFactory.getLogger(InstanceConfig.class.getName());
+  private static final String RETIRED_DISABLED_TYPE = "HELIX_DISABLED_TYPE";
 
   /**
    * Configurable characteristics of an instance
@@ -59,11 +60,9 @@ public class InstanceConfig extends HelixProperty {
   public enum InstanceConfigProperty {
     HELIX_HOST,
     HELIX_PORT,
-    HELIX_ZONE_ID,
     @Deprecated HELIX_ENABLED,
     HELIX_ENABLED_TIMESTAMP,
     @Deprecated HELIX_DISABLED_REASON,
-    @Deprecated HELIX_DISABLED_TYPE,
     HELIX_DISABLED_PARTITION,
     TAG_LIST,
     INSTANCE_WEIGHT,
@@ -94,8 +93,7 @@ public class InstanceConfig extends HelixProperty {
       OPERATION,
       REASON,
       SOURCE,
-      TIMESTAMP,
-      LEGACY_DISABLED_TYPE
+      TIMESTAMP
     }
 
     private InstanceOperation(@Nullable Map<String, String> properties) {
@@ -148,23 +146,6 @@ public class InstanceConfig extends HelixProperty {
         return this;
       }
 
-      /**
-       * Set the HELIX_DISABLED_TYPE which is a legacy field that must be stored, so we can write it
-       * back when we write back to the legacy fields.
-       *
-       * @param disabledType InstanceDisabledType
-       * @return Builder
-       */
-      private Builder setLegacyDisabledType(InstanceConstants.InstanceDisabledType disabledType) {
-        if (disabledType == null) {
-          logger.error("LEGACY_DISABLED_TYPE cannot be set to null. Skipped setting the field.");
-          return this;
-        }
-        _properties.put(InstanceOperationProperties.LEGACY_DISABLED_TYPE.name(),
-            disabledType.name());
-        return this;
-      }
-
       public InstanceOperation build() throws IllegalArgumentException {
         if (!_properties.containsKey(InstanceOperationProperties.OPERATION.name())) {
           throw new IllegalArgumentException(
@@ -210,12 +191,6 @@ public class InstanceConfig extends HelixProperty {
               InstanceConstants.InstanceOperationSource.USER.name()));
     }
 
-    private InstanceConstants.InstanceDisabledType getLegacyDisabledType() {
-      return InstanceConstants.InstanceDisabledType.valueOf(
-          _properties.getOrDefault(InstanceOperationProperties.LEGACY_DISABLED_TYPE.name(),
-              InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name()));
-    }
-
     /**
      * Get the timestamp (milliseconds from epoch) when this instance operation was triggered.
      *
@@ -247,7 +222,7 @@ public class InstanceConfig extends HelixProperty {
   // instance and must not transfer onto a swap-in target via overwriteInstanceConfig.
   private static final ImmutableSet<InstanceConfigProperty> NON_OVERWRITABLE_PROPERTIES =
       ImmutableSet.of(InstanceConfigProperty.HELIX_HOST, InstanceConfigProperty.HELIX_PORT,
-          InstanceConfigProperty.HELIX_ZONE_ID, InstanceConfigProperty.DOMAIN,
+          InstanceConfigProperty.DOMAIN,
           InstanceConfigProperty.INSTANCE_INFO_MAP,
           InstanceConfigProperty.INSTANCE_OPERATION_MAINTENANCE_UNTIL_MS);
 
@@ -305,20 +280,6 @@ public class InstanceConfig extends HelixProperty {
    */
   public void setPort(String port) {
     _record.setSimpleField(InstanceConfigProperty.HELIX_PORT.name(), port);
-  }
-
-  /**
-   * Set the zone identifier for this instance.
-   * This is deprecated, please use domain to set hierarchy tag for an instance.
-   * @return
-   */
-  @Deprecated
-  public String getZoneId() {
-    return _record.getSimpleField(InstanceConfigProperty.HELIX_ZONE_ID.name());
-  }
-
-  public void setZoneId(String zoneId) {
-    _record.setSimpleField(InstanceConfigProperty.HELIX_ZONE_ID.name(), zoneId);
   }
 
   /**
@@ -517,12 +478,12 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Removes HELIX_DISABLED_REASON and HELIX_DISABLED_TYPE entry from simple field.
+   * Removes the disabled reason and any persisted retired disabled type from simple fields.
    */
   @Deprecated
   public void resetInstanceDisabledTypeAndReason() {
     _record.getSimpleFields().remove(InstanceConfigProperty.HELIX_DISABLED_REASON.name());
-    _record.getSimpleFields().remove(InstanceConfigProperty.HELIX_DISABLED_TYPE.name());
+    _record.getSimpleFields().remove(RETIRED_DISABLED_TYPE);
   }
 
   /**
@@ -538,22 +499,6 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Set the instance disabled type when instance is disabled.
-   * It will be a no-op when instance is enabled.
-   * @deprecated This method is deprecated. Please use setInstanceOperation along with
-   * InstanceOperation.Builder().setSource
-   *(...)
-   */
-  @Deprecated
-  public void setInstanceDisabledType(InstanceConstants.InstanceDisabledType disabledType) {
-    if (getInstanceOperation().getOperation().equals(InstanceConstants.InstanceOperation.DISABLE)
-        && disabledType != InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE) {
-      _record.setSimpleField(InstanceConfigProperty.HELIX_DISABLED_TYPE.name(),
-          disabledType.name());
-    }
-  }
-
-  /**
    * Get the instance disabled reason when instance is disabled.
    * @return Return instance disabled reason. Default is am empty string.
    * @deprecated This method is deprecated. Please use getInstanceOperation().getReason() instead.
@@ -561,23 +506,6 @@ public class InstanceConfig extends HelixProperty {
   @Deprecated
   public String getInstanceDisabledReason() {
     return _record.getStringField(InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "");
-  }
-
-  /**
-   *
-   * @return Return instance disabled type (org.apache.helix.constants.InstanceConstants.InstanceDisabledType)
-   *         Default is am empty string.
-   * @deprecated This method is deprecated. Please use getInstanceOperation().getSource
-   *() instead.
-   */
-  @Deprecated
-  public String getInstanceDisabledType() {
-    if (_record.getBooleanField(InstanceConfigProperty.HELIX_ENABLED.name(),
-        HELIX_ENABLED_DEFAULT_VALUE)) {
-      return InstanceConstants.INSTANCE_NOT_DISABLED;
-    }
-    return _record.getStringField(InstanceConfigProperty.HELIX_DISABLED_TYPE.name(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name());
   }
 
   private List<InstanceOperation> getInstanceOperations() {
@@ -654,7 +582,6 @@ public class InstanceConfig extends HelixProperty {
 
       resetInstanceDisabledTypeAndReason();
       setInstanceDisabledReason(operation.getReason());
-      setInstanceDisabledType(operation.getLegacyDisabledType());
     } else if (operation.getOperation() == InstanceConstants.InstanceOperation.ENABLE) {
       // Ensure HELIX_ENABLED reflects the latest disable operation if applicable.
       InstanceOperation latestDisableInstanceOperation = getInstanceOperations().stream()
@@ -667,7 +594,6 @@ public class InstanceConfig extends HelixProperty {
         // being true takes precedence over an existing latest disable operation existing.
         if (latestDisableInstanceOperation != null) {
           setInstanceDisabledReason(latestDisableInstanceOperation.getReason());
-          setInstanceDisabledType(latestDisableInstanceOperation.getLegacyDisabledType());
         } else {
           setInstanceEnabledHelper(true, operation.getTimestamp());
         }
@@ -676,8 +602,8 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Set the instance operation for this instance. This method also sets the HELIX_ENABLED,
-   * HELIX_DISABLED_REASON, and HELIX_DISABLED_TYPE fields for backwards compatibility.
+   * Set the instance operation for this instance. This method also sets the HELIX_ENABLED
+   * and HELIX_DISABLED_REASON fields for backwards compatibility.
    *
    * @param operation the instance operation
    */
@@ -787,14 +713,6 @@ public class InstanceConfig extends HelixProperty {
       InstanceOperation.Builder instanceOperationBuilder =
           new InstanceOperation.Builder().setOperation(InstanceConstants.InstanceOperation.DISABLE)
               .setReason(getInstanceDisabledReason());
-
-      try {
-        instanceOperationBuilder.setLegacyDisabledType(
-            InstanceConstants.InstanceDisabledType.valueOf(getInstanceDisabledType()));
-      } catch (IllegalArgumentException e) {
-        _logger.error("Invalid instance disabled type for instance: " + _record.getId()
-            + ". Defaulting to DEFAULT_INSTANCE_DISABLE_TYPE.");
-      }
 
       return instanceOperationBuilder.build();
     }
@@ -1064,9 +982,7 @@ public class InstanceConfig extends HelixProperty {
    * @return
    */
   public boolean isDelayRebalanceEnabled() {
-    return _record
-        .getBooleanField(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-            true);
+    return _record.getBooleanField(InstanceConfigProperty.DELAY_REBALANCE_ENABLED.name(), true);
   }
 
   /**
@@ -1075,8 +991,7 @@ public class InstanceConfig extends HelixProperty {
    * @param enabled
    */
   public void setDelayRebalanceEnabled(boolean enabled) {
-    _record.setBooleanField(ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-        enabled);
+    _record.setBooleanField(InstanceConfigProperty.DELAY_REBALANCE_ENABLED.name(), enabled);
   }
 
   /**
@@ -1269,7 +1184,7 @@ public class InstanceConfig extends HelixProperty {
   }
 
   /**
-   * Validate if the topology related settings (Domain or ZoneId) in the given instanceConfig
+   * Validate if the topology related settings (Domain) in the given instanceConfig
    * are valid and align with current clusterConfig.
    * This function should be called when instance added to cluster or caller updates instanceConfig.
    *
@@ -1298,6 +1213,8 @@ public class InstanceConfig extends HelixProperty {
     _record.getSimpleFields().keySet().removeAll(overwritableProperties);
     _record.getListFields().keySet().removeAll(overwritableProperties);
     _record.getMapFields().keySet().removeAll(overwritableProperties);
+    // Retired fields are removed from the target but must not enter the copy allowlist.
+    _record.getSimpleFields().remove(RETIRED_DISABLED_TYPE);
 
     // Get all overwritable fields from the overwritingInstanceConfig and set them in this record
     overwritingInstanceConfig.getRecord().getSimpleFields().entrySet().stream()

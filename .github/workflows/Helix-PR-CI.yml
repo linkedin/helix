@@ -3,7 +3,6 @@ on:
   pull_request:
     branches: [ master, metaclient, dev]
     paths-ignore:
-      - '.github/**'
       - 'helix-front/**'
       - '**/*.md'
 
@@ -35,3 +34,10 @@ jobs:
     - name: Print Tests Results
       run: .github/scripts/printTestResult.sh
       if: ${{ success() || failure() }}
+    - name: Upload Unit Test Results as Artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: surefire-reports
+        path: ./**/target/surefire-reports/
+        if-no-files-found: ignore

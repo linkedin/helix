@@ -207,7 +207,6 @@ public class TestTargetedTaskStateChange {
     ZNRecord record = new ZNRecord(JOB_NAME);
     record.setSimpleField(IdealState.IdealStateProperty.NUM_PARTITIONS.name(), "1");
     record.setSimpleField(IdealState.IdealStateProperty.EXTERNAL_VIEW_DISABLED.name(), "true");
-    record.setSimpleField(IdealState.IdealStateProperty.IDEAL_STATE_MODE.name(), "AUTO");
     record.setSimpleField(IdealState.IdealStateProperty.REBALANCE_MODE.name(), "TASK");
     record.setSimpleField(IdealState.IdealStateProperty.REPLICAS.name(), "1");
     record.setSimpleField(IdealState.IdealStateProperty.STATE_MODEL_DEF_REF.name(), "Task");
@@ -222,7 +221,6 @@ public class TestTargetedTaskStateChange {
     ZNRecord recordDB = new ZNRecord(TARGET_RESOURCES);
     recordDB.setSimpleField(IdealState.IdealStateProperty.REPLICAS.name(), "3");
     recordDB.setSimpleField(IdealState.IdealStateProperty.REBALANCE_MODE.name(), "FULL_AUTO");
-    record.setSimpleField(IdealState.IdealStateProperty.IDEAL_STATE_MODE.name(), "AUTO_REBALANCE");
     record.setSimpleField(IdealState.IdealStateProperty.STATE_MODEL_DEF_REF.name(), "MasterSlave");
     record.setSimpleField(IdealState.IdealStateProperty.STATE_MODEL_DEF_REF.name(),
         "org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy");

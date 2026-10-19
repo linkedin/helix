@@ -50,6 +50,12 @@ public class TestTaskRebalancerRetryLimit extends TaskTestBase {
 
     _driver.start(flow);
 
+    JobConfig persistedConfig = _driver.getJobConfig(TaskUtil.getNamespacedJobName(jobResource));
+    Assert.assertNotNull(persistedConfig);
+    Assert.assertEquals(persistedConfig.getMaxAttemptsPerTask(), 2);
+    Assert.assertFalse(
+        persistedConfig.getRecord().getSimpleFields().containsKey("MaxForcedReassignmentsPerTask"));
+
     // Wait until the job completes.
     _driver.pollForWorkflowState(jobResource, TaskState.COMPLETED);
 

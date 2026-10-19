@@ -39,12 +39,9 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
   /**
    * The following fields are considered as non-topology related.
    * REBALANCE_DELAY,
-   * DELAY_REBALANCE_DISABLED,
-   * REBALANCE_TIMER_PERIOD,
-   * GROUP_ROUTING_ENABLED,
    * EXTERNAL_VIEW_DISABLED,
    * HELIX_ENABLED,
-   * ResourceConfigProperty.DELAY_REBALANCE_ENABLED
+   * DELAY_REBALANCE_ENABLED
    */
   private static final Map<FieldType, Set<String>> STATIC_TOPOLOGY_RELATED_FIELD_MAP = ImmutableMap
       .of(FieldType.SIMPLE_FIELD, ImmutableSet.of(
@@ -53,14 +50,11 @@ public class IdealStateTrimmer extends HelixPropertyTrimmer<IdealState> {
           IdealStateProperty.STATE_MODEL_FACTORY_NAME.name(),
           IdealStateProperty.REPLICAS.name(),
           IdealStateProperty.MIN_ACTIVE_REPLICAS.name(),
-          IdealStateProperty.IDEAL_STATE_MODE.name(),
           IdealStateProperty.REBALANCE_MODE.name(),
           IdealStateProperty.REBALANCER_CLASS_NAME.name(),
           IdealStateProperty.REBALANCE_STRATEGY.name(),
           IdealStateProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-          IdealStateProperty.INSTANCE_GROUP_TAG.name(),
-          IdealStateProperty.RESOURCE_GROUP_NAME.name(),
-          IdealStateProperty.RESOURCE_TYPE.name()));
+          IdealStateProperty.INSTANCE_GROUP_TAG.name()));
 
   private IdealStateTrimmer() {
   }

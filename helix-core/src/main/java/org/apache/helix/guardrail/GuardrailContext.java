@@ -19,26 +19,55 @@
 
 package org.apache.helix.guardrail;
 
+import java.util.List;
+
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.ResourceConfig;
 
 /**
  * Immutable bundle of everything a {@link GuardrailRule} needs to evaluate a proposed mutation.
  * <p>
  * The context is intentionally small: it carries the cluster name, a narrow read-only view of
  * cluster state ({@link ReadOnlyDataAccessor}) for the target cluster, and the target instance name
- * for instance-scoped operations. When rules for other object types (e.g. resources) are added, the
- * corresponding field can be introduced here through the {@link Builder} without breaking existing
- * rules.
+ * for instance-scoped operations. When rules need the actual object a mutation would write (rather
+ * than only current cluster state read through the accessor), that <em>proposed</em> object is
+ * supplied here as well; {@code proposedResourceConfig} and {@code proposedIdealState} are the first
+ * such fields. New object types (e.g. a proposed instance config) are added the same way, through
+ * the {@link Builder}, without breaking existing rules.
  */
 public class GuardrailContext {
   private final String clusterName;
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
+  private final String resourceName;
+  private final ResourceConfig proposedResourceConfig;
+  private final IdealState proposedIdealState;
+  private final InstanceConstants.InstanceOperation proposedInstanceOperation;
+  private final WagedAssignmentProvider wagedAssignmentProvider;
+  private final InstanceConfig proposedInstanceConfig;
+  private final List<String> proposedRemovedInstanceTags;
+  private final ClusterConfig currentClusterConfig;
+  private final ClusterConfig proposedClusterConfig;
+  private final MinActiveReplicaChecker minActiveReplicaChecker;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
+    this.resourceName = builder.resourceName;
+    this.proposedResourceConfig = builder.proposedResourceConfig;
+    this.proposedIdealState = builder.proposedIdealState;
+    this.proposedInstanceOperation = builder.proposedInstanceOperation;
+    this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
+    this.proposedInstanceConfig = builder.proposedInstanceConfig;
+    this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
+    this.currentClusterConfig = builder.currentClusterConfig;
+    this.proposedClusterConfig = builder.proposedClusterConfig;
+    this.minActiveReplicaChecker = builder.minActiveReplicaChecker;
   }
 
   public String getClusterName() {
@@ -54,6 +83,93 @@ public class GuardrailContext {
     return instanceName;
   }
 
+  /** The resource targeted by a resource-scoped mutation, or {@code null} if not applicable. */
+  public String getResourceName() {
+    return resourceName;
+  }
+
+  /**
+   * The resource config a mutation proposes to write, or {@code null} if the operation is not
+   * resource-scoped. Rules read the to-be-written weights/settings from here rather than from ZK,
+   * since the object does not exist in ZK yet at pre-validation time.
+   */
+  public ResourceConfig getProposedResourceConfig() {
+    return proposedResourceConfig;
+  }
+
+  /**
+   * The ideal state a mutation proposes to write, or {@code null} if the operation is not
+   * resource-scoped. Rules read the resource's structure (e.g. its partition count / names) from
+   * here rather than from ZK, since the object does not exist in ZK yet at pre-validation time. Note
+   * that a freshly-proposed ideal state has no computed assignment yet: its partition <em>count</em>
+   * ({@link IdealState#getNumPartitions()}) is set, but its per-partition preference lists are still
+   * empty, so {@link IdealState#getPartitionSet()} may be empty at this point.
+   */
+  public IdealState getProposedIdealState() {
+    return proposedIdealState;
+  }
+
+  /**
+   * The instance operation a mutation proposes to set on {@link #getInstanceName()}, or {@code null}
+   * if the operation is not an instance-operation change. Rules read the to-be-written operation from
+   * here (rather than from ZK) since the change has not been applied yet at pre-validation time.
+   */
+  public InstanceConstants.InstanceOperation getProposedInstanceOperation() {
+    return proposedInstanceOperation;
+  }
+
+  /**
+   * A read-only seam for computing a WAGED what-if assignment, or {@code null} if the endpoint did
+   * not supply one. Rules that need to simulate a rebalance (rather than only read current state)
+   * call through this so that ZooKeeper-connection plumbing stays in the REST layer and the rule
+   * remains a pure, unit-testable function. See {@link WagedAssignmentProvider}.
+   */
+  public WagedAssignmentProvider getWagedAssignmentProvider() {
+    return wagedAssignmentProvider;
+  }
+
+  /**
+   * The instance config delta a mutation proposes to merge into the target instance, or {@code null}
+   * if the operation is not instance-config-scoped. This carries only the fields the caller is
+   * changing (e.g. a reduced capacity map); rules combine it with the existing config read through
+   * the accessor to reason about the post-merge state that would be written.
+   */
+  public InstanceConfig getProposedInstanceConfig() {
+    return proposedInstanceConfig;
+  }
+
+  /**
+   * The instance tags a mutation proposes to remove from {@link #getInstanceName()}, or {@code null}
+   * if the operation is not a tag removal. Rules read the to-be-removed tags from here (rather than
+   * from ZK) since the change has not been applied yet at pre-validation time; a WAGED resource
+   * pinned to a removed tag (via {@code INSTANCE_GROUP_TAG}) can only place replicas on instances
+   * still carrying that tag.
+   */
+  public List<String> getProposedRemovedInstanceTags() {
+    return proposedRemovedInstanceTags;
+  }
+
+  /** The stored snapshot used by a version-checked cluster-config write, or null if absent. */
+  public ClusterConfig getCurrentClusterConfig() {
+    return currentClusterConfig;
+  }
+
+  /** The complete post-update cluster config, not a delta; null for other mutation types. */
+  public ClusterConfig getProposedClusterConfig() {
+    return proposedClusterConfig;
+  }
+
+  /**
+   * A read-only seam for evaluating whether an instance can stop serving its partitions without
+   * pushing any of them below {@code minActiveReplicas}, or {@code null} if the endpoint did not
+   * supply one. Rules call through this so the {@link org.apache.helix.HelixDataAccessor} the
+   * underlying check needs stays in the REST layer and the rule remains a pure, unit-testable
+   * function. See {@link MinActiveReplicaChecker}.
+   */
+  public MinActiveReplicaChecker getMinActiveReplicaChecker() {
+    return minActiveReplicaChecker;
+  }
+
   public static Builder newBuilder(String clusterName) {
     return new Builder(clusterName);
   }
@@ -62,6 +178,16 @@ public class GuardrailContext {
     private final String clusterName;
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
+    private String resourceName;
+    private ResourceConfig proposedResourceConfig;
+    private IdealState proposedIdealState;
+    private InstanceConstants.InstanceOperation proposedInstanceOperation;
+    private WagedAssignmentProvider wagedAssignmentProvider;
+    private InstanceConfig proposedInstanceConfig;
+    private List<String> proposedRemovedInstanceTags;
+    private ClusterConfig currentClusterConfig;
+    private ClusterConfig proposedClusterConfig;
+    private MinActiveReplicaChecker minActiveReplicaChecker;
 
     private Builder(String clusterName) {
       this.clusterName = clusterName;
@@ -74,6 +200,57 @@ public class GuardrailContext {
 
     public Builder instanceName(String instanceName) {
       this.instanceName = instanceName;
+      return this;
+    }
+
+    public Builder resourceName(String resourceName) {
+      this.resourceName = resourceName;
+      return this;
+    }
+
+    public Builder proposedResourceConfig(ResourceConfig proposedResourceConfig) {
+      this.proposedResourceConfig = proposedResourceConfig;
+      return this;
+    }
+
+    public Builder proposedIdealState(IdealState proposedIdealState) {
+      this.proposedIdealState = proposedIdealState;
+      return this;
+    }
+
+    public Builder proposedInstanceOperation(
+        InstanceConstants.InstanceOperation proposedInstanceOperation) {
+      this.proposedInstanceOperation = proposedInstanceOperation;
+      return this;
+    }
+
+    public Builder wagedAssignmentProvider(WagedAssignmentProvider wagedAssignmentProvider) {
+      this.wagedAssignmentProvider = wagedAssignmentProvider;
+      return this;
+    }
+
+    public Builder proposedInstanceConfig(InstanceConfig proposedInstanceConfig) {
+      this.proposedInstanceConfig = proposedInstanceConfig;
+      return this;
+    }
+
+    public Builder proposedRemovedInstanceTags(List<String> proposedRemovedInstanceTags) {
+      this.proposedRemovedInstanceTags = proposedRemovedInstanceTags;
+      return this;
+    }
+
+    public Builder currentClusterConfig(ClusterConfig currentClusterConfig) {
+      this.currentClusterConfig = currentClusterConfig;
+      return this;
+    }
+
+    public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
+      this.proposedClusterConfig = proposedClusterConfig;
+      return this;
+    }
+
+    public Builder minActiveReplicaChecker(MinActiveReplicaChecker minActiveReplicaChecker) {
+      this.minActiveReplicaChecker = minActiveReplicaChecker;
       return this;
     }
 

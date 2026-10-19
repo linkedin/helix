@@ -19,12 +19,15 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.DoubleSummaryStatistics;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
@@ -353,12 +356,17 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
         ClusterModel clusterModel = ClusterModelProvider.generateClusterModelFromExistingAssignment(
             dataProvider, resourceToMonitorMap, currentStateAssignment);
 
+        List<Double> generalUtilizations = new ArrayList<>();
+        List<Double> topStateUtilizations = new ArrayList<>();
         for (AssignableNode node : clusterModel.getAssignableNodes().values()) {
           String instanceName = node.getInstanceName();
           // There is no new usage adding to this node, so an empty map is passed in.
           double usage = node.getGeneralProjectedHighestUtilization(Collections.emptyMap());
           clusterStatusMonitor
               .updateInstanceCapacityStatus(instanceName, usage, node.getMaxCapacity());
+          generalUtilizations.add(usage);
+          topStateUtilizations
+              .add((double) node.getTopStateProjectedHighestUtilization(Collections.emptyMap()));
         }
 
         // Cluster-wide near-capacity signal: surface the aggregate estimated max utilization so
@@ -366,6 +374,24 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
         // cluster model used for the per-instance gauges above.
         clusterStatusMonitor.updateClusterCapacityUsage(
             computeClusterCapacityUsage(clusterModel.getContext()));
+
+        // Cluster-wide weighted-usage distribution: max / mean / min / max-to-mean ratio of the
+        // per-instance capacity-weighted load, for the all-replica ("partition") and top-state
+        // dimensions separately. Computed from the observed current-state assignment above, so it
+        // summarizes the live weighted load -- the dimension WAGED's MaxCapacityUsageInstanceConstraint
+        // / TopStateMaxCapacityUsageInstanceConstraint balance -- rather than WAGED's computed target.
+        // The max-to-mean ratio is the evenness indicator (1.0 == perfectly even); top-state weighted
+        // usage is otherwise unmeasured.
+        clusterStatusMonitor.updateWeightedCapacityUsageStats(
+            computeUsageStats(generalUtilizations), computeUsageStats(topStateUtilizations));
+
+        // The same distribution per capacity key: each instance's utilization of that key alone
+        // instead of its busiest key. The busiest key can differ between instances, so the gauges
+        // above can hide an uneven spread of the load (e.g. the top-state load) on another key.
+        Collection<AssignableNode> nodes = clusterModel.getAssignableNodes().values();
+        clusterStatusMonitor.updateCapacityKeyUsageStats(
+            computeUsageStatsByCapacityKey(nodes, false),
+            computeUsageStatsByCapacityKey(nodes, true));
       } catch (Exception ex) {
         LOG.error("Failed to report instance capacity metrics. Exception message: {}",
             ex.getMessage());
@@ -393,6 +419,73 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       return 0.0d;
     }
     return clusterContext.getEstimatedMaxUtilization();
+  }
+
+  /**
+   * Summarizes the distribution of the supplied per-instance weighted capacity utilization values as
+   * the maximum, arithmetic mean, minimum, and max-to-mean ratio across instances. Callers pass the
+   * observed current-state utilizations, so this describes how the live capacity-weighted load -- the
+   * dimension WAGED's capacity-usage soft constraints balance -- is spread across the cluster. The
+   * max-to-mean ratio (peak-to-average) is the evenness indicator: {@code 1.0} means perfectly even,
+   * larger means the busiest instance is further above average.
+   * <p>
+   * The ratio is {@code >= 1.0} when defined; it is reported as {@code 0.0} (undefined) when there
+   * are no values or the mean is {@code 0} (all-zero usage), which also avoids a divide-by-zero.
+   * Unlike a max-to-min ratio it stays defined when a single instance is idle.
+   * <p>
+   * Non-finite inputs ({@code NaN}/{@code Infinity} -- for example a node whose capacity for a key
+   * is {@code 0}, which makes its projected utilization {@code 0/0}) are dropped before aggregating,
+   * so a single misconfigured node cannot poison the summary or publish {@code NaN} on the gauges.
+   * An empty input, or one with no finite values, yields an all-zero summary.
+   *
+   * @param utilizations per-instance highest weighted utilization values ({@code >= 0.0})
+   * @return the {max, mean, min, maxMeanRatio} summary of the finite utilizations
+   */
+  static ClusterStatusMonitor.WeightedUsageStats computeUsageStats(
+      Collection<Double> utilizations) {
+    DoubleSummaryStatistics stats = (utilizations == null ? Collections.<Double>emptyList()
+        : utilizations).stream().filter(Objects::nonNull).mapToDouble(Double::doubleValue)
+        .filter(Double::isFinite).summaryStatistics();
+    if (stats.getCount() == 0) {
+      return new ClusterStatusMonitor.WeightedUsageStats(0.0d, 0.0d, 0.0d, 0.0d);
+    }
+    double max = stats.getMax();
+    double min = stats.getMin();
+    double mean = stats.getAverage();
+    double maxMeanRatio = (mean > 0.0d) ? (max / mean) : 0.0d;
+    return new ClusterStatusMonitor.WeightedUsageStats(max, mean, min, maxMeanRatio);
+  }
+
+  /**
+   * Summarizes, for each capacity key, the distribution of the per-instance weighted utilization of
+   * that key alone, in the same way as {@link #computeUsageStats}. An instance's utilization of a
+   * key is its assigned usage of the key divided by its capacity for the key.
+   *
+   * @param nodes    the instances of a WAGED cluster model built from the current assignment
+   * @param topState {@code true} to count only the top-state replicas, {@code false} to count all
+   *                 replicas
+   * @return capacity key -> the {max, mean, min, maxMeanRatio} summary of that key, sorted by key;
+   *         empty when there are no instances or no capacity keys
+   */
+  static Map<String, ClusterStatusMonitor.WeightedUsageStats> computeUsageStatsByCapacityKey(
+      Collection<AssignableNode> nodes, boolean topState) {
+    Map<String, List<Double>> utilizationsByKey = new TreeMap<>();
+    if (nodes != null) {
+      for (AssignableNode node : nodes) {
+        for (String capacityKey : node.getMaxCapacity().keySet()) {
+          // There is no new usage adding to this node, so an empty map is passed in.
+          List<String> scoringKeys = Collections.singletonList(capacityKey);
+          double utilization = topState
+              ? node.getTopStateProjectedHighestUtilization(Collections.emptyMap(), scoringKeys)
+              : node.getGeneralProjectedHighestUtilization(Collections.emptyMap(), scoringKeys);
+          utilizationsByKey.computeIfAbsent(capacityKey, key -> new ArrayList<>()).add(utilization);
+        }
+      }
+    }
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> statsByKey = new TreeMap<>();
+    utilizationsByKey.forEach((key, utilizations) -> statsByKey.put(key,
+        computeUsageStats(utilizations)));
+    return statsByKey;
   }
 
   private void reportResourcePartitionCapacityMetrics(ExecutorService executorService,

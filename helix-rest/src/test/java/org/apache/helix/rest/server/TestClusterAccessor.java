@@ -22,6 +22,7 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -40,6 +41,7 @@ import com.sun.research.ws.wadl.HTTPMethods;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
@@ -47,6 +49,7 @@ import org.apache.helix.cloud.azure.AzureConstants;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.cloud.constants.VirtualTopologyGroupConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
 import org.apache.helix.integration.manager.ClusterDistributedController;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKUtil;
@@ -89,6 +92,58 @@ public class TestClusterAccessor extends AbstractTestClass {
     for (String cluster : _clusters) {
       ClusterConfig clusterConfig = createClusterConfig(cluster);
       _configAccessor.setClusterConfig(cluster, clusterConfig);
+    }
+  }
+
+  @Test
+  public void testRetiredClusterConfigWriteGuard() throws IOException {
+    String cluster = "RetiredClusterConfigWriteGuard";
+    String retiredKey = "ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE";
+    _gSetupTool.addCluster(cluster, true);
+    try {
+      for (String oldValue : Arrays.asList(null, "3")) {
+        ClusterConfig stored = new ClusterConfig(cluster);
+        stored.setErrorOrRecoveryPartitionThresholdForLoadBalance(100);
+        if (oldValue != null) {
+          stored.getRecord().setSimpleField(retiredKey, oldValue);
+        }
+        _gZkClient.writeData(PropertyPathBuilder.clusterConfig(cluster), stored.getRecord());
+        ClusterConfig proposal = new ClusterConfig(stored.getRecord());
+        proposal.getRecord().setSimpleField(retiredKey, "5");
+        proposal.getRecord().setSimpleField("customKey", "must-not-be-written");
+        try (Response response = post("clusters/" + cluster + "/configs",
+            ImmutableMap.of("command", Command.update.name()),
+            Entity.entity(OBJECT_MAPPER.writeValueAsString(proposal.getRecord()),
+                MediaType.APPLICATION_JSON_TYPE),
+            Response.Status.BAD_REQUEST.getStatusCode(), true)) {
+          String body = response.readEntity(String.class);
+          Assert.assertTrue(body.contains(retiredKey));
+          Assert.assertTrue(body.contains("Use ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE"));
+        }
+        Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord(), stored.getRecord());
+      }
+
+      ClusterConfig roundTrip = _configAccessor.getClusterConfig(cluster);
+      roundTrip.getRecord().setSimpleField("customKey", "updated");
+      roundTrip.setErrorOrRecoveryPartitionThresholdForLoadBalance(101);
+      updateClusterConfigFromRest(cluster, roundTrip, Command.update);
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord(), roundTrip.getRecord());
+
+      ClusterConfig delta = new ClusterConfig(cluster);
+      delta.getRecord().setSimpleField("customKey", "unrelated");
+      updateClusterConfigFromRest(cluster, delta, Command.update);
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster).getRecord()
+          .getSimpleField(retiredKey), "3");
+
+      ClusterConfig removal = new ClusterConfig(cluster);
+      removal.getRecord().setSimpleField(retiredKey, "");
+      updateClusterConfigFromRest(cluster, removal, Command.delete);
+      Assert.assertFalse(_configAccessor.getClusterConfig(cluster).getRecord().getSimpleFields()
+          .containsKey(retiredKey));
+      Assert.assertEquals(_configAccessor.getClusterConfig(cluster)
+          .getErrorOrRecoveryPartitionThresholdForLoadBalance(), 101);
+    } finally {
+      deleteTestCluster(cluster);
     }
   }
 
@@ -159,6 +214,110 @@ public class TestClusterAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /**
+   * Guard rail: updating the cluster config to add a WAGED capacity key (INSTANCE_CAPACITY_KEYS) is
+   * rejected before it is written to ZooKeeper when some assignable instance does not declare that
+   * key, because WAGED could no longer build a cluster model and every WAGED resource would silently
+   * stop placing. This is the cluster-config write-path complement to the addWagedResource capacity
+   * key guard rail. Verifies enforcement (400 + verdict naming the starved instance, nothing
+   * written), dry-run (200 + the same infeasible verdict, nothing written), force bypass (written
+   * despite the gap), that an unrelated cluster-config edit is grandfathered past a pre-existing gap
+   * (the guard fires only when the capacity contract actually changes), and the fully-covered happy
+   * path (written). Uses a dedicated cluster so it does not perturb the other tests that share
+   * {@link #TEST_CLUSTER}.
+   */
+  @Test
+  public void testUpdateClusterConfigCapacityKeyGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestClusterCapacityKeyGuardrail";
+    _gSetupTool.addCluster(clusterName, true);
+    String coveredInstance = clusterName + "_instance0";
+    String starvedInstance = clusterName + "_instance1";
+    try {
+      // Two assignable instances; both declare FOO, but only one declares BAR, so adding BAR as a
+      // required cluster capacity key would leave the starved instance uncovered.
+      _gSetupTool.addInstanceToCluster(clusterName, coveredInstance);
+      _gSetupTool.addInstanceToCluster(clusterName, starvedInstance);
+      setInstanceCapacity(clusterName, coveredInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100));
+
+      // The update under test sets INSTANCE_CAPACITY_KEYS = [FOO, BAR]. Only that field is sent; the
+      // endpoint merges it into the existing cluster config exactly as the guard rail evaluates it.
+      ClusterConfig delta = new ClusterConfig(clusterName);
+      delta.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(delta.getRecord()),
+          MediaType.APPLICATION_JSON_TYPE);
+
+      // 1) Enforcement: 400 + a verdict naming the starved instance, and nothing written.
+      Response blocked = post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), entity,
+          Response.Status.BAD_REQUEST.getStatusCode(), true);
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(starvedInstance));
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys().isEmpty());
+
+      // 2) Dry-run: 200 with the same infeasible verdict, and still nothing written.
+      Response dryRun = post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name(), "dryRun", "true"), entity,
+          Response.Status.OK.getStatusCode(), true);
+      JsonNode dryRunVerdict = OBJECT_MAPPER.readTree(dryRun.readEntity(String.class));
+      Assert.assertFalse(dryRunVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          dryRunVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys().isEmpty());
+
+      // 3) force=true bypasses the guard rail: the keys are written despite the gap.
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name(), "force", "true"), entity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+
+      // 3b) Diff-gate: the capacity gap is now committed (keys=[FOO, BAR] while the starved instance
+      //     still omits BAR). An unrelated cluster-config update that does not touch
+      //     INSTANCE_CAPACITY_KEYS/DEFAULT_INSTANCE_CAPACITY_MAP must not be rejected for that
+      //     pre-existing gap: the guard fires only when the capacity contract actually changes, so an
+      //     edit that leaves it alone sails through even though the cluster is already uncovered.
+      ClusterConfig unrelatedDelta = new ClusterConfig(clusterName);
+      unrelatedDelta.setPersistBestPossibleAssignment(true);
+      Entity unrelatedEntity = Entity.entity(
+          OBJECT_MAPPER.writeValueAsString(unrelatedDelta.getRecord()),
+          MediaType.APPLICATION_JSON_TYPE);
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), unrelatedEntity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertTrue(
+          _configAccessor.getClusterConfig(clusterName).isPersistBestPossibleAssignment());
+      // The committed capacity keys are untouched by the unrelated edit; the gap is still present.
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+
+      // 4) Close the gap (the starved instance now declares BAR) and the same update passes the
+      //    guard rail: every assignable instance is covered, so the verdict is feasible.
+      setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
+      post("clusters/" + clusterName + "/configs",
+          ImmutableMap.of("command", Command.update.name()), entity,
+          Response.Status.OK.getStatusCode());
+      Assert.assertEquals(_configAccessor.getClusterConfig(clusterName).getInstanceCapacityKeys(),
+          Arrays.asList("FOO", "BAR"));
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void setInstanceCapacity(String cluster, String instance,
+      Map<String, Integer> capacityMap) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(cluster, instance);
+    instanceConfig.setInstanceCapacityMap(capacityMap);
+    _configAccessor.setInstanceConfig(cluster, instance, instanceConfig);
+  }
+
   @Test(dependsOnMethods = "testValidateClusterConfigChange")
   public void testGetClusters() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -171,7 +330,8 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     Set<String> clusters = OBJECT_MAPPER.readValue(clustersStr,
         OBJECT_MAPPER.getTypeFactory().constructCollectionType(Set.class, String.class));
-    Assert.assertTrue(isSame(clusters, _clusters));
+    Assert.assertTrue(clusters.equals(_clusters),
+        "Expected clusters " + _clusters + " but found " + clusters);
 
     validateAuditLogSize(1);
     AuditLog auditLog = _auditLogger.getAuditLogs().get(0);
@@ -335,6 +495,11 @@ public class TestClusterAccessor extends AbstractTestClass {
         Response.Status.OK.getStatusCode());
 
     Assert.assertTrue(isMaintenanceModeEnabled(VG_CLUSTER));
+    post("clusters/" + VG_CLUSTER,
+        ImmutableMap.of("command", "disableMaintenanceMode"),
+        Entity.entity("virtual group", MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.OK.getStatusCode());
+    Assert.assertFalse(isMaintenanceModeEnabled(VG_CLUSTER));
   }
 
   @Test(dataProvider = "prepareVirtualTopologyTests", dependsOnMethods = "testVirtualTopologyGroupMaintenanceMode")
@@ -375,7 +540,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
   @DataProvider
   public Object[][] prepareVirtualTopologyTests() {
-    setupClusterForVirtualTopology(VG_CLUSTER);
     String test1 = "{\"virtualTopologyGroupNumber\":\"7\",\"virtualTopologyGroupName\":\"vgTest\"}";
     String test2 = "{\"virtualTopologyGroupNumber\":\"9\",\"virtualTopologyGroupName\":\"vgTest\"}";
     // Split 5 zones into 2 virtual groups, expect 0-2-4 in virtual group 0, 1-3 in virtual group 1
@@ -455,6 +619,15 @@ public class TestClusterAccessor extends AbstractTestClass {
     // Write a test to verify the logics of virtual topology imbalance detection
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     String clusterName = "TestImbalanceDetectionCluster";
+    try {
+      verifyImbalanceAlgorithmThrottling(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyImbalanceAlgorithmThrottling(String clusterName) {
     setupClusterForVirtualTopology(clusterName);
     // Verify that the imbalance detection algorithm is working as expected
     HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
@@ -513,7 +686,40 @@ public class TestClusterAccessor extends AbstractTestClass {
       Assert.assertTrue(virtualZoneMap.get(virtualZoneOfZone1).size() > 2,
           "Zone 1 should have more than 2 instances now and it shouldn't be recomputed due to throttling");
     }
+  }
+
+  @Test
+  public void testAddVirtualTopologyGroupSurfacesValidationReason() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "VgErrorReasonCluster";
+    try {
+      verifyVirtualTopologyGroupValidationReason(clusterName);
+    } finally {
+      deleteTestCluster(clusterName);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifyVirtualTopologyGroupValidationReason(String clusterName) {
+    setupClusterForVirtualTopology(clusterName);
+
+    // The cluster has 5 fault zones; requesting 6 ZONE_BASED virtual groups must fail the
+    // "numGroups <= zones" validation and return a 400.
+    String requestParam = "{\"virtualTopologyGroupNumber\":\"6\",\"virtualTopologyGroupName\":\"vgTest\","
+        + "\"assignmentAlgorithmType\":\"ZONE_BASED\"}";
+
+    Response response = post("clusters/" + clusterName,
+        ImmutableMap.of("command", "addVirtualTopologyGroup"),
+        Entity.entity(requestParam, MediaType.APPLICATION_JSON_TYPE),
+        Response.Status.BAD_REQUEST.getStatusCode(), true);
+
+    // The validation reason must be surfaced in the response body, not only in the server log, so
+    // callers (for example ACM) can report the actual cause instead of an opaque "Illegal input"
+    // message.
+    String body = response.readEntity(String.class);
+    Assert.assertTrue(
+        body.contains("Number of virtual groups cannot be greater than the number of zones"),
+        "Expected the validation reason in the response body but got: " + body);
   }
 
   @Test(dependsOnMethods = "testGetClusterTopologyAndFaultZoneMap")
@@ -846,26 +1052,16 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
 
-    ClusterConfig configDelta = new ClusterConfig(cluster);
-    configDelta.getRecord()
-        .setSimpleField(ClusterConfig.ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS.name(),
-            "100");
-    updateClusterConfigFromRest(cluster, configDelta, Command.update);
-
-    //Purge again without customized timeout, and the action will use default timeout value.
+    // Purge again without a customized timeout. With no cluster-level default configured,
+    // nothing is purged and the instances remain.
     post("clusters/" + cluster, ImmutableMap.of("command", "purgeOfflineParticipants"), null,
         Response.Status.OK.getStatusCode());
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance1).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance2).getPath(), 0));
-    Assert.assertFalse(accessor.getBaseDataAccessor()
+    Assert.assertTrue(accessor.getBaseDataAccessor()
         .exists(accessor.keyBuilder().instanceConfig(instance3).getPath(), 0));
-
-    // reset cluster status to previous one
-    _gSetupTool.addInstanceToCluster(cluster, instance1);
-    _gSetupTool.addInstanceToCluster(cluster, instance2);
-    _gSetupTool.addInstanceToCluster(cluster, instance3);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -1280,7 +1476,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     testList.add("TestURL");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
 
-    // Bad request since Processor has not been defined.
+    // Bad request since the processor name has not been defined.
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.BAD_REQUEST.getStatusCode());
@@ -1288,7 +1484,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
         "TestProcessorName");
 
-    // Now response should be OK since all fields are set
+    // Now response should be OK since all required fields are set
     put(urlBase, null,
         Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.OK.getStatusCode());
@@ -1322,6 +1518,62 @@ public class TestClusterAccessor extends AbstractTestClass {
     Assert.assertEquals(cloudConfigRest.getCloudInfoProcessorName(), "TestProcessorName");
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @DataProvider
+  public Object[][] missingRequiredCloudFields() {
+    return new Object[][]{
+        {CloudConfig.CloudConfigProperty.CLOUD_PROVIDER, CloudProvider.CUSTOMIZED.name()},
+        {CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME, "TestProcessor"}
+    };
+  }
+
+  @Test(dataProvider = "missingRequiredCloudFields")
+  public void testIncompleteCloudConfigRejected(CloudConfig.CloudConfigProperty missingField,
+      String requiredValue) throws Exception {
+    String clusterName =
+        TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName() + "_" + missingField;
+    String cloudConfigPath = "clusters/" + clusterName + "/cloudconfig";
+    ZNRecord record = new ZNRecord(CloudConfig.CLOUD_CONFIG_KW);
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
+        CloudProvider.CUSTOMIZED.name());
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
+        "TestProcessor");
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("TestURL"));
+    record.getSimpleFields().remove(missingField.name());
+
+    try {
+      put("clusters/" + clusterName, ImmutableMap.of("addCloudConfig", "true"),
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertFalse(_gSetupTool.getClusterManagementTool().getClusters().contains(clusterName));
+
+      _gSetupTool.addCluster(clusterName, false);
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      get(cloudConfigPath, null, Response.Status.NOT_FOUND.getStatusCode(), true);
+
+      record.setSimpleField(missingField.name(), requiredValue);
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      ZNRecord stored =
+          toZNRecord(get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true));
+      Assert.assertEquals(stored.getSimpleFields(), record.getSimpleFields());
+      Assert.assertEquals(stored.getListFields(), record.getListFields());
+
+      record.getSimpleFields().remove(missingField.name());
+      put(cloudConfigPath, null,
+          Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode());
+      Assert.assertEquals(
+          toZNRecord(get(cloudConfigPath, null, Response.Status.OK.getStatusCode(), true)), stored);
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
   }
 
   @Test(dependsOnMethods = "testAddCloudConfig")
@@ -1720,11 +1972,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     validateAuditLog(auditLog, HTTPMethods.POST.name(),
         "clusters/" + cluster + "/configs?command=" + command.name(),
         Response.Status.OK.getStatusCode(), null);
-  }
-
-  private boolean isSame(Set<String> result, Set<String> expected) {
-    return result.size() == expected.size() && result.containsAll(expected) && expected.containsAll(
-        result);
   }
 
   private void validateAuditLogSize(int expected) {

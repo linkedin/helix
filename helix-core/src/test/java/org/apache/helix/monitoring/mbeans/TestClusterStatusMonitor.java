@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -632,6 +633,152 @@ public class TestClusterStatusMonitor {
     Assert.assertFalse(_server.isRegistered(clusterMonitorObjName));
   }
 
+  @Test
+  public void testRecordMappingCapacityRejections() throws Exception {
+    String clusterName = "TestCluster_MappingCapacityRejection";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    Set<String> instanceSet = new HashSet<>(ImmutableList.of("instance_0", "instance_1"));
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    // Create and register the resource monitors the way the pipeline does.
+    List<String> resources = ImmutableList.of("ResourceA", "ResourceB");
+    monitor.setResourceRebalanceStates(resources, ResourceMonitor.RebalanceStatus.NORMAL);
+    monitor.retainResourceMonitor(new HashSet<>(resources));
+
+    Map<String, Map<String, Long>> rejections = new HashMap<>();
+    rejections.put("ResourceA", ImmutableMap.of("instance_0", 2L, "instance_1", 3L));
+    // "instance_missing" has no monitor: it must be skipped rather than blowing up the pass.
+    rejections.put("ResourceB", ImmutableMap.of("instance_0", 4L, "instance_missing", 7L));
+
+    monitor.recordMappingCapacityRejections(rejections);
+
+    ObjectName resourceA = monitor.getObjectName(monitor.getResourceBeanName("ResourceA"));
+    ObjectName resourceB = monitor.getObjectName(monitor.getResourceBeanName("ResourceB"));
+    // Each resource gets a single fixed attribute holding its total, not one per instance.
+    Assert.assertEquals(_server.getAttribute(resourceA, "MappingCapacityRejectionCounter"), 5L);
+    Assert.assertEquals(_server.getAttribute(resourceB, "MappingCapacityRejectionCounter"), 11L);
+
+    // Instance counters aggregate that instance's rejections across all resources.
+    ObjectName instance0 = monitor.getObjectName(monitor.getInstanceBeanName("instance_0"));
+    ObjectName instance1 = monitor.getObjectName(monitor.getInstanceBeanName("instance_1"));
+    Assert.assertEquals(_server.getAttribute(instance0, "MappingCapacityRejectionCounter"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance1, "MappingCapacityRejectionCounter"), 3L);
+
+    // Counters are cumulative across passes.
+    monitor.recordMappingCapacityRejections(
+        Collections.singletonMap("ResourceA", ImmutableMap.of("instance_1", 1L)));
+    Assert.assertEquals(_server.getAttribute(resourceA, "MappingCapacityRejectionCounter"), 6L);
+    Assert.assertEquals(_server.getAttribute(instance1, "MappingCapacityRejectionCounter"), 4L);
+
+    monitor.reset();
+  }
+
+  @Test
+  public void testSetClusterInstanceStatusActualPartitionGauges() throws Exception {
+    String clusterName = "TestCluster_ActualPartitionStatus";
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    int numInstances = 4;
+    Set<String> instanceSet = Sets.newHashSet();
+    for (int i = 0; i < numInstances; i++) {
+      instanceSet.add("instance_" + i);
+    }
+
+    // Register instance monitors via setClusterInstanceStatus
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    // Gauges default to 0 before any actual partition count update.
+    for (String instance : instanceSet) {
+      ObjectName objName = monitor.getObjectName(monitor.getInstanceBeanName(instance));
+      Assert.assertTrue(_server.isRegistered(objName));
+      Assert.assertEquals(_server.getAttribute(objName, "ActualPartitionGauge"), 0L);
+      Assert.assertEquals(_server.getAttribute(objName, "ActualTopStatePartitionGauge"), 0L);
+    }
+
+    // instance_3 is intentionally absent, standing in for an instance that is not live.
+    Map<String, Long> actualPartitionCounts = Maps.newHashMap();
+    actualPartitionCounts.put("instance_0", 10L);
+    actualPartitionCounts.put("instance_1", 7L);
+    actualPartitionCounts.put("instance_2", 0L);
+    Map<String, Long> actualTopStatePartitionCounts = Maps.newHashMap();
+    actualTopStatePartitionCounts.put("instance_0", 4L);
+    actualTopStatePartitionCounts.put("instance_1", 3L);
+    actualTopStatePartitionCounts.put("instance_2", 0L);
+
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        actualPartitionCounts, actualTopStatePartitionCounts);
+
+    ObjectName instance0 = monitor.getObjectName(monitor.getInstanceBeanName("instance_0"));
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualPartitionGauge"), 10L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualTopStatePartitionGauge"), 4L);
+
+    ObjectName instance1 = monitor.getObjectName(monitor.getInstanceBeanName("instance_1"));
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualPartitionGauge"), 7L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualTopStatePartitionGauge"), 3L);
+
+    // Instances missing from the supplied maps are reset to 0 rather than left stale.
+    ObjectName instance3 = monitor.getObjectName(monitor.getInstanceBeanName("instance_3"));
+    Assert.assertEquals(_server.getAttribute(instance3, "ActualPartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance3, "ActualTopStatePartitionGauge"), 0L);
+
+    // The actual gauges are independent of the best-possible PartitionGauge on the same bean.
+    Assert.assertEquals(_server.getAttribute(instance0, "PartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance0, "TopStatePartitionGauge"), 0L);
+
+    // A subsequent update that no longer reports instance_0 must clear its previous value.
+    monitor.setClusterInstanceStatus(instanceSet, instanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.singletonMap("instance_1", 5L), Collections.singletonMap("instance_1", 2L));
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualPartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance0, "ActualTopStatePartitionGauge"), 0L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualPartitionGauge"), 5L);
+    Assert.assertEquals(_server.getAttribute(instance1, "ActualTopStatePartitionGauge"), 2L);
+
+    // An instance registered for the first time gets its counts populated in the same call, so a
+    // freshly registered bean never publishes 0 for partitions it is really hosting.
+    Set<String> grownInstanceSet = new HashSet<>(instanceSet);
+    grownInstanceSet.add("instance_4");
+    monitor.setClusterInstanceStatus(grownInstanceSet, grownInstanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.singletonMap("instance_4", 9L), Collections.singletonMap("instance_4", 6L));
+    ObjectName instance4 = monitor.getObjectName(monitor.getInstanceBeanName("instance_4"));
+    Assert.assertTrue(_server.isRegistered(instance4));
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
+
+    // Null maps mean "no information supplied" and must leave the existing gauges untouched,
+    // so callers that do not compute these counts cannot zero them out.
+    monitor.setClusterInstanceStatus(grownInstanceSet, grownInstanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), null, null);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
+
+    // The backward-compatible overload likewise leaves the actual gauges alone.
+    monitor.setClusterInstanceStatus(grownInstanceSet, grownInstanceSet, Collections.emptySet(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualPartitionGauge"), 9L);
+    Assert.assertEquals(_server.getAttribute(instance4, "ActualTopStatePartitionGauge"), 6L);
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName));
+  }
+
   private void verifyCapacityMetrics(ClusterStatusMonitor monitor, Map<String, Double> maxUsageMap,
       Map<String, Map<String, Integer>> instanceCapacityMap)
       throws MalformedObjectNameException, IOException, AttributeNotFoundException, MBeanException,
@@ -840,6 +987,61 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testInstancesUnderInstanceOperationMaintenanceGauge() throws Exception {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestMaintenanceMarkerGaugeCluster");
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 0L);
+
+    long now = System.currentTimeMillis();
+    long oneHourMs = 3_600_000L;
+    Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
+    // A valid marker counts whether the instance is live or not and whatever its operation is,
+    // because that is how the budget it is checked against counts it.
+    instanceConfigMap.put("markedLive", configWithMarker("markedLive", now + oneHourMs));
+    InstanceConfig markedDisabled = configWithMarker("markedDisabledOffline", now + oneHourMs);
+    markedDisabled.setInstanceOperation(
+        org.apache.helix.constants.InstanceConstants.InstanceOperation.DISABLE);
+    instanceConfigMap.put("markedDisabledOffline", markedDisabled);
+    // An expired marker is still on the config but exempts nothing, so it must not count.
+    instanceConfigMap.put("expired", configWithMarker("expired", now - 1L));
+    instanceConfigMap.put("unmarked", new InstanceConfig("unmarked"));
+    Set<String> liveInstances =
+        new HashSet<>(ImmutableList.of("markedLive", "expired", "unmarked"));
+
+    updateInstanceStatus(monitor, liveInstances, instanceConfigMap);
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 2L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName,
+        "InstancesUnderInstanceOperationMaintenanceGauge"), 2L);
+
+    // A gauge, not a counter: clearing a marker lowers it on the next refresh.
+    instanceConfigMap.get("markedLive").setInstanceOperationMaintenanceUntilMs(
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    updateInstanceStatus(monitor, liveInstances, instanceConfigMap);
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 1L);
+    Assert.assertEquals(_server.getAttribute(clusterMonitorObjName,
+        "InstancesUnderInstanceOperationMaintenanceGauge"), 1L);
+
+    // A new leader must not inherit the previous leadership period's count.
+    monitor.reset();
+    Assert.assertEquals(monitor.getInstancesUnderInstanceOperationMaintenanceGauge(), 0L);
+  }
+
+  private static InstanceConfig configWithMarker(String instanceName, long untilMs) {
+    InstanceConfig config = new InstanceConfig(instanceName);
+    config.setInstanceOperationMaintenanceUntilMs(untilMs);
+    return config;
+  }
+
+  private static void updateInstanceStatus(ClusterStatusMonitor monitor, Set<String> liveInstances,
+      Map<String, InstanceConfig> instanceConfigMap) {
+    monitor.setClusterInstanceStatus(new HashSet<>(liveInstances),
+        new HashSet<>(instanceConfigMap.keySet()), Collections.emptySet(), Collections.emptyMap(),
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), instanceConfigMap,
+        Collections.emptyMap());
+  }
+
+  @Test
   public void testWagedFailureCategoryCountersStartAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedCategoriesCluster");
     Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 0L);
@@ -895,6 +1097,144 @@ public class TestClusterStatusMonitor {
     Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 1L);
     monitor.setWagedFallbackInUseGauge(false);
     Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerEventQueueSizeGaugeStartsAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestControllerEventQueueGaugeCluster");
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerEventQueueSizeGaugeReflectsLatestSetter() {
+    ClusterStatusMonitor monitor =
+        new ClusterStatusMonitor("TestControllerEventQueueGaugeSetterCluster");
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+    monitor.setControllerEventQueueSizeGauge(7L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 7L);
+    // Gauge is reversible: draining the pipeline takes it back down to 0.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerEventQueueSizeGaugeResetsToZeroOnLeadershipChange() {
+    ClusterStatusMonitor monitor =
+        new ClusterStatusMonitor("TestControllerEventQueueGaugeResetCluster");
+    monitor.setControllerEventQueueSizeGauge(5L);
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 5L);
+    // reset() runs on leadership change / monitor teardown. Because the monitor instance is reused
+    // across leadership periods, a backlog left over from a prior leader must be zeroed here;
+    // otherwise the re-registered bean would re-report it after re-election until the next
+    // enqueue/dequeue refreshes the gauge.
+    monitor.reset();
+    Assert.assertEquals(monitor.getControllerEventQueueSizeGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeStartsAtZero() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledStartCluster");
+    // No queue backlog and no pipeline completion reported yet: no baseline, so not stalled.
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenQueueEmpty() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledIdleCluster");
+    // Empty queue but a stale last-completion timestamp: an idle controller is healthy, not wedged.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 60000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenProgressing() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledBusyCluster");
+    // Non-empty queue but a pipeline completed just now: busy-but-progressing, not wedged.
+    monitor.setControllerEventQueueSizeGauge(5L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWithoutBaseline() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledNoBaselineCluster");
+    // Non-empty queue but no pipeline completion ever reported (timestamp 0): treated as no data.
+    monitor.setControllerEventQueueSizeGauge(5L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeOneWhenWedged() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledWedgedCluster");
+    // Non-empty queue whose pipeline last completed longer ago than the (explicitly set) stall
+    // threshold: the controller holds events but is not draining them, i.e. wedged.
+    monitor.setPipelineStallThresholdMs(5000L);
+    monitor.setControllerEventQueueSizeGauge(3L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeOneWhenPipelineThreadDead() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadThreadCluster");
+    // Queue has pending work and a pipeline completed just now (well within the threshold), but the
+    // DEFAULT pipeline thread is dead: the definitive zombie is flagged immediately, no threshold
+    // wait, and independent of how recent the last completion was.
+    monitor.setControllerEventQueueSizeGauge(1L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    monitor.setPipelineLivenessSupplier(() -> false);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroDuringLongHealthyRun() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledLongRunCluster");
+    // A long-but-healthy rebalance: the thread is alive, the queue has events piled up behind the
+    // in-progress run, and the last completion is 2 minutes ago. With the default threshold (5 min)
+    // above the worst-case run, this must NOT be flagged (the reviewer's false-positive scenario).
+    monitor.setControllerEventQueueSizeGauge(4L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 120000L);
+    monitor.setPipelineLivenessSupplier(() -> true);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeZeroWhenThreadDeadButQueueEmpty() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadIdleCluster");
+    // Even a dead thread is not "wedged" when there is no pending work to process.
+    monitor.setControllerEventQueueSizeGauge(0L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 600000L);
+    monitor.setPipelineLivenessSupplier(() -> false);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeResetsToZeroOnLeadershipChange() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledResetCluster");
+    monitor.setPipelineStallThresholdMs(5000L);
+    monitor.setControllerEventQueueSizeGauge(3L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+    // reset() zeroes the progress timestamp so a re-registered bean does not report a stale stall.
+    monitor.reset();
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+  }
+
+  @Test
+  public void testControllerPipelineStalledGaugeHonorsConfiguredThreshold() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledThresholdCluster");
+    monitor.setControllerEventQueueSizeGauge(2L);
+    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L); // 6s since last run
+    // With a 10s threshold, a 6s gap is not yet stalled.
+    monitor.setPipelineStallThresholdMs(10000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+    // Tightening the threshold to 3s makes the same 6s gap count as stalled.
+    monitor.setPipelineStallThresholdMs(3000L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
+    // A non-positive threshold is ignored (keeps the last valid value), so it stays stalled.
+    monitor.setPipelineStallThresholdMs(0L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
   }
 
   @Test
@@ -1085,5 +1425,179 @@ public class TestClusterStatusMonitor {
         "Cluster monitor should be unregistered after reset");
 
     System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testWeightedUsageStatsGauges() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName clusterMonitorObjName = monitor.getObjectName(monitor.clusterBeanName());
+    Assert.assertTrue(_server.isRegistered(clusterMonitorObjName));
+
+    // All eight distribution gauges start at 0.0 and are exposed over JMX as Double attributes.
+    String[] attributes = new String[] {
+        "WeightedPartitionUsageMaxGauge", "WeightedPartitionUsageMeanGauge",
+        "WeightedPartitionUsageMinGauge", "WeightedPartitionUsageMaxMeanRatioGauge",
+        "WeightedTopStateUsageMaxGauge", "WeightedTopStateUsageMeanGauge",
+        "WeightedTopStateUsageMinGauge", "WeightedTopStateUsageMaxMeanRatioGauge"};
+    for (String attribute : attributes) {
+      Object value = _server.getAttribute(clusterMonitorObjName, attribute);
+      Assert.assertTrue(value instanceof Double, attribute + " should be a Double");
+      Assert.assertEquals((double) value, 0.0d, 0.0d, attribute + " should start at 0.0");
+    }
+
+    // Partition and top-state distributions are updated together and read back independently.
+    monitor.updateWeightedCapacityUsageStats(
+        new ClusterStatusMonitor.WeightedUsageStats(0.9d, 0.6d, 0.3d, 1.5d),
+        new ClusterStatusMonitor.WeightedUsageStats(0.8d, 0.5d, 0.0d, 1.6d));
+
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMaxGauge(), 0.9d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMeanGauge(), 0.6d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMinGauge(), 0.3d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedPartitionUsageMaxMeanRatioGauge(), 1.5d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxGauge(), 0.8d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMeanGauge(), 0.5d, 0.0d);
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMinGauge(), 0.0d, 0.0d);
+    // Max-to-mean ratio stays defined even when an instance is idle (min == 0).
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxMeanRatioGauge(), 1.6d, 0.0d);
+
+    // The updated values also round-trip through the JMX attributes.
+    Assert.assertEquals((double) _server
+        .getAttribute(clusterMonitorObjName, "WeightedPartitionUsageMaxMeanRatioGauge"), 1.5d, 0.0d);
+    Assert.assertEquals((double) _server
+        .getAttribute(clusterMonitorObjName, "WeightedTopStateUsageMaxGauge"), 0.8d, 0.0d);
+
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(clusterMonitorObjName),
+        "Cluster monitor should be unregistered after reset");
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testCapacityKeyUsageStatsGauges() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    ObjectName cuObjName = getCapacityKeyUsageObjectName(monitor, "CU");
+    ObjectName diskObjName = getCapacityKeyUsageObjectName(monitor, "DISK");
+    Assert.assertFalse(_server.isRegistered(cuObjName));
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+
+    // One MBean per capacity key, each with its own partition and top-state distributions.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.9d, 0.6d, 0.3d, 1.5d),
+            "DISK", new ClusterStatusMonitor.WeightedUsageStats(0.5d, 0.4d, 0.3d, 1.25d)),
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.8d, 0.4d, 0.0d, 2.0d),
+            "DISK", new ClusterStatusMonitor.WeightedUsageStats(0.2d, 0.2d, 0.2d, 1.0d)));
+    Assert.assertTrue(_server.isRegistered(cuObjName));
+    Assert.assertTrue(_server.isRegistered(diskObjName));
+    Assert.assertEquals(_server.getAttribute(cuObjName, "SensorName"),
+        "CapacityKeyUsage." + clusterName + ".CU");
+    assertCapacityKeyUsageGauges(cuObjName, 0.9d, 0.6d, 0.3d, 1.5d, 0.8d, 0.4d, 0.0d, 2.0d);
+    assertCapacityKeyUsageGauges(diskObjName, 0.5d, 0.4d, 0.3d, 1.25d, 0.2d, 0.2d, 0.2d, 1.0d);
+    // The cluster-level gauges are not changed by the per-key ones.
+    Assert.assertEquals(monitor.getWeightedTopStateUsageMaxMeanRatioGauge(), 0.0d, 0.0d);
+
+    // A later update overwrites the values, a key without top-state data reports 0.0 for those
+    // gauges, and the MBean of a key that is no longer reported is unregistered.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("CU", new ClusterStatusMonitor.WeightedUsageStats(0.7d, 0.7d, 0.7d, 1.0d)),
+        Collections.emptyMap());
+    Assert.assertTrue(_server.isRegistered(cuObjName));
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+    assertCapacityKeyUsageGauges(cuObjName, 0.7d, 0.7d, 0.7d, 1.0d, 0.0d, 0.0d, 0.0d, 0.0d);
+
+    // No data (e.g. no capacity keys) unregisters all the per-key MBeans.
+    monitor.updateCapacityKeyUsageStats(null, null);
+    Assert.assertFalse(_server.isRegistered(cuObjName));
+
+    // reset() unregisters the per-key MBeans along with the cluster MBean.
+    monitor.updateCapacityKeyUsageStats(
+        ImmutableMap.of("DISK",
+            new ClusterStatusMonitor.WeightedUsageStats(0.5d, 0.5d, 0.5d, 1.0d)),
+        ImmutableMap.of("DISK",
+            new ClusterStatusMonitor.WeightedUsageStats(0.3d, 0.2d, 0.1d, 1.5d)));
+    assertCapacityKeyUsageGauges(diskObjName, 0.5d, 0.5d, 0.5d, 1.0d, 0.3d, 0.2d, 0.1d, 1.5d);
+    monitor.reset();
+    Assert.assertFalse(_server.isRegistered(diskObjName));
+    Assert.assertFalse(_server.isRegistered(monitor.getObjectName(monitor.clusterBeanName())));
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  @Test
+  public void testCapacityKeyUsageStatsGaugesForSpecialKeys() throws Exception {
+    String className = TestHelper.getTestClassName();
+    String methodName = TestHelper.getTestMethodName();
+    String clusterName = className + "_" + methodName;
+
+    System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
+
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(clusterName);
+    monitor.active();
+    // "Q*" and "Q?" would make the ObjectName a pattern, and ':', '=' and ',' are not allowed in an
+    // unquoted value. Such keys are quoted, like resource names, and every key is updated.
+    List<String> specialKeys = ImmutableList.of("Q*", "Q?", "a:b", "a=b", "a,b");
+    List<String> keys = new ArrayList<>(specialKeys);
+    keys.addAll(ImmutableList.of("CU", "DISK", "PARTCOUNT"));
+    for (double scale : new double[] {1.0d, 2.0d}) {
+      Map<String, ClusterStatusMonitor.WeightedUsageStats> stats = new HashMap<>();
+      for (String key : keys) {
+        stats.put(key, new ClusterStatusMonitor.WeightedUsageStats(0.4d * scale, 0.2d * scale,
+            0.1d * scale, 2.0d));
+      }
+      monitor.updateCapacityKeyUsageStats(stats, stats);
+    }
+
+    List<ObjectName> objectNames = new ArrayList<>();
+    for (String key : keys) {
+      String beanKey = specialKeys.contains(key) ? ObjectName.quote(key) : key;
+      ObjectName objectName = monitor.getObjectName(String.format("%s,%s=%s",
+          monitor.clusterBeanName(), CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, beanKey));
+      Assert.assertEquals(_server.getAttribute(objectName, "SensorName"),
+          "CapacityKeyUsage." + clusterName + "." + key);
+      assertCapacityKeyUsageGauges(objectName, 0.8d, 0.4d, 0.2d, 2.0d, 0.8d, 0.4d, 0.2d, 2.0d);
+      objectNames.add(objectName);
+    }
+
+    monitor.reset();
+    for (ObjectName objectName : objectNames) {
+      Assert.assertFalse(_server.isRegistered(objectName), objectName.toString());
+    }
+
+    System.out.println("END " + clusterName + " at " + new Date(System.currentTimeMillis()));
+  }
+
+  private static ObjectName getCapacityKeyUsageObjectName(ClusterStatusMonitor monitor,
+      String capacityKey) throws MalformedObjectNameException {
+    return monitor.getObjectName(String.format("%s,%s=%s", monitor.clusterBeanName(),
+        CapacityKeyUsageMonitor.CAPACITY_KEY_DN_KEY, capacityKey));
+  }
+
+  private static void assertCapacityKeyUsageGauges(ObjectName objectName, double... expected)
+      throws Exception {
+    String[] attributes = new String[] {
+        "WeightedPartitionUsageMaxGauge", "WeightedPartitionUsageMeanGauge",
+        "WeightedPartitionUsageMinGauge", "WeightedPartitionUsageMaxMeanRatioGauge",
+        "WeightedTopStateUsageMaxGauge", "WeightedTopStateUsageMeanGauge",
+        "WeightedTopStateUsageMinGauge", "WeightedTopStateUsageMaxMeanRatioGauge"};
+    Assert.assertEquals(expected.length, attributes.length);
+    for (int i = 0; i < attributes.length; i++) {
+      Object value = _server.getAttribute(objectName, attributes[i]);
+      Assert.assertTrue(value instanceof Double, attributes[i] + " should be a Double");
+      Assert.assertEquals((double) value, expected[i], 0.0d, attributes[i]);
+    }
   }
 }

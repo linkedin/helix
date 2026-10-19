@@ -35,11 +35,111 @@ import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
 public class TestIntermediateStateCalcStage extends BaseStageTest {
   private ClusterConfig _clusterConfig;
+
+  @DataProvider
+  public Object[][] errorThresholdConfigs() {
+    return new Object[][] {
+        {null, null, 1, 1, false},
+        {null, null, 2, 1, true},
+        {null, 0, 2, 1, true},
+        {null, 3, 2, 1, true},
+        {null, 100, 2, 1, true},
+        {null, -2, 1, 1, false},
+        {-1, 100, 2, 1, true},
+        {0, 100, 1, 0, true},
+        {1, 30, 1, 1, false},
+        {3, 100, 3, 3, false},
+        {3, 100, 4, 3, true},
+        {100, 30, 2, 100, false},
+        {Integer.MAX_VALUE, 1, 2, Integer.MAX_VALUE, false},
+        {-2, 100, 0, -2, true}
+    };
+  }
+
+  @Test(dataProvider = "errorThresholdConfigs")
+  public void testErrorThresholdConfiguration(Integer configuredThreshold, Integer legacyThreshold,
+      int errorPartitions, int effectiveThreshold, boolean expectLoadThrottled) {
+    String resource = "resource";
+    String[] resources = {resource};
+    int partitionCount = errorPartitions + 3;
+    setupIdealState(3, resources, partitionCount, 1, IdealState.RebalanceMode.FULL_AUTO,
+        "OnlineOffline");
+    setupStateModel();
+    setupInstances(3);
+    setupLiveInstances(3);
+    ClusterConfig config = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    String legacyKey = "ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE";
+    if (legacyThreshold != null) {
+      config.getRecord().setIntField(legacyKey, legacyThreshold);
+    }
+    if (configuredThreshold != null) {
+      config.setErrorOrRecoveryPartitionThresholdForLoadBalance(configuredThreshold);
+    }
+    setClusterConfig(config);
+    Assert.assertEquals(config.getErrorOrRecoveryPartitionThresholdForLoadBalance(),
+        configuredThreshold == null ? -1 : configuredThreshold.intValue());
+    Assert.assertEquals(MessageThrottleProcessor.getErrorThreshold(config), effectiveThreshold);
+
+    CurrentStateOutput current = new CurrentStateOutput();
+    BestPossibleStateOutput best = new BestPossibleStateOutput();
+    MessageOutput messages = new MessageOutput();
+    String source = HOSTNAME_PREFIX + 0;
+    String target = HOSTNAME_PREFIX + 1;
+    for (int p = 0; p < partitionCount; p++) {
+      Partition partition = new Partition(resource + "_" + p);
+      best.setPreferenceList(resource, partition.getPartitionName(),
+          Collections.singletonList(target));
+      if (p < errorPartitions) {
+        for (String instance : Arrays.asList(source, target)) {
+          current.setCurrentState(resource, partition, instance, "ERROR");
+          best.setState(resource, partition, instance, "ERROR");
+        }
+      } else {
+        // One load-up, one recovery, and one load-down transition exercise the same threshold.
+        boolean recovery = p == errorPartitions + 1;
+        boolean downward = p == errorPartitions + 2;
+        if (!recovery) {
+          current.setCurrentState(resource, partition, source, "ONLINE");
+          best.setState(resource, partition, source, "ONLINE");
+        }
+        String from = downward ? "ONLINE" : "OFFLINE";
+        String to = downward ? "OFFLINE" : "ONLINE";
+        current.setCurrentState(resource, partition, target, from);
+        best.setState(resource, partition, target, to);
+        messages.addMessage(resource, partition, generateMessage(from, to, target));
+      }
+    }
+
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(),
+        getResourceMap(resources, partitionCount, "OnlineOffline"));
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), best);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), current);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), current);
+    event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), messages);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(),
+        new ResourceControllerDataProvider());
+    runStage(event, new ReadClusterDataStage());
+    runStage(event, new IntermediateStateCalcStage());
+
+    IntermediateStateOutput output = event.getAttribute(AttributeName.INTERMEDIATE_STATE.name());
+    Map<Partition, Map<String, String>> states = output.getPartitionStateMap(resource).getStateMap();
+    Assert.assertEquals(states.get(new Partition(resource + "_" + errorPartitions)).get(target),
+        expectLoadThrottled ? "OFFLINE" : "ONLINE");
+    Assert.assertEquals(states.get(new Partition(resource + "_" + (errorPartitions + 1))).get(target),
+        "ONLINE", "Recovery must not be blocked by the error threshold");
+    Assert.assertEquals(states.get(new Partition(resource + "_" + (errorPartitions + 2))).get(target),
+        "OFFLINE", "Downward load balance must not be blocked by the error threshold");
+    Assert.assertEquals(
+        accessor.getProperty(accessor.keyBuilder().clusterConfig()).getRecord().getSimpleField(legacyKey),
+        legacyThreshold == null ? null : legacyThreshold.toString(),
+        "Ignoring the legacy field must not delete or rewrite it");
+  }
 
   @Test
   public void testNoStateMissing() {

@@ -107,6 +107,10 @@ public class ConstraintBasedAlgorithmFactory {
     boolean forceBaselineConverge = preferences
         .getOrDefault(ClusterConfig.GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0)
         > 0;
+    int topStateEvennessPreference = preferences
+        .getOrDefault(ClusterConfig.GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS,
+            ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE
+                .get(ClusterConfig.GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS));
 
     List<SoftConstraint> softConstraints = ImmutableList
         .of(new PartitionMovementConstraint(), new BaselineInfluenceConstraint(),
@@ -122,8 +126,15 @@ public class ConstraintBasedAlgorithmFactory {
       // Note that BaselineInfluenceConstraint is a constraint that promotes movement for evenness,
       // and is therefore controlled by the evenness preference. Only PartitionMovementConstraint
       // contributes to less movement.
-      return key instanceof PartitionMovementConstraint ? movementPreference * weight
-          : evennessPreference * weight;
+      if (key instanceof PartitionMovementConstraint) {
+        return movementPreference * weight;
+      }
+      // The top state evenness can be weighted on its own, on top of the evenness preference, so
+      // that it can outweigh the movement preference without changing the other evenness goals.
+      if (key instanceof TopStateMaxCapacityUsageInstanceConstraint) {
+        return evennessPreference * topStateEvennessPreference * weight;
+      }
+      return evennessPreference * weight;
     });
 
     ForkJoinPool constraintEvaluationPool = getSharedConstraintEvaluationPool();

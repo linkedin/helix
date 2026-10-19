@@ -97,6 +97,34 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getContinuousTaskRebalanceFailureCount();
 
+  /**
+   * Backlog of the DEFAULT controller cluster-event pipeline (events enqueued but not yet
+   * processed). Stays near 0 on a healthy controller because the pipeline drains quickly and the
+   * queue dedups by event type; climbs when the controller holds leadership but has stopped
+   * processing events ("zombie leader").
+   * <p>
+   * Depth alone is ambiguous: under load a healthy controller also reads &gt; 0 (events queue
+   * behind the in-flight pipeline run), but it keeps draining them, so
+   * {@code ClusterEventStatus...TotalProcessed.EventCounter} advances. A wedged controller instead
+   * shows depth stuck &gt; 0 with that counter flat. The alert threshold and windowing belong in
+   * the alerting layer, not here.
+   * @return The current DEFAULT controller event queue size.
+   */
+  long getControllerEventQueueSizeGauge();
+
+  /**
+   * Reversible 0/1 wedged-controller ("zombie leader") gauge. 1 when the controller still holds
+   * queued DEFAULT events (and, since this MBean is registered only while leader, still holds
+   * leadership) but the pipeline is not processing them: either the DEFAULT pipeline thread is dead
+   * (caught immediately) or no pipeline run has completed within the configurable stall threshold
+   * (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS). 0 when idle (empty queue) or actively draining. Unlike
+   * the raw queue size this is producer-rate-independent and, because the threshold is set above the
+   * worst-case healthy run, does not false-positive on a long legitimate rebalance. Gate EKG/alerts
+   * on {@code == 1}.
+   * @return 1 if the controller pipeline appears wedged, otherwise 0.
+   */
+  long getControllerPipelineStalledGauge();
+
   // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
   // Each WAGED HelixRebalanceException increments exactly one of these. The pair
   // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended
@@ -279,6 +307,84 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   double getEstimatedMaxClusterCapacityUsageGauge();
 
+  // ---- WAGED weighted capacity-usage distribution across live instances ----
+  // Cluster-level summary (max / mean / min / max-to-mean ratio) of each live instance's highest
+  // per-capacity-key WEIGHTED utilization -- the capacity-weighted load that WAGED's capacity-usage
+  // soft constraints balance. These are derived from the OBSERVED current-state assignment (what is
+  // actually placed on each instance now), so they reflect the live weighted balance, which converges
+  // to -- but is not -- the ideal/best-possible target WAGED computes. Two dimensions are exposed:
+  // "partition" counts all replicas (mirrors the per-instance MaxCapacityUsageGauge) and "top-state"
+  // counts replicas currently in the top state only (otherwise unmeasured). The max-to-mean ratio is
+  // the evenness indicator (peak-to-average): 1.0 is perfectly even (WAGED's goal), larger is more
+  // skewed. Individual utilizations are >= 0.0 and may exceed 1.0 when a node is oversubscribed.
+  // The busiest key can differ between instances; the same gauges computed on each capacity key
+  // alone are exposed by one CapacityKeyUsageMonitor MBean per key.
+
+  /**
+   * @return highest per-instance general (all-replica) weighted capacity utilization across live
+   *         instances, or {@code 0.0} when there are no instances / no configured capacity
+   */
+  double getWeightedPartitionUsageMaxGauge();
+
+  /**
+   * @return arithmetic mean across live instances of the per-instance general (all-replica) weighted
+   *         capacity utilization. This is the mean of the per-instance highest-key utilizations and
+   *         is distinct from {@link #getEstimatedMaxClusterCapacityUsageGauge()}, which is the
+   *         aggregate {@code sum(usage)/sum(capacity)}. {@code 0.0} when there is no signal
+   */
+  double getWeightedPartitionUsageMeanGauge();
+
+  /**
+   * @return lowest per-instance general (all-replica) weighted capacity utilization across live
+   *         instances, or {@code 0.0} when there are no instances / no configured capacity
+   */
+  double getWeightedPartitionUsageMinGauge();
+
+  /**
+   * Ratio of {@link #getWeightedPartitionUsageMaxGauge()} to the mean per-instance general weighted
+   * utilization (peak-to-average) -- an evenness indicator for the all-replica weighted load.
+   * <ul>
+   *   <li>{@code 1.0} - perfectly even (max == mean), the WAGED goal.</li>
+   *   <li>larger values - the busiest instance is progressively further above the cluster average.</li>
+   *   <li>{@code 0.0} - undefined: no instances, or all-zero usage (mean is {@code 0}). Valid ratios
+   *       are {@code >= 1.0}, so {@code 0.0} is an unambiguous sentinel. Unlike a max-to-min ratio,
+   *       this stays defined when a single instance is idle.</li>
+   * </ul>
+   * @return max-to-mean ratio of per-instance general weighted utilization ({@code >= 1.0}, or
+   *         {@code 0.0} when undefined)
+   */
+  double getWeightedPartitionUsageMaxMeanRatioGauge();
+
+  /**
+   * @return highest per-instance top-state-only weighted capacity utilization across live instances,
+   *         or {@code 0.0} when there are no instances / no configured top-state capacity
+   */
+  double getWeightedTopStateUsageMaxGauge();
+
+  /**
+   * @return arithmetic mean across live instances of the per-instance top-state-only weighted
+   *         capacity utilization, or {@code 0.0} when there is no signal
+   */
+  double getWeightedTopStateUsageMeanGauge();
+
+  /**
+   * @return lowest per-instance top-state-only weighted capacity utilization across live instances,
+   *         or {@code 0.0} when there are no instances / no configured top-state capacity
+   */
+  double getWeightedTopStateUsageMinGauge();
+
+  /**
+   * Ratio of {@link #getWeightedTopStateUsageMaxGauge()} to the mean per-instance top-state weighted
+   * utilization (peak-to-average) -- the evenness indicator for top-state weighted load, which
+   * WAGED's {@code TopStateMaxCapacityUsageInstanceConstraint} balances and which is otherwise
+   * unmeasured. {@code 1.0} is perfectly even (max == mean); larger means the busiest instance is
+   * further above the average; {@code 0.0} is undefined (no instances, or all-zero usage). Valid
+   * ratios are {@code >= 1.0}.
+   * @return max-to-mean ratio of per-instance top-state weighted utilization ({@code >= 1.0}, or
+   *         {@code 0.0} when undefined)
+   */
+  double getWeightedTopStateUsageMaxMeanRatioGauge();
+
   /**
    * @return number of all resources in this cluster
    */
@@ -354,4 +460,12 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    * @return number of instances currently in UNKNOWN operation
    */
   long getInstancesInOperationUnknownGauge();
+
+  /**
+   * @return number of instances that carry a valid (unexpired) instance-operation maintenance
+   * marker, live or not. This is the population the INSTANCE_OPERATION_MAINTENANCE_BUDGET (or
+   * _PERCENTAGE) cap applies to, so it reads directly as budget usage. An expired marker stops
+   * counting on the next pipeline run, even though the field is still on the InstanceConfig.
+   */
+  long getInstancesUnderInstanceOperationMaintenanceGauge();
 }

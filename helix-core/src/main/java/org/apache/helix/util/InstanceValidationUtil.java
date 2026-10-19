@@ -93,15 +93,9 @@ public class InstanceValidationUtil {
     if (instanceConfig == null) {
       throw new HelixException("InstanceConfig is NULL");
     }
-    boolean enabledInInstanceConfig = instanceConfig.getInstanceEnabled();
-    // TODO: batch enable/disable in cluster config is breaking backward compatibility with older library
-    // re-enable once batch enable/disable is ready
-    if (true || clusterConfig == null) {
-      return enabledInInstanceConfig;
-    }
-    boolean enabledInClusterConfig =
-        !clusterConfig.getDisabledInstances().containsKey(instanceConfig.getInstanceName());
-    return enabledInClusterConfig && enabledInInstanceConfig;
+    // Cluster-level batch disable has been removed; instance enablement is sourced from
+    // InstanceConfig only. clusterConfig is retained for a backwards-compatible signature.
+    return instanceConfig.getInstanceEnabled();
   }
 
   /**

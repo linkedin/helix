@@ -37,7 +37,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -99,7 +98,6 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
-import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.RebalanceUtil;
@@ -115,9 +113,11 @@ import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -389,20 +389,17 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
       final boolean enabled) {
-    enableInstance(clusterName, instanceName, enabled, null, null);
+    enableInstance(clusterName, instanceName, enabled, null);
   }
 
   @Deprecated
   @Override
   public void enableInstance(final String clusterName, final String instanceName,
-      final boolean enabled, InstanceConstants.InstanceDisabledType disabledType, String reason) {
+      final boolean enabled, final String reason) {
     logger.info("{} instance {} in cluster {}.", enabled ? "Enable" : "Disable", instanceName,
         clusterName);
     BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
-
-    // Eventually we will have all instances' enable/disable information in clusterConfig. Now we
-    // update both instanceConfig and clusterConfig in transition period.
-    enableSingleInstance(clusterName, instanceName, enabled, baseAccessor, disabledType, reason);
+    enableSingleInstance(clusterName, instanceName, enabled, reason, baseAccessor);
   }
 
   @Deprecated
@@ -1373,9 +1370,6 @@ public class ZKHelixAdmin implements HelixAdmin {
         message.setFromState("*");
         message.setToState(HelixDefinedState.ERROR.toString());
       }
-      if (idealState.getResourceGroupName() != null) {
-        message.setResourceGroupName(idealState.getResourceGroupName());
-      }
       if (idealState.getInstanceGroupTag() != null) {
         message.setResourceTag(idealState.getInstanceGroupTag());
       }
@@ -1644,81 +1638,161 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Override
   public boolean addCluster(String clusterName, boolean recreateIfExists) {
-    logger.info("Add cluster {}.", clusterName);
-    String root = "/" + clusterName;
-
-    if (_zkClient.exists(root)) {
-      if (recreateIfExists) {
-        logger.warn("Root directory exists.Cleaning the root directory:" + root);
-        _zkClient.deleteRecursively(root);
-      } else {
-        logger.info("Cluster " + clusterName + " already exists");
-        return true;
-      }
-    }
-    try {
-      _zkClient.createPersistent(root, true);
-    } catch (Exception e) {
-      // some other process might have created the cluster
-      if (_zkClient.exists(root)) {
-        return true;
-      }
-      logger.error("Error creating cluster:" + clusterName, e);
-      return false;
-    }
-    try {
-      createZKPaths(clusterName);
-    } catch (Exception e) {
-      logger.error("Error creating cluster:" + clusterName, e);
-      return false;
-    }
-    logger.info("Created cluster:" + clusterName);
-    return true;
+    return addCluster(clusterName, recreateIfExists, null);
   }
 
-  private void createZKPaths(String clusterName) {
+  @Override
+  public boolean addCluster(String clusterName, boolean recreateIfExists, List<ACL> acl) {
+    logger.info("Add cluster {}.", clusterName);
+    String root = "/" + clusterName;
+    boolean creationStarted = false;
+
+    try {
+      if (clusterRootExists(root)) {
+        if (!recreateIfExists) {
+          logger.info("Cluster " + clusterName + " already exists");
+          return true;
+        }
+        logger.warn("Root directory exists.Cleaning the root directory:" + root);
+        _zkClient.deleteRecursively(root);
+      }
+      creationStarted = true;
+      try {
+        createClusterRoot(root, acl);
+      } catch (ZkNodeExistsException e) {
+        boolean rootExists = clusterRootExists(root);
+        if (!rootExists) {
+          logger.warn("Cluster root {} disappeared after concurrent creation", root);
+        }
+        return rootExists;
+      }
+      createZKPaths(clusterName, acl);
+      logger.info("Created cluster:" + clusterName);
+      return true;
+    } catch (RuntimeException e) {
+      for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+        if (cause instanceof KeeperException.NoAuthException) {
+          throw new HelixException("Not authorized to add cluster " + clusterName
+              + ". Check the client's authenticated identity and ACL permissions for the "
+              + "requested operation.", e);
+        }
+      }
+      if (!creationStarted) {
+        throw e;
+      }
+      logger.error("Error creating cluster {}. Partial metadata may remain; creation is not rolled back.",
+          clusterName, e);
+      return false;
+    }
+  }
+
+  private boolean clusterRootExists(String root) {
+    try {
+      // A successful read enforces READ on both ZK versions; empty roots may return null data.
+      _zkClient.readData(root);
+      return true;
+    } catch (ZkNoNodeException e) {
+      return false;
+    }
+  }
+
+  private void createClusterRoot(String root, List<ACL> acl) {
+    try {
+      // Let the caller handle a concurrently created root without initializing it.
+      createPersistent(root, false, acl);
+    } catch (ZkNoNodeException e) {
+      String parent = root.substring(0, root.lastIndexOf('/'));
+      createPersistent(parent, true, null);
+      createPersistent(root, false, acl);
+    }
+  }
+
+  private void createZKPaths(String clusterName, List<ACL> acl) {
+    String root = "/" + clusterName;
     String path;
 
     // IDEAL STATE
-    _zkClient.createPersistent(PropertyPathBuilder.idealState(clusterName));
+    createPersistent(PropertyPathBuilder.idealState(clusterName), false, acl);
     // CONFIGURATIONS
     path = PropertyPathBuilder.clusterConfig(clusterName);
-    _zkClient.createPersistent(path, true);
-    _zkClient.writeData(path, new ZNRecord(clusterName));
+    String parentPath = path.substring(0, path.lastIndexOf('/'));
+    createPersistentWithParents(parentPath, root, acl);
+    if (acl == null || acl.isEmpty()) {
+      createPersistent(path, false, acl);
+      _zkClient.writeData(path, new ZNRecord(clusterName));
+    } else {
+      createPersistent(path, new ZNRecord(clusterName), acl);
+    }
     path = PropertyPathBuilder.instanceConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     path = PropertyPathBuilder.resourceConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     path = PropertyPathBuilder.customizedStateConfig(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     // PROPERTY STORE
     path = PropertyPathBuilder.propertyStore(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
     // LIVE INSTANCES
-    _zkClient.createPersistent(PropertyPathBuilder.liveInstance(clusterName));
+    createPersistent(PropertyPathBuilder.liveInstance(clusterName), false, acl);
     // MEMBER INSTANCES
-    _zkClient.createPersistent(PropertyPathBuilder.instance(clusterName));
+    createPersistent(PropertyPathBuilder.instance(clusterName), false, acl);
     // External view
-    _zkClient.createPersistent(PropertyPathBuilder.externalView(clusterName));
+    createPersistent(PropertyPathBuilder.externalView(clusterName), false, acl);
     // State model definition
-    _zkClient.createPersistent(PropertyPathBuilder.stateModelDef(clusterName));
+    createPersistent(PropertyPathBuilder.stateModelDef(clusterName), false, acl);
 
     // controller
-    _zkClient.createPersistent(PropertyPathBuilder.controller(clusterName));
+    createPersistent(PropertyPathBuilder.controller(clusterName), false, acl);
     path = PropertyPathBuilder.controllerHistory(clusterName);
     final ZNRecord emptyHistory = new ZNRecord(PropertyType.HISTORY.toString());
     final List<String> emptyList = new ArrayList<String>();
     emptyHistory.setListField(clusterName, emptyList);
-    _zkClient.createPersistent(path, emptyHistory);
+    createPersistent(path, emptyHistory, acl);
 
     path = PropertyPathBuilder.controllerMessage(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
 
     path = PropertyPathBuilder.controllerStatusUpdate(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
 
     path = PropertyPathBuilder.controllerError(clusterName);
-    _zkClient.createPersistent(path);
+    createPersistent(path, false, acl);
+  }
+
+  /**
+   * Creates a persistent node, applying the given ACL when one is supplied. A null or empty ACL
+   * falls back to the ZkClient default, preserving the behavior of clusters created without ACLs.
+   */
+  private void createPersistent(String path, boolean createParents, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      _zkClient.createPersistent(path, createParents);
+    } else {
+      _zkClient.createPersistent(path, createParents, acl);
+    }
+  }
+
+  private void createPersistentWithParents(String path, String root, List<ACL> acl) {
+    try {
+      createPersistent(path, false, acl);
+    } catch (ZkNodeExistsException e) {
+      // Existing paths retain their ACLs.
+    } catch (ZkNoNodeException e) {
+      String parent = path.substring(0, path.lastIndexOf('/'));
+      // NoNode means the parent is absent. Never recreate a removed cluster root.
+      if (parent.equals(root)) {
+        throw e;
+      }
+      createPersistentWithParents(parent, root, acl);
+      createPersistentWithParents(path, root, acl);
+    }
+  }
+
+  private void createPersistent(String path, Object data, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      _zkClient.createPersistent(path, data);
+    } else {
+      _zkClient.createPersistent(path, data, acl);
+    }
   }
 
   @Override
@@ -1773,6 +1847,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void addResource(String clusterName, String resourceName, IdealState idealstate) {
     logger.info("Add resource {} in cluster {}.", resourceName, clusterName);
+    validateNonNegativeNumPartitions(clusterName, idealstate);
     String stateModelRef = idealstate.getStateModelDefRef();
     String stateModelDefPath = PropertyPathBuilder.stateModelDef(clusterName, stateModelRef);
     if (!_zkClient.exists(stateModelDefPath)) {
@@ -1906,10 +1981,29 @@ public class ZKHelixAdmin implements HelixAdmin {
     logger
         .info("Set IdealState for resource {} in cluster {} with new IdealState {}.", resourceName,
             clusterName, idealState == null ? "NULL" : idealState.toString());
+    validateNonNegativeNumPartitions(clusterName, idealState);
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
 
     accessor.setProperty(keyBuilder.idealStates(resourceName), idealState);
+  }
+
+  /**
+   * Validates that the given IdealState has a non-negative NUM_PARTITIONS before it is persisted.
+   * A missing NUM_PARTITIONS field defaults to -1 (see {@link IdealState#getNumPartitions()}). If
+   * such a record reaches ZooKeeper, the rebalancer later cannot place the resource (fails with
+   * NO_CANDIDATE_NODE) and keeps serving a stale assignment. Rejecting the write up front keeps the
+   * invalid record out of ZooKeeper. Mirrors the NUM_PARTITIONS check in
+   * {@link IdealState#isValid()}. A null IdealState is left untouched so existing callers that rely
+   * on that behavior are not affected.
+   */
+  private static void validateNonNegativeNumPartitions(String clusterName, IdealState idealState) {
+    if (idealState != null && idealState.getNumPartitions() < 0) {
+      throw new HelixException(String.format(
+          "Cannot write IdealState for resource %s in cluster %s: NUM_PARTITIONS must be "
+              + "non-negative, but was %d.",
+          idealState.getResourceName(), clusterName, idealState.getNumPartitions()));
+    }
   }
 
   /**
@@ -1929,6 +2023,17 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException(String.format(
           "updateIdealState failed. The IdealState for the given resource does not already exist. Resource name: %s",
           resourceName));
+    }
+    // This is a merge update, so a partial input that does not carry NUM_PARTITIONS must still be
+    // allowed (it simply does not touch partitions). Only reject an explicitly negative value so a
+    // caller cannot overwrite a valid NUM_PARTITIONS with -1.
+    if (idealState.getRecord().getSimpleFields()
+            .containsKey(IdealState.IdealStateProperty.NUM_PARTITIONS.name())
+        && idealState.getNumPartitions() < 0) {
+      throw new HelixException(String.format(
+          "updateIdealState failed for resource %s in cluster %s: NUM_PARTITIONS must be "
+              + "non-negative, but was %d.",
+          resourceName, clusterName, idealState.getNumPartitions()));
     }
     // Update by way of merge
     ZKUtil.upsertWithOptionalCreate(_zkClient, zkPath, idealState.getRecord(), true, true, false);
@@ -2564,26 +2669,6 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   @Override
-  public void setInstanceZoneId(String clusterName, String instanceName, String zoneId) {
-    logger.info("Set instance zoneId {} for instance {} in cluster {}.", zoneId, instanceName,
-        clusterName);
-    if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
-      throw new HelixException("cluster " + clusterName + " is not setup yet");
-    }
-
-    if (!ZKUtil.isInstanceSetup(_zkClient, clusterName, instanceName, InstanceType.PARTICIPANT)) {
-      throw new HelixException(
-          "cluster " + clusterName + " instance " + instanceName + " is not setup yet");
-    }
-    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
-    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
-
-    InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
-    config.setZoneId(zoneId);
-    accessor.setProperty(keyBuilder.instanceConfig(instanceName), config);
-  }
-
-  @Override
   public void enableBatchMessageMode(String clusterName, boolean enabled) {
     logger
         .info("{} batch message mode for cluster {}.", enabled ? "Enable" : "Disable", clusterName);
@@ -2614,8 +2699,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   @Deprecated
   private void enableSingleInstance(final String clusterName, final String instanceName,
-      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
-      InstanceConstants.InstanceDisabledType disabledType, String reason) {
+      final boolean enabled, final String reason, BaseDataAccessor<ZNRecord> baseAccessor) {
     String path = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
 
     if (!baseAccessor.exists(path, 0)) {
@@ -2623,7 +2707,7 @@ public class ZKHelixAdmin implements HelixAdmin {
           + ", instance config does not exist");
     }
 
-    baseAccessor.update(path, new DataUpdater<ZNRecord>() {
+    boolean updated = baseAccessor.update(path, new DataUpdater<ZNRecord>() {
       @Override
       public ZNRecord update(ZNRecord currentData) {
         if (currentData == null) {
@@ -2634,89 +2718,18 @@ public class ZKHelixAdmin implements HelixAdmin {
         InstanceConfig config = new InstanceConfig(currentData);
         config.setInstanceEnabled(enabled);
         if (!enabled) {
-          // new disabled type and reason will overwrite existing ones.
           config.resetInstanceDisabledTypeAndReason();
           if (reason != null) {
             config.setInstanceDisabledReason(reason);
-          }
-          if (disabledType != null) {
-            config.setInstanceDisabledType(disabledType);
           }
         }
         return config.getRecord();
       }
     }, AccessOption.PERSISTENT);
-  }
-
-  // TODO: Add history ZNode for all batched enabling/disabling histories with metadata.
-  @Deprecated
-  private void enableBatchInstances(final String clusterName, final List<String> instances,
-      final boolean enabled, BaseDataAccessor<ZNRecord> baseAccessor,
-      InstanceConstants.InstanceDisabledType disabledType, String reason) {
-
-    // TODO: batch enable/disable is breaking backward compatibility on instance enable with older library
-    // re-enable once batch enable/disable is ready
-    if (true) {
-      throw new HelixException("enableBatchInstances is not supported.");
+    if (!updated) {
+      throw new HelixException("Failed to update enablement for instance " + instanceName
+          + " in cluster " + clusterName);
     }
-    String path = PropertyPathBuilder.clusterConfig(clusterName);
-
-    if (!baseAccessor.exists(path, 0)) {
-      throw new HelixException("Cluster " + clusterName + ": cluster config does not exist");
-    }
-
-    baseAccessor.update(path, new DataUpdater<ZNRecord>() {
-      @Override
-      public ZNRecord update(ZNRecord currentData) {
-        if (currentData == null) {
-          throw new HelixException("Cluster: " + clusterName + ": cluster config is null");
-        }
-
-        ClusterConfig clusterConfig = new ClusterConfig(currentData);
-        Map<String, String> disabledInstances = new TreeMap<>(clusterConfig.getDisabledInstances());
-        Map<String, String> disabledInstancesWithInfo = new TreeMap<>(clusterConfig.getDisabledInstancesWithInfo());
-        if (enabled) {
-          disabledInstances.keySet().removeAll(instances);
-          disabledInstancesWithInfo.keySet().removeAll(instances);
-        } else {
-          for (String disabledInstance : instances) {
-            // We allow user to override disabledType and reason for an already disabled instance.
-            // TODO: we are updating both DISABLED_INSTANCES and DISABLED_INSTANCES_W_INFO for
-            // backward compatible. Deprecate DISABLED_INSTANCES in the future.
-            // TODO: update the history ZNode
-            String timeStamp = String.valueOf(System.currentTimeMillis());
-            disabledInstances.put(disabledInstance, timeStamp);
-            disabledInstancesWithInfo
-                .put(disabledInstance, assembleInstanceBatchedDisabledInfo(disabledType, reason, timeStamp));
-          }
-        }
-        clusterConfig.setDisabledInstances(disabledInstances);
-        clusterConfig.setDisabledInstancesWithInfo(disabledInstancesWithInfo);
-
-        return clusterConfig.getRecord();
-      }
-    }, AccessOption.PERSISTENT);
-  }
-
-  public static String assembleInstanceBatchedDisabledInfo(
-      InstanceConstants.InstanceDisabledType disabledType, String reason, String timeStamp) {
-    Map<String, String> disableInfo = new TreeMap<>();
-    disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_ENABLED_DISABLE_TIMESTAMP.toString(),
-        timeStamp);
-    if (disabledType != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_TYPE.toString(),
-          disabledType.toString());
-    }
-    if (reason != null) {
-      disableInfo.put(ClusterConfig.ClusterConfigProperty.HELIX_DISABLED_REASON.toString(), reason);
-    }
-    return ConfigStringUtil.concatenateMapping(disableInfo);
-  }
-
-  @Override
-  public Map<String, String> getBatchDisabledInstances(String clusterName) {
-    ConfigAccessor accessor = new ConfigAccessor(_zkClient);
-    return accessor.getClusterConfig(clusterName).getDisabledInstances();
   }
 
   @Override
@@ -2980,13 +2993,9 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   private Set<String> findTimeoutOfflineInstances(String clusterName, long offlineDuration) {
-    // in case there is no customized timeout value, use the one defined in cluster config
+    // No customized timeout value provided; nothing to purge by default.
     if (offlineDuration == ClusterConfig.OFFLINE_DURATION_FOR_PURGE_NOT_SET) {
-      offlineDuration =
-          _configAccessor.getClusterConfig(clusterName).getOfflineDurationForPurge();
-      if (offlineDuration == ClusterConfig.OFFLINE_DURATION_FOR_PURGE_NOT_SET) {
-        return Collections.emptySet();
-      }
+      return Collections.emptySet();
     }
 
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);

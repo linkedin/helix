@@ -171,9 +171,8 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
         || liveEnabledAssignableNodeList.size() != activeNodes.size()) {
       List<String> activeNodeList = new ArrayList<>(activeNodes);
       Collections.sort(activeNodeList);
-      int minActiveReplicas = DelayedRebalanceUtil.getMinActiveReplica(
-          ResourceConfig.mergeIdealStateWithResourceConfig(resourceConfig, currentIdealState),
-          currentIdealState, replicaCount);
+      int minActiveReplicas =
+          DelayedRebalanceUtil.getMinActiveReplica(currentIdealState, replicaCount);
 
       ZNRecord newActiveMapping =
           _rebalanceStrategy.computePartitionAssignment(allNodeList, activeNodeList, currentMapping,
@@ -261,6 +260,10 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
     StateModelDefinition stateModelDef = cache.getStateModelDef(stateModelDefName);
     ResourceAssignment partitionMapping = new ResourceAssignment(resource.getResourceName());
 
+    // numExtraReplicas depends only on the cluster config, so compute it once per resource instead
+    // of re-parsing the state-transition throttle configs for every partition.
+    int numExtraReplicas = getNumExtraReplicas(clusterConfig);
+
     for (Partition partition : resource.getPartitions()) {
       Set<String> disabledInstancesForPartition =
           cache.getDisabledInstancesForPartition(resource.getResourceName(), partition.toString());
@@ -268,10 +271,11 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       Map<String, String> bestStateForPartition =
           // We use cache.getLiveInstances().keySet() to make sure we gracefully handle n -> n + 1 replicas if possible
           // when the one of the current nodes holding the replica is no longer considered assignable. (ex: EVACUATE)
-          computeBestPossibleStateForPartition(cache.getLiveInstances().keySet(),
+          computeBestPossibleStateForPartitionInternal(cache.getLiveInstances().keySet(),
               stateModelDef, preferenceList,
               currentStateOutput, disabledInstancesForPartition, idealState, clusterConfig,
-              partition, cache.getAbnormalStateResolver(stateModelDefName), cache);
+              partition, cache.getAbnormalStateResolver(stateModelDefName), cache,
+              numExtraReplicas);
 
       partitionMapping.addReplicaMap(partition, bestStateForPartition);
     }
@@ -303,6 +307,17 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       CurrentStateOutput currentStateOutput, Set<String> disabledInstancesForPartition,
       IdealState idealState, ClusterConfig clusterConfig, Partition partition,
       MonitoredAbnormalResolver monitoredResolver, ResourceControllerDataProvider cache) {
+    return computeBestPossibleStateForPartitionInternal(liveInstances, stateModelDef, preferenceList,
+        currentStateOutput, disabledInstancesForPartition, idealState, clusterConfig, partition,
+        monitoredResolver, cache, getNumExtraReplicas(clusterConfig));
+  }
+
+  private Map<String, String> computeBestPossibleStateForPartitionInternal(Set<String> liveInstances,
+      StateModelDefinition stateModelDef, List<String> preferenceList,
+      CurrentStateOutput currentStateOutput, Set<String> disabledInstancesForPartition,
+      IdealState idealState, ClusterConfig clusterConfig, Partition partition,
+      MonitoredAbnormalResolver monitoredResolver, ResourceControllerDataProvider cache,
+      int numExtraReplicas) {
 
     Optional<Map<String, String>> optionalOverwrittenStates =
         computeStatesOverwriteForPartition(stateModelDef, preferenceList, currentStateOutput,
@@ -344,7 +359,6 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
       preferenceList = Collections.emptyList();
     }
     boolean isPreferenceListEmpty = preferenceList.isEmpty();
-    int numExtraReplicas = getNumExtraReplicas(clusterConfig);
 
     // TODO : Keep the behavior consistent with existing state count, change back to read from idealstate
     // replicas
@@ -383,6 +397,8 @@ public class DelayedAutoRebalancer extends AbstractRebalancer<ResourceController
                 + "it from combinedPreferenceList.", instance, idealState.getResourceName(),
                 partition.getPartitionName());
             combinedPreferenceList.remove(instance);
+            // Record the capacity rejection for metrics
+            cache.recordCapacityRejection(idealState.getResourceName(), instance);
           }
         }
       }

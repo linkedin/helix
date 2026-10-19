@@ -22,16 +22,19 @@ package org.apache.helix.rest.server;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.ConfigAccessor;
@@ -323,23 +326,27 @@ public class TestInstancesAccessor extends AbstractTestClass {
         STOPPABLE_CLUSTER2).post(this, Entity.entity(content, MediaType.APPLICATION_JSON_TYPE));
     JsonNode jsonNode = OBJECT_MAPPER.readTree(response.readEntity(String.class));
 
-    Set<String> stoppableSet = getStringSet(jsonNode,
-        InstancesAccessor.InstancesProperties.instance_stoppable_parallel.name());
-    Assert.assertTrue(stoppableSet.contains("instance12")
-        && stoppableSet.contains("instance11") && stoppableSet.contains("instance10"));
+    try {
+      Set<String> stoppableSet = getStringSet(jsonNode,
+          InstancesAccessor.InstancesProperties.instance_stoppable_parallel.name());
+      Assert.assertTrue(stoppableSet.contains("instance12")
+          && stoppableSet.contains("instance11") && stoppableSet.contains("instance10"));
+      // instance0 and instance1 are evacuating, but they stay routable and keep serving their
+      // replicas until a replacement is bootstrapped, so their siblings are still above min active
+      // replicas and remain stoppable.
+      Assert.assertTrue(stoppableSet.contains("instance13"));
+      Assert.assertTrue(stoppableSet.contains("instance14"));
 
-    JsonNode nonStoppableInstances = jsonNode.get(
-        InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
-        ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
-    instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance0, instanceConfig);
-    instanceConfig1.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
+      JsonNode nonStoppableInstances = jsonNode.get(
+          InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
+      Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
+          ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
+    } finally {
+      instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+      _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance0, instanceConfig);
+      instanceConfig1.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+      _configAccessor.setInstanceConfig(STOPPABLE_CLUSTER2, instance1, instanceConfig1);
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -583,55 +590,6 @@ public class TestInstancesAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  @Test(enabled = false)
-  public void testUpdateInstances() throws IOException {
-    // TODO: Reenable the test after storage node fix the problem
-    // Batch disable instances
-
-    List<String> instancesToDisable = Arrays.asList(new String[]{
-        CLUSTER_NAME + "localhost_12918",
-        CLUSTER_NAME + "localhost_12919", CLUSTER_NAME + "localhost_12920"});
-    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(ImmutableMap
-            .of(InstancesAccessor.InstancesProperties.instances.name(), instancesToDisable)),
-        MediaType.APPLICATION_JSON_TYPE);
-    post("clusters/" + CLUSTER_NAME + "/instances", ImmutableMap
-        .of("command", "disable", "instanceDisabledType", "USER_OPERATION",
-            "instanceDisabledReason", "reason_1"), entity, Response.Status.OK.getStatusCode());
-    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertEquals(clusterConfig.getDisabledInstances().keySet(),
-        new HashSet<>(instancesToDisable));
-    Assert.assertEquals(clusterConfig.getDisabledInstancesWithInfo().keySet(),
-        new HashSet<>(instancesToDisable));
-    Assert
-        .assertEquals(clusterConfig.getInstanceHelixDisabledType(CLUSTER_NAME + "localhost_12918"),
-            "USER_OPERATION");
-    Assert.assertEquals(
-        clusterConfig.getInstanceHelixDisabledReason(CLUSTER_NAME + "localhost_12918"), "reason_1");
-
-    instancesToDisable = Arrays
-        .asList(new String[]{CLUSTER_NAME + "localhost_12918", CLUSTER_NAME + "localhost_12920"});
-    entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(ImmutableMap
-            .of(InstancesAccessor.InstancesProperties.instances.name(), instancesToDisable)),
-        MediaType.APPLICATION_JSON_TYPE);
-    post("clusters/" + CLUSTER_NAME + "/instances", ImmutableMap
-        .of("command", "enable", "instanceDisabledType", "USER_OPERATION", "instanceDisabledReason",
-            "reason_1"), entity, Response.Status.OK.getStatusCode());
-    clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    Assert.assertEquals(clusterConfig.getDisabledInstances().keySet(),
-        new HashSet<>(Arrays.asList(CLUSTER_NAME + "localhost_12919")));
-    Assert.assertEquals(clusterConfig.getDisabledInstancesWithInfo().keySet(),
-        new HashSet<>(Arrays.asList(CLUSTER_NAME + "localhost_12919")));
-    Assert.assertEquals(Long.parseLong(
-        clusterConfig.getInstanceHelixDisabledTimeStamp(CLUSTER_NAME + "localhost_12919")),
-        Long.parseLong(clusterConfig.getDisabledInstances().get(CLUSTER_NAME + "localhost_12919")));
-    Assert
-        .assertEquals(clusterConfig.getInstanceHelixDisabledType(CLUSTER_NAME + "localhost_12918"),
-            "INSTANCE_NOT_DISABLED");
-    Assert
-        .assertNull(clusterConfig.getInstanceHelixDisabledReason(CLUSTER_NAME + "localhost_12918"));
-    System.out.println("End test :" + TestHelper.getTestMethodName());
-  }
-
   @Test(dependsOnMethods = "testGetAllInstances")
   public void testValidateWeightForAllInstances() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -783,10 +741,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode nonStoppableInstances = jsonNode.get(
         InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
+    // instance0 and instance1 are evacuating but still host their replicas, so they keep their
+    // siblings above min active replicas.
+    Assert.assertTrue(stoppableSet.contains("instance13"));
+    Assert.assertTrue(stoppableSet.contains("instance14"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
         ImmutableSet.of("HELIX:INSTANCE_NOT_EXIST"));
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
@@ -840,8 +798,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode nonStoppableInstances = jsonNode.get(
         InstancesAccessor.InstancesProperties.instance_not_stoppable_with_reasons.name());
-    Assert.assertEquals(getStringSet(nonStoppableInstances, "instance13"),
-        ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
+    // instance0 is evacuating but still hosts its replicas, so it keeps its siblings above min
+    // active replicas. instance1 is SWAP_IN, which is not serving traffic and stays presumed
+    // stopped.
+    Assert.assertTrue(stoppableSet.contains("instance13"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "instance14"),
         ImmutableSet.of("HELIX:MIN_ACTIVE_REPLICA_CHECK_FAILED"));
     Assert.assertEquals(getStringSet(nonStoppableInstances, "invalidInstance"),
@@ -969,6 +929,205 @@ public class TestInstancesAccessor extends AbstractTestClass {
         "Expected detailed reason to contain 'active replicas' but got: " + reason);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstancesUnableToAcceptOnlineReplicas() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Dedicated cluster so the population asserted here is not perturbed by other tests.
+    String clusterName = "TestOfflineBudgetCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    List<String> instances =
+        Arrays.asList("obInstance0", "obInstance1", "obInstance2", "obInstance3", "obInstance4");
+    for (String instance : instances) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+
+    // Baseline: no participants are running, so all 5 instances are offline and unmarked and all
+    // 5 count.
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName), sorted(instances));
+
+    // Liveness alone is not enough to be excluded; the instance must be enabled AND live. Start
+    // participants for obInstance3 and obInstance4, then mark obInstance4 DISABLE. obInstance3
+    // (ENABLE + live) must drop out of the population, obInstance4 (live but DISABLE) must stay.
+    // These two assertions are what pin the enabled-and-live rule: without a live participant the
+    // rule is inert and the whole test passes even if liveness is never read.
+    startInstances(clusterName, new TreeSet<>(Arrays.asList("obInstance3", "obInstance4")), 2);
+    setInstanceOperation(clusterName, "obInstance4", InstanceConstants.InstanceOperation.DISABLE);
+
+    List<String> expectedAfterStart =
+        sorted(Arrays.asList("obInstance0", "obInstance1", "obInstance2", "obInstance4"));
+    Assert.assertTrue(
+        TestHelper.verify(() -> fetchOfflineBudgetPopulation(clusterName).equals(
+            expectedAfterStart), TestHelper.WAIT_DURATION),
+        "An enabled and live instance must be excluded, and a live DISABLE instance must still "
+            + "count; got " + fetchOfflineBudgetPopulation(clusterName));
+
+    // A valid marker exempts an instance; an expired marker does not. A SWAP_IN instance is
+    // never counted regardless of marker state.
+    long nowMs = System.currentTimeMillis();
+    setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance0", nowMs + 600_000L);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "obInstance1", nowMs - 1L);
+    setInstanceOperation(clusterName, "obInstance2", InstanceConstants.InstanceOperation.SWAP_IN);
+
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        sorted(Arrays.asList("obInstance1", "obInstance4")),
+        "Valid marker and SWAP_IN must be excluded; the expired marker must still count");
+
+    // The population is a property of the instances alone. Changing the budget thresholds the
+    // controller compares it against must not change who is in it.
+    ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setMaxOfflineInstancesAllowed(1);
+    clusterConfig.setNumOfflineInstancesForAutoExit(0);
+    _configAccessor.setClusterConfig(clusterName, clusterConfig);
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        sorted(Arrays.asList("obInstance1", "obInstance4")),
+        "Offline-budget thresholds must not affect which instances are counted");
+
+    // An unknown cluster must 404 rather than answer with an empty population, which would read
+    // as "the whole offline budget is free". This deliberately differs from getAllInstances and
+    // validateWeight on this route, which both answer 200 with an empty body.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestOfflineBudgetClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstancesUnderInstanceOperationMaintenance() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Dedicated cluster so the listing asserted here is not perturbed by other tests.
+    String clusterName = "TestMarkerListingCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    List<String> instances =
+        Arrays.asList("mlInstance0", "mlInstance1", "mlInstance2", "mlInstance3", "mlInstance4");
+    for (String instance : instances) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+
+    // No instance holds a marker yet, so the listing is present and empty.
+    JsonNode emptyListing = fetchInstancesUnderInstanceOperationMaintenance(clusterName);
+    Assert.assertTrue(emptyListing.isObject() && emptyListing.size() == 0,
+        "Expected an empty listing, got " + emptyListing);
+
+    // A marker is listed whatever the instance's liveness or operation. An orchestrator usually
+    // marks a host while it is still live and ENABLE, so a listing that depended on either would
+    // miss exactly the hosts it needs to see. mlInstance1 and mlInstance2 are live, the rest are
+    // offline, and mlInstance2 gets its own expiry so each entry must report its own marker.
+    startInstances(clusterName, new TreeSet<>(Arrays.asList("mlInstance1", "mlInstance2")), 2);
+    long expiresAtMillis = System.currentTimeMillis() + 600_000L;
+    setInstanceOperation(clusterName, "mlInstance0", InstanceConstants.InstanceOperation.DISABLE);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance0", expiresAtMillis);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance1", expiresAtMillis);
+    setInstanceOperation(clusterName, "mlInstance2", InstanceConstants.InstanceOperation.EVACUATE);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance2", expiresAtMillis + 1L);
+    // An expired marker exempts nothing, so it is not listed. mlInstance4 holds no marker.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance3",
+        System.currentTimeMillis() - 1L);
+
+    ObjectNode expected = OBJECT_MAPPER.createObjectNode();
+    expected.set("mlInstance0",
+        markerEntry(false, InstanceConstants.InstanceOperation.DISABLE, expiresAtMillis));
+    expected.set("mlInstance1",
+        markerEntry(true, InstanceConstants.InstanceOperation.ENABLE, expiresAtMillis));
+    expected.set("mlInstance2",
+        markerEntry(true, InstanceConstants.InstanceOperation.EVACUATE, expiresAtMillis + 1L));
+    Assert.assertTrue(
+        TestHelper.verify(
+            () -> expected.equals(fetchInstancesUnderInstanceOperationMaintenance(clusterName)),
+            TestHelper.WAIT_DURATION),
+        "Unexpected listing: " + fetchInstancesUnderInstanceOperationMaintenance(clusterName));
+
+    // JsonNode equality ignores key order, so pin the sorted order separately.
+    List<String> listed = new ArrayList<>();
+    fetchInstancesUnderInstanceOperationMaintenance(clusterName).fieldNames()
+        .forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("mlInstance0", "mlInstance1", "mlInstance2"));
+
+    // No listed instance counts against the offline budget, and the expired marker (mlInstance3)
+    // counts again like an unmarked one.
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        Arrays.asList("mlInstance3", "mlInstance4"),
+        "Listed instances must be exempt and the expired marker must count");
+
+    // Clearing a marker drops the instance from the listing.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance2",
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    expected.remove("mlInstance2");
+    Assert.assertEquals(fetchInstancesUnderInstanceOperationMaintenance(clusterName), expected);
+
+    // An unknown cluster must 404, as getInstancesUnableToAcceptOnlineReplicas does, rather than
+    // answer with an empty listing.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=getInstancesUnderInstanceOperationMaintenance")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestMarkerListingClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private JsonNode fetchInstancesUnderInstanceOperationMaintenance(String clusterName)
+      throws IOException {
+    JsonNode node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnderInstanceOperationMaintenance")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    return node.get(InstancesAccessor.InstancesProperties
+        .instances_under_instance_operation_maintenance.name());
+  }
+
+  private static ObjectNode markerEntry(boolean live,
+      InstanceConstants.InstanceOperation instanceOperation, long expiresAtMillis) {
+    ObjectNode entry = OBJECT_MAPPER.createObjectNode();
+    entry.put("live", live);
+    entry.put("instanceOperation", instanceOperation.name());
+    entry.put("expiresAtMillis", expiresAtMillis);
+    return entry;
+  }
+
+  private List<String> fetchOfflineBudgetPopulation(String clusterName) throws IOException {
+    JsonNode node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnableToAcceptOnlineReplicas")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    return getSortedStringList(node,
+        InstancesAccessor.InstancesProperties.instances_unable_to_accept_online_replicas.name());
+  }
+
+  private void setInstanceOperation(String clusterName, String instanceName,
+      InstanceConstants.InstanceOperation operation) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperation(
+        new InstanceConfig.InstanceOperation.Builder().setOperation(operation).build());
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+  }
+
+  private void setInstanceOperationMaintenanceUntilMs(String clusterName, String instanceName,
+      long untilMs) {
+    InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(clusterName, instanceName);
+    instanceConfig.setInstanceOperationMaintenanceUntilMs(untilMs);
+    _configAccessor.setInstanceConfig(clusterName, instanceName, instanceConfig);
+  }
+
+  private static List<String> sorted(Collection<String> names) {
+    List<String> result = new ArrayList<>(names);
+    Collections.sort(result);
+    return result;
+  }
+
+  /**
+   * Reads a JSON array field as a sorted list. Sorting both sides keeps the comparison
+   * order-insensitive while still producing a readable diff on failure (TestNG compares
+   * collections element-by-element in iteration order).
+   */
+  private List<String> getSortedStringList(JsonNode jsonNode, String key) {
+    return sorted(getStringSet(jsonNode, key));
   }
 
   private Set<String> getStringSet(JsonNode jsonNode, String key) {

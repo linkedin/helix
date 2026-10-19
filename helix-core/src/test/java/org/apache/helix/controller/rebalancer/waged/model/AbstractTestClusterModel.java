@@ -35,6 +35,7 @@ import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolv
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.ResourceConfig;
@@ -86,7 +87,7 @@ public abstract class AbstractTestClusterModel {
     testInstanceConfig.setInstanceCapacityMap(_capacityDataMap);
     testInstanceConfig.addTag(_testInstanceTags.get(0));
     testInstanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    testInstanceConfig.setZoneId(_testFaultZoneId);
+    testInstanceConfig.setDomain("zone=" + _testFaultZoneId + ",instance=" + instanceId);
     return testInstanceConfig;
   }
 
@@ -110,11 +111,12 @@ public abstract class AbstractTestClusterModel {
     // 2. Set up the basic cluster configuration.
     ClusterConfig testClusterConfig = new ClusterConfig("testClusterConfigId");
     testClusterConfig.setMaxPartitionsPerInstance(5);
-    testClusterConfig.setDisabledInstances(Collections.emptyMap());
     testClusterConfig.setInstanceCapacityKeys(new ArrayList<>(_capacityDataMap.keySet()));
     testClusterConfig.setDefaultPartitionWeightMap(
         _capacityDataMap.keySet().stream().collect(Collectors.toMap(key -> key, key -> 0)));
     testClusterConfig.setTopologyAwareEnabled(true);
+    testClusterConfig.setTopology("/zone/instance");
+    testClusterConfig.setFaultZoneType("zone");
     when(testCache.getClusterConfig()).thenReturn(testClusterConfig);
     when(testCache.getAbnormalStateResolver(any()))
         .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
@@ -255,7 +257,8 @@ public abstract class AbstractTestClusterModel {
       // Construct one AssignableReplica for each partition in the current state.
       cs.getPartitionStateMap().entrySet().stream().forEach(entry -> assignmentSet
               .add(new AssignableReplica(dataProvider.getClusterConfig(), resourceConfig,
-                  entry.getKey(), entry.getValue(), entry.getValue().equals("MASTER") ? 1 : 2)));
+                  new IdealState(cs.getResourceName()), entry.getKey(), entry.getValue(),
+                  entry.getValue().equals("MASTER") ? 1 : 2)));
     }
     return assignmentSet;
   }

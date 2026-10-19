@@ -357,6 +357,24 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     return instances;
   }
 
+  protected void deleteTestCluster(String cluster) {
+    _clusterControllerManagers.removeIf(controller -> {
+      if (cluster.equals(controller.getClusterName())) {
+        controller.syncStop();
+        return true;
+      }
+      return false;
+    });
+    _mockParticipantManagers.removeIf(participant -> {
+      if (cluster.equals(participant.getClusterName())) {
+        participant.syncStop();
+        return true;
+      }
+      return false;
+    });
+    _gSetupTool.deleteCluster(cluster);
+  }
+
   protected void addParticipant(String cluster, String instanceName) {
     // Create instance
     _gSetupTool.addInstanceToCluster(cluster, instanceName);
@@ -418,7 +436,7 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
     for (int i = 0; i < numResources; i++) {
       String resource = cluster + "_db_" + i;
       org.apache.helix.model.ResourceConfig resourceConfig =
-          new org.apache.helix.model.ResourceConfig.Builder(resource).setNumReplica(NUM_REPLICA)
+          new org.apache.helix.model.ResourceConfig.Builder(resource)
               .build();
       _configAccessor.setResourceConfig(cluster, resource, resourceConfig);
       resources.add(resource);
@@ -593,6 +611,19 @@ public class AbstractTestClass extends JerseyTestNg.ContainerPerClassTest {
   protected void delete(String uri, int expectedReturnStatus) {
     final Response response = target(uri).request().delete();
     Assert.assertEquals(response.getStatus(), expectedReturnStatus);
+  }
+
+  protected Response delete(String uri, Map<String, String> queryParams,
+      int expectedReturnStatus) {
+    WebTarget webTarget = target(uri);
+    if (queryParams != null) {
+      for (Map.Entry<String, String> entry : queryParams.entrySet()) {
+        webTarget = webTarget.queryParam(entry.getKey(), entry.getValue());
+      }
+    }
+    Response response = webTarget.request().delete();
+    Assert.assertEquals(response.getStatus(), expectedReturnStatus);
+    return response;
   }
 
   protected TaskDriver getTaskDriver(String clusterName) {

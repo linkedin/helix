@@ -27,13 +27,13 @@ import java.util.Map;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixException;
-import org.apache.helix.controller.rebalancer.constraint.MockAbnormalStateResolver;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS;
 import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT;
+import static org.apache.helix.model.ClusterConfig.GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS;
 
 public class TestClusterConfig {
 
@@ -46,6 +46,25 @@ public class TestClusterConfig {
         .setListField(ClusterConfig.ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name(), keys);
 
     Assert.assertEquals(testConfig.getInstanceCapacityKeys(), keys);
+  }
+
+  @Test
+  public void testControllerPipelineStallThresholdMsDefaultAndRoundTrip() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    // Defaults to 5 minutes when unset (set above the worst-case healthy pipeline run).
+    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 300000L);
+    testConfig.setControllerPipelineStallThresholdMs(30000L);
+    Assert.assertEquals(testConfig.getControllerPipelineStallThresholdMs(), 30000L);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testControllerPipelineStallThresholdMsRejectsZero() {
+    new ClusterConfig("testId").setControllerPipelineStallThresholdMs(0L);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testControllerPipelineStallThresholdMsRejectsNegative() {
+    new ClusterConfig("testId").setControllerPipelineStallThresholdMs(-1L);
   }
 
   @Test
@@ -186,6 +205,74 @@ public class TestClusterConfig {
   }
 
   @Test
+  public void testTopStateEvennessPreference() {
+    Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preference = new HashMap<>();
+    preference.put(EVENNESS, 1);
+    preference.put(LESS_MOVEMENT, 2);
+    preference.put(TOP_STATE_EVENNESS, 4);
+
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    testConfig.setGlobalRebalancePreference(preference);
+    Assert.assertEquals(testConfig.getRecord()
+        .getMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name())
+        .get(TOP_STATE_EVENNESS.name()), "4");
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(), preference);
+
+    // Unlike EVENNESS and LESS_MOVEMENT, the key does not need a pair.
+    testConfig.setGlobalRebalancePreference(Collections.singletonMap(TOP_STATE_EVENNESS, 4));
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        Collections.singletonMap(TOP_STATE_EVENNESS, 4));
+
+    // The default keeps the configured weight of the top state evenness constraint.
+    Assert.assertEquals(
+        (int) ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE.get(TOP_STATE_EVENNESS), 1);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testSetTopStateEvennessPreferenceOutOfRange() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    testConfig.setGlobalRebalancePreference(Collections.singletonMap(TOP_STATE_EVENNESS, 1001));
+  }
+
+  @Test
+  public void testGetRebalancePreferenceClampsOutOfRangeValues() {
+    // A REST update of the config writes the record without the checks of the setter.
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "-1");
+    preference.put(LESS_MOVEMENT.name(), "2000");
+    preference.put(TOP_STATE_EVENNESS.name(), "-5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 0, LESS_MOVEMENT, 1000, TOP_STATE_EVENNESS, 0));
+  }
+
+  @Test
+  public void testGetRebalancePreferenceIgnoresValuesThatAreNotIntegers() {
+    ClusterConfig testConfig = new ClusterConfig("testId");
+    Map<String, String> preference = new HashMap<>();
+    preference.put(EVENNESS.name(), "1");
+    preference.put(LESS_MOVEMENT.name(), " 2 ");
+    preference.put(TOP_STATE_EVENNESS.name(), "2.5");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+
+    // The key that does not parse is left out, so that it falls back to its default.
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(EVENNESS, 1, LESS_MOVEMENT, 2));
+
+    // As when one of them is missing, EVENNESS and LESS_MOVEMENT fall back together.
+    preference.put(EVENNESS.name(), "high");
+    preference.put(TOP_STATE_EVENNESS.name(), "4");
+    testConfig.getRecord()
+        .setMapField(ClusterConfig.ClusterConfigProperty.REBALANCE_PREFERENCE.name(), preference);
+    Assert.assertEquals(testConfig.getGlobalRebalancePreference(),
+        ImmutableMap.of(TOP_STATE_EVENNESS, 4));
+  }
+
+  @Test
   public void testGetInstanceCapacityMap() {
     Map<String, Integer> capacityDataMap = ImmutableMap.of("item1", 1, "item2", 2, "item3", 3);
 
@@ -313,92 +400,6 @@ public class TestClusterConfig {
   }
 
   @Test
-  public void testGetOfflineNodeTimeOutForMaintenanceMode() {
-    ClusterConfig testConfig = new ClusterConfig("testId");
-    Assert.assertEquals(testConfig.getOfflineNodeTimeOutForMaintenanceMode(), -1);
-
-    testConfig.getRecord()
-        .setLongField(ClusterConfig.ClusterConfigProperty.OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE
-                .name(),
-            10000L);
-    Assert.assertEquals(testConfig.getOfflineNodeTimeOutForMaintenanceMode(), 10000L);
-  }
-
-  @Test
-  public void testSetOfflineNodeTimeOutForMaintenanceMode() {
-    ClusterConfig testConfig = new ClusterConfig("testId");
-    testConfig.setOfflineNodeTimeOutForMaintenanceMode(10000L);
-    Assert.assertEquals(testConfig.getRecord()
-        .getLongField(ClusterConfig.ClusterConfigProperty.OFFLINE_NODE_TIME_OUT_FOR_MAINTENANCE_MODE
-                .name(),
-            -1), 10000L);
-  }
-
-
-  @Test
-  public void testGetOfflineNodeTimeOutForPurge() {
-    ClusterConfig testConfig = new ClusterConfig("testId");
-    Assert.assertEquals(testConfig.getOfflineDurationForPurge(), -1);
-
-    testConfig.getRecord()
-        .setLongField(ClusterConfig.ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS
-                .name(),
-            10000L);
-    Assert.assertEquals(testConfig.getOfflineDurationForPurge(), 10000L);
-  }
-
-  @Test
-  public void testSetOfflineNodeTimeOutForPurge() {
-    ClusterConfig testConfig = new ClusterConfig("testId");
-    testConfig.setOfflineDurationForPurge(10000L);
-    Assert.assertEquals(testConfig.getRecord()
-        .getLongField(ClusterConfig.ClusterConfigProperty.OFFLINE_DURATION_FOR_PURGE_MS
-                .name(),
-            -1), 10000L);
-  }
-
-  @Test
-  public void testAbnormalStatesResolverConfig() {
-    ClusterConfig testConfig = new ClusterConfig("testConfig");
-    // Default value is empty
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), Collections.EMPTY_MAP);
-    // Test set
-    Map<String, String> resolverMap =
-        ImmutableMap.of(MasterSlaveSMD.name, MockAbnormalStateResolver.class.getName());
-    testConfig.setAbnormalStateResolverMap(resolverMap);
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), resolverMap);
-    // Test empty the map
-    testConfig.setAbnormalStateResolverMap(Collections.emptyMap());
-    Assert.assertEquals(testConfig.getAbnormalStateResolverMap(), Collections.EMPTY_MAP);
-
-    testConfig.setAbnormalStateResolverMap(null);
-    Assert.assertTrue(testConfig.getRecord()
-        .getMapField(ClusterConfig.ClusterConfigProperty.ABNORMAL_STATES_RESOLVER_MAP.name())
-        == null);
-  }
-
-  @Test
-  public void testSetInvalidAbnormalStatesResolverConfig() {
-    ClusterConfig testConfig = new ClusterConfig("testConfig");
-
-    Map<String, String> resolverMap = new HashMap<>();
-    resolverMap.put(null, MockAbnormalStateResolver.class.getName());
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put("", MockAbnormalStateResolver.class.getName());
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put(MasterSlaveSMD.name, null);
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-
-    resolverMap.clear();
-    resolverMap.put(MasterSlaveSMD.name, "");
-    trySetInvalidAbnormalStatesResolverMap(testConfig, resolverMap);
-  }
-
-  @Test
   public void testGetLastOnDemandRebalanceTimestamp() {
     ClusterConfig testConfig = new ClusterConfig("testConfig");
     Assert.assertEquals(testConfig.getLastOnDemandRebalanceTimestamp(), -1L);
@@ -417,17 +418,6 @@ public class TestClusterConfig {
     Assert.assertEquals(testConfig.getRecord()
         .getLongField(ClusterConfig.ClusterConfigProperty.LAST_ON_DEMAND_REBALANCE_TIMESTAMP.name(),
             -1), 10000L);
-  }
-
-
-  private void trySetInvalidAbnormalStatesResolverMap(ClusterConfig testConfig,
-      Map<String, String> resolverMap) {
-    try {
-      testConfig.setAbnormalStateResolverMap(resolverMap);
-      Assert.fail("Invalid resolver setup shall fail.");
-    } catch (IllegalArgumentException ex) {
-      // expected
-    }
   }
 
   @Test
@@ -548,5 +538,56 @@ public class TestClusterConfig {
 
     Assert.assertEquals(clusterConfig.getInstanceOperationMaintenanceBudget(), -1);
     Assert.assertEquals(clusterConfig.getDefaultInstanceOperationMaintenanceDurationMs(), -1L);
+  }
+
+  @Test
+  public void testTopStateScoringKeys() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertNull(clusterConfig.getTopStateScoringKeys());
+
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("CU"));
+    Assert.assertEquals(clusterConfig.getTopStateScoringKeys(), Collections.singletonList("CU"));
+    // The top state scoring keys are separate from the preferred scoring keys.
+    Assert.assertNull(clusterConfig.getPreferredScoringKeys());
+
+    clusterConfig.setTopStateScoringKeys(null);
+    Assert.assertNull(clusterConfig.getTopStateScoringKeys());
+    Assert.assertFalse(clusterConfig.getRecord().getListFields()
+        .containsKey(ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name()));
+  }
+
+  @Test
+  public void testTopStateScoringAlpha() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
+
+    clusterConfig.setTopStateScoringAlpha(10d);
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), 10d, 0d);
+
+    clusterConfig.setTopStateScoringAlpha(null);
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
+    Assert.assertFalse(clusterConfig.getRecord().getSimpleFields()
+        .containsKey(ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name()));
+
+    // A value written to the record directly that is not a positive number reads as not set.
+    for (String invalid : new String[] {"0", "-3", "NaN", "Infinity", "abc"}) {
+      clusterConfig.getRecord().setSimpleField(
+          ClusterConfig.ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), invalid);
+      Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d, invalid);
+    }
+  }
+
+  @Test
+  public void testSetInvalidTopStateScoringAlpha() {
+    ClusterConfig clusterConfig = new ClusterConfig("testCluster");
+    for (double invalid : new double[] {0d, -1d, Double.NaN, Double.POSITIVE_INFINITY}) {
+      try {
+        clusterConfig.setTopStateScoringAlpha(invalid);
+        Assert.fail("Expected the top state scoring alpha " + invalid + " to be rejected");
+      } catch (IllegalArgumentException expected) {
+        // expected
+      }
+    }
+    Assert.assertEquals(clusterConfig.getTopStateScoringAlpha(), -1d, 0d);
   }
 }

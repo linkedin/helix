@@ -78,4 +78,48 @@ public class TestTopStateMaxCapacityUsageInstanceConstraint {
             _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext);
     Assert.assertTrue(normalizedScore > 0.99);
   }
+
+  @Test
+  public void testTopStateScoringKeysReplaceThePreferredScoringKeys() {
+    List<String> preferredScoringKeys = Collections.singletonList("DISK");
+    List<String> topStateScoringKeys = Collections.singletonList("CU");
+    when(_testReplica.isReplicaTopState()).thenReturn(true);
+    when(_testNode.getTopStateProjectedHighestUtilization(anyMap(), eq(preferredScoringKeys)))
+        .thenReturn(0.9f);
+    when(_testNode.getTopStateProjectedHighestUtilization(anyMap(), eq(topStateScoringKeys)))
+        .thenReturn(0.5f);
+    when(_clusterContext.getPreferredScoringKeys()).thenReturn(preferredScoringKeys);
+    when(_clusterContext.getEstimatedTopStateMaxUtilization()).thenReturn(1f);
+    Assert.assertEquals(
+        (float) _constraint.getAssignmentScore(_testNode, _testReplica, _clusterContext), 0.9f);
+
+    when(_clusterContext.getTopStateScoringKeys()).thenReturn(topStateScoringKeys);
+    Assert.assertEquals(
+        (float) _constraint.getAssignmentScore(_testNode, _testReplica, _clusterContext), 0.5f);
+  }
+
+  @Test
+  public void testTopStateScoringAlpha() {
+    when(_testReplica.isReplicaTopState()).thenReturn(true);
+    when(_testNode.getTopStateProjectedHighestUtilization(anyMap(), any())).thenReturn(1.1f);
+    when(_clusterContext.getEstimatedTopStateMaxUtilization()).thenReturn(1f);
+    // With the default steepness, a node at 1.1x of the estimate scores almost nothing...
+    Assert.assertEquals(
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext),
+        sigmoid(-0.1 * 44), 1e-6);
+    // ...while a softer curve still ranks it.
+    when(_clusterContext.getTopStateScoringAlpha()).thenReturn(10d);
+    Assert.assertEquals(
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext),
+        sigmoid(-0.1 * 10), 1e-6);
+    // A non-positive steepness means not set.
+    when(_clusterContext.getTopStateScoringAlpha()).thenReturn(-1d);
+    Assert.assertEquals(
+        _constraint.getAssignmentNormalizedScore(_testNode, _testReplica, _clusterContext),
+        sigmoid(-0.1 * 44), 1e-6);
+  }
+
+  private static double sigmoid(double x) {
+    return 1 / (1 + Math.exp(-x));
+  }
 }

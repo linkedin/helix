@@ -47,21 +47,8 @@ public class ResourceConfig extends HelixProperty {
    */
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
-    NUM_PARTITIONS,
-    STATE_MODEL_DEF_REF,
-    STATE_MODEL_FACTORY_NAME,
-    REPLICAS,
-    MIN_ACTIVE_REPLICAS,
     MAX_PARTITIONS_PER_INSTANCE,
-    INSTANCE_GROUP_TAG,
-    HELIX_ENABLED,
-    RESOURCE_GROUP_NAME,
-    RESOURCE_TYPE,
-    GROUP_ROUTING_ENABLED,
-    EXTERNAL_VIEW_DISABLED,
-    DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
-    RELAXED_DISABLED_PARTITION_CONSTRAINT, // Resource-level override for relaxed disabled partition constraint
     ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
 
@@ -102,28 +89,24 @@ public class ResourceConfig extends HelixProperty {
     super(record, id);
   }
 
-  public ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
-      String stateModelDefRef, String stateModelFactoryName, String numReplica,
-      int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-      Boolean helixEnabled, String resourceGroupName, String resourceType,
-      Boolean groupRoutingEnabled, Boolean externalViewDisabled, RebalanceConfig rebalanceConfig,
+  public ResourceConfig(String resourceId, Boolean monitorDisabled,
+      int maxPartitionsPerInstance,
+      RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
-    this(resourceId, monitorDisabled, numPartitions, stateModelDefRef, stateModelFactoryName,
-        numReplica, minActiveReplica, maxPartitionsPerInstance, instanceGroupTag, helixEnabled,
-        resourceGroupName, resourceType, groupRoutingEnabled, externalViewDisabled, rebalanceConfig,
-        stateTransitionTimeoutConfig, listFields, mapFields, p2pMessageEnabled, null);
+    this(resourceId, monitorDisabled,
+        maxPartitionsPerInstance,
+        rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
+        p2pMessageEnabled, null);
   }
 
-  private ResourceConfig(String resourceId, Boolean monitorDisabled, int numPartitions,
-    String stateModelDefRef, String stateModelFactoryName, String numReplica,
-    int minActiveReplica, int maxPartitionsPerInstance, String instanceGroupTag,
-        Boolean helixEnabled, String resourceGroupName, String resourceType,
-        Boolean groupRoutingEnabled, Boolean externalViewDisabled,
-        RebalanceConfig rebalanceConfig, StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
-        Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
-        Boolean p2pMessageEnabled, Map<String, Map<String, Integer>> partitionCapacityMap) {
+  private ResourceConfig(String resourceId, Boolean monitorDisabled,
+      int maxPartitionsPerInstance,
+      RebalanceConfig rebalanceConfig,
+      StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
+      Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
+      Boolean p2pMessageEnabled, Map<String, Map<String, Integer>> partitionCapacityMap) {
     super(resourceId);
 
     if (monitorDisabled != null) {
@@ -134,54 +117,8 @@ public class ResourceConfig extends HelixProperty {
       _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), p2pMessageEnabled);
     }
 
-    if (numPartitions > 0) {
-      _record.setIntField(ResourceConfigProperty.NUM_PARTITIONS.name(), numPartitions);
-    }
-
-    if (stateModelDefRef != null) {
-      _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_DEF_REF.name(), stateModelDefRef);
-    }
-
-    if (stateModelFactoryName != null) {
-      _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(), stateModelFactoryName);
-    }
-
-    if (numReplica != null) {
-      _record.setSimpleField(ResourceConfigProperty.REPLICAS.name(), numReplica);
-    }
-
-    if (minActiveReplica >= 0) {
-      _record.setIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), minActiveReplica);
-    }
-
     if (maxPartitionsPerInstance >= 0) {
       _record.setIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), maxPartitionsPerInstance);
-    }
-
-    if (instanceGroupTag != null) {
-      _record.setSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), instanceGroupTag);
-    }
-
-    if (helixEnabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), helixEnabled);
-    }
-
-    if (resourceGroupName != null) {
-      _record.setSimpleField(ResourceConfigProperty.RESOURCE_GROUP_NAME.name(), resourceGroupName);
-    }
-
-    if (resourceType != null) {
-      _record.setSimpleField(ResourceConfigProperty.RESOURCE_TYPE.name(), resourceType);
-    }
-
-    if (groupRoutingEnabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.GROUP_ROUTING_ENABLED.name(),
-          groupRoutingEnabled);
-    }
-
-    if (externalViewDisabled != null) {
-      _record.setBooleanField(ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(),
-          externalViewDisabled);
     }
 
     if (rebalanceConfig != null) {
@@ -239,48 +176,6 @@ public class ResourceConfig extends HelixProperty {
     return _record.getId();
   }
 
-  /**
-   * Get the number of partitions of this resource
-   * @return the number of partitions
-   */
-  public int getNumPartitions() {
-    return _record.getIntField(ResourceConfigProperty.NUM_PARTITIONS.name(), 0);
-  }
-
-  /**
-   * Get the state model associated with this resource
-   * @return an identifier of the state model
-   */
-  public String getStateModelDefRef() {
-    return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_DEF_REF.name());
-  }
-
-  /**
-   * Get the state model factory associated with this resource
-   * @return state model factory name
-   */
-  public String getStateModelFactoryName() {
-    return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name());
-  }
-
-  /**
-   * Get the number of replicas for each partition of this resource
-   * @return number of replicas (as a string)
-   */
-  public String getNumReplica() {
-    // TODO: use IdealState.getNumbReplica()?
-    return _record.getSimpleField(ResourceConfigProperty.REPLICAS.name());
-  }
-
-  /**
-   * Get the number of minimal active partitions for this resource.
-   *
-   * @return
-   */
-  public int getMinActiveReplica() {
-    return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
-  }
-
   // Delimiter used for storing active states as a comma-separated string in simpleField
   private static final String ACTIVE_STATES_DELIMITER = ",";
 
@@ -331,87 +226,6 @@ public class ResourceConfig extends HelixProperty {
   public int getMaxPartitionsPerInstance() {
     return _record.getIntField(ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.toString(),
         Integer.MAX_VALUE);
-  }
-
-  /**
-   * Check for a tag that will restrict assignment to instances with a matching tag
-   * @return the group tag, or null if none is present
-   */
-  public String getInstanceGroupTag() {
-    return _record.getSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.toString());
-  }
-
-  /**
-   * Get if the resource is enabled or not
-   * By default, it's enabled
-   * @return true if enabled; false otherwise
-   */
-  public Boolean isEnabled() {
-    return _record.getBooleanField(ResourceConfigProperty.HELIX_ENABLED.name(), true);
-  }
-
-  /**
-   * Get the resource type
-   * @return the resource type, or null if none is being set
-   */
-  public String getResourceType() {
-    return _record.getSimpleField(ResourceConfigProperty.RESOURCE_TYPE.name());
-  }
-
-  /**
-   * Get the resource group name
-   *
-   * @return
-   */
-  public String getResourceGroupName() {
-    return _record.getSimpleField(ResourceConfigProperty.RESOURCE_GROUP_NAME.name());
-  }
-
-  /**
-   * Get if the resource group routing feature is enabled or not
-   * By default, it's disabled
-   *
-   * @return true if enabled; false otherwise
-   */
-  public Boolean isGroupRoutingEnabled() {
-    return _record.getBooleanField(ResourceConfigProperty.GROUP_ROUTING_ENABLED.name(), false);
-  }
-
-  /**
-   * If the external view for this resource is disabled. by default, it is false.
-   *
-   * @return true if the external view should be disabled for this resource.
-   */
-  public Boolean isExternalViewDisabled() {
-    return _record.getBooleanField(ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(), false);
-  }
-
-  /**
-   * Whether the relaxed disabled partition constraint is enabled for this resource.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE 
-   * instead of being immediately reassigned for this specific resource.
-   * This setting overrides the cluster-level configuration for this resource.
-   * @return true if enabled, false if disabled, null if not set (uses cluster default)
-   */
-  public Boolean isRelaxedDisabledPartitionConstraintEnabled() {
-    String value = _record.getSimpleField(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name());
-    return value != null ? Boolean.valueOf(value) : null;
-  }
-
-  /**
-   * Enable/disable relaxed disabled partition constraint for this resource.
-   * When enabled, WAGED rebalancer will allow disabled partitions to remain OFFLINE 
-   * instead of being immediately reassigned for this specific resource.
-   * This setting overrides the cluster-level configuration for this resource.
-   * @param enabled true to enable relaxed constraint, false for strict constraint, 
-   *                null to use cluster default
-   */
-  public void setRelaxedDisabledPartitionConstraint(Boolean enabled) {
-    if (enabled == null) {
-      _record.getSimpleFields().remove(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name());
-    } else {
-      _record.setBooleanField(ResourceConfigProperty.RELAXED_DISABLED_PARTITION_CONSTRAINT.name(), enabled);
-    }
   }
 
   /**
@@ -644,18 +458,7 @@ public class ResourceConfig extends HelixProperty {
   public static class Builder {
     private String _resourceId;
     private Boolean _monitorDisabled;
-    private int _numPartitions;
-    private String _stateModelDefRef;
-    private String _stateModelFactoryName;
-    private String _numReplica;
-    private int _minActiveReplica = -1;
     private int _maxPartitionsPerInstance = -1;
-    private String _instanceGroupTag;
-    private Boolean _helixEnabled;
-    private String _resourceGroupName;
-    private String _resourceType;
-    private Boolean _groupRoutingEnabled;
-    private Boolean _externalViewDisabled;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
     private StateTransitionTimeoutConfig _stateTransitionTimeoutConfig;
@@ -691,115 +494,12 @@ public class ResourceConfig extends HelixProperty {
       return _resourceId;
     }
 
-    public int getNumPartitions() {
-      return _numPartitions;
-    }
-
-    public Builder setNumPartitions(int numPartitions) {
-      _numPartitions = numPartitions;
-      return this;
-    }
-
-    public String getStateModelDefRef() {
-      return _stateModelDefRef;
-    }
-
-    public Builder setStateModelDefRef(String stateModelDefRef) {
-      _stateModelDefRef = stateModelDefRef;
-      return this;
-    }
-
-    public String getStateModelFactoryName() {
-      return _stateModelFactoryName;
-    }
-
-    public Builder setStateModelFactoryName(String stateModelFactoryName) {
-      _stateModelFactoryName = stateModelFactoryName;
-      return this;
-    }
-
-    public String getNumReplica() {
-      return _numReplica;
-    }
-
-    public Builder setNumReplica(String numReplica) {
-      _numReplica = numReplica;
-      return this;
-    }
-
-    public Builder setNumReplica(int numReplica) {
-      return setNumReplica(String.valueOf(numReplica));
-    }
-
-    public int getMinActiveReplica() {
-      return _minActiveReplica;
-    }
-
-    public Builder setMinActiveReplica(int minActiveReplica) {
-      _minActiveReplica = minActiveReplica;
-      return this;
-    }
-
     public int getMaxPartitionsPerInstance() {
       return _maxPartitionsPerInstance;
     }
 
     public Builder setMaxPartitionsPerInstance(int maxPartitionsPerInstance) {
       _maxPartitionsPerInstance = maxPartitionsPerInstance;
-      return this;
-    }
-
-    public String getInstanceGroupTag() {
-      return _instanceGroupTag;
-    }
-
-    public Builder setInstanceGroupTag(String instanceGroupTag) {
-      _instanceGroupTag = instanceGroupTag;
-      return this;
-    }
-
-    public Boolean isHelixEnabled() {
-      return _helixEnabled;
-    }
-
-    public Builder setHelixEnabled(boolean helixEnabled) {
-      _helixEnabled = helixEnabled;
-      return this;
-    }
-
-    public String getResourceType() {
-      return _resourceType;
-    }
-
-    public Builder setResourceType(String resourceType) {
-      _resourceType = resourceType;
-      return this;
-    }
-
-    public String getResourceGroupName() {
-      return _resourceGroupName;
-    }
-
-    public Builder setResourceGroupName(String resourceGroupName) {
-      _resourceGroupName = resourceGroupName;
-      return this;
-    }
-
-    public Boolean isGroupRoutingEnabled() {
-      return _groupRoutingEnabled;
-    }
-
-    public Builder setGroupRoutingEnabled(boolean groupRoutingEnabled) {
-      _groupRoutingEnabled = groupRoutingEnabled;
-      return this;
-    }
-
-    public Boolean isExternalViewDisabled() {
-      return _externalViewDisabled;
-    }
-
-    public Builder setExternalViewDisabled(boolean externalViewDisabled) {
-      _externalViewDisabled = externalViewDisabled;
       return this;
     }
 
@@ -892,26 +592,6 @@ public class ResourceConfig extends HelixProperty {
           throw new IllegalArgumentException("Invalid RebalanceConfig!");
         }
       }
-      if (_numPartitions <= 0) {
-        throw new IllegalArgumentException("Invalid number of partitions!");
-      }
-
-      if (_stateModelDefRef == null) {
-        throw new IllegalArgumentException("State Model Definition Reference is not set!");
-      }
-
-      if (_numReplica == null) {
-        throw new IllegalArgumentException("Number of replica is not set!");
-      } else {
-        if (!_numReplica.equals(ResourceConfigConstants.ANY_LIVEINSTANCE.name())) {
-          try {
-            Integer.parseInt(_numReplica);
-          } catch (NumberFormatException ex) {
-            throw new IllegalArgumentException("Invalid number of replica!");
-          }
-        }
-      }
-
       if (_partitionCapacityMap != null) {
         if (_partitionCapacityMap.keySet().stream()
             .noneMatch(partition -> partition.equals(DEFAULT_PARTITION_KEY))) {
@@ -930,18 +610,18 @@ public class ResourceConfig extends HelixProperty {
       // TODO: Reenable the validation in the future when ResourceConfig is ready.
       // validate();
 
-      return new ResourceConfig(_resourceId, _monitorDisabled, _numPartitions, _stateModelDefRef,
-          _stateModelFactoryName, _numReplica, _minActiveReplica, _maxPartitionsPerInstance,
-          _instanceGroupTag, _helixEnabled, _resourceGroupName, _resourceType, _groupRoutingEnabled,
-          _externalViewDisabled, _rebalanceConfig, _stateTransitionTimeoutConfig, _preferenceLists,
-          _mapFields, _p2pMessageEnabled, _partitionCapacityMap);
+      return new ResourceConfig(_resourceId, _monitorDisabled,
+          _maxPartitionsPerInstance,
+          _rebalanceConfig,
+          _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
+          _partitionCapacityMap);
     }
   }
 
   /**
    * For backward compatibility, propagate the critical simple fields from the IdealState to
    * the Resource Config.
-   * Eventually, Resource Config should be the only metadata node that contains the required information.
+   * Instance-group placement tags are read directly from IdealState and are not propagated here.
    *
    * Note that the config fields get updated in this method shall be fully compatible with ones in the IdealState.
    *  1. The fields shall have exactly the same meaning.
@@ -968,41 +648,9 @@ public class ResourceConfig extends HelixProperty {
     }
     // Fill the compatible Idealstate fields to the ResourceConfig if possible.
     ZNRecord mergedZNRecord = mergedResourceConfig.getRecord();
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
-            idealState.getInstanceGroupTag());
     mergedZNRecord.setIntFieldIfAbsent(
         ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
         idealState.getMaxPartitionsPerInstance());
-    mergedZNRecord.setIntFieldIfAbsent(ResourceConfigProperty.NUM_PARTITIONS.name(),
-        idealState.getNumPartitions());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.STATE_MODEL_DEF_REF.name(),
-            idealState.getStateModelDefRef());
-    mergedZNRecord.setSimpleFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
-        idealState.getStateModelFactoryName());
-    mergedZNRecord.setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.REPLICAS.name(),
-        idealState.getReplicas());
-    mergedZNRecord
-        .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-            idealState.getMinActiveReplicas());
-    mergedZNRecord
-        .setBooleanFieldIfAbsent(ResourceConfig.ResourceConfigProperty.HELIX_ENABLED.name(),
-            idealState.isEnabled());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.RESOURCE_GROUP_NAME.name(),
-            idealState.getResourceGroupName());
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.RESOURCE_TYPE.name(),
-            idealState.getResourceType());
-    mergedZNRecord.setBooleanFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.EXTERNAL_VIEW_DISABLED.name(),
-        idealState.isExternalViewDisabled());
-    mergedZNRecord.setBooleanFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-        idealState.isDelayRebalanceEnabled());
     return mergedResourceConfig;
   }
 }
-

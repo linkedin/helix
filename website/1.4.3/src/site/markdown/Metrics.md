@@ -108,6 +108,10 @@ ObjectName: "ClusterStatus:cluster=[cluster-name],instanceName=[instance-name]"
 |Enabled|This instance is Enabled (1) or Disabled (0)|
 |TotalMessageReceived|Number of messages sent to this instance by controller|
 |DisabledPartitions|Get the total disabled partitions number for this instance|
+|PartitionGauge|Get number of partitions assigned to this instance in the best possible state|
+|TopStatePartitionGauge|Get number of partitions assigned to this instance in the top state in the best possible state|
+|ActualPartitionGauge|Get number of partitions this instance actually holds according to its CurrentState. Counts any state other than the state model's initial state (e.g. OFFLINE), plus partitions held in the initial state on purpose because the instance, the partition, or the resource is disabled. Partitions left in the initial state for any other reason are not counted, since that means the transition has not finished or has failed|
+|ActualTopStatePartitionGauge|Get number of partitions this instance holds in the resource top state according to its CurrentState|
 
 #### MBean ResourceMonitor
 ObjectName: "ClusterStatus:cluster=[cluster-name],resourceName=[resource-name]"

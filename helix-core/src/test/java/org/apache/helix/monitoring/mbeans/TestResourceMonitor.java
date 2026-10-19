@@ -248,6 +248,33 @@ public class TestResourceMonitor {
   }
 
   @Test
+  public void testCapacityRejectionCounter() throws JMException {
+    ResourceMonitor monitor =
+        new ResourceMonitor(_clusterName, _dbName, new ObjectName("testDomain:key=value2"));
+    monitor.register();
+
+    try {
+      int attributeCountBefore = monitor.getMBeanInfo().getAttributes().length;
+
+      monitor.incrementMappingCapacityRejectionCounter(2);
+      monitor.incrementMappingCapacityRejectionCounter(3);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 5L);
+
+      // Non-positive increments are ignored.
+      monitor.incrementMappingCapacityRejectionCounter(0);
+      monitor.incrementMappingCapacityRejectionCounter(-4);
+      Assert.assertEquals(monitor.getMappingCapacityRejectionCounter(), 5L);
+
+      // The counter is a single fixed attribute, so recording rejections must never grow the
+      // MBean's attribute set no matter how many instances were involved.
+      Assert.assertEquals(monitor.getMBeanInfo().getAttributes().length, attributeCountBefore);
+      Assert.assertEquals(monitor.getAttribute("MappingCapacityRejectionCounter"), 5L);
+    } finally {
+      monitor.unregister();
+    }
+  }
+
+  @Test
   public void testNoMetricsRecordedForNullOrDisabledIdealState() throws JMException {
     final int n = 5;
     ResourceMonitor monitor =

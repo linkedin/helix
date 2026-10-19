@@ -264,7 +264,7 @@ public class ClusterModelProvider {
     ClusterContext context = new ClusterContext(
         replicaMap.values().stream().flatMap(Set::stream).collect(Collectors.toSet()),
         assignableNodes, logicalIdIdealAssignment, logicalIdCurrentAssignment,
-        dataProvider.getClusterConfig(), dataProvider);
+        dataProvider.getClusterConfig());
 
     // Initial the cluster context with the allocated assignments.
     context.setAssignmentForFaultZoneMap(mapAssignmentToFaultZone(assignableNodes));
@@ -660,7 +660,7 @@ public class ClusterModelProvider {
         for (Map.Entry<String, Integer> entry : stateCountMap.entrySet()) {
           String state = entry.getKey();
           for (int i = 0; i < entry.getValue(); i++) {
-            replicas.add(new AssignableReplica(clusterConfig, mergedResourceConfig, partition, state,
+            replicas.add(new AssignableReplica(clusterConfig, mergedResourceConfig, is, partition, state,
                     def.getStatePriorityMap().get(state)));
           }
         }

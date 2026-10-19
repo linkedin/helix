@@ -32,6 +32,7 @@ import java.util.Set;
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
@@ -94,7 +95,8 @@ public class TestAssignableNode extends AbstractTestClusterModel {
 
     // Test 2 - release assignment from the AssignableNode
     AssignableReplica removingReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "MASTER", 1);
+        testCache.getResourceConfig(_resourceNames.get(1)), new IdealState(_resourceNames.get(1)),
+        _partitionNames.get(2), "MASTER", 1);
     expectedAssignment.get(_resourceNames.get(1)).remove(_partitionNames.get(2));
     expectedCapacityMap.put("item1", 9);
     expectedCapacityMap.put("item2", 18);
@@ -137,7 +139,8 @@ public class TestAssignableNode extends AbstractTestClusterModel {
 
     // Test 3 - add assignment to the AssignableNode
     AssignableReplica addingReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2), "SLAVE", 2);
+        testCache.getResourceConfig(_resourceNames.get(1)), new IdealState(_resourceNames.get(1)),
+        _partitionNames.get(2), "SLAVE", 2);
     expectedAssignment.get(_resourceNames.get(1)).add(_partitionNames.get(2));
     expectedCapacityMap.put("item1", 4);
     expectedCapacityMap.put("item2", 8);
@@ -179,7 +182,8 @@ public class TestAssignableNode extends AbstractTestClusterModel {
     AssignableNode assignableNode = new AssignableNode(testCache.getClusterConfig(),
         testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
     AssignableReplica removingReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(1)), _partitionNames.get(2) + "non-exist",
+        testCache.getResourceConfig(_resourceNames.get(1)), new IdealState(_resourceNames.get(1)),
+        _partitionNames.get(2) + "non-exist",
         "MASTER", 1);
 
     // Release shall pass.
@@ -195,7 +199,8 @@ public class TestAssignableNode extends AbstractTestClusterModel {
         testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
     assignableNode.assignInitBatch(assignmentSet);
     AssignableReplica duplicateReplica = new AssignableReplica(testCache.getClusterConfig(),
-        testCache.getResourceConfig(_resourceNames.get(0)), _partitionNames.get(0), "SLAVE", 2);
+        testCache.getResourceConfig(_resourceNames.get(0)), new IdealState(_resourceNames.get(0)),
+        _partitionNames.get(0), "SLAVE", 2);
     assignableNode.assign(duplicateReplica);
   }
 

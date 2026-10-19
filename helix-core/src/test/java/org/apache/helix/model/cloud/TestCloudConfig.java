@@ -20,6 +20,7 @@ package org.apache.helix.model.cloud;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.helix.ConfigAccessor;
@@ -31,7 +32,9 @@ import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CloudConfig;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestCloudConfig extends ZkUnitTestBase {
@@ -98,7 +101,7 @@ public class TestCloudConfig extends ZkUnitTestBase {
     String clusterName = "CLUSTER_" + className;
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
-    // Verify will fail because cloudID has net been defined.
+    // Validation fails because the cloud provider is missing.
     CloudConfig cloudConfig = builder.build();
   }
 
@@ -116,8 +119,9 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig cloudConfig = builder.build();
   }
 
-  @Test(expectedExceptions = HelixException.class)
-  public void testUnverifiedCloudConfigBuilderWithoutProcessor() {
+  @Test(expectedExceptions = HelixException.class,
+      expectedExceptionsMessageRegExp = ".*CloudInfoProcessorName.*")
+  public void testCloudConfigBuilderWithoutProcessorName() {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
@@ -125,7 +129,59 @@ public class TestCloudConfig extends ZkUnitTestBase {
     List<String> testList = new ArrayList<String>();
     builder.setCloudInfoSources(testList);
     builder.addCloudInfoSource("TestURL");
-    CloudConfig cloudConfig = builder.build();
+    builder.build();
+  }
+
+  @Test(expectedExceptions = HelixException.class,
+      expectedExceptionsMessageRegExp = ".*Cloud Provider is missing.*")
+  public void testCloudConfigBuilderWithoutProvider() {
+    CloudConfig.Builder builder = new CloudConfig.Builder();
+    builder.setCloudEnabled(true);
+    builder.addCloudInfoSource("TestURL");
+    builder.setCloudInfoProcessorName("TestProcessor");
+    builder.build();
+  }
+
+  @DataProvider
+  public Object[][] cloudConfigBuilderInputs() {
+    ZNRecord record = new ZNRecord(CloudConfig.CLOUD_CONFIG_KW);
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    CloudConfig cloudConfig = new CloudConfig();
+    cloudConfig.setCloudEnabled(true);
+    return new Object[][]{
+        {record, new CloudConfig.Builder(record)},
+        {cloudConfig.getRecord(), new CloudConfig.Builder(cloudConfig)}
+    };
+  }
+
+  @Test(dataProvider = "cloudConfigBuilderInputs")
+  public void testBuilderDoesNotMutateInput(ZNRecord record, CloudConfig.Builder builder) {
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
+        CloudProvider.CUSTOMIZED.name());
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
+        "TestProcessor");
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("TestURL"));
+    ZNRecord original = new ZNRecord(record);
+
+    CloudConfig built = builder.build();
+
+    Assert.assertEquals(record, original);
+    Assert.assertEquals(built.getRecord(), original);
+    Assert.assertNull(built.getCloudInfoProcessorPackage());
+  }
+
+  @Test(dataProvider = "cloudConfigBuilderInputs")
+  public void testFailedBuilderDoesNotMutateInput(ZNRecord record, CloudConfig.Builder builder) {
+    ZNRecord original = new ZNRecord(record);
+
+    try {
+      builder.build();
+      Assert.fail("A missing cloud provider must be rejected");
+    } catch (HelixException e) {
+      Assert.assertTrue(e.getMessage().contains("Cloud Provider is missing"));
+    }
+    Assert.assertEquals(record, original);
   }
 
   @Test(dependsOnMethods = "testCloudConfig")

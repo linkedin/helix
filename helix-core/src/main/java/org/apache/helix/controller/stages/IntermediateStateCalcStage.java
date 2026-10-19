@@ -360,10 +360,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     Set<String> messagesThrottledForLoad = new HashSet<>();
     ClusterConfig clusterConfig = cache.getClusterConfig();
 
-    // If the threshold (ErrorOrRecovery) is set, then use it, if not, then check if the old
-    // threshold (Error) is set. If the old threshold is set, use it. If not, use the default value
-    // for the new one. This is for backward-compatibility
-    int threshold = 1; // Default threshold for ErrorOrRecoveryPartitionThresholdForLoadBalance
+    int threshold = MessageThrottleProcessor.getErrorThreshold(clusterConfig);
     // Keep the error count as partition level. This logic only applies to downward state transition determination
     for (Partition partition : currentStateOutput.getCurrentStateMap(resourceName).keySet()) {
       Map<String, String> entry = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
@@ -372,18 +369,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       }
     }
     int numPartitionsWithErrorReplica = partitionsWithErrorStateReplica.size();
-    if (clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
-      // ErrorOrRecovery is set
-      threshold = clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance();
-    } else {
-      if (clusterConfig.getErrorPartitionThresholdForLoadBalance() != 0) {
-        // 0 is the default value so the old threshold has been set
-        threshold = clusterConfig.getErrorPartitionThresholdForLoadBalance();
-      }
-    }
-
-    // Perform regular load balance only if the number of partitions in recovery and in error is
-    // less than the threshold. Otherwise, only allow downward-transition load balance
+    // Only allow downward load-balance transitions when error partitions exceed the threshold.
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
 
     boolean recoveryRebalanceForTopStateDownwardTransition =
@@ -393,6 +379,12 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     List<Partition> partitions = new ArrayList<>(resource.getPartitions());
     partitions.sort(new PartitionPriorityComparator(bestPossiblePartitionStateMap.getStateMap(),
         currentStateOutput.getCurrentStateMap(resourceName), stateModelDef.getTopState()));
+
+    // getEnabledLiveInstances() builds and returns a fresh HashSet on every call. Resolve it once
+    // for the whole resource: the snapshot is fixed for the duration of a pipeline run, so
+    // hoisting it out of the per-partition loop is behaviour-preserving.
+    Set<String> enabledLiveInstances = cache.getEnabledLiveInstances();
+
     for (Partition partition : partitions) {
       if (resourceMessageMap.get(partition) == null || resourceMessageMap.get(partition)
           .isEmpty()) {
@@ -403,7 +395,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
           currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet().stream()
               .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
       List<String> preferenceList = preferenceLists.get(partition.getPartitionName());
-      Map<String, Integer> requiredState = getRequiredStates(resourceName, cache, preferenceList);
+      Map<String, Integer> requiredState =
+          getRequiredStates(resourceName, cache, preferenceList, enabledLiveInstances);
       if (preferenceList != null && !preferenceList.isEmpty()) {
         // Sort messages based on the priority (priority is defined in the state model definition
         messagesToThrottle.sort(new MessagePriorityComparator(preferenceList, stateModelDef.getStatePriorityMap()));
@@ -507,13 +500,18 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     String resourceName = resource.getResourceName();
     boolean recoveryRebalanceForTopStateDownwardTransition =
         cache.getClusterConfig().isRecoveryRebalanceForTopStateDownwardTransitionEnabled();
+
+    // Resolved once for the whole resource — see the note in computeIntermediatePartitionState().
+    Set<String> enabledLiveInstances = cache.getEnabledLiveInstances();
+
     // check and charge pending transitions
     for (Partition partition : resource.getPartitions()) {
       // To clarify that custom mode does not apply recovery/load rebalance since user can define different number of
       // replicas for different partitions. Actually, the custom will stopped from resource level checks if this resource
       // is not FULL_AUTO, we will return best possible state and do nothing.
       Map<String, Integer> requiredStates =
-          getRequiredStates(resourceName, cache, preferenceLists.get(partition.getPartitionName()));
+          getRequiredStates(resourceName, cache, preferenceLists.get(partition.getPartitionName()),
+              enabledLiveInstances);
       // Maps instance to its current state
       Map<String, String> currentStateMap =
           currentStateOutput.getCurrentStateMap(resourceName, partition);
@@ -692,7 +690,8 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
   }
 
   private Map<String, Integer> getRequiredStates(String resourceName,
-      ResourceControllerDataProvider resourceControllerDataProvider, List<String> preferenceList) {
+      ResourceControllerDataProvider resourceControllerDataProvider, List<String> preferenceList,
+      Set<String> enabledLiveInstances) {
 
     // Prepare required inputs: 1) Priority State List 2) required number of replica
     IdealState idealState = resourceControllerDataProvider.getIdealState(resourceName);
@@ -706,12 +705,11 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     // Generate a state mapping, state -> required numbers based on the live and enabled instances for this partition
     // preference list
     if (preferenceList != null) {
-      return stateModelDefinition.getStateCountMap((int) preferenceList.stream().filter(
-              i -> resourceControllerDataProvider.getEnabledLiveInstances().contains(i))
-          .count(), requiredNumReplica); // StateModelDefinition's counts
+      return stateModelDefinition.getStateCountMap(
+          (int) preferenceList.stream().filter(enabledLiveInstances::contains).count(),
+          requiredNumReplica); // StateModelDefinition's counts
     }
-    return stateModelDefinition.getStateCountMap(
-        resourceControllerDataProvider.getEnabledLiveInstances().size(),
+    return stateModelDefinition.getStateCountMap(enabledLiveInstances.size(),
         requiredNumReplica); // StateModelDefinition's counts
   }
 

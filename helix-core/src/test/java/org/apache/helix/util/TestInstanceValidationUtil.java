@@ -32,7 +32,6 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyType;
-import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
@@ -42,7 +41,6 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.StateModelDefinition;
 import org.mockito.ArgumentMatcher;
 import org.testng.Assert;
-import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Matchers.eq;
@@ -56,43 +54,6 @@ public class TestInstanceValidationUtil {
   private static final String TEST_CLUSTER = "testCluster";
   private static final String TEST_INSTANCE = "instance0";
   private static final PropertyKey.Builder BUILDER = new PropertyKey.Builder(TEST_CLUSTER);
-
-  @DataProvider
-  Object[][] isEnabledTestSuite() {
-    return new Object[][] {
-        {
-            true, true, true
-        }, {
-            true, false, false
-        }, {
-            false, true, false
-        }, {
-            false, false, false
-        }
-    };
-  }
-
-  @Test(dataProvider = "isEnabledTestSuite", enabled = false)
-  public void TestIsInstanceEnabled(boolean instanceConfigEnabled, boolean clusterConfigEnabled,
-      boolean expected) {
-    Mock mock = new Mock();
-    InstanceConfig instanceConfig = new InstanceConfig(TEST_INSTANCE);
-    instanceConfig.setInstanceOperation(
-        instanceConfigEnabled ? InstanceConstants.InstanceOperation.ENABLE
-            : InstanceConstants.InstanceOperation.DISABLE);
-    doReturn(instanceConfig).when(mock.dataAccessor)
-        .getProperty(BUILDER.instanceConfig(TEST_INSTANCE));
-    ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    if (!clusterConfigEnabled) {
-      clusterConfig.setDisabledInstances(ImmutableMap.of(TEST_INSTANCE, "12345"));
-    }
-    doReturn(clusterConfig).when(mock.dataAccessor)
-        .getProperty(BUILDER.clusterConfig());
-
-    boolean isEnabled = InstanceValidationUtil.isEnabled(mock.dataAccessor, TEST_INSTANCE);
-
-    Assert.assertEquals(isEnabled, expected);
-  }
 
   @Test(expectedExceptions = HelixException.class)
   public void TestIsInstanceEnabled_whenInstanceConfigNull() {

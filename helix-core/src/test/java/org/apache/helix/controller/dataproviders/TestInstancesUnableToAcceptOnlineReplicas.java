@@ -27,6 +27,7 @@ import java.util.Set;
 
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -52,7 +53,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testEnableLiveExcluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.ENABLE)),
-        enabledLive("h1"));
+        liveInstances("h1"));
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "Healthy ENABLE+live instance must not count toward the offline budget");
   }
@@ -61,7 +62,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testEnableOfflineIncluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.ENABLE)),
-        enabledLive());
+        liveInstances());
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"), "ENABLE+offline is the canonical 'real outage' case and must count");
   }
@@ -70,7 +71,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testDisableLiveIncluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.DISABLE)),
-        enabledLive());
+        liveInstances("h1"));
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"),
         "DISABLE instances cannot accept ONLINE replicas and must count regardless of liveness");
@@ -80,7 +81,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testDisableOfflineIncluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.DISABLE)),
-        enabledLive());
+        liveInstances());
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"));
   }
@@ -89,7 +90,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testEvacuateLiveIncluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.EVACUATE)),
-        enabledLive());
+        liveInstances("h1"));
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"),
         "EVACUATE is the asymmetric op pre-fix; both entry and exit must now count it");
@@ -99,7 +100,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testEvacuateOfflineIncluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.EVACUATE)),
-        enabledLive());
+        liveInstances());
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"));
   }
@@ -108,7 +109,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testSwapInExcluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.SWAP_IN)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "SWAP_IN is in UNROUTABLE_INSTANCE_OPERATIONS and must never count");
   }
@@ -117,7 +118,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testUnknownExcluded() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.UNKNOWN)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "UNKNOWN is in UNROUTABLE_INSTANCE_OPERATIONS and must never count");
   }
@@ -128,7 +129,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testValidMarkerExemptsEnableOffline() {
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.ENABLE, FUTURE_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "Valid marker on ENABLE+offline must exempt the instance from the budget");
   }
@@ -137,7 +138,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testValidMarkerExemptsEvacuate() {
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.EVACUATE, FUTURE_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "Valid marker on EVACUATE must exempt — this is the orchestrator-driven decom case");
   }
@@ -146,7 +147,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testValidMarkerExemptsDisable() {
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.DISABLE, FUTURE_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty());
   }
 
@@ -154,7 +155,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testExpiredMarkerDoesNotExempt() {
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.ENABLE, PAST_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"), "Expired marker must behave as if the marker were absent");
   }
@@ -165,7 +166,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     // already past the window.
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.ENABLE, NOW_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("h1"), "nowMs == untilMs is no longer under maintenance; instance must count");
   }
@@ -175,7 +176,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     // SWAP_IN is filtered out before the marker check; a marker on it must not change that.
     BaseControllerDataProvider provider = providerWith(
         configs(configWithMarker("h1", InstanceConstants.InstanceOperation.SWAP_IN, FUTURE_MS)),
-        enabledLive());
+        liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty(),
         "Marker on a SWAP_IN instance must not change the (already excluded) outcome");
   }
@@ -184,7 +185,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
 
   @Test
   public void testEmptyCluster() {
-    BaseControllerDataProvider provider = providerWith(configs(), enabledLive());
+    BaseControllerDataProvider provider = providerWith(configs(), liveInstances());
     Assert.assertTrue(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS).isEmpty());
   }
 
@@ -194,11 +195,11 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     // 1 DISABLE (counts), 1 EVACUATE (counts), 1 EVACUATE w/marker (exempt),
     // 1 SWAP_IN (excluded), 1 UNKNOWN (excluded).
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
-    Set<String> enabledLive = new HashSet<>();
+    Set<String> liveInstanceNames = new HashSet<>();
     for (int i = 0; i < 8; i++) {
       String name = "enable-live-" + i;
       instanceConfigMap.put(name, config(name, InstanceConstants.InstanceOperation.ENABLE));
-      enabledLive.add(name);
+      liveInstanceNames.add(name);
     }
     instanceConfigMap.put("enable-offline",
         config("enable-offline", InstanceConstants.InstanceOperation.ENABLE));
@@ -217,7 +218,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     instanceConfigMap.put("unknown",
         config("unknown", InstanceConstants.InstanceOperation.UNKNOWN));
 
-    BaseControllerDataProvider provider = providerWith(instanceConfigMap, enabledLive);
+    BaseControllerDataProvider provider = providerWith(instanceConfigMap, liveInstanceNames);
 
     Assert.assertEquals(provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS),
         setOf("enable-offline", "disable", "evacuate"),
@@ -232,7 +233,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     // particular) rely on this for downstream filtering. Verify both properties hold.
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.ENABLE)),
-        enabledLive());
+        liveInstances());
     Set<String> result = provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS);
     result.add("h99");
     Assert.assertTrue(result.contains("h99"), "Returned set must be modifiable");
@@ -242,7 +243,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   public void testReturnedSetIsIndependentOfFutureCalls() {
     BaseControllerDataProvider provider = providerWith(
         configs(config("h1", InstanceConstants.InstanceOperation.ENABLE)),
-        enabledLive());
+        liveInstances());
     Set<String> first = provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS);
     first.clear();
     Set<String> second = provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS);
@@ -254,13 +255,18 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
 
   /**
    * Builds a {@link BaseControllerDataProvider} whose only contract is to return the
-   * supplied instance-config map and enabled-live set. The accessor under test depends on
+   * supplied instance-config map and live-instance set. The accessor under test depends on
    * exactly those two hooks plus {@link InstanceConfig#isUnderInstanceOperationMaintenance},
    * so overriding the two getters is sufficient and avoids initializing the full cluster
-   * cache machinery.
+   * cache machinery. The enabled-live subset is derived from the configs the same way the
+   * controller derives it, so the ENABLE filter is exercised here rather than stubbed.
    */
   private static BaseControllerDataProvider providerWith(
-      Map<String, InstanceConfig> instanceConfigMap, Set<String> enabledLive) {
+      Map<String, InstanceConfig> instanceConfigMap, Set<String> liveInstanceNames) {
+    Map<String, LiveInstance> liveInstanceMap = new HashMap<>();
+    for (String name : liveInstanceNames) {
+      liveInstanceMap.put(name, new LiveInstance(name));
+    }
     return new BaseControllerDataProvider() {
       @Override
       public Map<String, InstanceConfig> getInstanceConfigMap() {
@@ -268,8 +274,8 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
       }
 
       @Override
-      public Set<String> getEnabledLiveInstances() {
-        return Collections.unmodifiableSet(enabledLive);
+      public Map<String, LiveInstance> getLiveInstances() {
+        return Collections.unmodifiableMap(liveInstanceMap);
       }
     };
   }
@@ -297,7 +303,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
   }
 
   /**
-   * Test-side set builder. Used for both the enabled-live input set and the expected-result
+   * Test-side set builder. Used for both the live-instance input set and the expected-result
    * set so that assertions and setup share the same shape; the two readings sit at the call
    * site through the method name on the input side and explicit assertEquals on the result.
    */
@@ -307,7 +313,7 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
     return set;
   }
 
-  private static Set<String> enabledLive(String... names) {
+  private static Set<String> liveInstances(String... names) {
     return setOf(names);
   }
 }

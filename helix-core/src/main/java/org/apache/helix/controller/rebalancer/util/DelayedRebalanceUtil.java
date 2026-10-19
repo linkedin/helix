@@ -155,14 +155,6 @@ public class DelayedRebalanceUtil {
     // check the time instance got disabled.
     if (!instanceConfig.getInstanceEnabled()) {
       long disabledTime = instanceConfig.getInstanceEnabledTime();
-      String batchedDisabledTime = clusterConfig.getInstanceHelixDisabledTimeStamp(instance);
-      if (batchedDisabledTime != null && !batchedDisabledTime.isEmpty()) {
-        // Update batch disable time
-        long batchDisableTime = Long.parseLong(batchedDisabledTime);
-        if (disabledTime == -1 || disabledTime > batchDisableTime) {
-          disabledTime = batchDisableTime;
-        }
-      }
 
       // Check if the disabled instance is forced to be rebalanced by an on-demand rebalance.
       // If so, return it as an inactive instance.
@@ -235,25 +227,17 @@ public class DelayedRebalanceUtil {
   /**
    * Get the minimum active replica count threshold that allows delayed rebalance.
    * Prioritize of the input params:
-   * 1. resourceConfig
-   * 2. idealState
-   * 3. replicaCount
+   * 1. idealState
+   * 2. replicaCount
    * The lower priority minimum active replica count will only be applied if the higher priority
-   * items are missing.
-   * TODO: Remove the idealState input once we have all the config information migrated to the
-   * TODO: resource config by default.
+   * item is missing.
    *
-   * @param resourceConfig the resource config
    * @param idealState     the ideal state of the resource
    * @param replicaCount   the expected active replica count.
    * @return the expected minimum active replica count that is required
    */
-  public static int getMinActiveReplica(ResourceConfig resourceConfig, IdealState idealState,
-      int replicaCount) {
-    int minActiveReplicas = resourceConfig == null ? -1 : resourceConfig.getMinActiveReplica();
-    if (minActiveReplicas < 0) {
-      minActiveReplicas = idealState.getMinActiveReplicas();
-    }
+  public static int getMinActiveReplica(IdealState idealState, int replicaCount) {
+    int minActiveReplicas = idealState.getMinActiveReplicas();
     if (minActiveReplicas < 0) {
       minActiveReplicas = replicaCount;
     }
@@ -333,7 +317,7 @@ public class DelayedRebalanceUtil {
           resourceAssignment.getReplicaMap(partition).forEach((logicalId, state) ->
               allocatedReplicas.computeIfAbsent(logicalId, key -> new HashSet<>())
                   .add(new AssignableReplica(clusterData.getClusterConfig(), mergedResourceConfig,
-                      partition.getPartitionName(), state, statePriorityMap.get(state)))));
+                      idealState, partition.getPartitionName(), state, statePriorityMap.get(state)))));
       // only proceed for resource requiring delayed rebalance overwrites
       List<String> partitions =
           partitionsMissingMinActiveReplicas.getOrDefault(resourceName, Collections.emptyList());
@@ -408,9 +392,8 @@ public class DelayedRebalanceUtil {
     IdealState currentIdealState = clusterData.getIdealState(resourceName);
     Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
     int numReplica = currentIdealState.getReplicaCount(enabledLiveInstances.size());
-    int minActiveReplica = DelayedRebalanceUtil.getMinActiveReplica(ResourceConfig
-        .mergeIdealStateWithResourceConfig(clusterData.getResourceConfig(resourceName),
-            currentIdealState), currentIdealState, numReplica);
+    int minActiveReplica =
+        DelayedRebalanceUtil.getMinActiveReplica(currentIdealState, numReplica);
     return resourceAssignment.getMappedPartitions()
         .parallelStream()
         .filter(partition -> {
@@ -429,9 +412,7 @@ public class DelayedRebalanceUtil {
     IdealState currentIdealState = clusterData.getIdealState(resourceName);
     Set<String> enabledLiveInstances = clusterData.getEnabledLiveInstances();
     int numReplica = currentIdealState.getReplicaCount(enabledLiveInstances.size());
-    return DelayedRebalanceUtil.getMinActiveReplica(ResourceConfig
-        .mergeIdealStateWithResourceConfig(clusterData.getResourceConfig(resourceName),
-            currentIdealState), currentIdealState, numReplica);
+    return DelayedRebalanceUtil.getMinActiveReplica(currentIdealState, numReplica);
   }
 
   /**
@@ -513,7 +494,8 @@ public class DelayedRebalanceUtil {
         int curActiveStateCount = activeStateReplicaCount.getOrDefault(state, 0);
         for (int i = 0; i < stateCountMap.get(state) - curActiveStateCount && replicaGapCount > 0; i++) {
           toBeAssignedReplicas.add(
-              new AssignableReplica(clusterData.getClusterConfig(), resourceConfig, partitionName, state, priority));
+              new AssignableReplica(clusterData.getClusterConfig(), resourceConfig,
+                  currentIdealState, partitionName, state, priority));
           replicaGapCount--;
         }
       }

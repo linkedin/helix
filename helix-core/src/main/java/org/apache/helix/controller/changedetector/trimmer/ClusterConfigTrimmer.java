@@ -36,7 +36,6 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
 
   /**
    * The following fields are considered as non-topology related.
-   * HELIX_DISABLE_PIPELINE_TRIGGERS,
    * PERSIST_BEST_POSSIBLE_ASSIGNMENT,
    * PERSIST_INTERMEDIATE_ASSIGNMENT,
    * STATE_TRANSITION_THROTTLE_CONFIGS,
@@ -46,13 +45,10 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
    * REBALANCE_TIMER_PERIOD,
    * MAX_CONCURRENT_TASK_PER_INSTANCE,
    * TARGET_EXTERNALVIEW_ENABLED,
-   * DISABLED_INSTANCES,
    * QUOTA_TYPES,
    * MAX_OFFLINE_INSTANCES_ALLOWED,
    * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT,
-   * ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
    * ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
-   * DELAY_REBALANCE_DISABLED,
    * DELAY_REBALANCE_ENABLED,
    * DELAY_REBALANCE_TIME,
    * GLOBAL_REBALANCE_ASYNC_MODE,
@@ -60,14 +56,19 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
    * All StateTransitionTimeoutConfig,
    * All StateTransitionThrottleConfig
    */
+  // Besides the topology, the fields that change how the WAGED rebalancer scores an assignment
+  // (REBALANCE_PREFERENCE, TOP_STATE_SCORING_KEYS, TOP_STATE_SCORING_ALPHA) are kept, so that a
+  // change to them triggers a global rebalance.
   private static final Map<FieldType, Set<String>> STATIC_TOPOLOGY_RELATED_FIELD_MAP = ImmutableMap
       .of(FieldType.SIMPLE_FIELD, ImmutableSet
               .of(ClusterConfigProperty.TOPOLOGY.name(),
                   ClusterConfigProperty.FAULT_ZONE_TYPE.name(),
                   ClusterConfigProperty.TOPOLOGY_AWARE_ENABLED.name(),
-                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name()),
+                  ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
+                  ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name()),
           FieldType.LIST_FIELD, ImmutableSet
-              .of(ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name()),
+              .of(ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name(),
+                  ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name()),
           FieldType.MAP_FIELD, ImmutableSet
               .of(ClusterConfigProperty.DEFAULT_INSTANCE_CAPACITY_MAP.name(),
               ClusterConfigProperty.DEFAULT_PARTITION_WEIGHT_MAP.name(),

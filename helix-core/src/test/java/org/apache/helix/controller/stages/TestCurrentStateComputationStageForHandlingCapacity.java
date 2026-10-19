@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -39,6 +40,7 @@ import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
@@ -257,7 +259,141 @@ public class TestCurrentStateComputationStageForHandlingCapacity {
         CurrentStateComputationStage.computeClusterCapacityUsage(overSubscribedContext), 1.2d, 1e-6d);
   }
 
+  @Test
+  public void testComputeUsageStats() {
+    // Empty / null input: an all-zero summary with an undefined (0.0) ratio.
+    for (ClusterStatusMonitor.WeightedUsageStats empty : ImmutableList.of(
+        CurrentStateComputationStage.computeUsageStats(null),
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of()))) {
+      Assert.assertEquals(empty.getMax(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMean(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMin(), 0.0d, 0.0d);
+      Assert.assertEquals(empty.getMaxMeanRatio(), 0.0d, 0.0d);
+    }
+
+    // Single instance: max == mean == min, ratio 1.0 (perfectly even by definition).
+    ClusterStatusMonitor.WeightedUsageStats single =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.7d));
+    Assert.assertEquals(single.getMax(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMean(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMin(), 0.7d, 1e-9d);
+    Assert.assertEquals(single.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // Perfectly even load across instances: max == mean, ratio 1.0 (the WAGED goal).
+    ClusterStatusMonitor.WeightedUsageStats even =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.5d, 0.5d, 0.5d));
+    Assert.assertEquals(even.getMax(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMin(), 0.5d, 1e-9d);
+    Assert.assertEquals(even.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // Skewed load: max 0.8, mean 0.5, so the max-to-mean ratio is 1.6 (min 0.2 is still reported).
+    ClusterStatusMonitor.WeightedUsageStats skewed =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.2d, 0.8d, 0.5d));
+    Assert.assertEquals(skewed.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(skewed.getMin(), 0.2d, 1e-9d);
+    Assert.assertEquals(skewed.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(skewed.getMaxMeanRatio(), 1.6d, 1e-9d);
+
+    // An idle instance (min == 0): the max-to-mean ratio stays defined (unlike max-to-min).
+    // max 0.8, mean 0.4 -> ratio 2.0.
+    ClusterStatusMonitor.WeightedUsageStats withIdle =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.0d, 0.8d));
+    Assert.assertEquals(withIdle.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(withIdle.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(withIdle.getMean(), 0.4d, 1e-9d);
+    Assert.assertEquals(withIdle.getMaxMeanRatio(), 2.0d, 1e-9d);
+
+    // All-zero usage (mean == 0): the ratio is the 0.0 undefined sentinel rather than NaN.
+    ClusterStatusMonitor.WeightedUsageStats allZero =
+        CurrentStateComputationStage.computeUsageStats(ImmutableList.of(0.0d, 0.0d));
+    Assert.assertEquals(allZero.getMax(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMean(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(allZero.getMaxMeanRatio(), 0.0d, 0.0d);
+
+    // Non-finite values (NaN from a 0/0 capacity key, or Infinity) are dropped so a single broken
+    // node cannot poison the summary. Here NaN is filtered, leaving max 0.8, min 0.2, mean 0.5.
+    ClusterStatusMonitor.WeightedUsageStats withNaN = CurrentStateComputationStage
+        .computeUsageStats(ImmutableList.of(0.2d, 0.8d, Double.NaN));
+    Assert.assertEquals(withNaN.getMax(), 0.8d, 1e-9d);
+    Assert.assertEquals(withNaN.getMin(), 0.2d, 1e-9d);
+    Assert.assertEquals(withNaN.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(withNaN.getMaxMeanRatio(), 1.6d, 1e-9d);
+
+    // Infinity is likewise dropped, leaving the single finite value 0.5 (ratio 1.0).
+    ClusterStatusMonitor.WeightedUsageStats withInf = CurrentStateComputationStage
+        .computeUsageStats(ImmutableList.of(0.5d, Double.POSITIVE_INFINITY));
+    Assert.assertEquals(withInf.getMax(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMin(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMean(), 0.5d, 1e-9d);
+    Assert.assertEquals(withInf.getMaxMeanRatio(), 1.0d, 1e-9d);
+
+    // All-non-finite input yields an all-zero summary (no NaN published), same as empty.
+    ClusterStatusMonitor.WeightedUsageStats allNonFinite =
+        CurrentStateComputationStage.computeUsageStats(
+            ImmutableList.of(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY));
+    Assert.assertEquals(allNonFinite.getMax(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMean(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMin(), 0.0d, 0.0d);
+    Assert.assertEquals(allNonFinite.getMaxMeanRatio(), 0.0d, 0.0d);
+  }
+
+  @Test
+  public void testComputeUsageStatsByCapacityKey() {
+    // No instances: no capacity key to summarize.
+    Assert.assertTrue(
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(null, false).isEmpty());
+    Assert.assertTrue(CurrentStateComputationStage
+        .computeUsageStatsByCapacityKey(ImmutableList.of(), true).isEmpty());
+
+    // Each capacity key is summarized on its own, from each instance's utilization of that key:
+    // all replicas when topState is false, top-state replicas only when it is true.
+    List<AssignableNode> nodes = ImmutableList.of(
+        mockNodeUtilization(ImmutableMap.of("CU", 0.8f, "DISK", 0.2f),
+            ImmutableMap.of("CU", 0.6f, "DISK", 0.1f)),
+        mockNodeUtilization(ImmutableMap.of("CU", 0.4f, "DISK", 0.6f),
+            ImmutableMap.of("CU", 0.2f, "DISK", 0.1f)));
+
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> partitionStats =
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(nodes, false);
+    Assert.assertEquals(ImmutableList.copyOf(partitionStats.keySet()),
+        ImmutableList.of("CU", "DISK"));
+    assertUsageStats(partitionStats.get("CU"), 0.8d, 0.6d, 0.4d, 0.8d / 0.6d);
+    assertUsageStats(partitionStats.get("DISK"), 0.6d, 0.4d, 0.2d, 1.5d);
+
+    Map<String, ClusterStatusMonitor.WeightedUsageStats> topStateStats =
+        CurrentStateComputationStage.computeUsageStatsByCapacityKey(nodes, true);
+    Assert.assertEquals(ImmutableList.copyOf(topStateStats.keySet()),
+        ImmutableList.of("CU", "DISK"));
+    assertUsageStats(topStateStats.get("CU"), 0.6d, 0.4d, 0.2d, 1.5d);
+    assertUsageStats(topStateStats.get("DISK"), 0.1d, 0.1d, 0.1d, 1.0d);
+  }
+
   // -- static helpers
+  private static AssignableNode mockNodeUtilization(Map<String, Float> utilization,
+      Map<String, Float> topStateUtilization) {
+    AssignableNode node = Mockito.mock(AssignableNode.class);
+    Map<String, Integer> capacity = new HashMap<>();
+    utilization.keySet().forEach(capacityKey -> capacity.put(capacityKey, 100));
+    Mockito.when(node.getMaxCapacity()).thenReturn(capacity);
+    utilization.forEach((capacityKey, value) -> Mockito.when(node
+        .getGeneralProjectedHighestUtilization(Collections.emptyMap(),
+            Collections.singletonList(capacityKey))).thenReturn(value));
+    topStateUtilization.forEach((capacityKey, value) -> Mockito.when(node
+        .getTopStateProjectedHighestUtilization(Collections.emptyMap(),
+            Collections.singletonList(capacityKey))).thenReturn(value));
+    return node;
+  }
+
+  private static void assertUsageStats(ClusterStatusMonitor.WeightedUsageStats stats, double max,
+      double mean, double min, double maxMeanRatio) {
+    Assert.assertEquals(stats.getMax(), max, 1e-6d);
+    Assert.assertEquals(stats.getMean(), mean, 1e-6d);
+    Assert.assertEquals(stats.getMin(), min, 1e-6d);
+    Assert.assertEquals(stats.getMaxMeanRatio(), maxMeanRatio, 1e-6d);
+  }
+
   private Map<String, InstanceConfig> generateInstanceCapacityConfigs() {
     Map<String, InstanceConfig> instanceConfigMap = new HashMap<>();
 

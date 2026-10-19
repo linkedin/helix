@@ -447,10 +447,18 @@ public class TestDelayedAutoRebalance extends ZkTestBase {
     // Disable one node, no partition should be moved.
     long currentTime = System.currentTimeMillis();
     _gSetupTool.getClusterManagementTool().enableInstance(CLUSTER_NAME, instance, enabled);
+    long completionTime = System.currentTimeMillis();
     InstanceConfig instanceConfig = _configAccessor.getInstanceConfig(CLUSTER_NAME, instance);
+    validateInstanceEnabled(instanceConfig, enabled, currentTime, completionTime);
+  }
+
+  static void validateInstanceEnabled(InstanceConfig instanceConfig, boolean enabled,
+      long currentTime, long completionTime) {
     Assert.assertEquals(instanceConfig.getInstanceEnabled(), enabled);
-    Assert.assertTrue(instanceConfig.getInstanceEnabledTime() >= currentTime);
-    Assert.assertTrue(instanceConfig.getInstanceEnabledTime() <= currentTime + 100);
+    long enabledTime = instanceConfig.getInstanceEnabledTime();
+    Assert.assertTrue(enabledTime >= currentTime && enabledTime <= completionTime,
+        "Instance enabled timestamp " + enabledTime + " is outside the operation interval ["
+            + currentTime + ", " + completionTime + "]");
   }
 
   protected void validateDelayedMovementsOnDisabledNode(Map<String, ExternalView> externalViewsBefore)
@@ -470,7 +478,9 @@ public class TestDelayedAutoRebalance extends ZkTestBase {
     /*
       shutdown order: 1) disconnect the controller 2) disconnect participants
      */
-    _controller.syncStop();
+    if (_controller != null) {
+      _controller.syncStop();
+    }
     for (MockParticipantManager participant : _participants) {
       participant.syncStop();
     }
