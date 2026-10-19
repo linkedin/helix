@@ -770,6 +770,25 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertEquals(response.getStatus(), Response.Status.OK.getStatusCode());
     Assert.assertTrue(instanceDrainedResult.get("successful"));
 
+    // test areReplicasOffline on the same instance, which still holds replicas
+    response = new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=areReplicasOffline")
+        .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
+    Map<String, Object> replicaStatus =
+        OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
+    int replicaCount = (int) replicaStatus.get("replicaCount");
+    Assert.assertTrue(replicaCount > 0);
+    Assert.assertEquals(replicaStatus.get("offline"),
+        replicaStatus.get("offlineReplicaCount").equals(replicaCount));
+    Assert.assertTrue(replicaStatus.containsKey("errorPartitions"));
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=areReplicasOffline&exclusions=ERROR_PARTITIONS")
+        .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
+    // Only ERROR partitions can be excluded.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=areReplicasOffline&exclusions=DISABLED_PARTITION")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
+
     // test isEvacuateFinished on instance with EVACUATE and no currentState
     // Create new instance so no currentState or messages assigned to it
     String test_instance_name = INSTANCE_NAME + "_foo";
