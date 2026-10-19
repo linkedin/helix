@@ -52,7 +52,7 @@ public class TestResourceConfig {
     RebalanceConfig rebalanceConfig = wrapped.getRebalanceConfig();
     ResourceConfig rebuilt = new ResourceConfig.Builder("resource")
         .setRebalanceConfig(rebalanceConfig)
-        .setMaxPartitionsPerInstance(10)
+        .setP2PMessageEnabled(true)
         .build();
 
     Assert.assertEquals(wrapped.getRecord(), original);
@@ -61,7 +61,8 @@ public class TestResourceConfig {
     Assert.assertEquals(rebuilt.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
     Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_DELAY"));
     Assert.assertFalse(rebuilt.simpleConfigContains("REBALANCE_MODE"));
-    Assert.assertEquals(rebuilt.getMaxPartitionsPerInstance(), 10);
+    Assert.assertTrue(rebuilt.isP2PMessageEnabled());
+    Assert.assertFalse(rebuilt.simpleConfigContains("MAX_PARTITIONS_PER_INSTANCE"));
     Assert.assertFalse(rebuilt.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     Assert.assertEquals(record, original);
   }
@@ -73,14 +74,15 @@ public class TestResourceConfig {
     record.setLongField("REBALANCE_DELAY", 3000L);
 
     ResourceConfig resourceConfig = new ResourceConfig("resource", false,
-        10, new RebalanceConfig(record), null, null, null, true);
+        new RebalanceConfig(record), null, null, null, true);
 
     Assert.assertFalse(
         resourceConfig.getRecord().getSimpleFields().containsKey(LEGACY_REBALANCE_STRATEGY));
     Assert.assertEquals(resourceConfig.getRebalanceConfig().getConfigsMap(), Collections.emptyMap());
     Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_DELAY"));
     Assert.assertFalse(resourceConfig.simpleConfigContains("REBALANCE_MODE"));
-    Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
+    Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
+    Assert.assertFalse(resourceConfig.simpleConfigContains("MAX_PARTITIONS_PER_INSTANCE"));
     Assert.assertFalse(resourceConfig.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     Assert.assertEquals(record.getSimpleField(LEGACY_REBALANCE_STRATEGY),
         CrushEdRebalanceStrategy.class.getName());
@@ -350,15 +352,14 @@ public class TestResourceConfig {
   @Test
   public void testConstructorWithoutGroupRoutingFields() {
     ResourceConfig resourceConfig = new ResourceConfig("resource", false,
-        10, null, null, null, null, true);
-    Assert.assertEquals(resourceConfig.getMaxPartitionsPerInstance(), 10);
+        null, null, null, null, true);
     Assert.assertFalse(resourceConfig.isMonitoringDisabled());
     Assert.assertTrue(resourceConfig.isP2PMessageEnabled());
     for (String legacyField :
         new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
             "STATE_MODEL_DEF_REF", "REPLICAS", "NUM_PARTITIONS", "HELIX_ENABLED",
             "EXTERNAL_VIEW_DISABLED", "DELAY_REBALANCE_ENABLED", "MIN_ACTIVE_REPLICAS",
-            "STATE_MODEL_FACTORY_NAME", "INSTANCE_GROUP_TAG"}) {
+            "STATE_MODEL_FACTORY_NAME", "INSTANCE_GROUP_TAG", "MAX_PARTITIONS_PER_INSTANCE"}) {
       Assert.assertFalse(resourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
   }
@@ -388,24 +389,23 @@ public class TestResourceConfig {
     testIdealState.getRecord().setBooleanField("GROUP_ROUTING_ENABLED", true);
     testIdealState.setDisableExternalView(false);
     testIdealState.setDelayRebalanceEnabled(true);
-    // Test IdealState info overriding the empty config fields.
+    // Retired IdealState duplicates are not copied into ResourceConfig.
     ResourceConfig mergedResourceConfig =
         ResourceConfig.mergeIdealStateWithResourceConfig(null, testIdealState);
     Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields()
         .containsKey("INSTANCE_GROUP_TAG"));
-    Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
-        testIdealState.getMaxPartitionsPerInstance());
     Assert.assertFalse(mergedResourceConfig.simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
     for (String legacyField :
-        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED"}) {
+        new String[]{"RESOURCE_GROUP_NAME", "RESOURCE_TYPE", "GROUP_ROUTING_ENABLED",
+            "MAX_PARTITIONS_PER_INSTANCE"}) {
       Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields().containsKey(legacyField));
     }
     Assert.assertFalse(mergedResourceConfig.getRecord().getSimpleFields()
         .containsKey("DELAY_REBALANCE_ENABLED"));
-    // Test priority, Resource Config field has higher priority.
+    // Existing raw ResourceConfig fields remain opaque metadata.
     ResourceConfig.Builder configBuilder = new ResourceConfig.Builder("testResource");
-    configBuilder.setMaxPartitionsPerInstance(2);
     testConfig = configBuilder.build();
+    testConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 2);
     testConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "testRCFactory");
     Assert.assertFalse(testConfig.getRecord().getSimpleFields().containsKey("INSTANCE_GROUP_TAG"));
     testConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyRCGroup");
@@ -418,8 +418,9 @@ public class TestResourceConfig {
         "legacyRCGroup");
     Assert.assertEquals(testConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"), "legacyRCGroup");
     Assert.assertEquals(testIdealState.getInstanceGroupTag(), "testISGroup");
-    Assert.assertEquals(mergedResourceConfig.getMaxPartitionsPerInstance(),
-        testConfig.getMaxPartitionsPerInstance());
+    Assert.assertEquals(mergedResourceConfig.getRecord().getIntField("MAX_PARTITIONS_PER_INSTANCE", -1),
+        2);
+    Assert.assertEquals(testIdealState.getMaxPartitionsPerInstance(), 1);
     Assert.assertEquals(mergedResourceConfig.getSimpleConfig("STATE_MODEL_FACTORY_NAME"),
         "testRCFactory");
     for (String legacyField :

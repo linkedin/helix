@@ -50,6 +50,7 @@ public class TestAssignableReplica {
     capacityDataMapResource1.put("item1", 3);
     capacityDataMapResource1.put("item2", 6);
     ResourceConfig testResourceConfigResource = new ResourceConfig(resourceName);
+    testResourceConfigResource.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 2);
     testResourceConfigResource.setPartitionCapacityMap(
         Collections.singletonMap(ResourceConfig.DEFAULT_PARTITION_KEY, capacityDataMapResource1));
     ClusterConfig testClusterConfig = new ClusterConfig("testCluster");
@@ -85,13 +86,11 @@ public class TestAssignableReplica {
     String partitionName2 = partitionNamePrefix + 2;
     capacityMap.put(partitionName2, capacityDataMapResource2);
     testResourceConfigResource.setPartitionCapacityMap(capacityMap);
-    // 2. update instance group tag and max partitions per instance
+    // 2. update the IdealState placement tag and partition limit
     String group = "DEFAULT";
     int maxPartition = 10;
     idealState.setInstanceGroupTag(group);
-    testResourceConfigResource.getRecord()
-        .setIntField(ResourceConfig.ResourceConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(),
-            maxPartition);
+    idealState.setMaxPartitionsPerInstance(maxPartition);
 
     replica = new AssignableReplica(testClusterConfig, testResourceConfigResource, idealState, partitionName,
         masterState, masterPriority);
@@ -109,6 +108,8 @@ public class TestAssignableReplica {
     Assert.assertEquals(replica.getCapacity(), capacityDataMapResource2);
     Assert.assertEquals(replica.getResourceInstanceGroupTag(), group);
     Assert.assertEquals(replica.getResourceMaxPartitionsPerInstance(), maxPartition);
+    Assert.assertEquals(
+        testResourceConfigResource.getRecord().getIntField("MAX_PARTITIONS_PER_INSTANCE", -1), 2);
   }
 
   /**

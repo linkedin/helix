@@ -166,6 +166,31 @@ public class TestHelixPropoertyTimmer {
   }
 
   @Test
+  public void testPartitionLimitChangesOnlyMatterInIdealState() {
+    ResourceConfig resourceConfig = _resourceConfigMap.get(RESOURCE_NAME);
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    resourceConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 1);
+    idealState.setMaxPartitionsPerInstance(2);
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    resourceConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 3);
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG),
+        Collections.emptySet());
+    Assert.assertFalse(ResourceConfigTrimmer.getInstance().trimProperty(resourceConfig)
+        .simpleConfigContains("MAX_PARTITIONS_PER_INSTANCE"));
+    Assert.assertEquals(resourceConfig.getRecord().getIntField("MAX_PARTITIONS_PER_INSTANCE", -1), 3);
+
+    idealState.setMaxPartitionsPerInstance(4);
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
+  }
+
+  @Test
   public void testDetectNonTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
     ResourceChangeDetector detector = new ResourceChangeDetector(true);

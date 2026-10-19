@@ -55,7 +55,7 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
   /**
    * @param clusterConfig  The cluster config.
    * @param resourceConfig The resource config for the resource which contains the replication.
-   * @param idealState     The resource ideal state, which owns the instance-group placement tag.
+   * @param idealState     The resource ideal state, which owns the placement tag and partition limit.
    * @param partitionName  The replication's partition name.
    * @param replicaState   The state of the replication.
    * @param statePriority  The priority of the replication's state.
@@ -68,7 +68,7 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
     _resourceName = resourceConfig.getResourceName();
     _capacityUsage = WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
     _resourceInstanceGroupTag = idealState.getInstanceGroupTag();
-    _resourceMaxPartitionsPerInstance = resourceConfig.getMaxPartitionsPerInstance();
+    _resourceMaxPartitionsPerInstance = idealState.getMaxPartitionsPerInstance();
     _replicaKey = generateReplicaKey(_resourceName, _partitionName,_replicaState);
   }
 
