@@ -46,6 +46,7 @@ import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
+import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
@@ -839,17 +840,27 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   }
 
   /**
-   * Read-only, accept-only feasibility probe: reuses WAGED's partial rebalance (best-possible seed,
-   * drained node excluded from the active set) to re-place only {@code drainedInstanceName}'s
-   * replicas. A clean return proves the drain is feasible; a thrown {@link HelixRebalanceException}
-   * is inconclusive -- a partial rebalance is more constrained than a global one, so failure is not
-   * proof of infeasibility -- and callers must never block a drain on it.
+   * Read-only, accept-only feasibility probe. Models the evacuation of
+   * {@code drainedInstanceName} as a permanent node-down and reuses WAGED's emergency rebalance
+   * (best-possible seed, drained node excluded from the active set) to re-place exactly that node's
+   * replicas onto the survivors while pinning every surviving replica. Emergency rebalance is
+   * strictly more constrained than a global one, so a clean placement proves the drain is feasible;
+   * a thrown {@link HelixRebalanceException} is inconclusive -- not proof of infeasibility -- and
+   * callers must never block a drain on it.
+   *
+   * <p>Soundness guard: {@link org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider}
+   * caps each partition's replica count at the number of surviving assignable fault zones (see
+   * {@link org.apache.helix.model.StateModelDefinition#getStateCountMap}). When a drain drops the
+   * fault-zone count below a resource's configured replica count the model would silently
+   * under-replicate, so a successful placement would not prove the full replica set still fits. This
+   * probe detects that case up front and declines (throws) so the caller falls back to the
+   * authoritative full what-if.
    *
    * @param clusterData fully refreshed cluster data cache
    * @param resourceMap the WAGED resources to consider
    * @param currentStateOutput the computed current state (fallback seed)
    * @param drainedInstanceName the instance being evacuated; must be in the active pool
-   * @return {@code true} iff the partial rebalance placed every drained replica
+   * @return {@code true} iff the emergency rebalance placed every drained replica
    * @throws HelixRebalanceException if the replicas could not be placed or the model could not be built
    */
   public boolean isInstanceDrainFeasibleViaPartialRebalance(
@@ -865,14 +876,40 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (!activeNodes.remove(drainedInstanceName)) {
       throw new HelixRebalanceException(
           "Instance " + drainedInstanceName + " is not in the active assignable pool; cannot model "
-              + "its drain via partial rebalance.", HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+              + "its drain.", HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
     }
-    // Best-possible seed (same as the controller's partial rebalance), passed as both ideal and
-    // current so surviving replicas are pinned and only the drained node's replicas are re-placed.
+    // Seed from the persisted best-possible assignment, then model the drained node as a permanent
+    // node-down: emergency rebalance re-queues exactly the drained node's replicas and pins every
+    // surviving replica in place.
     Map<String, ResourceAssignment> seedAssignment = _assignmentManager
         .getBestPossibleAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
-    ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForPartialRebalance(
-        clusterData, resourceMap, activeNodes, seedAssignment, seedAssignment);
+    ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForEmergencyRebalance(
+        clusterData, resourceMap, activeNodes, seedAssignment);
+
+    // Soundness guard: the model caps each partition's replica count at the number of surviving
+    // assignable fault zones (StateModelDefinition#getStateCountMap). If the drain drops the
+    // fault-zone count below a resource's configured replica count, the model under-replicates and a
+    // successful placement would not prove the full replica set fits, so decline and let the caller
+    // fall back to the authoritative full what-if.
+    long survivingFaultZones = clusterModel.getAssignableNodes().values().stream()
+        .map(AssignableNode::getFaultZone).distinct().count();
+    for (String resourceName : resourceMap.keySet()) {
+      IdealState idealState = clusterData.getIdealState(resourceName);
+      if (idealState == null) {
+        continue;
+      }
+      int requiredReplicas = idealState.getReplicaCount(activeNodes.size());
+      if (survivingFaultZones < requiredReplicas) {
+        throw new HelixRebalanceException(String.format(
+            "Draining %s leaves %d assignable fault zone(s), fewer than the %d replicas required by "
+                + "%s; cannot certify drain feasibility via the fast path.", drainedInstanceName,
+            survivingFaultZones, requiredReplicas, resourceName),
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+      }
+    }
+
+    // With the full replica set represented, a clean placement of the drained node's replicas onto
+    // the survivors proves the drain is feasible.
     WagedRebalanceUtil.calculateAssignment(clusterModel, _rebalanceAlgorithm);
     return true;
   }
