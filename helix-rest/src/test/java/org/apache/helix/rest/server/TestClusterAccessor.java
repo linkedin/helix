@@ -399,11 +399,15 @@ public class TestClusterAccessor extends AbstractTestClass {
       Assert.assertTrue(isResourceWagedRebalanced(clusterName, blockedResource));
       Assert.assertTrue(isResourceWagedRebalanced(clusterName, forcedResource));
 
-      // 4) Close the gap (the starved instance now declares BAR) and add a fresh non-WAGED resource;
-      //    the bulk flip now passes the guard rail and the new resource is flipped to WAGED.
+      // 4) Close the gap (the starved instance now declares BAR) and add a fresh non-WAGED resource.
+      //    Rebalance it so its ideal state carries a real partition -- not an empty resource WAGED
+      //    would trivially accept -- and rely on the cluster DEFAULT_PARTITION_WEIGHT_MAP set above for
+      //    its weights, so its resource side is genuinely valid. The bulk flip now passes both sides of
+      //    the guard rail and the resource (one WAGED can actually place) is flipped to WAGED.
       setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100, "BAR", 100));
       _gSetupTool.getClusterManagementTool()
           .addResource(clusterName, validResource, 1, "OnlineOffline");
+      _gSetupTool.rebalanceStorageCluster(clusterName, validResource, 1);
       Assert.assertFalse(isResourceWagedRebalanced(clusterName, validResource));
       post(uri,
           ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name()),
@@ -445,10 +449,13 @@ public class TestClusterAccessor extends AbstractTestClass {
       clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
       _configAccessor.setClusterConfig(clusterName, clusterConfig);
 
-      // A legacy, non-WAGED resource with no partition weights (addResource never sets weights) and no
-      // cluster default to fall back on.
+      // A legacy, non-WAGED resource with real partitions but no partition weights (addResource never
+      // sets weights) and no cluster default to fall back on. Rebalanced so it carries an actual
+      // partition WAGED must weight -- i.e. exactly the resource that fails the cluster-wide WAGED
+      // model build, not an empty resource WAGED would skip.
       _gSetupTool.getClusterManagementTool()
           .addResource(clusterName, weightlessResource, 1, "OnlineOffline");
+      _gSetupTool.rebalanceStorageCluster(clusterName, weightlessResource, 1);
       Assert.assertFalse(isResourceWagedRebalanced(clusterName, weightlessResource));
 
       // 1) Enforcement: 400 + a verdict naming the weightless resource, and nothing flipped.
