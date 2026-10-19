@@ -965,7 +965,13 @@ public class ZKHelixAdmin implements HelixAdmin {
           .ifPresent(evacuationInfo::setLastActivityTimestamp);
     }
 
-    List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
+    // Only the ideal states of the resources on the instance affect the result.
+    List<PropertyKey> idealStateKeys = currentStates.stream()
+        .map(currentState -> keyBuilder.idealStates(currentState.getResourceName()))
+        .collect(Collectors.toList());
+    List<IdealState> idealStates = accessor.<IdealState>getProperty(idealStateKeys, true).stream()
+        .filter(Objects::nonNull)
+        .collect(Collectors.toList());
 
     // Step 1: Get set of FULL_AUTO and CUSTOMIZED resources, except for excluded ones through exclusion list
     Set<String> allowedResources = filterResourcesByModeAndExclusions(idealStates, exclusionTypes);
