@@ -36,11 +36,15 @@ import org.apache.helix.api.config.StateTransitionThrottleConfig;
 import org.apache.helix.api.config.StateTransitionTimeoutConfig;
 import org.apache.helix.api.config.ViewClusterSourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Cluster configurations
  */
 public class ClusterConfig extends HelixProperty {
+  private static final Logger logger = LoggerFactory.getLogger(ClusterConfig.class.getName());
+
   /**
    * Configurable characteristics of a cluster.
    * NOTE: Do NOT use this field name directly, use its corresponding getter/setter in the
@@ -70,10 +74,6 @@ public class ClusterConfig extends HelixProperty {
 
     // The following concerns maintenance mode
     MAX_PARTITIONS_PER_INSTANCE,
-    // The maximum number of partitions that an instance can serve in this cluster.
-    // This only works for GreedyRebalanceStrategy.
-    // TODO: if we want to support this for other rebalancers, we need to implement that logic
-    GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE,
     // The following two include offline AND disabled instances
     // TODO: At some point we should rename this to something like MAX_INSTANCES_UNABLE_TO_TAKE_ACCEPT_REPLICAS
     //     to make it clear that it includes both offline and non-assignable instances
@@ -95,15 +95,9 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
-    @Deprecated // ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE will take
-    // precedence if it is set
-    ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance state
-    // transition if the number of partitons that need
-    // recovery exceeds this limitation
-    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE, // Controller won't execute load balance
-    // state transition if the number of
-    // partitons that need recovery or in
-    // error exceeds this limitation
+    // Restrict load balance to downward transitions when the number of error partitions exceeds
+    // this threshold. Recovery partitions are not counted.
+    ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
 
     VIEW_CLUSTER, // Set to "true" to indicate this is a view cluster
     VIEW_CLUSTER_SOURCES, // Map field, key is the name of source cluster, value is
@@ -153,6 +147,7 @@ public class ClusterConfig extends HelixProperty {
     // The preference of the rebalance result.
     // EVENNESS - Evenness of the resource utilization, partition, and top state distribution.
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
+    // TOP_STATE_EVENNESS - an additional multiplier for the evenness of the top state usage only.
     REBALANCE_PREFERENCE,
     // Specify if the WAGED rebalancer should asynchronously perform the global rebalance, which is
     // in general slower than the partial rebalance.
@@ -194,6 +189,17 @@ public class ClusterConfig extends HelixProperty {
     // for message ordering and extracted throttle logic. When disabled (default), the original
     // IntermediateStateCalcStage (V1) is used for backward compatibility.
     INTERMEDIATE_STATE_CALC_STAGE_V2_ENABLED,
+
+    // Optional capacity keys on which the WAGED rebalancer scores the evenness of the top state
+    // usage. When set, they replace PREFERRED_SCORING_KEYS for that score only; the other usage
+    // scores keep PREFERRED_SCORING_KEYS. When not set, the top state usage is scored like the
+    // other usage scores.
+    TOP_STATE_SCORING_KEYS,
+
+    // Optional steepness (sigmoid alpha) of the WAGED top state usage evenness score. The default
+    // (44) spends almost all of the score between 0.93x and 1.07x of the estimated usage, so the
+    // instances further above it score about the same; a smaller value keeps them ranked.
+    TOP_STATE_SCORING_ALPHA,
   }
 
   public enum GlobalRebalancePreferenceKey {
@@ -201,14 +207,18 @@ public class ClusterConfig extends HelixProperty {
     EVENNESS,
     LESS_MOVEMENT,
     FORCE_BASELINE_CONVERGE,
+    // Optional. An integer multiplier, from 0 to 1000, on the weight of the top state utilization
+    // evenness constraint, on top of EVENNESS, so that the top state (e.g. leader) load can be
+    // balanced harder than the other evenness goals. The default 1 keeps the configured weight,
+    // and 0 turns the constraint off. A higher value moves more top states. The first global
+    // rebalance after raising it can hand off many of them at once, and move some replicas, to
+    // undo the existing skew; later rebalances, e.g. when an instance leaves or comes back, also
+    // move more top states than with the default.
+    TOP_STATE_EVENNESS,
   }
 
   private final static int DEFAULT_MAX_CONCURRENT_TASK_PER_INSTANCE = 40;
-  // By default, no load balance if any error partition
-  @Deprecated
-  private final static int DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = 0;
-  // By default, no load balance if any error or recovery partition. -1 implies that the threshold
-  // is not set and will be given a default value of 1
+  // -1 means unset; the controller uses an effective error-partition threshold of 1.
   private final static int DEFAULT_ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE = -1;
   private static final String IDEAL_STATE_RULE_PREFIX = "IdealStateRule!";
 
@@ -222,7 +232,8 @@ public class ClusterConfig extends HelixProperty {
       ImmutableMap.<GlobalRebalancePreferenceKey, Integer>builder()
           .put(GlobalRebalancePreferenceKey.EVENNESS, 1)
           .put(GlobalRebalancePreferenceKey.LESS_MOVEMENT, 1)
-          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0).build();
+          .put(GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0)
+          .put(GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS, 1).build();
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
@@ -536,26 +547,6 @@ public class ClusterConfig extends HelixProperty {
    */
   public int getMaxPartitionsPerInstance() {
     return _record.getIntField(ClusterConfigProperty.MAX_PARTITIONS_PER_INSTANCE.name(), -1);
-  }
-
-  /**
-   * Set the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @param globalMaxPartitionAllowedPerInstance the maximum number of partitions allowed
-   */
-  public void setGlobalMaxPartitionAllowedPerInstance(int globalMaxPartitionAllowedPerInstance) {
-    _record.setIntField(ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(),
-        globalMaxPartitionAllowedPerInstance);
-  }
-
-  /**
-   * Get the maximum number of partitions allowed to assign to an instance in this cluster.
-   *
-   * @return the maximum number of partitions allowed, or Integer.MAX_VALUE
-   */
-  public int getGlobalMaxPartitionAllowedPerInstance() {
-    return _record.getIntField(
-        ClusterConfigProperty.GLOBAL_MAX_PARTITIONS_ALLOWED_PER_INSTANCE.name(), -1);
   }
 
   /**
@@ -921,35 +912,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Get maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @return the maximum allowed error partition count
-   */
-  public int getErrorPartitionThresholdForLoadBalance() {
-    return _record.getIntField(
-        ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-            DEFAULT_ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE);
-  }
-
-  /**
-   * Set maximum allowed error partitions for a resource to be load balanced.
-   * If limitation is set to negative number, Helix won't check error partition count before
-   * schedule load balance.
-   * @param errorPartitionThreshold the maximum allowed error partition count
-   */
-  public void setErrorPartitionThresholdForLoadBalance(int errorPartitionThreshold) {
-    _record.setIntField(ClusterConfigProperty.ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE.name(),
-        errorPartitionThreshold);
-  }
-
-  /**
-   * Get the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @return the threshold
+   * Get the error-partition threshold for load balancing. Despite the property name, recovery
+   * partitions are not counted. If the number of error partitions exceeds the effective threshold,
+   * load balance is restricted to downward transitions.
+   * @return the configured threshold, or -1 when unset; the controller uses 1 for -1
    */
   public int getErrorOrRecoveryPartitionThresholdForLoadBalance() {
     return _record.getIntField(
@@ -958,12 +924,10 @@ public class ClusterConfig extends HelixProperty {
   }
 
   /**
-   * Set the threshold for the number of partitions needing recovery or in error. Default value is
-   * set at
-   * Integer.MAX_VALUE to allow recovery rebalance and load rebalance to happen in the same pipeline
-   * cycle. If the number of partitions needing recovery is greater than this threshold, recovery
-   * balance will take precedence and load balance will not happen during this cycle.
-   * @param recoveryPartitionThreshold
+   * Set the error-partition threshold for load balancing. Zero allows no error partitions before
+   * restricting load balance to downward transitions; -1 selects the controller default of 1.
+   * Recovery transitions are not blocked by this threshold.
+   * @param recoveryPartitionThreshold the error-partition threshold
    */
   public void setErrorOrRecoveryPartitionThresholdForLoadBalance(int recoveryPartitionThreshold) {
     _record.setIntField(
@@ -1272,7 +1236,8 @@ public class ClusterConfig extends HelixProperty {
    *                   The weights will determine the rebalancer's behavior. Note that
    *                   GlobalRebalancePreferenceKey.EVENNESS and
    *                   GlobalRebalancePreferenceKey.LESS_MOVEMENT must be both specified or not
-   *                   specified, or an exception will be thrown.
+   *                   specified, or an exception will be thrown. The other keys are optional; an
+   *                   unspecified key uses its value in DEFAULT_GLOBAL_REBALANCE_PREFERENCE.
    *                   If null, the preference item will be removed from the config.
    */
   public void setGlobalRebalancePreference(Map<GlobalRebalancePreferenceKey, Integer> preference) {
@@ -1298,6 +1263,11 @@ public class ClusterConfig extends HelixProperty {
 
   /**
    * Get the global rebalancer's assignment preference.
+   * The preference can be written without the checks of setGlobalRebalancePreference, e.g. by a
+   * REST update of the config, and the rebalancer reads it on every rebalance. So a value outside
+   * the valid range (0 to 1000) is clamped to it, and a value that is not an integer is ignored, so
+   * that its key falls back to the default; both are logged. As when one of them is missing, if
+   * EVENNESS or LESS_MOVEMENT is ignored, the other one is ignored too.
    */
   public Map<GlobalRebalancePreferenceKey, Integer> getGlobalRebalancePreference() {
     Map<String, String> preferenceStrMap =
@@ -1306,7 +1276,10 @@ public class ClusterConfig extends HelixProperty {
       Map<GlobalRebalancePreferenceKey, Integer> preference = new HashMap<>();
       for (GlobalRebalancePreferenceKey key : GlobalRebalancePreferenceKey.values()) {
         if (preferenceStrMap.containsKey(key.name())) {
-          preference.put(key, Integer.parseInt(preferenceStrMap.get(key.name())));
+          Integer value = parseGlobalRebalancePreference(key, preferenceStrMap.get(key.name()));
+          if (value != null) {
+            preference.put(key, value);
+          }
         }
       }
       // In case this map is set incorrectly, check for both attributes to ensure strong pairing
@@ -1319,6 +1292,30 @@ public class ClusterConfig extends HelixProperty {
     }
     // If configuration is not complete, return the default one.
     return DEFAULT_GLOBAL_REBALANCE_PREFERENCE;
+  }
+
+  /**
+   * @return the preference value clamped to the valid range, or null if it is not an integer
+   */
+  private Integer parseGlobalRebalancePreference(GlobalRebalancePreferenceKey key, String value) {
+    int preference;
+    try {
+      preference = Integer.parseInt(value == null ? "" : value.trim());
+    } catch (NumberFormatException e) {
+      logger.warn("Ignoring the global rebalance preference {}={} of cluster {}: it must be an "
+              + "integer from {} to {}. The default applies.", key, value, getClusterName(),
+          MIN_REBALANCE_PREFERENCE, MAX_REBALANCE_PREFERENCE);
+      return null;
+    }
+    if (preference < MIN_REBALANCE_PREFERENCE || preference > MAX_REBALANCE_PREFERENCE) {
+      int clamped =
+          Math.max(MIN_REBALANCE_PREFERENCE, Math.min(MAX_REBALANCE_PREFERENCE, preference));
+      logger.warn("Clamping the global rebalance preference {}={} of cluster {} to {}: it must be "
+              + "from {} to {}.", key, preference, getClusterName(), clamped,
+          MIN_REBALANCE_PREFERENCE, MAX_REBALANCE_PREFERENCE);
+      return clamped;
+    }
+    return preference;
   }
 
   /**
@@ -1404,12 +1401,91 @@ public class ClusterConfig extends HelixProperty {
    * Set list of preferred scoring keys for cluster.
    * preferredScoringKeys is set as a List to make it generic and accommodate any future use case.
    * preferredScoringKeys will be a singleton list for current use case.
+   * Keys that are not capacity keys of the cluster are ignored, and if none is left, the usage is
+   * scored on all the capacity keys.
    *
    * @param preferredScoringKeys value used in evenness score computation
    */
   public void setPreferredScoringKeys(List<String> preferredScoringKeys) {
     _record.setListField(ClusterConfigProperty.PREFERRED_SCORING_KEYS.name(),
         preferredScoringKeys);
+  }
+
+  /**
+   * Get the capacity keys on which the WAGED rebalancer scores the evenness of the top state usage,
+   * if set.
+   *
+   * @return the top state scoring keys, or null if not set; the top state usage is then scored on
+   *         the preferred scoring keys like the other usage scores. Keys that are not capacity keys
+   *         of the cluster are ignored, and if none is left, the preferred scoring keys apply.
+   */
+  public List<String> getTopStateScoringKeys() {
+    return _record.getListField(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name());
+  }
+
+  /**
+   * Set the capacity keys on which the WAGED rebalancer scores the evenness of the top state usage.
+   * They replace the preferred scoring keys for that score only; the other usage scores keep the
+   * preferred scoring keys.
+   *
+   * @param topStateScoringKeys the capacity keys, or null to remove the setting
+   */
+  public void setTopStateScoringKeys(List<String> topStateScoringKeys) {
+    if (topStateScoringKeys == null) {
+      _record.getListFields().remove(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name());
+    } else {
+      _record.setListField(ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name(),
+          topStateScoringKeys);
+    }
+  }
+
+  /**
+   * Get the steepness (sigmoid alpha) of the WAGED top state usage evenness score, if set.
+   *
+   * @return the steepness, or -1 if it is not set or is not a positive number
+   */
+  public double getTopStateScoringAlpha() {
+    String value = _record.getSimpleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name());
+    if (value == null) {
+      return -1;
+    }
+    double alpha;
+    try {
+      alpha = Double.parseDouble(value);
+    } catch (NumberFormatException e) {
+      alpha = Double.NaN;
+    }
+    if (alpha > 0 && !Double.isInfinite(alpha)) {
+      return alpha;
+    }
+    // Read on every rebalance, so one line rather than a stack trace.
+    logger.warn("Ignoring the top state scoring alpha {} of cluster {}: it must be a positive "
+        + "number. The default applies.", value, getClusterName());
+    return -1;
+  }
+
+  /**
+   * Set the steepness (sigmoid alpha) of the WAGED top state usage evenness score. With the default
+   * steepness the instances well above the estimated top state usage all score about the same; a
+   * smaller value keeps them ranked, so that a heavily loaded instance is still preferred less.
+   * This matters where single top state replicas are heavy compared with an instance's top state
+   * usage: moving one leaves the receiving instance well above the estimate, which the default
+   * scores like a far busier instance, so the move is not made. A smaller value also tells apart
+   * the instances close to the estimate less sharply, so set it only where the top state usage
+   * stays uneven with the default.
+   *
+   * @param alpha a positive steepness, or null to remove the setting and use the default
+   */
+  public void setTopStateScoringAlpha(Double alpha) {
+    if (alpha == null) {
+      _record.getSimpleFields().remove(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name());
+      return;
+    }
+    if (!(alpha > 0) || alpha.isInfinite()) {
+      throw new IllegalArgumentException(
+          "The top state scoring alpha must be a positive number, got " + alpha);
+    }
+    _record.setDoubleField(ClusterConfigProperty.TOP_STATE_SCORING_ALPHA.name(), alpha);
   }
 
   /**

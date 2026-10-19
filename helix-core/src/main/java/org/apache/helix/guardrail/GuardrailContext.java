@@ -23,6 +23,7 @@ import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
@@ -42,24 +43,30 @@ public class GuardrailContext {
   private final String clusterName;
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
+  private final String resourceName;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
   private final InstanceConstants.InstanceOperation proposedInstanceOperation;
   private final WagedAssignmentProvider wagedAssignmentProvider;
   private final InstanceConfig proposedInstanceConfig;
   private final List<String> proposedRemovedInstanceTags;
+  private final ClusterConfig currentClusterConfig;
+  private final ClusterConfig proposedClusterConfig;
   private final MinActiveReplicaChecker minActiveReplicaChecker;
 
   private GuardrailContext(Builder builder) {
     this.clusterName = builder.clusterName;
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
+    this.resourceName = builder.resourceName;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
     this.proposedInstanceOperation = builder.proposedInstanceOperation;
     this.wagedAssignmentProvider = builder.wagedAssignmentProvider;
     this.proposedInstanceConfig = builder.proposedInstanceConfig;
     this.proposedRemovedInstanceTags = builder.proposedRemovedInstanceTags;
+    this.currentClusterConfig = builder.currentClusterConfig;
+    this.proposedClusterConfig = builder.proposedClusterConfig;
     this.minActiveReplicaChecker = builder.minActiveReplicaChecker;
   }
 
@@ -74,6 +81,11 @@ public class GuardrailContext {
   /** The instance targeted by an instance-scoped mutation, or {@code null} if not applicable. */
   public String getInstanceName() {
     return instanceName;
+  }
+
+  /** The resource targeted by a resource-scoped mutation, or {@code null} if not applicable. */
+  public String getResourceName() {
+    return resourceName;
   }
 
   /**
@@ -137,6 +149,16 @@ public class GuardrailContext {
     return proposedRemovedInstanceTags;
   }
 
+  /** The stored snapshot used by a version-checked cluster-config write, or null if absent. */
+  public ClusterConfig getCurrentClusterConfig() {
+    return currentClusterConfig;
+  }
+
+  /** The complete post-update cluster config, not a delta; null for other mutation types. */
+  public ClusterConfig getProposedClusterConfig() {
+    return proposedClusterConfig;
+  }
+
   /**
    * A read-only seam for evaluating whether an instance can stop serving its partitions without
    * pushing any of them below {@code minActiveReplicas}, or {@code null} if the endpoint did not
@@ -156,12 +178,15 @@ public class GuardrailContext {
     private final String clusterName;
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
+    private String resourceName;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
     private InstanceConstants.InstanceOperation proposedInstanceOperation;
     private WagedAssignmentProvider wagedAssignmentProvider;
     private InstanceConfig proposedInstanceConfig;
     private List<String> proposedRemovedInstanceTags;
+    private ClusterConfig currentClusterConfig;
+    private ClusterConfig proposedClusterConfig;
     private MinActiveReplicaChecker minActiveReplicaChecker;
 
     private Builder(String clusterName) {
@@ -175,6 +200,11 @@ public class GuardrailContext {
 
     public Builder instanceName(String instanceName) {
       this.instanceName = instanceName;
+      return this;
+    }
+
+    public Builder resourceName(String resourceName) {
+      this.resourceName = resourceName;
       return this;
     }
 
@@ -206,6 +236,16 @@ public class GuardrailContext {
 
     public Builder proposedRemovedInstanceTags(List<String> proposedRemovedInstanceTags) {
       this.proposedRemovedInstanceTags = proposedRemovedInstanceTags;
+      return this;
+    }
+
+    public Builder currentClusterConfig(ClusterConfig currentClusterConfig) {
+      this.currentClusterConfig = currentClusterConfig;
+      return this;
+    }
+
+    public Builder proposedClusterConfig(ClusterConfig proposedClusterConfig) {
+      this.proposedClusterConfig = proposedClusterConfig;
       return this;
     }
 

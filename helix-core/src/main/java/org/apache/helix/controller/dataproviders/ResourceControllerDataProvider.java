@@ -41,9 +41,7 @@ import org.apache.helix.common.caches.CustomizedViewCache;
 import org.apache.helix.common.caches.PropertyCache;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.LogUtil;
-import org.apache.helix.controller.common.CapacityNode;
 import org.apache.helix.controller.pipeline.Pipeline;
-import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.waged.WagedInstanceCapacity;
 import org.apache.helix.controller.rebalancer.waged.WagedResourceWeightsProvider;
 import org.apache.helix.controller.stages.InProgressHandoffRecord;
@@ -104,7 +102,6 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
   // Maintain a set of all ChangeTypes for change detection
   private Set<HelixConstants.ChangeType> _refreshedChangeTypes;
   private Set<String> _aggregationEnabledTypes = new HashSet<>();
-  private Set<CapacityNode> _simpleCapacitySet;
   private final Set<String> _disabledInstancesForAllPartitionsSet = new HashSet<>();
 
 
@@ -207,18 +204,6 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     refreshStablePartitionList(getIdealStates());
     refreshDisabledInstancesForAllPartitionsSet();
 
-    if (getClusterConfig().getGlobalMaxPartitionAllowedPerInstance() != -1) {
-      buildSimpleCapacityMap(getClusterConfig().getGlobalMaxPartitionAllowedPerInstance());
-      // Remove all cached IdealState because it is a global computation cannot partially be
-      // performed for some resources. The computation is simple as well not taking too much resource
-      // to recompute the assignments.
-      Set<String> cachedGreedyIdealStates = _idealMappingCache.values().stream().filter(
-              record -> record.getSimpleField(IdealState.IdealStateProperty.REBALANCE_STRATEGY.name())
-                  .equals(GreedyRebalanceStrategy.class.getName())).map(ZNRecord::getId)
-          .collect(Collectors.toSet());
-      _idealMappingCache.keySet().removeAll(cachedGreedyIdealStates);
-    }
-
     LogUtil.logInfo(logger, getClusterEventId(), String.format(
         "END: ResourceControllerDataProvider.refresh() for cluster %s, started at %d took %d for %s pipeline",
         getClusterName(), startTime, System.currentTimeMillis() - startTime, getPipelineName()));
@@ -238,9 +223,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
         .getAndSet(false)) {
       CustomizedStateConfig customizedStateConfig =
           accessor.getProperty(accessor.keyBuilder().customizedStateConfig());
-      if (customizedStateConfig != null) {
-        _aggregationEnabledTypes =
-            new HashSet<>(customizedStateConfig.getAggregationEnabledTypes());
+      List<String> aggregationEnabledTypes =
+          customizedStateConfig == null ? null : customizedStateConfig.getAggregationEnabledTypes();
+      if (aggregationEnabledTypes != null) {
+        _aggregationEnabledTypes = new HashSet<>(aggregationEnabledTypes);
       } else {
         _aggregationEnabledTypes.clear();
       }
@@ -589,19 +575,6 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
    */
   public WagedInstanceCapacity getWagedInstanceCapacity() {
     return _wagedInstanceCapacity;
-  }
-
-  private void buildSimpleCapacityMap(int globalMaxPartitionAllowedPerInstance) {
-    _simpleCapacitySet = new HashSet<>();
-    for (String instance : getEnabledLiveInstances()) {
-      CapacityNode capacityNode = new CapacityNode(instance);
-      capacityNode.setCapacity(globalMaxPartitionAllowedPerInstance);
-      _simpleCapacitySet.add(capacityNode);
-    }
-  }
-
-  public Set<CapacityNode> getSimpleCapacitySet() {
-    return _simpleCapacitySet;
   }
 
   private void refreshDisabledInstancesForAllPartitionsSet() {

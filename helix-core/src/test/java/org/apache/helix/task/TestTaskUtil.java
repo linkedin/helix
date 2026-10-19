@@ -19,22 +19,29 @@ package org.apache.helix.task;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.helix.AccessOption;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.TaskTestBase;
 import org.apache.helix.integration.task.TaskTestUtil;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.store.HelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -102,7 +109,7 @@ public class TestTaskUtil extends TaskTestBase {
   }
 
   @Test
-  public void testGetExpiredJobsFromCacheFailPropagation() {
+  public void testGetExpiredJobsFromCacheMissingConfigFailPropagation() {
     String workflowName = "TEST_WORKFLOW_COMPLEX_DAG";
     Workflow.Builder workflowBuilder = new Workflow.Builder(workflowName);
     // Workflow Schematic:
@@ -148,12 +155,11 @@ public class TestTaskUtil extends TaskTestBase {
     when(workflowContext.getJobStates()).thenReturn(jobStates);
 
     JobConfig jobConfig = mock(JobConfig.class);
-    when(jobConfig.getTerminalStateExpiry()).thenReturn(1L);
     WorkflowControllerDataProvider workflowControllerDataProvider =
         mock(WorkflowControllerDataProvider.class);
     for (int i = 0; i < 10; i++) {
       when(workflowControllerDataProvider.getJobConfig(workflowName + "_Job_" + i))
-          .thenReturn(jobConfig);
+          .thenReturn(i == 0 || i == 2 || i == 4 ? null : jobConfig);
     }
 
     JobContext inProgressJobContext = mock(JobContext.class);
@@ -189,6 +195,71 @@ public class TestTaskUtil extends TaskTestBase {
     Assert.assertEquals(TaskUtil
         .getExpiredJobsFromCache(workflowControllerDataProvider, workflow.getWorkflowConfig(),
             workflowContext, _manager), expectedJobs);
+  }
+
+  @DataProvider
+  public Object[][] legacyTerminalStateExpiries() {
+    return new Object[][] {{null}, {"-1"}, {"0"}, {"200"}, {"invalid"}};
+  }
+
+  @Test(dataProvider = "legacyTerminalStateExpiries")
+  @SuppressWarnings("unchecked")
+  public void testExpiredJobsIgnoreLegacyTerminalStateExpiry(String legacyValue) {
+    String workflowName = "legacyTerminalExpiry";
+    JobQueue.Builder queue = new JobQueue.Builder(workflowName);
+    WorkflowContext workflowContext = new WorkflowContext(new ZNRecord(workflowName));
+    WorkflowControllerDataProvider cache = mock(WorkflowControllerDataProvider.class);
+    HelixDataAccessor accessor = mock(HelixDataAccessor.class);
+    PropertyKey.Builder keys = new PropertyKey.Builder("cluster");
+    when(accessor.keyBuilder()).thenReturn(keys);
+    Map<String, JobConfig> configs = new HashMap<>();
+    Map<String, ZNRecord> originals = new HashMap<>();
+    when(accessor.getProperty(any(PropertyKey.class))).thenAnswer(invocation -> {
+      PropertyKey key = invocation.getArgument(0);
+      return configs.get(key.getPath());
+    });
+    HelixPropertyStore<ZNRecord> propertyStore = mock(HelixPropertyStore.class);
+    long now = System.currentTimeMillis();
+    Object[][] jobs = {
+        {"expired", TaskState.COMPLETED, now - 1000L},
+        {"future", TaskState.COMPLETED, now + 60000L},
+        {"failed", TaskState.FAILED, now - 1000L},
+        {"timedOut", TaskState.TIMED_OUT, now - 1000L},
+        {"running", TaskState.IN_PROGRESS, now - 1000L},
+        {"unfinished", TaskState.COMPLETED, (long) WorkflowContext.UNFINISHED},
+        {"missingContext", TaskState.COMPLETED, null}
+    };
+    for (Object[] job : jobs) {
+      String jobName = TaskUtil.getNamespacedJobName(workflowName, (String) job[0]);
+      JobConfig.Builder builder = new JobConfig.Builder().setWorkflow(workflowName)
+          .setJobId(jobName).setTargetResource("database").setCommand("Dummy").setExpiry(200L);
+      JobConfig config = builder.build();
+      if (legacyValue != null) {
+        config.getRecord().setSimpleField("TerminalStateExpiry", legacyValue);
+      }
+      queue.enqueueJob((String) job[0], builder);
+      configs.put(keys.resourceConfig(jobName).getPath(), config);
+      originals.put(jobName, new ZNRecord(config.getRecord()));
+      workflowContext.setJobState(jobName, (TaskState) job[1]);
+      when(cache.getJobConfig(jobName)).thenReturn(config);
+      if (job[2] != null) {
+        JobContext context = new JobContext(new ZNRecord(jobName));
+        context.setFinishTime((Long) job[2]);
+        when(cache.getJobContext(jobName)).thenReturn(context);
+        when(propertyStore.get(TaskConstants.REBALANCER_CONTEXT_ROOT + "/" + jobName + "/"
+            + TaskUtil.CONTEXT_NODE, null, AccessOption.PERSISTENT)).thenReturn(context.getRecord());
+      }
+    }
+    WorkflowConfig workflowConfig = queue.build().getWorkflowConfig();
+    Set<String> expected = Collections.singleton(workflowName + "_expired");
+    Assert.assertEquals(TaskUtil.getExpiredJobsFromCache(cache, workflowConfig, workflowContext,
+        _manager), expected);
+    Assert.assertEquals(TaskUtil.getExpiredJobs(accessor, propertyStore, workflowConfig,
+        workflowContext), expected);
+    for (String jobName : originals.keySet()) {
+      Assert.assertEquals(configs.get(keys.resourceConfig(jobName).getPath()).getRecord(),
+          originals.get(jobName), "Expiry checks must not rewrite legacy records");
+    }
   }
 
   @Test

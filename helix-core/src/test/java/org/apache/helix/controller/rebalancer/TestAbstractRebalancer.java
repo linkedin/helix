@@ -19,11 +19,19 @@ package org.apache.helix.controller.rebalancer;
  * under the License.
  */
 
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.helix.HelixException;
 import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolver;
+import org.apache.helix.controller.rebalancer.strategy.AutoRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.CrushEd2RebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.CrushRebalanceStrategy;
+import org.apache.helix.controller.rebalancer.strategy.RebalanceStrategy;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
@@ -36,6 +44,43 @@ import org.testng.annotations.Test;
 
 
 public class TestAbstractRebalancer {
+
+  @DataProvider
+  public static Object[][] supportedRebalanceStrategies() {
+    return new Object[][] {
+        {null, AutoRebalanceStrategy.class},
+        {"DEFAULT", AutoRebalanceStrategy.class},
+        {AutoRebalanceStrategy.class.getName(), AutoRebalanceStrategy.class},
+        {CrushRebalanceStrategy.class.getName(), CrushRebalanceStrategy.class},
+        {CrushEdRebalanceStrategy.class.getName(), CrushEdRebalanceStrategy.class},
+        {CrushEd2RebalanceStrategy.class.getName(), CrushEd2RebalanceStrategy.class}
+    };
+  }
+
+  @Test(dataProvider = "supportedRebalanceStrategies")
+  public void testSupportedRebalanceStrategySelection(String strategyName, Class<?> expectedClass) {
+    LinkedHashMap<String, Integer> states = new LinkedHashMap<>();
+    states.put("ONLINE", 1);
+    RebalanceStrategy<?> strategy = new AutoRebalancer().getRebalanceStrategy(strategyName,
+        Collections.singletonList("test_0"), "test", states, Integer.MAX_VALUE);
+    Assert.assertEquals(strategy.getClass(), expectedClass);
+  }
+
+  @Test
+  public void testRetiredGreedyStrategyDoesNotFallBack() {
+    String strategyName =
+        "org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy";
+    LinkedHashMap<String, Integer> states = new LinkedHashMap<>();
+    states.put("ONLINE", 1);
+    try {
+      new AutoRebalancer().getRebalanceStrategy(strategyName,
+          Collections.singletonList("test_0"), "test", states, Integer.MAX_VALUE);
+      Assert.fail("Retired strategy must fail instead of silently changing placement");
+    } catch (HelixException e) {
+      Assert.assertTrue(e.getCause() instanceof ClassNotFoundException);
+      Assert.assertTrue(e.getMessage().contains(strategyName));
+    }
+  }
 
   @Test(dataProvider = "TestComputeBestPossibleStateInput")
   public void testComputeBestPossibleState(String comment, String stateModelName, List<String> liveInstances,

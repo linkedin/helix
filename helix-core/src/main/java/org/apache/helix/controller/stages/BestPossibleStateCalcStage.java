@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
@@ -46,7 +47,6 @@ import org.apache.helix.controller.rebalancer.MaintenanceRebalancer;
 import org.apache.helix.controller.rebalancer.Rebalancer;
 import org.apache.helix.controller.rebalancer.SemiAutoRebalancer;
 import org.apache.helix.controller.rebalancer.internal.MappingCalculator;
-import org.apache.helix.controller.rebalancer.strategy.GreedyRebalanceStrategy;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.ReadOnlyWagedRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
@@ -79,6 +79,12 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   // Upper bound on how many (resource, instance) pairs the aggregated capacity-rejection line
   // names. A cluster-wide shortage can produce thousands of distinct pairs.
   private static final int MAX_LOGGED_REJECTION_PAIRS = 20;
+  // Gauge tasks of consecutive runs share a thread pool and can finish out of order. Keep the
+  // latest run that reported each resource, so an older run never overwrites a newer report,
+  // and the newest run's resources, so an older run does not report a resource deleted since.
+  private final AtomicLong _latestRun = new AtomicLong();
+  private final Map<String, Long> _reportedRuns = new HashMap<>();
+  private volatile Set<String> _latestResources = Collections.emptySet();
 
   @Override
   public void process(ClusterEvent event) throws Exception {
@@ -112,10 +118,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     final Map<String, StateModelDefinition> stateModelDefMap = cache.getStateModelDefMap();
     final Map<String, IdealState> idealStateMap = cache.getIdealStates();
     final Map<String, ExternalView> externalViewMap = cache.getExternalViews();
+    final CurrentStateOutput currentStateIncludingUnknown =
+        event.getAttribute(AttributeName.CURRENT_STATE.name());
     final Map<String, ResourceConfig> resourceConfigMap = cache.getResourceConfigMap();
     // Capture capacity rejection data from this pipeline run and clear for next run
     final Map<String, Map<String, AtomicLong>> capacityRejectionSnapshot =
         cache.getAndClearCapacityRejections();
+    final long run = _latestRun.incrementAndGet();
+    _latestResources = new HashSet<>(idealStateMap.keySet());
 
     asyncExecute(cache.getAsyncTasksThreadPool(), () -> {
       try {
@@ -134,8 +144,32 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
               continue;
             }
             IdealState is = idealStateMap.get(resourceName);
-            reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName, is,
-                externalViewMap.get(resourceName), stateModelDefMap.get(is.getStateModelDefRef()));
+            ExternalView ev = externalViewMap.get(resourceName);
+            // The cached external view is updated asynchronously and can lag this run, leaving
+            // the gauges stale until the next run. Build the view from this run's current state
+            // instead, the same way ExternalViewComputeStage does.
+            if (resourceMap.containsKey(resourceName) && currentStateIncludingUnknown != null
+                && !is.isExternalViewDisabled()) {
+              ev = new ExternalView(resourceName);
+              for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
+                Map<String, String> stateMap =
+                    currentStateIncludingUnknown.getCurrentStateMap(resourceName, partition);
+                if (stateMap != null && !stateMap.isEmpty()) {
+                  ev.setStateMap(partition.getPartitionName(), new TreeMap<>(stateMap));
+                }
+              }
+            }
+            synchronized (_reportedRuns) {
+              if (_latestResources.contains(resourceName)
+                  && _reportedRuns.merge(resourceName, run, Math::max) == run) {
+                reportResourceState(clusterStatusMonitor, bestPossibleStateOutput, resourceName,
+                    is, ev, stateModelDefMap.get(is.getStateModelDefRef()));
+              }
+            }
+          }
+          // Forget the resources that the newest run no longer has.
+          synchronized (_reportedRuns) {
+            _reportedRuns.keySet().retainAll(_latestResources);
           }
 
           // Report the capacity rejections seen in this pass. The per-(resource, instance) pairing
@@ -379,40 +413,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     Map<String, Resource> remainingResourceMap = new HashMap<>(resourceMap);
     remainingResourceMap.keySet().removeAll(calculatedResourceMap.keySet());
 
-    // Resources that use the global per-instance partition limit (GreedyRebalanceStrategy with an
-    // active capacity scoreboard) share a single mutable CapacityNode set
-    // (ResourceControllerDataProvider#getSimpleCapacitySet). Computing them in parallel is
-    // non-deterministic: the order in which threads reserve capacity varies run-to-run, producing a
-    // different (though still valid) assignment each pipeline round and causing perpetual rebalance
-    // churn (and previously ConcurrentModificationException). They must be computed sequentially in
-    // a stable order so the assignment is deterministic across rounds.
-    List<Resource> globalCapacityResources = new ArrayList<>();
-    List<Resource> parallelResources = new ArrayList<>();
-    for (Resource resource : remainingResourceMap.values()) {
-      if (usesGlobalCapacityScoreboard(resource, cache)) {
-        globalCapacityResources.add(resource);
-      } else {
-        parallelResources.add(resource);
-      }
-    }
-
     if (logger.isDebugEnabled()) {
       LogUtil.logDebug(logger, _eventId, String.format(
-          "Computing best possible state: %d global-capacity resource(s) sequentially, "
-              + "%d resource(s) in parallel.", globalCapacityResources.size(),
-          parallelResources.size()));
+          "Computing best possible state for %d resource(s) in parallel.",
+          remainingResourceMap.size()));
     }
 
-    // Sequential, deterministic-order computation for the shared global-capacity resources.
-    globalCapacityResources.sort(Comparator.comparing(Resource::getResourceName));
-    for (Resource resource : globalCapacityResources) {
-      computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
-          output, failureResources);
-    }
-
-    // Parallel computation for the remaining resources.
     List<Callable<Void>> computeBestPossibleStateTasks = new ArrayList<>();
-    for (Resource resource : parallelResources) {
+    for (Resource resource : remainingResourceMap.values()) {
       computeBestPossibleStateTasks.add(() -> {
         computeAndRecordSingleResourceBestPossibleState(event, cache, currentStateOutput, resource,
             output, failureResources);
@@ -439,25 +447,8 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
   }
 
   /**
-   * A resource participates in the global per-instance partition-limit computation when the
-   * cluster-wide capacity scoreboard is active and the resource uses {@link GreedyRebalanceStrategy}.
-   * Such resources share a single mutable {@code CapacityNode} set and therefore must be computed
-   * sequentially and in a deterministic order to avoid non-deterministic assignments and churn.
-   */
-  private boolean usesGlobalCapacityScoreboard(Resource resource,
-      ResourceControllerDataProvider cache) {
-    if (cache.getSimpleCapacitySet() == null) {
-      return false;
-    }
-    IdealState idealState = cache.getIdealState(resource.getResourceName());
-    return idealState != null && GreedyRebalanceStrategy.class.getName()
-        .equals(idealState.getRebalanceStrategy());
-  }
-
-  /**
    * Computes the best possible state for a single resource and records the resource as failed (in
-   * {@code failureResources}) when the computation does not succeed. Shared by the sequential
-   * global-capacity path and the parallel path.
+   * {@code failureResources}) when the computation does not succeed.
    */
   private void computeAndRecordSingleResourceBestPossibleState(ClusterEvent event,
       ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput, Resource resource,

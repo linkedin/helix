@@ -120,6 +120,77 @@ public class TestHelixPropoertyTimmer {
   }
 
   @Test
+  public void testLegacyIdealStateModeIsNotTopology() {
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    IdealStateTrimmer trimmer = IdealStateTrimmer.getInstance();
+    IdealState original = trimmer.trimProperty(idealState);
+    for (String legacy : new String[]{"AUTO", "AUTO_REBALANCE", "CUSTOMIZED", "invalid"}) {
+      idealState.getRecord().setSimpleField("IDEAL_STATE_MODE", legacy);
+      IdealState trimmed = trimmer.trimProperty(idealState);
+      Assert.assertEquals(trimmed.getRecord(), original.getRecord());
+      Assert.assertFalse(trimmed.getRecord().getSimpleFields().containsKey("IDEAL_STATE_MODE"));
+      Assert.assertEquals(idealState.getRecord().getSimpleField("IDEAL_STATE_MODE"), legacy);
+    }
+    idealState.setRebalanceMode(IdealState.RebalanceMode.SEMI_AUTO);
+    Assert.assertEquals(trimmer.trimProperty(idealState).getRecord()
+        .getSimpleField("REBALANCE_MODE"), "SEMI_AUTO");
+    Assert.assertFalse(trimmer.trimProperty(idealState).getRecord().equals(original.getRecord()));
+  }
+
+  @Test
+  public void testFactoryChangesOnlyMatterInIdealState() {
+    ResourceConfig resourceConfig = _resourceConfigMap.get(RESOURCE_NAME);
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    resourceConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "legacyFactory");
+    idealState.setStateModelFactoryName("idealStateFactory");
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    resourceConfig.putSimpleConfig("STATE_MODEL_FACTORY_NAME", "changedLegacyFactory");
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG),
+        Collections.emptySet());
+    Assert.assertFalse(ResourceConfigTrimmer.getInstance().trimProperty(resourceConfig)
+        .simpleConfigContains("STATE_MODEL_FACTORY_NAME"));
+    Assert.assertEquals(resourceConfig.getSimpleConfig("STATE_MODEL_FACTORY_NAME"),
+        "changedLegacyFactory");
+
+    idealState.setStateModelFactoryName("changedIdealStateFactory");
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
+    Assert.assertEquals(IdealStateTrimmer.getInstance().trimProperty(idealState)
+        .getStateModelFactoryName(), "changedIdealStateFactory");
+  }
+
+  @Test
+  public void testPartitionLimitChangesOnlyMatterInIdealState() {
+    ResourceConfig resourceConfig = _resourceConfigMap.get(RESOURCE_NAME);
+    IdealState idealState = _idealStateMap.get(RESOURCE_NAME);
+    resourceConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 1);
+    idealState.setMaxPartitionsPerInstance(2);
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    resourceConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 3);
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG),
+        Collections.emptySet());
+    Assert.assertFalse(ResourceConfigTrimmer.getInstance().trimProperty(resourceConfig)
+        .simpleConfigContains("MAX_PARTITIONS_PER_INSTANCE"));
+    Assert.assertEquals(resourceConfig.getRecord().getIntField("MAX_PARTITIONS_PER_INSTANCE", -1), 3);
+
+    idealState.setMaxPartitionsPerInstance(4);
+    detector.updateSnapshots(_dataProvider);
+
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
+  }
+
+  @Test
   public void testDetectNonTrimmableFieldChanges() {
     // Fill mock data to initialize the detector
     ResourceChangeDetector detector = new ResourceChangeDetector(true);
@@ -179,6 +250,33 @@ public class TestHelixPropoertyTimmer {
       modifyListMapfieldKeysAndVerifyDetector(instanceConfig,
           HelixConstants.ChangeType.INSTANCE_CONFIG, detector, _dataProvider);
     }
+  }
+
+  @Test
+  public void testTopStateScoringFieldChangesAreDetected() {
+    _clusterConfig.setTopStateScoringKeys(Collections.singletonList("CU"));
+    _clusterConfig.setTopStateScoringAlpha(10d);
+    _clusterConfig.setPreferredScoringKeys(Collections.singletonList("CU"));
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+
+    // A change to how WAGED scores the top state usage is a cluster config change, which triggers
+    // a global rebalance.
+    _clusterConfig.setTopStateScoringKeys(Collections.singletonList("DISK"));
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 1);
+
+    _clusterConfig.setTopStateScoringAlpha(20d);
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 1);
+
+    // The preferred scoring keys stay trimmable, as before.
+    _clusterConfig.setPreferredScoringKeys(Collections.singletonList("DISK"));
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(
+        detector.getChangesByType(HelixConstants.ChangeType.CLUSTER_CONFIG).size(), 0);
   }
 
   @Test
@@ -251,7 +349,25 @@ public class TestHelixPropoertyTimmer {
       Assert.assertEquals(resourceConfig.getRecord().getSimpleField(legacyField), "legacyValue");
     }
     Assert.assertEquals(trimmedIdealState.getInstanceGroupTag(), "placementTag");
-    Assert.assertEquals(trimmedResourceConfig.getInstanceGroupTag(), "placementTag");
+    Assert.assertFalse(trimmedResourceConfig.getRecord().getSimpleFields()
+        .containsKey("INSTANCE_GROUP_TAG"));
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"),
+        "placementTag");
+  }
+
+  @Test
+  public void testOnlyIdealStateTagChangesAffectTopology() {
+    ResourceChangeDetector detector = new ResourceChangeDetector(true);
+    detector.updateSnapshots(_dataProvider);
+    _resourceConfigMap.get(RESOURCE_NAME).getRecord()
+        .setSimpleField("INSTANCE_GROUP_TAG", "legacyTag");
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertTrue(detector.getChangesByType(HelixConstants.ChangeType.RESOURCE_CONFIG).isEmpty());
+
+    _idealStateMap.get(RESOURCE_NAME).setInstanceGroupTag("placementTag");
+    detector.updateSnapshots(_dataProvider);
+    Assert.assertEquals(detector.getChangesByType(HelixConstants.ChangeType.IDEAL_STATE),
+        Collections.singleton(RESOURCE_NAME));
   }
 
   private void modifyListMapfieldKeysAndVerifyDetector(HelixProperty helixProperty,

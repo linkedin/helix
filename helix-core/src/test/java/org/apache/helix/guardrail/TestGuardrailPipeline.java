@@ -19,6 +19,7 @@
 
 package org.apache.helix.guardrail;
 
+import java.util.Arrays;
 import java.util.List;
 
 import org.testng.Assert;
@@ -147,6 +148,29 @@ public class TestGuardrailPipeline {
     try {
       result.getViolations().add(Violation.newBuilder("b").build());
       Assert.fail("Expected the violations list to be unmodifiable");
+    } catch (UnsupportedOperationException expected) {
+      // expected
+    }
+  }
+
+  @Test
+  public void testGetRuleIdsInEvaluationOrder() {
+    GuardrailPipeline pipeline =
+        new GuardrailPipeline(passingRule("a"), failingRule("b"), passingRule("c"));
+    Assert.assertEquals(pipeline.getRuleIds(), Arrays.asList("a", "b", "c"));
+  }
+
+  @Test
+  public void testGetRuleIdsEmptyForNoRules() {
+    Assert.assertTrue(new GuardrailPipeline().getRuleIds().isEmpty());
+  }
+
+  @Test
+  public void testGetRuleIdsIsImmutable() {
+    GuardrailPipeline pipeline = new GuardrailPipeline(passingRule("a"));
+    try {
+      pipeline.getRuleIds().add("b");
+      Assert.fail("Expected the rule id list to be unmodifiable");
     } catch (UnsupportedOperationException expected) {
       // expected
     }

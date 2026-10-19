@@ -239,7 +239,7 @@ public class ClusterSetup {
       _admin.addCloudConfig(clusterName, cloudConfig);
       // If cloud is enabled and Cloud Provider is Azure, populated the Topology information in cluster config
       if (cloudConfig.isCloudEnabled()
-          && cloudConfig.getCloudProvider().equals(CloudProvider.AZURE.name())) {
+          && CloudProvider.AZURE.name().equals(cloudConfig.getCloudProvider())) {
         ConfigAccessor configAccessor = new ConfigAccessor(_zkClient);
         ClusterConfig clusterConfig = new ClusterConfig(clusterName);
         clusterConfig.setTopology(AzureConstants.AZURE_TOPOLOGY);

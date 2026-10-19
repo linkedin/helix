@@ -24,6 +24,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.util.ConfigStringUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -32,6 +33,26 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestDelayedRebalanceUtil {
+  @DataProvider
+  public Object[][] resourceRebalanceDelays() {
+    return new Object[][] {{null, 5000L}, {-1L, 5000L}, {0L, 0L}, {1000L, 1000L}};
+  }
+
+  @Test(dataProvider = "resourceRebalanceDelays")
+  public void testIdealStateDelayOverridesClusterDefault(Long resourceDelay, long expectedDelay) {
+    ClusterConfig clusterConfig = new ClusterConfig("cluster");
+    clusterConfig.setRebalanceDelayTime(5000L);
+    IdealState idealState = new IdealState("resource");
+    if (resourceDelay != null) {
+      idealState.setRebalanceDelay(resourceDelay);
+    }
+    ZNRecord original = new ZNRecord(idealState.getRecord());
+
+    Assert.assertEquals(DelayedRebalanceUtil.getRebalanceDelay(idealState, clusterConfig),
+        expectedDelay);
+    Assert.assertEquals(idealState.getRecord(), original);
+  }
+
   @DataProvider
   public Object[][] legacyDisableTimestamps() {
     return new Object[][] {

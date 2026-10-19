@@ -360,10 +360,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
     Set<String> messagesThrottledForLoad = new HashSet<>();
     ClusterConfig clusterConfig = cache.getClusterConfig();
 
-    // If the threshold (ErrorOrRecovery) is set, then use it, if not, then check if the old
-    // threshold (Error) is set. If the old threshold is set, use it. If not, use the default value
-    // for the new one. This is for backward-compatibility
-    int threshold = 1; // Default threshold for ErrorOrRecoveryPartitionThresholdForLoadBalance
+    int threshold = MessageThrottleProcessor.getErrorThreshold(clusterConfig);
     // Keep the error count as partition level. This logic only applies to downward state transition determination
     for (Partition partition : currentStateOutput.getCurrentStateMap(resourceName).keySet()) {
       Map<String, String> entry = currentStateOutput.getCurrentStateMap(resourceName).get(partition);
@@ -372,18 +369,7 @@ public class IntermediateStateCalcStage extends AbstractBaseStage {
       }
     }
     int numPartitionsWithErrorReplica = partitionsWithErrorStateReplica.size();
-    if (clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance() != -1) {
-      // ErrorOrRecovery is set
-      threshold = clusterConfig.getErrorOrRecoveryPartitionThresholdForLoadBalance();
-    } else {
-      if (clusterConfig.getErrorPartitionThresholdForLoadBalance() != 0) {
-        // 0 is the default value so the old threshold has been set
-        threshold = clusterConfig.getErrorPartitionThresholdForLoadBalance();
-      }
-    }
-
-    // Perform regular load balance only if the number of partitions in recovery and in error is
-    // less than the threshold. Otherwise, only allow downward-transition load balance
+    // Only allow downward load-balance transitions when error partitions exceed the threshold.
     boolean onlyDownwardLoadBalance = numPartitionsWithErrorReplica > threshold;
 
     boolean recoveryRebalanceForTopStateDownwardTransition =

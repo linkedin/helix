@@ -317,6 +317,8 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   // counts replicas currently in the top state only (otherwise unmeasured). The max-to-mean ratio is
   // the evenness indicator (peak-to-average): 1.0 is perfectly even (WAGED's goal), larger is more
   // skewed. Individual utilizations are >= 0.0 and may exceed 1.0 when a node is oversubscribed.
+  // The busiest key can differ between instances; the same gauges computed on each capacity key
+  // alone are exposed by one CapacityKeyUsageMonitor MBean per key.
 
   /**
    * @return highest per-instance general (all-replica) weighted capacity utilization across live

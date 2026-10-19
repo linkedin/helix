@@ -28,9 +28,39 @@ import com.google.common.collect.ImmutableMap;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestInstanceConfig {
+  @Test
+  public void testDelayRebalanceEnabledByDefault() {
+    InstanceConfig instanceConfig = new InstanceConfig("instance");
+    Assert.assertTrue(instanceConfig.isDelayRebalanceEnabled());
+    Assert.assertFalse(instanceConfig.getRecord().getSimpleFields()
+        .containsKey("DELAY_REBALANCE_ENABLED"));
+  }
+
+  @DataProvider(name = "delayRebalanceEnabled")
+  public Object[][] delayRebalanceEnabled() {
+    return new Object[][]{{true}, {false}};
+  }
+
+  @Test(dataProvider = "delayRebalanceEnabled")
+  public void testDelayRebalanceEnabledLegacyRecordAndRoundTrip(boolean enabled) {
+    ZNRecord legacyRecord = new ZNRecord("instance");
+    legacyRecord.setSimpleField("DELAY_REBALANCE_ENABLED", Boolean.toString(enabled));
+    InstanceConfig instanceConfig = new InstanceConfig(legacyRecord);
+    Assert.assertEquals(instanceConfig.isDelayRebalanceEnabled(), enabled);
+
+    instanceConfig.setDelayRebalanceEnabled(!enabled);
+    Assert.assertEquals(instanceConfig.getRecord().getSimpleField("DELAY_REBALANCE_ENABLED"),
+        Boolean.toString(!enabled));
+    Assert.assertEquals(new InstanceConfig(instanceConfig.getRecord()).isDelayRebalanceEnabled(),
+        !enabled);
+    Assert.assertEquals(legacyRecord.getSimpleField("DELAY_REBALANCE_ENABLED"),
+        Boolean.toString(enabled));
+  }
+
   @Test
   public void testNotCheckingHostPortExistence() {
     InstanceConfig config = new InstanceConfig("node_0");
@@ -53,26 +83,20 @@ public class TestInstanceConfig {
   public void testSetInstanceEnableWithReason() {
     InstanceConfig instanceConfig = new InstanceConfig(new ZNRecord("id"));
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
 
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.toString()), null);
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.toString()), null);
-    Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
-        .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_TYPE.toString()), null);
 
     String reasonCode = "ReasonCode";
     instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
         InstanceConstants.InstanceOperation.DISABLE).setReason(reasonCode).build());
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.toString()), "false");
     Assert.assertEquals(instanceConfig.getRecord().getSimpleFields()
         .get(InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_REASON.toString()), reasonCode);
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), reasonCode);
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.USER_OPERATION.toString());
   }
 
   @Test
@@ -106,8 +130,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.AUTOMATION);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "disableReason");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.toString());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "disableReason");
 
     // Automation source then enables the instance
@@ -154,7 +176,6 @@ public class TestInstanceConfig {
     // Disable the instance with legacy HELIX_ENABLED field set to false
     instanceConfig.getRecord()
         .setSimpleField(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(), "false");
-    instanceConfig.setInstanceDisabledType(InstanceConstants.InstanceDisabledType.USER_OPERATION);
     instanceConfig.setInstanceDisabledReason("foo");
     Assert.assertFalse(instanceConfig.getInstanceEnabled());
     Assert.assertEquals(instanceConfig.getInstanceOperation().getOperation(),
@@ -172,8 +193,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.AUTOMATION);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "bar");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.DEFAULT_INSTANCE_DISABLE_TYPE.name());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "bar");
 
     // Enable with automation source and return the instance to DISABLE with user source
@@ -186,8 +205,6 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceOperation().getSource(),
         InstanceConstants.InstanceOperationSource.USER);
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "foo");
-    Assert.assertEquals(instanceConfig.getInstanceDisabledType(),
-        InstanceConstants.InstanceDisabledType.USER_OPERATION.name());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "foo");
   }
 
@@ -336,15 +353,69 @@ public class TestInstanceConfig {
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "disableReason");
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "unknownReason");
 
+    instanceConfig.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.DISABLE);
+    Assert.assertFalse(instanceConfig.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
     instanceConfig.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder().setOperation(
         InstanceConstants.InstanceOperation.DISABLE).setReason("disableReason2").build());
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "disableReason2");
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "disableReason2");
 
+    instanceConfig.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
     instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.ENABLE);
+    Assert.assertFalse(instanceConfig.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"));
     Assert.assertEquals(instanceConfig.getInstanceDisabledReason(), "");
     Assert.assertEquals(instanceConfig.getInstanceOperation().getReason(), "");
+  }
+
+  @Test
+  public void testResetInstanceDisabledTypeAndReason() {
+    InstanceConfig config = new InstanceConfig("instance");
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.DISABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION)
+        .setReason("operation reason").build());
+    config.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+    config.getRecord().setSimpleField("CUSTOM_METADATA", "preserved");
+    ZNRecord expected = new ZNRecord(config.getRecord());
+    expected.getSimpleFields().remove("HELIX_DISABLED_TYPE");
+    expected.getSimpleFields().remove("HELIX_DISABLED_REASON");
+
+    config.resetInstanceDisabledTypeAndReason();
+    Assert.assertEquals(config.getRecord(), expected,
+        "Cleanup must preserve enablement, modern operations and unrelated fields");
+    config.resetInstanceDisabledTypeAndReason();
+    Assert.assertEquals(config.getRecord(), expected, "Cleanup must be idempotent");
+  }
+
+  @DataProvider(name = "retiredDisabledTypeRecords")
+  public Object[][] retiredDisabledTypeRecords() {
+    return new Object[][] {{false, false}, {true, false}, {false, true}, {true, true}};
+  }
+
+  @Test(dataProvider = "retiredDisabledTypeRecords")
+  public void testOverwriteRemovesRetiredDisabledType(boolean targetHasType, boolean sourceHasType) {
+    InstanceConfig target = new InstanceConfig("target");
+    target.setHostName("target-host");
+    target.getRecord().setSimpleField("CUSTOM_METADATA", "preserved");
+    InstanceConfig source = new InstanceConfig("source");
+    source.setWeight(200);
+    if (targetHasType) {
+      target.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "CLOUD_EVENT");
+    }
+    if (sourceHasType) {
+      source.getRecord().setSimpleField("HELIX_DISABLED_TYPE", "USER_OPERATION");
+    }
+    ZNRecord originalSource = new ZNRecord(source.getRecord());
+
+    target.overwriteInstanceConfig(source);
+
+    Assert.assertFalse(target.getRecord().getSimpleFields().containsKey("HELIX_DISABLED_TYPE"),
+        "The retired key must be removed from the target, never copied from the source");
+    Assert.assertEquals(target.getWeight(), 200);
+    Assert.assertEquals(target.getHostName(), "target-host");
+    Assert.assertEquals(target.getRecord().getSimpleField("CUSTOM_METADATA"), "preserved");
+    Assert.assertEquals(source.getRecord(), originalSource, "The source must not be mutated");
   }
 
   @Test

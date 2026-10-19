@@ -46,12 +46,20 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.CapacityKeyConsistencyGuardrailRule;
+import org.apache.helix.guardrail.rules.IdealStateRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.guardrail.rules.MinActiveReplicasConsistencyGuardrailRule;
 import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
+import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
+import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
+import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -61,6 +69,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.util.HelixUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.slf4j.Logger;
@@ -327,20 +336,27 @@ public class ResourceAccessor extends AbstractHelixResource {
           return structuralError.get();
         }
 
-        // Guard rails: (1) instance capacity-key consistency (always on) -- reject if any assignable
-        // instance's capacity map omits a cluster-required capacity key (WAGED could not build a
-        // model, so the resource would be accepted but silently never place; the admin write path
-        // already validates the resource's own weights, but not the instances'); (2) partition-weight
-        // capacity (opt-in per cluster) -- reject if a partition weight exceeds the largest single
-        // instance's capacity in any dimension (making it permanently unplaceable). force=true
-        // overrides; dryRun=true only reports the verdict without writing.
+        // Guard rails: (1) state-model existence (always on) -- reject if the resource's
+        // STATE_MODEL_DEF_REF names a state model absent from STATEMODELDEFS (the controller drives
+        // every transition from that state model, so the resource could never come online; the plain
+        // addResource path rejects this up front, but addResourceWithWeight does not -- it persists
+        // the resource config and ideal state and only then rebalances, failing late after a partial
+        // write and leaving a half-created resource in ZooKeeper); (2) instance
+        // capacity-key consistency (always on) -- reject if any assignable instance's capacity map
+        // omits a cluster-required capacity key (WAGED could not build a model, so the resource would
+        // be accepted but silently never place; the admin write path already validates the resource's
+        // own weights, but not the instances'); (3) partition-weight capacity (opt-in per cluster) --
+        // reject if a partition weight exceeds the largest single instance's capacity in any dimension
+        // (making it permanently unplaceable). force=true overrides; dryRun=true only reports the
+        // verdict without writing.
         GuardrailContext context = GuardrailContext.newBuilder(clusterId)
             .dataAccessor(getDataAccssor(clusterId))
             .proposedResourceConfig(proposedResourceConfig)
             .proposedIdealState(proposedIdealState)
             .build();
         GuardrailPipeline pipeline =
-            new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule(),
+            new GuardrailPipeline(new StateModelDefExistenceGuardrailRule(),
+                new CapacityKeyConsistencyGuardrailRule(),
                 new PartitionWeightCapacityGuardrailRule());
         Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
         if (preflightResponse.isPresent()) {
@@ -419,12 +435,25 @@ public class ResourceAccessor extends AbstractHelixResource {
       @PathParam("resourceName") String resourceName, @QueryParam("command") String command,
       @DefaultValue("-1") @QueryParam("replicas") int replicas,
       @DefaultValue("") @QueryParam("keyPrefix") String keyPrefix,
-      @DefaultValue("") @QueryParam("group") String group) {
+      @DefaultValue("") @QueryParam("group") String group,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
     Command cmd;
     try {
       cmd = Command.valueOf(command);
     } catch (Exception e) {
       return badRequest("Invalid command : " + command);
+    }
+
+    // force and dryRun are only honored by commands that run a guard rail pipeline (on this endpoint,
+    // only enableWagedRebalance). For any other command they are meaningless and, worse, dryRun=true
+    // would still perform a real write -- the opposite of a simulation. Reject them up front for
+    // unsupported commands so callers are never misled into thinking a mutation was simulated or its
+    // violations overridden.
+    if ((force || dryRun) && cmd != Command.enableWagedRebalance) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'enableWagedRebalance' command, "
+              + "not '%s'.", command));
     }
 
     HelixAdmin admin = getHelixAdmin();
@@ -443,13 +472,32 @@ public class ResourceAccessor extends AbstractHelixResource {
         keyPrefix = keyPrefix.length() == 0 ? resourceName : keyPrefix;
         admin.rebalance(clusterId, resourceName, replicas, keyPrefix, group);
         break;
-      case enableWagedRebalance:
+      case enableWagedRebalance: {
+        // Guard rail: block (or simulate) flipping an existing resource to WAGED when some assignable
+        // instance's capacity map omits a cluster-required capacity key. enableWagedRebalance writes
+        // WagedRebalancer + FULL_AUTO to ZooKeeper without any instance validation, so with such a
+        // gap WAGED could not build a cluster model and the resource would be flipped to WAGED but
+        // silently never place -- the same "accepted but never places" gap addWagedResource already
+        // guards. The check is cluster-global and instance-side; the resource being flipped is passed
+        // only so violations name it (its config contents are not read). force=true overrides;
+        // dryRun=true only reports the verdict without writing.
+        GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(getDataAccssor(clusterId))
+            .proposedResourceConfig(new ResourceConfig(resourceName))
+            .build();
+        GuardrailPipeline pipeline =
+            new GuardrailPipeline(new CapacityKeyConsistencyGuardrailRule());
+        Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         try {
           admin.enableWagedRebalance(clusterId, Collections.singletonList(resourceName));
         } catch (HelixException e) {
           return badRequest(e.getMessage());
         }
         break;
+      }
       default:
         _logger.error("Unsupported command :" + command);
         return badRequest("Unsupported command :" + command);
@@ -466,7 +514,24 @@ public class ResourceAccessor extends AbstractHelixResource {
   @DELETE
   @Path("{resourceName}")
   public Response deleteResource(@PathParam("clusterId") String clusterId,
-      @PathParam("resourceName") String resourceName) {
+      @PathParam("resourceName") String resourceName,
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun) {
+    // Guard rail: block (or simulate) dropping a resource that is still in use -- its external view
+    // still has replicas placed (in any state other than DROPPED), so the drop would tear down a
+    // live assignment. Unlike an instance drop, the admin layer (ZKHelixAdmin.dropResource) performs
+    // no such check, so this preflight is the only safety gate. force=true overrides the verdict;
+    // dryRun=true only reports it without dropping.
+    GuardrailContext context = GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .resourceName(resourceName)
+        .build();
+    GuardrailPipeline pipeline = new GuardrailPipeline(new ResourceInUseGuardrailRule());
+    Optional<Response> preflightResponse = preflight(pipeline, context, force, dryRun);
+    if (preflightResponse.isPresent()) {
+      return preflightResponse.get();
+    }
+
     HelixAdmin admin = getHelixAdmin();
     try {
       admin.dropResource(clusterId, resourceName);
@@ -498,7 +563,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   @Path("{resourceName}/configs")
   public Response updateResourceConfig(@PathParam("clusterId") String clusterId,
       @PathParam("resourceName") String resourceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior to keep it backward-compatible
@@ -508,6 +574,15 @@ public class ResourceAccessor extends AbstractHelixResource {
       } catch (HelixException ex) {
         return badRequest(ex.getMessage());
       }
+    }
+
+    // force and dryRun are only honored by the 'update' command, which runs the weight guard rail
+    // pipeline. Reject them for any other command (e.g. delete) so a caller is never misled into
+    // thinking a delete was simulated (dryRun) or its verdict overridden (force).
+    if ((force || dryRun) && command != Command.update) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'update' command, not '%s'.",
+          commandStr));
     }
 
     ZNRecord record;
@@ -527,6 +602,33 @@ public class ResourceAccessor extends AbstractHelixResource {
     try {
       switch (command) {
       case update:
+        // Weight guard rail (opt-in via ClusterConfig#PARTITION_WEIGHT_GUARDRAIL_ENABLED): editing a
+        // WAGED resource's weights here is a raw config write that never re-runs the resource-side
+        // weight validation addResourceWithWeight applies on the add path. Raising a partition weight
+        // above every assignable instance's capacity in some dimension makes it permanently
+        // unplaceable, which fails the WAGED global rebalance (CAPACITY_DEFICIT) and silently stalls
+        // placement for the whole cluster. Validate the merged (post-write) resource config -- the
+        // same way the ZK write merges the incoming record into the existing config -- against the
+        // resource's real partitions (its current ideal state). force=true overrides; dryRun=true
+        // reports the verdict without writing.
+        ResourceConfig existingConfig = configAccessor.getResourceConfig(clusterId, resourceName);
+        ZNRecord mergedRecord =
+            existingConfig != null ? existingConfig.getRecord() : new ZNRecord(resourceName);
+        mergedRecord.update(record);
+        HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+        GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(dataAccessor)
+            .proposedResourceConfig(new ResourceConfig(mergedRecord))
+            .proposedIdealState(
+                dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName)))
+            .build();
+        GuardrailPipeline guardrailPipeline =
+            new GuardrailPipeline(new PartitionWeightCapacityGuardrailRule());
+        Optional<Response> preflightResponse =
+            preflight(guardrailPipeline, guardrailContext, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         configAccessor.updateResourceConfig(clusterId, resourceName, resourceConfig);
         break;
       case delete:
@@ -563,13 +665,29 @@ public class ResourceAccessor extends AbstractHelixResource {
     return notFound();
   }
 
+  /**
+   * Update (merge) or delete a resource's ideal state.
+   * <p>
+   * <b>Latency note ({@code command=update}).</b> The always-on
+   * {@link IdealStateRebalanceFeasibilityGuardrailRule} runs a read-only WAGED what-if on a feasible,
+   * non-{@code force} edit: it computes a full {@code ReadOnlyWagedRebalancer} assignment for the
+   * cluster synchronously on the request thread, up to twice (once for the pre-edit baseline and once
+   * for the candidate), with cost scaling as resources &times; partitions &times; instances. It is
+   * bounded -- skipped entirely on {@code force=true} (the verdict is overridden anyway), run only for a
+   * WAGED (non-{@code ANY_LIVEINSTANCE}) proposed ideal state, and the baseline run is skipped when the
+   * cluster has no current WAGED resource (1&times; then). This is a low-QPS administrative mutation, so
+   * paying up to two full what-ifs per call is acceptable; a caller batching many ideal-state edits on a
+   * very large cluster should expect per-call latency on the order of a single WAGED rebalance, and can
+   * pass {@code force=true} to skip the what-if when the feasibility verdict is not wanted.
+   */
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)
   @Timed(name = HttpConstants.WRITE_REQUEST)
   @POST
   @Path("{resourceName}/idealState")
   public Response updateResourceIdealState(@PathParam("clusterId") String clusterId,
       @PathParam("resourceName") String resourceName, @QueryParam("command") String commandStr,
-      String content) {
+      @DefaultValue("false") @QueryParam("force") boolean force,
+      @DefaultValue("false") @QueryParam("dryRun") boolean dryRun, String content) {
     Command command;
     if (commandStr == null || commandStr.isEmpty()) {
       command = Command.update; // Default behavior is update
@@ -579,6 +697,15 @@ public class ResourceAccessor extends AbstractHelixResource {
       } catch (HelixException ex) {
         return badRequest(ex.getMessage());
       }
+    }
+
+    // force and dryRun are only honored by the 'update' command, which runs the guard rail
+    // pipeline. Reject them for any other command (e.g. delete) so a caller is never misled into
+    // thinking a delete was simulated (dryRun) or its verdict overridden (force).
+    if ((force || dryRun) && command != Command.update) {
+      return badRequest(String.format(
+          "The 'force' and 'dryRun' flags are only supported for the 'update' command, not '%s'.",
+          commandStr));
     }
 
     ZNRecord record;
@@ -592,9 +719,60 @@ public class ResourceAccessor extends AbstractHelixResource {
     HelixAdmin helixAdmin = getHelixAdmin();
     try {
       switch (command) {
-      case update:
+      case update: {
+        // Guard rails on the merged (post-write) ideal state. (1) StateModelDefExistence is a cheap,
+        // always-on check: an edit that points STATE_MODEL_DEF_REF at a state model absent from
+        // STATEMODELDEFS is unplaceable -- the controller can compute no transition -- so the resource
+        // would be accepted but never come online (updateIdealState does not validate this). (2)
+        // MinActiveReplicasConsistency is a cheap, always-on field check: an edit that leaves
+        // MIN_ACTIVE_REPLICAS greater than REPLICAS is logically inconsistent -- a partition can never
+        // have more active replicas than it has replicas -- so every partition is permanently below
+        // its minimum active count, defeating delayed rebalance and min-active health guarantees. (3)
+        // IdealStateRebalanceFeasibility is an always-on WAGED what-if: it blocks an edit (e.g. a
+        // replica-count increase) that the live instances cannot actually place. (4)
+        // UserDefinedRebalancerClass is a cheap, always-on check for USER_DEFINED resources: an edit
+        // that leaves the resource in USER_DEFINED mode without a loadable REBALANCER_CLASS_NAME that
+        // is a Rebalancer is unplaceable -- the controller resolves a null rebalancer and computes no
+        // assignment -- so the resource would be accepted but never come online (neither
+        // updateIdealState nor IdealState.isValid validates this). All validate the merged record, the
+        // same way the ZK write merges the incoming record into the existing one; each blocks only
+        // edits that introduce or worsen a problem and grandfathers an already-bad resource.
+        // force=true overrides; dryRun=true only reports the verdict without writing.
+        HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+        IdealState existingIdealState =
+            dataAccessor.getProperty(dataAccessor.keyBuilder().idealStates(resourceName));
+        ZNRecord mergedRecord = existingIdealState != null
+            ? new ZNRecord(existingIdealState.getRecord()) : new ZNRecord(resourceName);
+        mergedRecord.update(record);
+        // The WAGED feasibility rule runs a (relatively expensive) read-only WAGED what-if. Only
+        // wire its provider seam when the verdict can matter: on a real force write the feasibility
+        // verdict is overridden anyway, so leave the provider null and let that rule self-certify
+        // feasible without simulating; the cheap min-active rule still runs. A dryRun still computes
+        // the verdict (even together with force) so it can be previewed.
+        WagedAssignmentProvider wagedAssignmentProvider = (dryRun || !force)
+            ? (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
+                .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                    liveInstances, idealStates, resourceConfigs)
+            : null;
+        GuardrailContext guardrailContext = GuardrailContext.newBuilder(clusterId)
+            .dataAccessor(dataAccessor)
+            .proposedIdealState(new IdealState(mergedRecord))
+            .wagedAssignmentProvider(wagedAssignmentProvider)
+            .build();
+        GuardrailPipeline guardrailPipeline =
+            new GuardrailPipeline(new StateModelDefExistenceGuardrailRule(),
+                new MinActiveReplicasConsistencyGuardrailRule(),
+                new IdealStateRebalanceFeasibilityGuardrailRule(),
+                new UserDefinedRebalancerClassGuardrailRule());
+        Optional<Response> preflightResponse =
+            preflight(guardrailPipeline, guardrailContext, force, dryRun);
+        if (preflightResponse.isPresent()) {
+          return preflightResponse.get();
+        }
         helixAdmin.updateIdealState(clusterId, resourceName, idealState);
         break;
+      }
       case delete: {
         helixAdmin.removeFromIdealState(clusterId, resourceName, idealState);
       }

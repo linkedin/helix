@@ -28,6 +28,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
+import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
@@ -42,6 +43,7 @@ import org.apache.helix.controller.pipeline.AbstractBaseStage;
 import org.apache.helix.controller.pipeline.StageException;
 import org.apache.helix.manager.zk.DefaultSchedulerMessageHandlerFactory;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
@@ -49,6 +51,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
+import org.apache.helix.task.TaskConstants;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.MessageUtil;
 import org.slf4j.Logger;
@@ -94,6 +97,7 @@ public class MessageGenerationPhase extends AbstractBaseStage {
 
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
     Map<String, String> sessionIdMap = new HashMap<>();
+    Map<String, Map<String, CurrentState>> taskCurrentStates = new HashMap<>();
 
     for (LiveInstance liveInstance : liveInstances.values()) {
       sessionIdMap.put(liveInstance.getInstanceName(), liveInstance.getEphemeralOwner());
@@ -103,7 +107,7 @@ public class MessageGenerationPhase extends AbstractBaseStage {
     for (Resource resource : resourceMap.values()) {
       try {
         generateMessage(resource, cache, bestPossibleStateOutput, currentStateOutput, manager,
-            sessionIdMap, event.getEventType(), output, messagesToCleanUp);
+            sessionIdMap, event.getEventType(), output, messagesToCleanUp, taskCurrentStates);
       } catch (HelixException ex) {
         LogUtil.logError(logger, _eventId,
             "Failed to generate message for resource " + resource.getResourceName(), ex);
@@ -118,11 +122,42 @@ public class MessageGenerationPhase extends AbstractBaseStage {
     event.addAttribute(AttributeName.MESSAGES_ALL.name(), output);
   }
 
+  private Message setTaskMessageFactory(Message message, Message pendingMessage, String desiredState,
+      BaseControllerDataProvider cache, Map<String, Map<String, CurrentState>> taskCurrentStates) {
+    if (message == null || !TaskConstants.STATE_MODEL_NAME.equals(message.getStateModelDef())) {
+      return message;
+    }
+
+    String factoryName;
+    if (Message.MessageType.STATE_TRANSITION_CANCELLATION.name().equals(message.getMsgType())) {
+      factoryName = pendingMessage.getStateModelFactoryName();
+    } else if (HelixDefinedState.DROPPED.name().equals(desiredState)) {
+      // Cleanup must reach the target participant's existing state model, not a config override.
+      CurrentState currentState = taskCurrentStates.computeIfAbsent(message.getTgtName(),
+          instance -> cache.getCurrentState(instance, message.getTgtSessionId(), true))
+          .get(message.getResourceName());
+      if (currentState == null) {
+        LogUtil.logWarn(logger, _eventId, String.format(
+            "Skip task cleanup message for %s on %s: no CurrentState for session %s",
+            message.getResourceName(), message.getTgtName(), message.getTgtSessionId()));
+        return null;
+      }
+      factoryName = currentState.getStateModelFactoryName();
+    } else {
+      return message;
+    }
+
+    message.setStateModelFactoryName(
+        factoryName == null ? HelixConstants.DEFAULT_STATE_MODEL_FACTORY : factoryName);
+    return message;
+  }
+
   private void generateMessage(final Resource resource, final BaseControllerDataProvider cache,
       final ResourcesStateMap resourcesStateMap, final CurrentStateOutput currentStateOutput,
       final HelixManager manager, final Map<String, String> sessionIdMap,
       final ClusterEventType eventType, MessageOutput output,
-      Map<String, Map<String, Message>> messagesToCleanUp) {
+      Map<String, Map<String, Message>> messagesToCleanUp,
+      Map<String, Map<String, CurrentState>> taskCurrentStates) {
     String resourceName = resource.getResourceName();
 
     StateModelDefinition stateModelDef = cache.getStateModelDef(resource.getStateModelDefRef());
@@ -212,6 +247,8 @@ public class MessageGenerationPhase extends AbstractBaseStage {
                 generateCancellationMessageForPendingMessage(desiredState, currentState, nextState,
                     pendingMessage, manager, resource, partition, sessionIdMap, instanceName,
                     stateModelDef, cancellationMessage, isCancellationEnabled);
+            message =
+                setTaskMessageFactory(message, pendingMessage, desiredState, cache, taskCurrentStates);
             addGeneratedMessageToMap(message, messageMap, eventType, cache, desiredState,
                 resourceName, partition, currentState, nextState);
 
@@ -305,6 +342,8 @@ public class MessageGenerationPhase extends AbstractBaseStage {
             }
           }
         }
+        message =
+            setTaskMessageFactory(message, pendingMessage, desiredState, cache, taskCurrentStates);
         addGeneratedMessageToMap(message, messageMap, eventType, cache, desiredState, resourceName,
             partition, currentState, nextState);
       }

@@ -23,6 +23,7 @@ import java.util.Map;
 
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.slf4j.Logger;
@@ -54,21 +55,20 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
   /**
    * @param clusterConfig  The cluster config.
    * @param resourceConfig The resource config for the resource which contains the replication.
+   * @param idealState     The resource ideal state, which owns the placement tag and partition limit.
    * @param partitionName  The replication's partition name.
    * @param replicaState   The state of the replication.
    * @param statePriority  The priority of the replication's state.
-   * @param maxPartitionsPerInstance The maximum number of partitions of this resource allowed on
-   *                                 a single instance (sourced from the resource's IdealState).
    */
   public AssignableReplica(ClusterConfig clusterConfig, ResourceConfig resourceConfig,
-      String partitionName, String replicaState, int statePriority, int maxPartitionsPerInstance) {
+      IdealState idealState, String partitionName, String replicaState, int statePriority) {
     _partitionName = partitionName;
     _replicaState = replicaState;
     _statePriority = statePriority;
     _resourceName = resourceConfig.getResourceName();
     _capacityUsage = WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
-    _resourceInstanceGroupTag = resourceConfig.getInstanceGroupTag();
-    _resourceMaxPartitionsPerInstance = maxPartitionsPerInstance;
+    _resourceInstanceGroupTag = idealState.getInstanceGroupTag();
+    _resourceMaxPartitionsPerInstance = idealState.getMaxPartitionsPerInstance();
     _replicaKey = generateReplicaKey(_resourceName, _partitionName,_replicaState);
   }
 

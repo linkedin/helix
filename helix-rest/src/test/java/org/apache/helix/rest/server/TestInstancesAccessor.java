@@ -34,6 +34,7 @@ import javax.ws.rs.core.Response;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.helix.ConfigAccessor;
@@ -994,6 +995,100 @@ public class TestInstancesAccessor extends AbstractTestClass {
         .format("TestOfflineBudgetClusterDoesNotExist").get(this);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstancesUnderInstanceOperationMaintenance() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    // Dedicated cluster so the listing asserted here is not perturbed by other tests.
+    String clusterName = "TestMarkerListingCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    List<String> instances =
+        Arrays.asList("mlInstance0", "mlInstance1", "mlInstance2", "mlInstance3", "mlInstance4");
+    for (String instance : instances) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+
+    // No instance holds a marker yet, so the listing is present and empty.
+    JsonNode emptyListing = fetchInstancesUnderInstanceOperationMaintenance(clusterName);
+    Assert.assertTrue(emptyListing.isObject() && emptyListing.size() == 0,
+        "Expected an empty listing, got " + emptyListing);
+
+    // A marker is listed whatever the instance's liveness or operation. An orchestrator usually
+    // marks a host while it is still live and ENABLE, so a listing that depended on either would
+    // miss exactly the hosts it needs to see. mlInstance1 and mlInstance2 are live, the rest are
+    // offline, and mlInstance2 gets its own expiry so each entry must report its own marker.
+    startInstances(clusterName, new TreeSet<>(Arrays.asList("mlInstance1", "mlInstance2")), 2);
+    long expiresAtMillis = System.currentTimeMillis() + 600_000L;
+    setInstanceOperation(clusterName, "mlInstance0", InstanceConstants.InstanceOperation.DISABLE);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance0", expiresAtMillis);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance1", expiresAtMillis);
+    setInstanceOperation(clusterName, "mlInstance2", InstanceConstants.InstanceOperation.EVACUATE);
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance2", expiresAtMillis + 1L);
+    // An expired marker exempts nothing, so it is not listed. mlInstance4 holds no marker.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance3",
+        System.currentTimeMillis() - 1L);
+
+    ObjectNode expected = OBJECT_MAPPER.createObjectNode();
+    expected.set("mlInstance0",
+        markerEntry(false, InstanceConstants.InstanceOperation.DISABLE, expiresAtMillis));
+    expected.set("mlInstance1",
+        markerEntry(true, InstanceConstants.InstanceOperation.ENABLE, expiresAtMillis));
+    expected.set("mlInstance2",
+        markerEntry(true, InstanceConstants.InstanceOperation.EVACUATE, expiresAtMillis + 1L));
+    Assert.assertTrue(
+        TestHelper.verify(
+            () -> expected.equals(fetchInstancesUnderInstanceOperationMaintenance(clusterName)),
+            TestHelper.WAIT_DURATION),
+        "Unexpected listing: " + fetchInstancesUnderInstanceOperationMaintenance(clusterName));
+
+    // JsonNode equality ignores key order, so pin the sorted order separately.
+    List<String> listed = new ArrayList<>();
+    fetchInstancesUnderInstanceOperationMaintenance(clusterName).fieldNames()
+        .forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("mlInstance0", "mlInstance1", "mlInstance2"));
+
+    // No listed instance counts against the offline budget, and the expired marker (mlInstance3)
+    // counts again like an unmarked one.
+    Assert.assertEquals(fetchOfflineBudgetPopulation(clusterName),
+        Arrays.asList("mlInstance3", "mlInstance4"),
+        "Listed instances must be exempt and the expired marker must count");
+
+    // Clearing a marker drops the instance from the listing.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "mlInstance2",
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    expected.remove("mlInstance2");
+    Assert.assertEquals(fetchInstancesUnderInstanceOperationMaintenance(clusterName), expected);
+
+    // An unknown cluster must 404, as getInstancesUnableToAcceptOnlineReplicas does, rather than
+    // answer with an empty listing.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances?command=getInstancesUnderInstanceOperationMaintenance")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestMarkerListingClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private JsonNode fetchInstancesUnderInstanceOperationMaintenance(String clusterName)
+      throws IOException {
+    JsonNode node = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder(
+            "clusters/{}/instances?command=getInstancesUnderInstanceOperationMaintenance")
+            .isBodyReturnExpected(true).format(clusterName).get(this));
+    return node.get(InstancesAccessor.InstancesProperties
+        .instances_under_instance_operation_maintenance.name());
+  }
+
+  private static ObjectNode markerEntry(boolean live,
+      InstanceConstants.InstanceOperation instanceOperation, long expiresAtMillis) {
+    ObjectNode entry = OBJECT_MAPPER.createObjectNode();
+    entry.put("live", live);
+    entry.put("instanceOperation", instanceOperation.name());
+    entry.put("expiresAtMillis", expiresAtMillis);
+    return entry;
   }
 
   private List<String> fetchOfflineBudgetPopulation(String clusterName) throws IOException {

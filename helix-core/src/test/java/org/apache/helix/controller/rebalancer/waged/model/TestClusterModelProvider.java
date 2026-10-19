@@ -47,6 +47,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Matchers.anyString;
@@ -54,6 +55,62 @@ import static org.mockito.Mockito.when;
 
 public class TestClusterModelProvider extends AbstractTestClusterModel {
   Map<String, ResourceConfig> _resourceConfigMap = new HashMap<>();
+
+  @DataProvider(name = "idealStatePlacementTags")
+  public Object[][] idealStatePlacementTags() {
+    return new Object[][]{{"TestTag"}, {null}, {""}};
+  }
+
+  @Test(dataProvider = "idealStatePlacementTags")
+  public void testNormalAndDelayedReplicasUseIdealStatePlacementSettings(String idealTag)
+      throws IOException {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    String resourceName = _resourceNames.get(0);
+    String partitionName = _partitionNames.get(0);
+    IdealState idealState = cache.getIdealState(resourceName);
+    idealState.setMinActiveReplicas(1);
+    idealState.setMaxPartitionsPerInstance(7);
+    if (idealTag != null) {
+      idealState.setInstanceGroupTag(idealTag);
+    }
+    ResourceConfig resourceConfig = cache.getResourceConfig(resourceName);
+    resourceConfig.getRecord().setSimpleField("INSTANCE_GROUP_TAG", "legacyTag");
+    resourceConfig.getRecord().setIntField("MAX_PARTITIONS_PER_INSTANCE", 1);
+    Set<String> resources = Collections.singleton(resourceName);
+    ClusterModel model = ClusterModelProvider.generateClusterModelForBaseline(cache,
+        Collections.singletonMap(resourceName, new Resource(resourceName)), _instances,
+        Collections.emptyMap(), Collections.emptyMap());
+    Set<AssignableReplica> normalReplicas = model.getAssignableReplicaMap().get(resourceName);
+    Assert.assertEquals(normalReplicas.size(), idealState.getPartitionSet().size());
+    normalReplicas.forEach(replica -> {
+      Assert.assertEquals(replica.getResourceInstanceGroupTag(), idealTag);
+      Assert.assertEquals(replica.getResourceMaxPartitionsPerInstance(), 7);
+    });
+
+    ResourceAssignment assignment = new ResourceAssignment(resourceName);
+    assignment.addReplicaMap(new Partition(partitionName),
+        Collections.singletonMap("offlineInstance", "OFFLINE"));
+    Map<String, Set<AssignableReplica>> allocated = new HashMap<>();
+    Set<AssignableReplica> delayedReplicas =
+        DelayedRebalanceUtil.findToBeAssignedReplicasForMinActiveReplica(cache, resources, _instances,
+            Collections.singletonMap(resourceName, assignment), allocated);
+
+    Assert.assertEquals(delayedReplicas.size(), 1);
+    AssignableReplica delayed = delayedReplicas.iterator().next();
+    Assert.assertEquals(delayed.getPartitionName(), partitionName);
+    Assert.assertEquals(delayed.getReplicaState(), "MASTER");
+    Assert.assertEquals(delayed.getResourceInstanceGroupTag(), idealTag);
+    Assert.assertEquals(delayed.getResourceMaxPartitionsPerInstance(), 7);
+    Assert.assertEquals(allocated.keySet(), Collections.singleton("offlineInstance"));
+    Assert.assertEquals(allocated.get("offlineInstance").size(), 1);
+    Assert.assertEquals(allocated.get("offlineInstance").iterator().next()
+        .getResourceInstanceGroupTag(), idealTag);
+    Assert.assertEquals(allocated.get("offlineInstance").iterator().next()
+        .getResourceMaxPartitionsPerInstance(), 7);
+    Assert.assertEquals(resourceConfig.getRecord().getSimpleField("INSTANCE_GROUP_TAG"), "legacyTag");
+    Assert.assertEquals(resourceConfig.getRecord().getIntField("MAX_PARTITIONS_PER_INSTANCE", -1), 1);
+    Assert.assertEquals(idealState.getInstanceGroupTag(), idealTag);
+  }
 
   @Override
   protected ResourceControllerDataProvider setupClusterDataCache() throws IOException {
@@ -308,7 +365,6 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
     Map<String, IdealState> isMap = new HashMap<>();
     for (String resource : _resourceNames) {
       ResourceConfig resourceConfig = new ResourceConfig.Builder(resource)
-          .setMinActiveReplica(minActiveReplica)
           .build();
       _resourceConfigMap.put(resource, resourceConfig);
       IdealState is = new IdealState(resource);
@@ -676,8 +732,8 @@ public class TestClusterModelProvider extends AbstractTestClusterModel {
 
   static class MockAssignableReplica extends AssignableReplica {
     MockAssignableReplica(ResourceConfig resourceConfig, String partition, String replicaState) {
-      super(new ClusterConfig("testCluster"), resourceConfig, partition, replicaState, 1,
-          Integer.MAX_VALUE);
+      super(new ClusterConfig("testCluster"), resourceConfig,
+          new IdealState(resourceConfig.getResourceName()), partition, replicaState, 1);
     }
   }
 

@@ -47,10 +47,6 @@ public class ResourceConfig extends HelixProperty {
    */
   public enum ResourceConfigProperty {
     MONITORING_DISABLED, // Resource-level config, do not create Mbean and report any status for the resource.
-    STATE_MODEL_FACTORY_NAME,
-    MIN_ACTIVE_REPLICAS,
-    INSTANCE_GROUP_TAG,
-    DELAY_REBALANCE_ENABLED,
     PARTITION_CAPACITY_MAP,
     ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK // List of states to be considered as "active" for min active replica check
   }
@@ -93,21 +89,16 @@ public class ResourceConfig extends HelixProperty {
   }
 
   public ResourceConfig(String resourceId, Boolean monitorDisabled,
-      String stateModelFactoryName,
-      int minActiveReplica, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
       Boolean p2pMessageEnabled) {
-    this(resourceId, monitorDisabled, stateModelFactoryName,
-        minActiveReplica, instanceGroupTag,
+    this(resourceId, monitorDisabled,
         rebalanceConfig, stateTransitionTimeoutConfig, listFields, mapFields,
         p2pMessageEnabled, null);
   }
 
   private ResourceConfig(String resourceId, Boolean monitorDisabled,
-      String stateModelFactoryName,
-      int minActiveReplica, String instanceGroupTag,
       RebalanceConfig rebalanceConfig,
       StateTransitionTimeoutConfig stateTransitionTimeoutConfig,
       Map<String, List<String>> listFields, Map<String, Map<String, String>> mapFields,
@@ -120,18 +111,6 @@ public class ResourceConfig extends HelixProperty {
 
     if (p2pMessageEnabled != null) {
       _record.setBooleanField(HelixConfigProperty.P2P_MESSAGE_ENABLED.name(), p2pMessageEnabled);
-    }
-
-    if (stateModelFactoryName != null) {
-      _record.setSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(), stateModelFactoryName);
-    }
-
-    if (minActiveReplica >= 0) {
-      _record.setIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), minActiveReplica);
-    }
-
-    if (instanceGroupTag != null) {
-      _record.setSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), instanceGroupTag);
     }
 
     if (rebalanceConfig != null) {
@@ -189,23 +168,6 @@ public class ResourceConfig extends HelixProperty {
     return _record.getId();
   }
 
-  /**
-   * Get the state model factory associated with this resource
-   * @return state model factory name
-   */
-  public String getStateModelFactoryName() {
-    return _record.getSimpleField(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name());
-  }
-
-  /**
-   * Get the number of minimal active partitions for this resource.
-   *
-   * @return
-   */
-  public int getMinActiveReplica() {
-    return _record.getIntField(ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(), -1);
-  }
-
   // Delimiter used for storing active states as a comma-separated string in simpleField
   private static final String ACTIVE_STATES_DELIMITER = ",";
 
@@ -251,14 +213,6 @@ public class ResourceConfig extends HelixProperty {
           ResourceConfigProperty.ACTIVE_STATES_FOR_MIN_ACTIVE_REPLICA_CHECK.name(),
           String.join(ACTIVE_STATES_DELIMITER, activeStates));
     }
-  }
-
-  /**
-   * Check for a tag that will restrict assignment to instances with a matching tag
-   * @return the group tag, or null if none is present
-   */
-  public String getInstanceGroupTag() {
-    return _record.getSimpleField(ResourceConfigProperty.INSTANCE_GROUP_TAG.toString());
   }
 
   /**
@@ -491,9 +445,6 @@ public class ResourceConfig extends HelixProperty {
   public static class Builder {
     private String _resourceId;
     private Boolean _monitorDisabled;
-    private String _stateModelFactoryName;
-    private int _minActiveReplica = -1;
-    private String _instanceGroupTag;
     private Boolean _p2pMessageEnabled;
     private RebalanceConfig _rebalanceConfig;
     private StateTransitionTimeoutConfig _stateTransitionTimeoutConfig;
@@ -527,33 +478,6 @@ public class ResourceConfig extends HelixProperty {
 
     public String getResourceId() {
       return _resourceId;
-    }
-
-    public String getStateModelFactoryName() {
-      return _stateModelFactoryName;
-    }
-
-    public Builder setStateModelFactoryName(String stateModelFactoryName) {
-      _stateModelFactoryName = stateModelFactoryName;
-      return this;
-    }
-
-    public int getMinActiveReplica() {
-      return _minActiveReplica;
-    }
-
-    public Builder setMinActiveReplica(int minActiveReplica) {
-      _minActiveReplica = minActiveReplica;
-      return this;
-    }
-
-    public String getInstanceGroupTag() {
-      return _instanceGroupTag;
-    }
-
-    public Builder setInstanceGroupTag(String instanceGroupTag) {
-      _instanceGroupTag = instanceGroupTag;
-      return this;
     }
 
     public Builder setRebalanceConfig(RebalanceConfig rebalanceConfig) {
@@ -664,22 +588,16 @@ public class ResourceConfig extends HelixProperty {
       // validate();
 
       return new ResourceConfig(_resourceId, _monitorDisabled,
-          _stateModelFactoryName, _minActiveReplica,
-          _instanceGroupTag, _rebalanceConfig,
+          _rebalanceConfig,
           _stateTransitionTimeoutConfig, _preferenceLists, _mapFields, _p2pMessageEnabled,
           _partitionCapacityMap);
     }
   }
 
   /**
-   * For backward compatibility, propagate the critical simple fields from the IdealState to
-   * the Resource Config.
-   * Eventually, Resource Config should be the only metadata node that contains the required information.
-   *
-   * Note that the config fields get updated in this method shall be fully compatible with ones in the IdealState.
-   *  1. The fields shall have exactly the same meaning.
-   *  2. The value shall be fully compatible, no additional calculation involved.
-   *  3. Resource Config items have a high priority.
+   * When an IdealState is provided, validate resource identity and copy or create a ResourceConfig.
+   * Placement settings are read directly from IdealState and are not propagated here.
+   * Legacy fields already present in ResourceConfig remain opaque metadata.
    */
   public static ResourceConfig mergeIdealStateWithResourceConfig(
       final ResourceConfig resourceConfig, final IdealState idealState) {
@@ -699,20 +617,6 @@ public class ResourceConfig extends HelixProperty {
       // If no resource config specified, construct one based on the Idealstate.
       mergedResourceConfig = new ResourceConfig(idealState.getResourceName());
     }
-    // Fill the compatible Idealstate fields to the ResourceConfig if possible.
-    ZNRecord mergedZNRecord = mergedResourceConfig.getRecord();
-    mergedZNRecord
-        .setSimpleFieldIfAbsent(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
-            idealState.getInstanceGroupTag());
-    mergedZNRecord.setSimpleFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
-        idealState.getStateModelFactoryName());
-    mergedZNRecord
-        .setIntFieldIfAbsent(ResourceConfig.ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-            idealState.getMinActiveReplicas());
-    mergedZNRecord.setBooleanFieldIfAbsent(
-        ResourceConfig.ResourceConfigProperty.DELAY_REBALANCE_ENABLED.name(),
-        idealState.isDelayRebalanceEnabled());
     return mergedResourceConfig;
   }
 }

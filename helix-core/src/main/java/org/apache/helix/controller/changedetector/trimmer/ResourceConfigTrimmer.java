@@ -42,16 +42,12 @@ public class ResourceConfigTrimmer extends HelixPropertyTrimmer<ResourceConfig> 
    * STATE_MODEL_DEF_REF,
    * REPLICAS,
    * MAX_PARTITIONS_PER_INSTANCE,
+   * MIN_ACTIVE_REPLICAS,
    * EXTERNAL_VIEW_DISABLED,
-   * DELAY_REBALANCE_ENABLED,
    * HELIX_ENABLED
    */
   private static final Map<FieldType, Set<String>> STATIC_NON_TRIMMABLE_FIELD_MAP = ImmutableMap
-      .of(FieldType.SIMPLE_FIELD, ImmutableSet
-              .of(ResourceConfigProperty.STATE_MODEL_FACTORY_NAME.name(),
-                  ResourceConfigProperty.MIN_ACTIVE_REPLICAS.name(),
-                  ResourceConfigProperty.INSTANCE_GROUP_TAG.name()),
-          FieldType.MAP_FIELD, ImmutableSet
+      .of(FieldType.MAP_FIELD, ImmutableSet
               .of(ResourceConfigProperty.PARTITION_CAPACITY_MAP.name()));
 
   private ResourceConfigTrimmer() {

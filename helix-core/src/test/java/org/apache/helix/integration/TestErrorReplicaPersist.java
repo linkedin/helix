@@ -115,7 +115,7 @@ public class TestErrorReplicaPersist extends ZkStandAloneCMTestBase {
   public void testErrorReplicaPersist() throws InterruptedException {
     ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
     ClusterConfig clusterConfig = configAccessor.getClusterConfig(CLUSTER_NAME);
-    clusterConfig.setErrorPartitionThresholdForLoadBalance(100000);
+    clusterConfig.setErrorOrRecoveryPartitionThresholdForLoadBalance(100000);
     configAccessor.setClusterConfig(CLUSTER_NAME, clusterConfig);
 
     for (int i = 0; i < (NODE_NR + 1) / 2; i++) {

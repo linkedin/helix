@@ -21,6 +21,7 @@ package org.apache.helix.controller.rebalancer.waged.model;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -37,7 +38,9 @@ import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
@@ -264,5 +267,90 @@ public class TestClusterContext extends AbstractTestClusterModel {
     }
     //estimatedMaxUtilization calculated using preferredScoringKey only.
     Assert.assertEquals(actualEstimatedMaxUtilization, (float) totalUsage.get(preferredScoringKeys.get(0)) / totalCapacity.get(preferredScoringKeys.get(0)));
+  }
+
+  @Test
+  public void testTopStateScoringKeysAndAlpha() throws IOException {
+    // The fixture uses 16 of 20 on "item1" and 0 of 30 on "item3"; its top state replicas use 8 of
+    // 20 on "item1" and 0 of 30 on "item3".
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    Set<AssignableReplica> assignmentSet = generateReplicas(testCache);
+    ClusterConfig clusterConfig = testCache.getClusterConfig();
+
+    // Not set: both estimates use all the capacity keys.
+    ClusterContext context = new ClusterContext(assignmentSet, generateNodes(testCache),
+        new HashMap<>(), new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getTopStateScoringKeys());
+    Assert.assertEquals(context.getTopStateScoringAlpha(), -1d, 0d);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 16f / 20, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
+
+    // The top state scoring keys change the top state estimate only.
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("item3"));
+    clusterConfig.setTopStateScoringAlpha(10d);
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertEquals(context.getTopStateScoringKeys(), Collections.singletonList("item3"));
+    Assert.assertEquals(context.getTopStateScoringAlpha(), 10d, 0d);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 16f / 20, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0f, 0.0001f);
+
+    // Without them, the top state estimate follows the preferred scoring keys...
+    clusterConfig.setTopStateScoringKeys(null);
+    clusterConfig.setPreferredScoringKeys(Collections.singletonList("item3"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getTopStateScoringKeys());
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0f, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0f, 0.0001f);
+
+    // ...and with them, they take precedence for the top state estimate.
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("item1"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0f, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
+  }
+
+  @Test
+  public void testScoringKeysThatAreNotCapacityKeysAreIgnored()
+      throws IOException, HelixRebalanceException {
+    ResourceControllerDataProvider testCache = setupClusterDataCache();
+    Set<AssignableReplica> assignmentSet = generateReplicas(testCache);
+    ClusterConfig clusterConfig = testCache.getClusterConfig();
+
+    // A key that is not a capacity key, e.g. a typo or a capacity key removed later, is ignored
+    // instead of failing the usage estimates.
+    clusterConfig.setPreferredScoringKeys(Arrays.asList("item3", "unknown"));
+    clusterConfig.setTopStateScoringKeys(Arrays.asList("item1", "unknown"));
+    Set<AssignableNode> nodes = generateNodes(testCache);
+    ClusterContext context =
+        new ClusterContext(assignmentSet, nodes, new HashMap<>(), new HashMap<>(), clusterConfig);
+    Assert.assertEquals(context.getPreferredScoringKeys(), Collections.singletonList("item3"));
+    Assert.assertEquals(context.getTopStateScoringKeys(), Collections.singletonList("item1"));
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 0f, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
+
+    // The usage scores take their keys from the context, so the assignment does not fail either.
+    OptimalAssignment assignment = ConstraintBasedAlgorithmFactory
+        .getInstance(ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE)
+        .calculate(new ClusterModel(context, assignmentSet, nodes,
+            ClusterModel.RebalanceScopeType.PARTIAL));
+    Assert.assertFalse(assignment.hasAnyFailure());
+
+    // With no capacity key left, the top state scoring keys fall back to the preferred ones...
+    clusterConfig.setTopStateScoringKeys(Collections.singletonList("unknown"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getTopStateScoringKeys());
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 0f, 0.0001f);
+
+    // ...and the preferred scoring keys to all the capacity keys.
+    clusterConfig.setPreferredScoringKeys(Collections.singletonList("unknown"));
+    context = new ClusterContext(assignmentSet, generateNodes(testCache), new HashMap<>(),
+        new HashMap<>(), clusterConfig);
+    Assert.assertNull(context.getPreferredScoringKeys());
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), 16f / 20, 0.0001f);
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(), 8f / 20, 0.0001f);
   }
 }

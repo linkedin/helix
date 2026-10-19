@@ -20,12 +20,15 @@ package org.apache.helix;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.model.CloudConfig;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ConfigScope;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.HelixConfigScope.ConfigScopeProperty;
@@ -34,11 +37,204 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.model.builder.ConfigScopeBuilder;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 
 public class TestConfigAccessor extends ZkUnitTestBase {
+  private static final String RETIRED_KEY = "ERROR_PARTITION_THRESHOLD_FOR_LOAD_BALANCE";
+
+  @DataProvider
+  public Object[][] clusterConfigWriters() {
+    return new Object[][] {{"replace"}, {"update"}, {"generic"}, {"deprecated"}, {"admin"}};
+  }
+
+  @Test(dataProvider = "clusterConfigWriters")
+  public void testRetiredClusterConfigWrites(String writer) {
+    String cluster = "TestRetiredClusterConfig_" + writer;
+    ZKHelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    ConfigAccessor accessor = new ConfigAccessor(_gZkClient);
+    admin.addCluster(cluster, true);
+    try {
+      ClusterConfig initial = accessor.getClusterConfig(cluster);
+      initial.setErrorOrRecoveryPartitionThresholdForLoadBalance(100);
+      initial.getRecord().setSimpleField("customKey", "original");
+      accessor.setClusterConfig(cluster, initial);
+
+      ClusterConfig proposal = new ClusterConfig(initial.getRecord());
+      proposal.getRecord().setSimpleField(RETIRED_KEY, "3");
+      proposal.getRecord().setSimpleField("customKey", "must-not-be-written");
+      assertRetiredConfigRejected(writer, accessor, cluster, proposal);
+
+      // Seed metadata written by an older client, before this write guard existed.
+      initial.getRecord().setSimpleField(RETIRED_KEY, "3");
+      _gZkClient.writeData(PropertyPathBuilder.clusterConfig(cluster), initial.getRecord());
+      proposal.getRecord().setSimpleField(RETIRED_KEY, "5");
+      assertRetiredConfigRejected(writer, accessor, cluster, proposal);
+
+      proposal.getRecord().setSimpleField(RETIRED_KEY, "3");
+      proposal.getRecord().setSimpleField("customKey", "updated");
+      proposal.setErrorOrRecoveryPartitionThresholdForLoadBalance(101);
+      writeClusterConfig(writer, accessor, cluster, proposal);
+      Assert.assertEquals(accessor.getClusterConfig(cluster).getRecord(), proposal.getRecord());
+
+      ClusterConfig unrelated = new ClusterConfig(cluster);
+      unrelated.getRecord().setSimpleField("customKey", "unrelated");
+      writeClusterConfig(writer, accessor, cluster, unrelated);
+      ClusterConfig stored = accessor.getClusterConfig(cluster);
+      Assert.assertEquals(stored.getRecord().getSimpleField(RETIRED_KEY),
+          writer.equals("replace") ? null : "3");
+      Assert.assertEquals(stored.getRecord().getSimpleField("customKey"), "unrelated");
+
+      HelixConfigScope scope =
+          new HelixConfigScopeBuilder(ConfigScopeProperty.CLUSTER).forCluster(cluster).build();
+      accessor.remove(scope, RETIRED_KEY);
+      Assert.assertFalse(accessor.getClusterConfig(cluster).getRecord().getSimpleFields()
+          .containsKey(RETIRED_KEY));
+      assertRetiredConfigRejected(writer, accessor, cluster, proposal);
+
+      HelixConfigScope resourceScope = new HelixConfigScopeBuilder(ConfigScopeProperty.RESOURCE)
+          .forCluster(cluster).forResource("resource").build();
+      accessor.set(resourceScope, RETIRED_KEY, "5");
+      Assert.assertEquals(accessor.get(resourceScope, RETIRED_KEY), "5",
+          "The retirement applies only to ClusterConfig");
+    } finally {
+      admin.dropCluster(cluster);
+    }
+  }
+
+  private void assertRetiredConfigRejected(String writer, ConfigAccessor accessor, String cluster,
+      ClusterConfig proposal) {
+    ZNRecord before = accessor.getClusterConfig(cluster).getRecord();
+    try {
+      writeClusterConfig(writer, accessor, cluster, proposal);
+      Assert.fail("Adding or changing the retired config must be rejected");
+    } catch (IllegalArgumentException ex) {
+      Assert.assertTrue(ex.getMessage().contains(RETIRED_KEY));
+      Assert.assertTrue(ex.getMessage()
+          .contains("Use ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE"));
+    }
+    Assert.assertEquals(accessor.getClusterConfig(cluster).getRecord(), before,
+        "Rejected requests must not write any fields");
+  }
+
+  private void writeClusterConfig(String writer, ConfigAccessor accessor, String cluster,
+      ClusterConfig proposal) {
+    HelixConfigScope scope =
+        new HelixConfigScopeBuilder(ConfigScopeProperty.CLUSTER).forCluster(cluster).build();
+    switch (writer) {
+      case "replace":
+        accessor.setClusterConfig(cluster, proposal);
+        break;
+      case "update":
+        accessor.updateClusterConfig(cluster, proposal);
+        break;
+      case "generic":
+        accessor.set(scope, proposal.getRecord().getSimpleFields());
+        break;
+      case "deprecated":
+        accessor.set(new ConfigScopeBuilder().forCluster(cluster).build(),
+            proposal.getRecord().getSimpleFields());
+        break;
+      case "admin":
+        new ZKHelixAdmin(_gZkClient).setConfig(scope, proposal.getRecord().getSimpleFields());
+        break;
+      default:
+        throw new AssertionError("Unknown writer: " + writer);
+    }
+  }
+
+  @DataProvider
+  public Object[][] concurrentRetiredValues() {
+    return new Object[][] {{null}, {"5"}};
+  }
+
+  @Test(dataProvider = "concurrentRetiredValues")
+  public void testRetiredConfigRevalidatedOnConcurrentWriteRetry(String concurrentValue) {
+    String cluster = "cluster";
+    String path = PropertyPathBuilder.clusterConfig(cluster);
+    RealmAwareZkClient client = mock(RealmAwareZkClient.class);
+    when(client.exists(anyString())).thenReturn(true);
+    AtomicInteger attempts = new AtomicInteger();
+    doAnswer(invocation -> {
+      DataUpdater<ZNRecord> updater = invocation.getArgument(1);
+      ZNRecord current = new ZNRecord(cluster);
+      current.setSimpleField(RETIRED_KEY, "3");
+      attempts.incrementAndGet();
+      updater.update(current);
+      Assert.assertNull(current.getSimpleField("customKey"),
+          "Preparing the candidate must not mutate the stored snapshot");
+      if (concurrentValue == null) {
+        current.getSimpleFields().remove(RETIRED_KEY);
+      } else {
+        current.setSimpleField(RETIRED_KEY, concurrentValue);
+      }
+      attempts.incrementAndGet();
+      updater.update(current);
+      return null;
+    }).when(client).<ZNRecord>updateDataSerialized(eq(path), any());
+
+    ClusterConfig proposal = new ClusterConfig(cluster);
+    proposal.getRecord().setSimpleField(RETIRED_KEY, "3");
+    proposal.getRecord().setSimpleField("customKey", "updated");
+    try {
+      new ConfigAccessor(client).updateClusterConfig(cluster, proposal);
+      Assert.fail("A retry must reject restoring a concurrently changed or deleted retired value");
+    } catch (IllegalArgumentException ex) {
+      Assert.assertTrue(ex.getMessage().contains(RETIRED_KEY));
+    }
+    Assert.assertEquals(attempts.get(), 2);
+  }
+
+  @Test(expectedExceptions = IllegalStateException.class,
+      expectedExceptionsMessageRegExp = "write failed")
+  public void testClusterConfigWriteFailureIsNotSwallowed() {
+    RealmAwareZkClient client = mock(RealmAwareZkClient.class);
+    when(client.exists(anyString())).thenReturn(true);
+    doThrow(new IllegalStateException("write failed"))
+        .when(client).<ZNRecord>updateDataSerialized(anyString(), any());
+    new ConfigAccessor(client).updateClusterConfig("cluster", new ClusterConfig("cluster"));
+  }
+
+  @Test
+  public void testClusterConfigMapAndListUpdateSemantics() {
+    String cluster = "TestClusterConfigMapAndListUpdateSemantics";
+    ZKHelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    ConfigAccessor accessor = new ConfigAccessor(_gZkClient);
+    admin.addCluster(cluster, true);
+    try {
+      ClusterConfig initial = new ClusterConfig(cluster);
+      initial.getRecord().setListField("list", Collections.singletonList("old"));
+      initial.getRecord().setMapField("map", Collections.singletonMap("old", "value"));
+      initial.getRecord().setSimpleField("keep", "value");
+      accessor.setClusterConfig(cluster, initial);
+
+      ClusterConfig delta = new ClusterConfig(cluster);
+      delta.getRecord().setListField("list", Collections.singletonList("new"));
+      delta.getRecord().setMapField("map", Collections.singletonMap("new", "value"));
+      accessor.updateClusterConfig(cluster, delta);
+      initial.getRecord().update(delta.getRecord());
+      Assert.assertEquals(accessor.getClusterConfig(cluster).getRecord(), initial.getRecord());
+
+      accessor.setClusterConfig(cluster, delta);
+      Assert.assertEquals(accessor.getClusterConfig(cluster).getRecord(), delta.getRecord());
+    } finally {
+      admin.dropCluster(cluster);
+    }
+  }
+
   @Test
   public void testBasic() throws Exception {
     String className = TestHelper.getTestClassName();

@@ -73,6 +73,11 @@ public class ClusterContext {
   // Cluster total capacity. Used to compute score when sorting replicas.
   private final Map<String, Long> _clusterCapacityMap;
   private final List<String> _preferredScoringKeys;
+  // The capacity keys on which the top state usage is scored, when they are configured separately
+  // from the preferred scoring keys; null otherwise.
+  private final List<String> _topStateScoringKeys;
+  // The steepness of the top state usage score, or -1 when not configured.
+  private final double _topStateScoringAlpha;
   private final String _clusterName;
   /**
    * Construct the cluster context based on the current instance status.
@@ -93,7 +98,12 @@ public class ClusterContext {
     Map<String, Long> totalUsage = new HashMap<>();
     Map<String, Long> totalTopStateUsage = new HashMap<>();
     Map<String, Long> totalCapacity = new HashMap<>();
-    _preferredScoringKeys = Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
+    List<String> preferredScoringKeys =
+        Optional.ofNullable(clusterConfig).map(ClusterConfig::getPreferredScoringKeys).orElse(null);
+    List<String> topStateScoringKeys =
+        Optional.ofNullable(clusterConfig).map(ClusterConfig::getTopStateScoringKeys).orElse(null);
+    _topStateScoringAlpha = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::getTopStateScoringAlpha).orElse(-1d);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
@@ -117,6 +127,10 @@ public class ClusterContext {
     }
     nodeSet.forEach(node -> node.getMaxCapacity().forEach(
         (key, value) -> totalCapacity.compute(key, (k, v) -> (v == null) ? (long) value : (v + value))));
+    _preferredScoringKeys =
+        getValidScoringKeys("PREFERRED_SCORING_KEYS", preferredScoringKeys, totalCapacity.keySet());
+    _topStateScoringKeys =
+        getValidScoringKeys("TOP_STATE_SCORING_KEYS", topStateScoringKeys, totalCapacity.keySet());
 
     // TODO: these variables correspond to one constraint each, and may become unnecessary if the
     // constraints are not used. A better design is to make them pluggable.
@@ -128,14 +142,16 @@ public class ClusterContext {
       _clusterCapacityMap = Collections.emptyMap();
     } else {
       _estimatedMaxUtilization = estimateMaxUtilization(totalCapacity, totalUsage, _preferredScoringKeys);
-      _estimatedTopStateMaxUtilization = estimateMaxUtilization(totalCapacity, totalTopStateUsage, _preferredScoringKeys);
+      _estimatedTopStateMaxUtilization = estimateMaxUtilization(totalCapacity, totalTopStateUsage,
+          _topStateScoringKeys != null ? _topStateScoringKeys : _preferredScoringKeys);
       _estimateUtilizationMap = estimateUtilization(totalCapacity, totalUsage);
       _clusterCapacityMap = Collections.unmodifiableMap(totalCapacity);
     }
-    LOG.info(
-        "clusterName: {}, preferredScoringKeys: {}, estimatedMaxUtilization: {}, estimatedTopStateMaxUtilization: {}",
-        _clusterName, _preferredScoringKeys, _estimatedMaxUtilization,
-        _estimatedTopStateMaxUtilization);
+    LOG.info("clusterName: {}, preferredScoringKeys: {}, topStateScoringKeys: {}, "
+            + "topStateScoringAlpha: {}, estimatedMaxUtilization: {}, "
+            + "estimatedTopStateMaxUtilization: {}",
+        _clusterName, _preferredScoringKeys, _topStateScoringKeys, _topStateScoringAlpha,
+        _estimatedMaxUtilization, _estimatedTopStateMaxUtilization);
     _estimatedMaxPartitionCount = estimateAvgReplicaCount(totalReplicas, instanceCount);
     _estimatedMaxTopStateCount = estimateAvgReplicaCount(totalTopStateReplicas, instanceCount);
     _baselineAssignment = baselineAssignment;
@@ -146,10 +162,58 @@ public class ClusterContext {
   /**
    * Get List of preferred scoring keys if set.
    *
-   * @return PreferredScoringKeys which is used in computation of evenness score
+   * @return PreferredScoringKeys which is used in computation of evenness score, without the keys
+   *         that are not capacity keys of the cluster; null if none is set or left
    */
   public List<String> getPreferredScoringKeys() {
     return _preferredScoringKeys;
+  }
+
+  /**
+   * Get the capacity keys on which the top state usage evenness is scored, if they are configured
+   * separately from the preferred scoring keys.
+   *
+   * @return the configured top state scoring keys, without the keys that are not capacity keys of
+   *         the cluster, or null if none is set or left; the top state usage is then scored on
+   *         {@link #getPreferredScoringKeys()}
+   */
+  public List<String> getTopStateScoringKeys() {
+    return _topStateScoringKeys;
+  }
+
+  /**
+   * Keeps the scoring keys that are capacity keys of the cluster. The configured keys are not
+   * checked against the capacity keys when they are written, and a capacity key can be removed
+   * later; an unknown key would make the usage estimates and scores fail on every rebalance.
+   *
+   * @return the keys that are capacity keys, or null if none is set or left
+   */
+  private List<String> getValidScoringKeys(String setting, List<String> keys,
+      Set<String> capacityKeys) {
+    if (keys == null || keys.isEmpty()) {
+      return null;
+    }
+    if (capacityKeys.isEmpty()) {
+      // No capacity is configured, so there is nothing to score on or to check against.
+      return keys;
+    }
+    List<String> validKeys =
+        keys.stream().filter(capacityKeys::contains).collect(Collectors.toList());
+    if (validKeys.size() < keys.size()) {
+      LOG.warn("Ignoring the {} {} of cluster {}: they are not capacity keys of the cluster {}.",
+          setting, keys.stream().filter(key -> !capacityKeys.contains(key))
+              .collect(Collectors.toList()), _clusterName, capacityKeys);
+    }
+    return validKeys.isEmpty() ? null : validKeys;
+  }
+
+  /**
+   * Get the steepness (sigmoid alpha) of the top state usage evenness score, if configured.
+   *
+   * @return the configured steepness, or -1 if not set (the default steepness applies)
+   */
+  public double getTopStateScoringAlpha() {
+    return _topStateScoringAlpha;
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {

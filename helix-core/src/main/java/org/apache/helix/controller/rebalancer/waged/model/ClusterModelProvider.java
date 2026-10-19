@@ -660,8 +660,8 @@ public class ClusterModelProvider {
         for (Map.Entry<String, Integer> entry : stateCountMap.entrySet()) {
           String state = entry.getKey();
           for (int i = 0; i < entry.getValue(); i++) {
-            replicas.add(new AssignableReplica(clusterConfig, mergedResourceConfig, partition, state,
-                    def.getStatePriorityMap().get(state), is.getMaxPartitionsPerInstance()));
+            replicas.add(new AssignableReplica(clusterConfig, mergedResourceConfig, is, partition, state,
+                    def.getStatePriorityMap().get(state)));
           }
         }
       }

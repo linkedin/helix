@@ -24,6 +24,7 @@ import java.util.Collections;
 import org.apache.helix.HelixCloudProperty;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.model.CloudConfig;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -92,5 +93,39 @@ public class TestHelixCloudProperty {
         "CustomCloudInstanceInfoProcessor");
     Assert.assertEquals(customCloudProperty.getCloudInfoProcessorFullyQualifiedClassName(),
         "org.apache.helix.cloud.customized.CustomCloudInstanceInfoProcessor");
+  }
+
+  @Test
+  public void testHelixCloudPropertyDoesNotDefaultCustomizedProcessor() {
+    ZNRecord record = new ZNRecord(CloudConfig.CLOUD_CONFIG_KW);
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
+        CloudProvider.CUSTOMIZED.name());
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("https://custom-cloud.com"));
+
+    HelixCloudProperty customCloudProperty = new HelixCloudProperty(new CloudConfig(record));
+
+    Assert.assertTrue(customCloudProperty.getCloudEnabled());
+    Assert.assertEquals(customCloudProperty.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
+    Assert.assertEquals(customCloudProperty.getCloudInfoProcessorPackage(),
+        "org.apache.helix.cloud.customized");
+    Assert.assertNull(customCloudProperty.getCloudInfoProcessorName());
+  }
+
+  @Test
+  public void testHelixCloudPropertyDoesNotDefaultMissingProvider() {
+    ZNRecord record = new ZNRecord("CloudConfig");
+    record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
+    record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(),
+        Collections.singletonList("https://custom-cloud.com"));
+    CloudConfig cloudConfig = new CloudConfig(record);
+
+    HelixCloudProperty cloudProperty = new HelixCloudProperty(cloudConfig);
+
+    Assert.assertTrue(cloudProperty.getCloudEnabled());
+    Assert.assertNull(cloudProperty.getCloudProvider());
+    Assert.assertNull(cloudProperty.getCloudInfoProcessorName());
+    Assert.assertNull(cloudProperty.getCloudInfoProcessorPackage());
   }
 }

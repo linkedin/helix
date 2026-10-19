@@ -19,6 +19,8 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  * under the License.
  */
 
+import java.util.List;
+
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
@@ -29,6 +31,8 @@ import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
  * The higher the maximum usage value for the capacity key, the lower the score will be, implying
  * that it is that much less desirable to assign anything on the given node.
  * It is a greedy approach since it evaluates only on the most used capacity key.
+ * The capacity keys and the steepness of the score can be configured per cluster
+ * (TOP_STATE_SCORING_KEYS and TOP_STATE_SCORING_ALPHA in the ClusterConfig).
  */
 class TopStateMaxCapacityUsageInstanceConstraint extends UsageSoftConstraint {
   @Override
@@ -40,8 +44,25 @@ class TopStateMaxCapacityUsageInstanceConstraint extends UsageSoftConstraint {
       return 0;
     }
     float estimatedTopStateMaxUtilization = clusterContext.getEstimatedTopStateMaxUtilization();
-    float projectedHighestUtilization =
-        node.getTopStateProjectedHighestUtilization(replica.getCapacity(), clusterContext.getPreferredScoringKeys());
+    float projectedHighestUtilization = node.getTopStateProjectedHighestUtilization(
+        replica.getCapacity(), getScoringKeys(clusterContext));
     return computeUtilizationScore(estimatedTopStateMaxUtilization, projectedHighestUtilization);
+  }
+
+  @Override
+  protected NormalizeFunction getNormalizeFunction(ClusterContext clusterContext) {
+    double alpha = clusterContext.getTopStateScoringAlpha();
+    return alpha > 0 ? getSigmoidNormalizeFunction(alpha)
+        : super.getNormalizeFunction(clusterContext);
+  }
+
+  /**
+   * The top state scoring keys, when configured, replace the preferred scoring keys for this
+   * constraint only.
+   */
+  private static List<String> getScoringKeys(ClusterContext clusterContext) {
+    List<String> topStateScoringKeys = clusterContext.getTopStateScoringKeys();
+    return topStateScoringKeys == null || topStateScoringKeys.isEmpty()
+        ? clusterContext.getPreferredScoringKeys() : topStateScoringKeys;
   }
 }
