@@ -324,8 +324,11 @@ public class TestClusterAccessor extends AbstractTestClass {
    * and every flipped resource would be accepted but silently never place -- cluster-wide. Verifies
    * enforcement (400 + a cluster-scoped verdict naming the starved instance, nothing flipped),
    * dry-run (200 + the same infeasible verdict, nothing flipped), force bypass (flipped despite the
-   * gap), and the fully-covered happy path (flipped). Uses a dedicated cluster so flipping all of its
-   * resources to WAGED does not perturb the other tests.
+   * gap), and the fully-covered happy path (flipped). The cluster declares a
+   * DEFAULT_PARTITION_WEIGHT_MAP so the <em>resource</em> side of every flipped resource is satisfied,
+   * isolating this test on the instance side; the resource side is covered by
+   * {@link #testEnableWagedRebalanceForAllResourcesResourceWeightGuardrail}. Uses a dedicated cluster
+   * so flipping all of its resources to WAGED does not perturb the other tests.
    */
   @Test
   public void testEnableWagedRebalanceForAllResourcesCapacityKeyGuardrail() throws Exception {
@@ -347,6 +350,11 @@ public class TestClusterAccessor extends AbstractTestClass {
       setInstanceCapacity(clusterName, starvedInstance, ImmutableMap.of("FOO", 100));
       ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
       clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      // Cover the resource side for every flipped resource with a cluster default partition weight
+      // map, so this test isolates the instance-side gap (the starved instance). The resource side --
+      // a flipped resource whose partition weights omit a required key -- has its own test below
+      // (testEnableWagedRebalanceForAllResourcesResourceWeightGuardrail).
+      clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("FOO", 1, "BAR", 1));
       _configAccessor.setClusterConfig(clusterName, clusterConfig);
 
       // Two non-WAGED resources to flip; each starts on SEMI_AUTO, not WagedRebalancer.
@@ -402,6 +410,69 @@ public class TestClusterAccessor extends AbstractTestClass {
           Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
           Response.Status.OK.getStatusCode());
       Assert.assertTrue(isResourceWagedRebalanced(clusterName, validResource));
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * Guard rail, resource side: the bulk {@code enableWagedRebalanceForAllResources} flip also sweeps
+   * in legacy resources that never went through {@code addResourceWithWeight}, so a resource whose
+   * partitions carry no weight -- and that the cluster's {@code DEFAULT_PARTITION_WEIGHT_MAP} does not
+   * cover -- would make WAGED fail to build its one cluster-wide model, stalling the rebalance for
+   * every resource. Here every instance declares all required keys (no instance-side gap), so the flip
+   * is blocked purely by the weightless resource, and the verdict names it. Closing the gap with a
+   * cluster default weight map then lets the flip through. Uses a dedicated cluster.
+   */
+  @Test
+  public void testEnableWagedRebalanceForAllResourcesResourceWeightGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestClusterEnableWagedAllResourceWeightGuardrail";
+    _gSetupTool.addCluster(clusterName, true);
+    String instance0 = clusterName + "_instance0";
+    String instance1 = clusterName + "_instance1";
+    String weightlessResource = "enableWagedAllWeightlessResource";
+    String uri = "clusters/" + clusterName;
+    try {
+      // Both instances declare every required key, so there is no instance-side gap -- only the
+      // resource side can block the flip.
+      _gSetupTool.addInstanceToCluster(clusterName, instance0);
+      _gSetupTool.addInstanceToCluster(clusterName, instance1);
+      setInstanceCapacity(clusterName, instance0, ImmutableMap.of("FOO", 100, "BAR", 100));
+      setInstanceCapacity(clusterName, instance1, ImmutableMap.of("FOO", 100, "BAR", 100));
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(clusterName);
+      clusterConfig.setInstanceCapacityKeys(Arrays.asList("FOO", "BAR"));
+      _configAccessor.setClusterConfig(clusterName, clusterConfig);
+
+      // A legacy, non-WAGED resource with no partition weights (addResource never sets weights) and no
+      // cluster default to fall back on.
+      _gSetupTool.getClusterManagementTool()
+          .addResource(clusterName, weightlessResource, 1, "OnlineOffline");
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, weightlessResource));
+
+      // 1) Enforcement: 400 + a verdict naming the weightless resource, and nothing flipped.
+      Response blocked = post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name()),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.BAD_REQUEST.getStatusCode(), true);
+      JsonNode blockedVerdict = OBJECT_MAPPER.readTree(blocked.readEntity(String.class));
+      Assert.assertFalse(blockedVerdict.get("feasible").asBoolean());
+      Assert.assertTrue(
+          blockedVerdict.toString().contains(CapacityKeyConsistencyGuardrailRule.RULE_ID));
+      Assert.assertTrue(blockedVerdict.toString().contains(weightlessResource));
+      Assert.assertFalse(isResourceWagedRebalanced(clusterName, weightlessResource));
+
+      // 2) Close the resource-side gap with a cluster default weight map declaring both keys; the flip
+      //    now passes the guard rail and the resource is flipped to WAGED.
+      clusterConfig = _configAccessor.getClusterConfig(clusterName);
+      clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("FOO", 1, "BAR", 1));
+      _configAccessor.setClusterConfig(clusterName, clusterConfig);
+      post(uri,
+          ImmutableMap.of("command", Command.enableWagedRebalanceForAllResources.name()),
+          Entity.entity("", MediaType.APPLICATION_JSON_TYPE),
+          Response.Status.OK.getStatusCode());
+      Assert.assertTrue(isResourceWagedRebalanced(clusterName, weightlessResource));
     } finally {
       _gSetupTool.deleteCluster(clusterName);
     }

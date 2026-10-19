@@ -36,6 +36,7 @@ import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
@@ -47,15 +48,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for {@link CapacityKeyConsistencyGuardrailRule}, which certifies that every assignable
- * instance declares every capacity key the cluster requires. The rule runs on two write paths: a
- * WAGED resource add (validated against the committed cluster config) and a cluster-config update
- * that changes the capacity keys (validated against the proposed, not-yet-written config). The
- * resource-side coverage is deliberately not this rule's concern -- it is already validated by
- * {@code ZKHelixAdmin#addResourceWithWeight} before the write -- so these tests exercise only the
- * instance side. Cluster state (cluster config + instance configs) is supplied through a mocked
- * {@link HelixDataAccessor}; the proposed resource config or proposed cluster config is passed
- * directly through the {@link GuardrailContext}.
+ * Unit tests for {@link CapacityKeyConsistencyGuardrailRule}, which certifies that a WAGED mutation
+ * cannot leave the cluster's capacity model unsatisfiable. The rule runs on several write paths: a
+ * WAGED resource add and the bulk {@code enableWagedRebalanceForAllResources} flip (both validated
+ * against the committed cluster config) and a cluster-config update that changes the capacity keys
+ * (validated against the proposed, not-yet-written config). On the add and cluster-config paths it
+ * checks the <em>instance</em> side only (the resource side is already validated by
+ * {@code ZKHelixAdmin#addResourceWithWeight} before the write); on the bulk flip it checks
+ * <em>both</em> the instance side and -- because legacy resources flipped in bulk never went through
+ * {@code addResourceWithWeight} -- the resource side, naming each offending resource. Cluster state
+ * (cluster config, instance configs, and, for the bulk path, ideal states and resource configs) is
+ * supplied through a mocked {@link HelixDataAccessor}; the proposed resource config or proposed
+ * cluster config is passed directly through the {@link GuardrailContext}.
  */
 public class TestCapacityKeyConsistencyGuardrailRule {
   private static final String CLUSTER = "testCluster";
@@ -358,6 +362,141 @@ public class TestCapacityKeyConsistencyGuardrailRule {
         rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Resource-side coverage on the bulk enableWagedRebalanceForAllResources path. The bulk flip
+  // sweeps every resource with an IdealState into WAGED through an admin path that never validates
+  // partition weights, so a single legacy resource missing a required weight breaks the one
+  // cluster-wide WAGED model. The rule validates the resource side too and names each offender.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testWagedEnableForAllResourcesLegacyResourceMissingWeightIsInfeasible() {
+    // Instances cover both keys (no instance-side gap), but a legacy resource has no ResourceConfig
+    // and the cluster declares no DEFAULT_PARTITION_WEIGHT_MAP, so WAGED could not weight its
+    // partitions -- the resource-side gap the bulk flip would otherwise accept silently.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(idealState("legacyResource", 3)),
+        ImmutableList.of());
+
+    ValidationResult result = rule.validate(contextWithWagedEnableForAllResources(dataAccessor));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getRuleId(), CapacityKeyConsistencyGuardrailRule.RULE_ID);
+    // The resource-side verdict names the offending resource (unlike the cluster-scoped instance side).
+    Assert.assertEquals(violation.getResourceName(), "legacyResource");
+    Assert.assertTrue(violation.getMessage().contains("legacyResource"));
+    Assert.assertTrue(violation.getMessage().contains("DEFAULT_PARTITION_WEIGHT_MAP"));
+    Assert.assertTrue(violation.getMessage().contains("BAR"));
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesLegacyResourceCoveredByClusterDefaultIsFeasible() {
+    // Same legacy (config-less) resource, but now the cluster's DEFAULT_PARTITION_WEIGHT_MAP declares
+    // every required key, so every partition is weighted by fallback and the flip is safe.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of("FOO", 1, "BAR", 1));
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(idealState("legacyResource", 3)),
+        ImmutableList.of());
+
+    Assert.assertTrue(
+        rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesResourceWithCompleteWeightsIsFeasible()
+      throws IOException {
+    // A resource whose own weight map (via the DEFAULT_PARTITION_KEY entry) declares every required
+    // key needs no cluster default and is safe to flip.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(idealState("weightedResource", 2)),
+        ImmutableList.of(resourceWithDefaultWeights("weightedResource",
+            ImmutableMap.of("FOO", 1, "BAR", 1))));
+
+    Assert.assertTrue(
+        rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesResourceWithIncompleteWeightsIsInfeasible()
+      throws IOException {
+    // The resource has a ResourceConfig, but its DEFAULT_PARTITION_KEY weight omits BAR, so WAGED's
+    // per-partition validation (which this rule mirrors) would reject it at model-build time.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(idealState("partialResource", 1)),
+        ImmutableList.of(resourceWithDefaultWeights("partialResource", ImmutableMap.of("FOO", 1))));
+
+    ValidationResult result = rule.validate(contextWithWagedEnableForAllResources(dataAccessor));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getResourceName(), "partialResource");
+    Assert.assertTrue(violation.getMessage().contains("partialResource"));
+    Assert.assertTrue(violation.getMessage().contains("BAR"));
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesResourceConfigWithoutWeightsIsInfeasible() {
+    // A ResourceConfig exists but carries no partition weights at all; with no DEFAULT_PARTITION_KEY
+    // entry and no cluster default, its partitions fall back to an empty weight map.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(idealState("weightlessResource", 2)),
+        ImmutableList.of(new ResourceConfig("weightlessResource")));
+
+    ValidationResult result = rule.validate(contextWithWagedEnableForAllResources(dataAccessor));
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getResourceName(), "weightlessResource");
+    Assert.assertTrue(violation.getMessage().contains("weightlessResource"));
+    Assert.assertTrue(violation.getMessage().contains("DEFAULT_PARTITION_WEIGHT_MAP"));
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesReportsBothInstanceAndResourceGaps() {
+    // The bulk flip surfaces both failure classes at once: instance0 omits BAR (instance side) and a
+    // legacy resource has no weights (resource side). Both are reported; only the resource-side
+    // violation names a resource.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100))),
+        ImmutableList.of(idealState("legacyResource", 1)),
+        ImmutableList.of());
+
+    ValidationResult result = rule.validate(contextWithWagedEnableForAllResources(dataAccessor));
+
+    Assert.assertFalse(result.isFeasible());
+    boolean hasInstanceGap = result.getViolations().stream()
+        .anyMatch(v -> v.getResourceName() == null && v.getMessage().contains("instance0"));
+    boolean hasResourceGap = result.getViolations().stream()
+        .anyMatch(v -> "legacyResource".equals(v.getResourceName()));
+    Assert.assertTrue(hasInstanceGap, "expected an instance-side violation for instance0");
+    Assert.assertTrue(hasResourceGap, "expected a resource-side violation naming legacyResource");
+  }
+
+  @Test
+  public void testWagedEnableForAllResourcesNoResourcesIsFeasible() {
+    // No ideal states to flip (empty cluster): the resource-side check has nothing to reject.
+    ClusterConfig clusterConfig = clusterConfig("FOO", "BAR");
+    HelixDataAccessor dataAccessor = mockAccessorWithResources(clusterConfig,
+        ImmutableList.of(instanceConfig("instance0", ImmutableMap.of("FOO", 100, "BAR", 100))),
+        ImmutableList.of(),
+        ImmutableList.of());
+
+    Assert.assertTrue(
+        rule.validate(contextWithWagedEnableForAllResources(dataAccessor)).isFeasible());
+  }
+
   private GuardrailContext contextWith(HelixDataAccessor dataAccessor,
       ResourceConfig proposedResourceConfig) {
     return GuardrailContext.newBuilder(CLUSTER)
@@ -397,6 +536,29 @@ public class TestCapacityKeyConsistencyGuardrailRule {
     doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
     doReturn(instanceConfigs).when(dataAccessor).getChildValues(BUILDER.instanceConfigs(), true);
     return dataAccessor;
+  }
+
+  private HelixDataAccessor mockAccessorWithResources(ClusterConfig clusterConfig,
+      List<InstanceConfig> instanceConfigs, List<IdealState> idealStates,
+      List<ResourceConfig> resourceConfigs) {
+    HelixDataAccessor dataAccessor = mockAccessor(clusterConfig, instanceConfigs);
+    doReturn(idealStates).when(dataAccessor).getChildValues(BUILDER.idealStates(), true);
+    doReturn(resourceConfigs).when(dataAccessor).getChildValues(BUILDER.resourceConfigs(), true);
+    return dataAccessor;
+  }
+
+  private static IdealState idealState(String resourceName, int numPartitions) {
+    IdealState idealState = new IdealState(resourceName);
+    idealState.setNumPartitions(numPartitions);
+    return idealState;
+  }
+
+  private static ResourceConfig resourceWithDefaultWeights(String resourceName,
+      Map<String, Integer> defaultPartitionWeights) throws IOException {
+    ResourceConfig resourceConfig = new ResourceConfig(resourceName);
+    resourceConfig.setPartitionCapacityMap(
+        ImmutableMap.of(ResourceConfig.DEFAULT_PARTITION_KEY, defaultPartitionWeights));
+    return resourceConfig;
   }
 
   private static ClusterConfig clusterConfig(String... capacityKeys) {
