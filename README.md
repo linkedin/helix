@@ -93,6 +93,29 @@ IdealState, CurrentState, and Message factory APIs remain supported. There is no
 automatic deletion or migration of stored values; do not copy an ignored
 ResourceConfig value into IdealState without reviewing the intended factory.
 
+### Global rebalance execution compatibility
+
+`ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE`,
+`ClusterConfig.isGlobalRebalanceAsyncModeEnabled()`,
+`ClusterConfig.setGlobalRebalanceAsyncMode(boolean)`, and
+`ClusterConfig.DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED` have been removed.
+The obsolete `setGlobalRebalanceAsyncMode(boolean)` methods on `WagedRebalancer`
+and `GlobalRebalanceRunner` have also been removed. Remove downstream references
+and rebuild before upgrading; the enum and method removals are source- and
+binary-incompatible.
+
+Normal WAGED controllers always calculate the global baseline asynchronously,
+preserving the previous default (`true`); users need not supply a setting.
+An asynchronous calculation can temporarily use an older baseline before the
+completed baseline triggers another pipeline run. Existing raw copies of the
+retired key remain opaque metadata, but `false` no longer requests synchronous
+controller execution. Review callers that depended on this override before rollout.
+
+Read-only WAGED assignment utilities still complete global and partial calculations
+synchronously through their internal constructor, independently of cluster
+metadata. Partial-rebalance configuration is unchanged. No persisted fields are
+deleted or migrated, and generic raw-record APIs remain unchanged.
+
 ## WHAT IS HELIX
 
 Helix is a generic cluster management framework used for automatic management of partitioned, replicated and distributed resources hosted on a cluster of nodes. Helix provides the following features: 

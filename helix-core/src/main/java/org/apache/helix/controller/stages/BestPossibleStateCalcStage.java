@@ -545,8 +545,6 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       // Since the rebalance configuration can be updated at runtime, try to update the rebalancer
       // before calculating.
       wagedRebalancer.updateRebalancePreference(clusterConfig.getGlobalRebalancePreference());
-      wagedRebalancer
-          .setGlobalRebalanceAsyncMode(clusterConfig.isGlobalRebalanceAsyncModeEnabled());
     }
   }
 

@@ -383,23 +383,6 @@ public class TestClusterConfig {
   }
 
   @Test
-  public void testAsyncGlobalRebalanceOption() {
-    ClusterConfig testConfig = new ClusterConfig("testConfig");
-    // Default value is true.
-    Assert.assertEquals(testConfig.isGlobalRebalanceAsyncModeEnabled(), true);
-    // Test get the option
-    testConfig.getRecord()
-        .setBooleanField(ClusterConfig.ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(),
-            false);
-    Assert.assertEquals(testConfig.isGlobalRebalanceAsyncModeEnabled(), false);
-    // Test set the option
-    testConfig.setGlobalRebalanceAsyncMode(true);
-    Assert.assertEquals(testConfig.getRecord()
-        .getBooleanField(ClusterConfig.ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(),
-            false), true);
-  }
-
-  @Test
   public void testGetLastOnDemandRebalanceTimestamp() {
     ClusterConfig testConfig = new ClusterConfig("testConfig");
     Assert.assertEquals(testConfig.getLastOnDemandRebalanceTimestamp(), -1L);
