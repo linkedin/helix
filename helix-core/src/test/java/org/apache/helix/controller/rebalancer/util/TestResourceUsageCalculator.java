@@ -61,6 +61,40 @@ public class TestResourceUsageCalculator {
   }
 
   @Test
+  public void testCountReplicaMovements() {
+    Map<String, ResourceAssignment> previous = buildResourceAssignment(ImmutableMap.of("DB",
+        ImmutableMap.of(
+            "DB_0", ImmutableMap.of("host_A", "MASTER", "host_B", "SLAVE", "host_C", "SLAVE"),
+            "DB_1", ImmutableMap.of("host_A", "MASTER", "host_B", "SLAVE", "host_C", "SLAVE"))));
+
+    // Identical assignment => no movements.
+    Assert.assertEquals(ResourceUsageCalculator.countReplicaMovements(previous, previous), 0L);
+
+    // Empty new assignment => nothing was placed, so nothing moved.
+    Assert.assertEquals(
+        ResourceUsageCalculator.countReplicaMovements(previous, Collections.emptyMap()), 0L);
+
+    // Empty previous assignment => every replica in the new assignment is a fresh placement (2 x 3).
+    Assert.assertEquals(
+        ResourceUsageCalculator.countReplicaMovements(Collections.emptyMap(), previous), 6L);
+
+    // Mixed changes:
+    //  - DB_0: host_C's SLAVE relocates to host_D (1 movement). The host_C drop is NOT counted.
+    //  - DB_1: host_A MASTER->SLAVE and host_B SLAVE->MASTER (2 state changes); host_C unchanged.
+    // Total = 3.
+    Map<String, ResourceAssignment> updated = buildResourceAssignment(ImmutableMap.of("DB",
+        ImmutableMap.of(
+            "DB_0", ImmutableMap.of("host_A", "MASTER", "host_B", "SLAVE", "host_D", "SLAVE"),
+            "DB_1", ImmutableMap.of("host_A", "SLAVE", "host_B", "MASTER", "host_C", "SLAVE"))));
+    Assert.assertEquals(ResourceUsageCalculator.countReplicaMovements(previous, updated), 3L);
+
+    // A resource absent from the previous assignment => all its replicas count as movements.
+    Map<String, ResourceAssignment> newResource = buildResourceAssignment(ImmutableMap.of("DB2",
+        ImmutableMap.of("DB2_0", ImmutableMap.of("host_A", "MASTER", "host_B", "SLAVE"))));
+    Assert.assertEquals(ResourceUsageCalculator.countReplicaMovements(previous, newResource), 2L);
+  }
+
+  @Test
   public void testCalculateAveragePartitionWeight() {
     Map<String, Map<String, Integer>> partitionCapacityMap = ImmutableMap.of(
         "partition1", ImmutableMap.of("capacity1", 20, "capacity2", 40),
