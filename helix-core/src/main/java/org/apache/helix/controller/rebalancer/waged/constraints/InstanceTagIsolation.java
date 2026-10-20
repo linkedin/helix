@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import com.google.common.base.Strings;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
@@ -94,11 +95,12 @@ class InstanceTagIsolation {
   private final ClusterModel _clusterModel;
   private final List<AssignableNode> _nodes;
 
-  // Failures are funneled here while isolating so a tolerated group failure never marks the
+  // Failures are recorded here while isolating so a tolerated group failure never marks the
   // returned OptimalAssignment as failed, which would make getOptimalResourceAssignment throw.
   private final OptimalAssignment _failureSink;
   // Computed on the first failure only, so the happy path stays identical to the default mode.
   private List<Set<String>> _shareBlocks;
+  private Map<String, Set<String>> _blockByGroup;
   private Map<String, String> _tagByGroup;
 
   InstanceTagIsolation(ClusterModel clusterModel, List<AssignableNode> nodes) {
@@ -124,16 +126,16 @@ class InstanceTagIsolation {
    *
    * A resource pinned to an instance group tag can only ever be placed on that tag's nodes, so the
    * tag is the failure domain the operator declared: every resource sharing the tag competes for
-   * the same nodes and is carried over together. A resource with no tag has no declared domain and
-   * can be placed anywhere, so it is keyed on its own, though it then shares nodes with everything.
+   * the same set of nodes and is carried over together. A resource with no tag has no declared
+   * domain and can be placed anywhere, so it is keyed on its own, though it then shares nodes with
+   * everything.
    */
   private static String groupKey(AssignableReplica replica) {
     return groupKey(replica.getResourceName(), replica.getResourceInstanceGroupTag());
   }
 
   private static String groupKey(String resource, String tag) {
-    return (tag == null || tag.isEmpty()) ? UNTAGGED_GROUP_PREFIX + resource
-        : TAG_GROUP_PREFIX + tag;
+    return Strings.isNullOrEmpty(tag) ? UNTAGGED_GROUP_PREFIX + resource : TAG_GROUP_PREFIX + tag;
   }
 
   /**
@@ -152,7 +154,16 @@ class InstanceTagIsolation {
     if (_shareBlocks != null) {
       return _shareBlocks;
     }
-    _shareBlocks = blocksOf(tagByGroup());
+    List<Set<String>> blocks = blocksOf(tagByGroup());
+    // The blocks partition the groups, so every group maps to exactly one block.
+    Map<String, Set<String>> blockByGroup = new HashMap<>();
+    for (Set<String> block : blocks) {
+      for (String group : block) {
+        blockByGroup.put(group, block);
+      }
+    }
+    _blockByGroup = blockByGroup;
+    _shareBlocks = blocks;
     return _shareBlocks;
   }
 
@@ -230,22 +241,22 @@ class InstanceTagIsolation {
 
   /** The share block containing this group, which is the unit that is carried over together. */
   private Set<String> blockOf(String group) {
-    for (Set<String> block : shareBlocks()) {
-      if (block.contains(group)) {
-        return block;
-      }
-    }
-    return Collections.singleton(group);
+    // Builds the group to block lookup on first use.
+    shareBlocks();
+    Set<String> block = _blockByGroup.get(group);
+    return block != null ? block : Collections.singleton(group);
   }
 
-  /** A group's tag, or null for an untagged group, which can use every node. */
+  /** Maps each group to its tag, or to null for an untagged group, which can use every node. */
   private Map<String, String> tagByGroup() {
-    if (_tagByGroup == null) {
-      Map<String, String> tagByGroup = new HashMap<>();
-      _clusterModel.getContext().getResourceInstanceGroupTags().forEach((resource, tag) ->
-          tagByGroup.put(groupKey(resource, tag), (tag == null || tag.isEmpty()) ? null : tag));
-      _tagByGroup = tagByGroup;
+    if (_tagByGroup != null) {
+      return _tagByGroup;
     }
+    Map<String, String> tagByGroup = new HashMap<>();
+    _clusterModel.getContext().getResourceInstanceGroupTags().forEach((resource, tag) -> {
+      tagByGroup.put(groupKey(resource, tag), Strings.emptyToNull(tag));
+    });
+    _tagByGroup = tagByGroup;
     return _tagByGroup;
   }
 }
