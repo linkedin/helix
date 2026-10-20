@@ -2024,4 +2024,70 @@ public class TestClusterAccessor extends AbstractTestClass {
     String response = get(uri, null, Response.Status.OK.getStatusCode(), true);
     return OBJECT_MAPPER.readValue(response, new TypeReference<HashMap<String, Object>>() { });
   }
+
+  @Test
+  public void testGetClusterConvergence() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String clusterName = "TestClusterConvergence";
+    _gSetupTool.addCluster(clusterName, true);
+    try {
+      HelixDataAccessor accessor =
+          new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+      // A customized resource is compared with the mapping in its ideal state.
+      IdealState idealState = new IdealState("TestDB");
+      idealState.setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
+      idealState.setStateModelDefRef("OnlineOffline");
+      idealState.setNumPartitions(1);
+      idealState.setPartitionState("TestDB_0", "instance0", "ONLINE");
+      accessor.setProperty(accessor.keyBuilder().idealStates("TestDB"), idealState);
+      ExternalView externalView = new ExternalView("TestDB");
+      externalView.setState("TestDB_0", "instance0", "ONLINE");
+      accessor.setProperty(accessor.keyBuilder().externalView("TestDB"), externalView);
+
+      String url = "clusters/" + clusterName + "/convergence";
+      JsonNode converged =
+          OBJECT_MAPPER.readTree(get(url, null, Response.Status.OK.getStatusCode(), true));
+      // Only the two fields, like GET /clusters/{clusterId}/maintenance.
+      Assert.assertEquals(converged.size(), 2);
+      Assert.assertTrue(converged.get(ClusterAccessor.ClusterProperties.converged.name())
+          .booleanValue());
+      Assert.assertEquals(converged.get(ClusterAccessor.ClusterProperties.unconvergedResources
+          .name()).size(), 0);
+
+      // An extra replica in the initial state fails only the strict match, the default.
+      externalView.setState("TestDB_0", "instance1", "OFFLINE");
+      accessor.setProperty(accessor.keyBuilder().externalView("TestDB"), externalView);
+      JsonNode strict =
+          OBJECT_MAPPER.readTree(get(url, null, Response.Status.OK.getStatusCode(), true));
+      Assert.assertFalse(strict.get(ClusterAccessor.ClusterProperties.converged.name())
+          .booleanValue());
+      Assert.assertEquals(OBJECT_MAPPER.convertValue(
+          strict.get(ClusterAccessor.ClusterProperties.unconvergedResources.name()),
+          List.class), Collections.singletonList("TestDB"));
+      JsonNode lenient = OBJECT_MAPPER.readTree(get(url, ImmutableMap.of("matchMode", "LENIENT"),
+          Response.Status.OK.getStatusCode(), true));
+      Assert.assertTrue(lenient.get(ClusterAccessor.ClusterProperties.converged.name())
+          .booleanValue());
+
+      get(url, ImmutableMap.of("matchMode", "lenient"), Response.Status.BAD_REQUEST.getStatusCode(),
+          true);
+      get("clusters/" + clusterName + "_missing/convergence", null,
+          Response.Status.NOT_FOUND.getStatusCode(), false);
+
+      // A Full-Auto resource can't be compared unless the cluster persists its assignment.
+      IdealState fullAutoIdealState = new IdealState("FullAutoDB");
+      fullAutoIdealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+      fullAutoIdealState.setStateModelDefRef("OnlineOffline");
+      fullAutoIdealState.setNumPartitions(1);
+      fullAutoIdealState.setPreferenceList("FullAutoDB_0", Collections.singletonList("instance0"));
+      accessor.setProperty(accessor.keyBuilder().idealStates("FullAutoDB"), fullAutoIdealState);
+      ExternalView fullAutoExternalView = new ExternalView("FullAutoDB");
+      fullAutoExternalView.setState("FullAutoDB_0", "instance0", "ONLINE");
+      accessor.setProperty(accessor.keyBuilder().externalView("FullAutoDB"), fullAutoExternalView);
+      get(url, null, Response.Status.INTERNAL_SERVER_ERROR.getStatusCode(), true);
+    } finally {
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
 }

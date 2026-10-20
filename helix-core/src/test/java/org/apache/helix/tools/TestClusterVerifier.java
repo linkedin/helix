@@ -32,6 +32,7 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkUnitTestBase;
+import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
@@ -43,6 +44,7 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
+import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
 import org.apache.helix.tools.ClusterVerifiers.HelixClusterVerifier;
 import org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier;
@@ -429,5 +431,81 @@ public class TestClusterVerifier extends ZkUnitTestBase {
             .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
             .build();
     Assert.assertFalse(lenientVerifier.verify(3000));
+  }
+
+  @Test
+  public void testGetUnconvergedResources() throws Exception {
+    HelixDataAccessor accessor =
+        new ZKHelixDataAccessor(_clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    ZkHelixClusterVerifier verifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME).build();
+    Assert.assertTrue(verifier.verifyByPolling());
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, false),
+        Collections.emptyList());
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, true),
+        Collections.emptyList());
+
+    // Stop the controller so the external views edited below are not rewritten.
+    _controller.syncStop();
+    ZkHelixClusterVerifier strictVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient).build();
+    ZkHelixClusterVerifier lenientVerifier =
+        new StrictMatchExternalViewVerifier.Builder(_clusterName).setZkClient(_gZkClient)
+            .setLenientMatch(true).build();
+
+    // An extra replica in the initial state fails only the strict match, as in the verifier.
+    ExternalView onlineOfflineView = accessor.getProperty(keyBuilder.externalView(RESOURCES[1]));
+    String partition = onlineOfflineView.getPartitionSet().iterator().next();
+    String instanceWithoutReplica = Arrays.stream(_participants)
+        .map(MockParticipantManager::getInstanceName)
+        .filter(instance -> !onlineOfflineView.getStateMap(partition).containsKey(instance))
+        .findFirst().get();
+    onlineOfflineView.setState(partition, instanceWithoutReplica, "OFFLINE");
+    accessor.setProperty(keyBuilder.externalView(RESOURCES[1]), onlineOfflineView);
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, false),
+        Collections.singletonList(RESOURCES[1]));
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, true),
+        Collections.emptyList());
+    Assert.assertFalse(strictVerifier.verifyByPolling(0, 0));
+    Assert.assertTrue(lenientVerifier.verifyByPolling(0, 0));
+
+    // A replica in another state and a missing external view fail both, listed in name order.
+    ExternalView masterSlaveView = accessor.getProperty(keyBuilder.externalView(RESOURCES[0]));
+    String masterSlavePartition = masterSlaveView.getPartitionSet().iterator().next();
+    String master = masterSlaveView.getStateMap(masterSlavePartition).entrySet().stream()
+        .filter(entry -> "MASTER".equals(entry.getValue())).map(Map.Entry::getKey).findFirst()
+        .get();
+    masterSlaveView.setState(masterSlavePartition, master, "SLAVE");
+    accessor.setProperty(keyBuilder.externalView(RESOURCES[0]), masterSlaveView);
+    accessor.removeProperty(keyBuilder.externalView(RESOURCES[3]));
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, false),
+        Arrays.asList(RESOURCES[3], RESOURCES[0], RESOURCES[1]));
+    Assert.assertEquals(StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, true),
+        Arrays.asList(RESOURCES[3], RESOURCES[0]));
+    Assert.assertFalse(lenientVerifier.verifyByPolling(0, 0));
+  }
+
+  @Test
+  public void testGetUnconvergedResourcesWritesNoParticipantHistory() {
+    // Without a controller, nothing records that the instance below went offline.
+    _controller.syncStop();
+    HelixDataAccessor accessor =
+        new ZKHelixDataAccessor(_clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+    PropertyKey historyKey = accessor.keyBuilder().participantHistory("localhost_13000");
+    _setupTool.addInstanceToCluster(_clusterName, "localhost_13000");
+    ParticipantHistory history = new ParticipantHistory("localhost_13000");
+    history.reportOnline("session_0", "version_0");
+    accessor.setProperty(historyKey, history);
+
+    StrictMatchExternalViewVerifier.getUnconvergedResources(accessor, false);
+    Assert.assertEquals(((ParticipantHistory) accessor.getProperty(historyKey)).getLastOfflineTime(),
+        ParticipantHistory.ONLINE);
+
+    // The full refresh that the verifier makes records the offline time.
+    new ResourceControllerDataProvider().refresh(accessor);
+    Assert.assertTrue(((ParticipantHistory) accessor.getProperty(historyKey)).getLastOfflineTime()
+        != ParticipantHistory.ONLINE);
   }
 }
