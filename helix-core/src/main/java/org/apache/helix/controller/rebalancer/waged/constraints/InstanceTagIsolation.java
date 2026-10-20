@@ -82,12 +82,12 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Parity</h3>
  * Every method is a no-op while disabled. While enabled, {@link #shouldSkip} and
- * {@link #recordPlacement} run for every replica but are bookkeeping only: until something fails,
- * the first returns false and the second remembers the placement. {@link #failureSink} only
- * changes where a failure is recorded, {@link #finish} returns at once unless something failed,
- * and the remaining entry points are only reached on a path where the default mode has already
- * decided to throw. A run in which nothing fails therefore produces exactly the same assignment
- * either way, for any topology.
+ * {@link #recordPlacement} run for every replica but never change where a replica goes: until
+ * something fails, the first returns false and the second only records the placement.
+ * {@link #failureSink} only changes where a failure is recorded, {@link #finish} returns at once
+ * unless something failed, and the remaining entry points are only reached on a path where the
+ * default mode has already decided to throw. A run in which nothing fails therefore produces
+ * exactly the same assignment either way, for any topology.
  *
  * Instances are stateful and scoped to a single
  * {@link ConstraintBasedAlgorithm#calculate(ClusterModel)} run. They are not thread safe, which
@@ -142,13 +142,9 @@ class InstanceTagIsolation {
    * @return true when the caller should move on to the next replica.
    */
   boolean shouldSkip(AssignableReplica replica) {
-    if (!_enabled) {
+    if (!_enabled || _failedGroups.isEmpty() || !_failedGroups.contains(groupKey(replica))) {
       return false;
     }
-    if (!_failedGroups.contains(groupKey(replica))) {
-      return false;
-    }
-    // The whole group is being carried over unchanged, so do not assign the rest of it piecemeal.
     _skippedResources.add(replica.getResourceName());
     return true;
   }
@@ -160,9 +156,8 @@ class InstanceTagIsolation {
     if (!_enabled) {
       return;
     }
-    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>()).add(
-        new Placement(replica.getResourceName(), replica.getPartitionName(),
-            replica.getReplicaState(), node.getInstanceName()));
+    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>())
+        .add(new Placement(replica, node));
   }
 
   /**
@@ -184,39 +179,34 @@ class InstanceTagIsolation {
     // nodes, so the capacity the whole set occupies is off limits to everything still being
     // calculated.
     Set<String> closure = blockOf(group);
-    // Isolation is pointless when the cluster holds no second block to recalculate around, which is
-    // what an untagged resource or a tag bridging instance produces by merging every group it meets
-    // into one. A group that reaches no node still makes a block of its own here, so it can let
-    // isolation go ahead, and finish then fails the run when every group that reaches a node
-    // failed. Measured over every block the cluster's resources form, including the ones whose
-    // replicas are all placed already, rather than over the groups that happen to have outstanding
-    // replicas this run: a partial rebalance can carry work for a single clique, and comparing
-    // against that would read as "shares nodes with every other group" on a cluster of twenty
-    // independent cliques and fail them all. A tag carried only by nodes no resource is pinned to
-    // (a spare pool, or a clique whose resources do not exist yet) does not make a block here. It
-    // holds nothing that could keep rebalancing, so counting it would turn a failure of the only
-    // clique into a rebalance that quietly carries everything over.
+    // Isolation needs a second share block to keep rebalancing. Blocks are counted over every
+    // resource group, placed or not, since a partial rebalance may only have work for one clique.
+    // A tag no resource is pinned to (a spare pool) makes no block, so it cannot hide a failure of
+    // the only clique. A group that reaches no node is a block of its own, and finish fails the
+    // run if every group that reaches a node failed.
     if (shareBlocks().size() < 2) {
-      LOG.warn(
-          "Instance tag isolation cannot isolate group {} during the {} rebalance of cluster {}: "
-              + "it shares nodes with every other group that holds resources, so there is nothing "
-              + "left to recalculate around it. Failing the whole rebalance exactly like the "
-              + "default global mode.", group, _clusterModel.getRebalanceScopeType(),
-          _clusterModel.getContext().getClusterName());
+      LOG.warn("Instance tag isolation cannot isolate group {} in the {} rebalance of cluster {}, "
+              + "since its resource groups form {} share block(s) and isolation needs at least "
+              + "two. Failing the rebalance.", group, _clusterModel.getRebalanceScopeType(),
+          _clusterModel.getContext().getClusterName(), shareBlocks().size());
       return false;
     }
     int released = 0;
     // Releasing gives back the node capacity this run's placements for the whole block used and
-    // removes their fault zone entries, leaving the other blocks' placements in place. Those
-    // updates commute, so the release order is not significant.
+    // removes their fault zone entries, leaving the other blocks' placements in place. Each release
+    // only undoes its own placement, so the order of the releases does not matter.
     for (String member : closure) {
       List<Placement> placements = _placementsByGroup.remove(member);
       if (placements != null) {
         for (int i = placements.size() - 1; i >= 0; i--) {
           Placement placement = placements.get(i);
-          _clusterModel.release(placement._resourceName, placement._partitionName, placement._state,
-              placement._instanceName);
-          _skippedResources.add(placement._resourceName);
+          AssignableReplica placed = placement._replica;
+          // The release path is keyed by state, so pass the placed replica's own state. With any
+          // other state the node keeps the replica and only logs a warning, while the fault zone
+          // entry is still removed, and a state the model does not index throws.
+          _clusterModel.release(placed.getResourceName(), placed.getPartitionName(),
+              placed.getReplicaState(), placement._node.getInstanceName());
+          _skippedResources.add(placed.getResourceName());
           released++;
         }
       }
@@ -226,13 +216,10 @@ class InstanceTagIsolation {
     if (_firstFailure == null) {
       _firstFailure = failure;
     }
-    LOG.warn(
-        "Instance tag isolation: rolling back and skipping group {} together with {} group(s) it "
-            + "shares nodes with, during the {} rebalance of cluster {}. {} replica(s) already "
-            + "placed were released. Skipped set: {}. Every other group keeps its newly calculated "
-            + "assignment unless every group that reaches a node fails, which fails the whole "
-            + "rebalance.", group, closure.size() - 1, _clusterModel.getRebalanceScopeType(),
-        _clusterModel.getContext().getClusterName(), released, closure, failure);
+    LOG.warn("Instance tag isolation rolled back and skipped share block {} after group {} failed "
+            + "in the {} rebalance of cluster {}. Released {} replica(s) placed in this run.",
+        closure, group, _clusterModel.getRebalanceScopeType(),
+        _clusterModel.getContext().getClusterName(), released, failure);
     return true;
   }
 
@@ -247,19 +234,11 @@ class InstanceTagIsolation {
     if (!_enabled || _failedGroups.isEmpty()) {
       return;
     }
-    // Outstanding work can belong only to the failing clique, and a baseline can be incremental, so
-    // whether anything survived is judged over the full resource inventory, allocated groups
-    // included, rather than over the replicas being reassigned. An unrelated resource edit must not
-    // turn one broken clique into a global failure. The same rule holds in every scope, and only
-    // groups that hold resources and reach a node of the scope's model count. A tag carried only by
-    // nodes no resource is pinned to never fails, so counting it as a surviving block would hide a
-    // genuine cluster wide failure behind a spare pool. A resource group whose tag no node of the
-    // model carries (a resource added before any instance carries its tag, every instance retagged
-    // away, or in the delayed rebalance overwrite every instance offline inside the delay window)
-    // is the same case from the other side. It has no node to rebalance onto, and with nothing to
-    // place it never fails, so counting it as a survivor would carry everything over in place of
-    // the failure. A failure always takes its whole share block with it, so every reaching group
-    // failing is the same as every block that reaches a node failing.
+    // Survival is judged over every resource group, not only the replicas being reassigned, since a
+    // partial or incremental rebalance may only have work for the failing clique. Only groups that
+    // hold resources and reach a node of this model count. A spare pool never fails, and a group
+    // whose tag no node carries has nothing to place, so counting either as a survivor would hide a
+    // cluster wide failure.
     if (_failedGroups.containsAll(groupsReachingANode())) {
       // Every independent part of the cluster that reaches a node failed, so behave exactly like
       // the default global mode.
@@ -444,22 +423,19 @@ class InstanceTagIsolation {
   /**
    * A placement made during this run, kept so it can be released if the group later fails.
    *
-   * All four fields are needed because the release path is keyed by state. With any other state
-   * the node keeps the replica and only logs a warning, while the fault zone entry is still
-   * removed, and a state the model does not index throws.
+   * Holds only the replica and the node it went to, two references or 24 bytes with compressed
+   * oops, and reads the fields the release needs only during a rollback. Those fields are final, so
+   * they still hold the placed values. One record is kept per placed replica while isolation is
+   * enabled, until calculate returns, and none while it is disabled. A record cannot be dropped
+   * earlier, since a later failure anywhere in its share block still rolls its group back.
    */
   private static final class Placement {
-    private final String _resourceName;
-    private final String _partitionName;
-    private final String _state;
-    private final String _instanceName;
+    private final AssignableReplica _replica;
+    private final AssignableNode _node;
 
-    private Placement(String resourceName, String partitionName, String state,
-        String instanceName) {
-      _resourceName = resourceName;
-      _partitionName = partitionName;
-      _state = state;
-      _instanceName = instanceName;
+    private Placement(AssignableReplica replica, AssignableNode node) {
+      _replica = replica;
+      _node = node;
     }
   }
 }
