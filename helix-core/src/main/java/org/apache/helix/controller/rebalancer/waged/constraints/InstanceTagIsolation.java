@@ -118,7 +118,8 @@ class InstanceTagIsolation {
   private Map<String, Set<String>> _blockByGroup;
   private Map<String, String> _tagByGroup;
 
-  InstanceTagIsolation(ClusterModel clusterModel, List<AssignableNode> nodes) {
+  InstanceTagIsolation(ClusterModel clusterModel, List<AssignableReplica> allReplicas,
+      List<AssignableNode> nodes) {
     _enabled = clusterModel.getContext().isInstanceTagIsolationEnabled();
     _clusterModel = clusterModel;
     _nodes = nodes;
