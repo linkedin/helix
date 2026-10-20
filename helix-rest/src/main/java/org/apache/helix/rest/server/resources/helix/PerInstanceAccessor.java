@@ -71,6 +71,7 @@ import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
@@ -740,6 +741,24 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             return serverError(e);
           }
           return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of("successful", instanceDrained)));
+        case areReplicasOffline:
+          InstanceReplicaStatus replicaStatus;
+          try {
+            if (!(admin instanceof ZKHelixAdmin)) {
+              return serverError("Command areReplicasOffline requires a ZKHelixAdmin.");
+            }
+            replicaStatus = ((ZKHelixAdmin) admin).getInstanceReplicaStatus(clusterId, instanceName,
+                InstanceDrainExclusionType.parseExclusionTypes(exclusions));
+          } catch (IllegalArgumentException e) {
+            LOG.error("Invalid exclusions for cluster: {}, instance: {}, exclusions: {}", clusterId,
+                instanceName, exclusions, e);
+            return badRequest(e.getMessage());
+          } catch (HelixException e) {
+            LOG.error("Encountered error when checking if replicas are offline for cluster: {}, "
+                + "instance: {}", clusterId, instanceName, e);
+            return serverError(e);
+          }
+          return OK(OBJECT_MAPPER.writeValueAsString(replicaStatus));
         case forceKillInstance:
           boolean instanceForceKilled = admin.forceKillInstance(clusterId, instanceName, reason, instanceOperationSource);
           if (!instanceForceKilled) {

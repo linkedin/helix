@@ -86,6 +86,7 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Message;
@@ -97,6 +98,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
+import org.apache.helix.task.TaskConstants;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
@@ -513,6 +515,69 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
+  }
+
+  /**
+   * Returns whether the replicas in the current states of the instance's live session are offline,
+   * together with how many there are, how many are offline, and which are in ERROR. Task resources
+   * are excluded. A replica is offline in the initial state of its own state model, for example
+   * OFFLINE. With {@link InstanceDrainExclusionType#ERROR_PARTITIONS} excluded, a replica in ERROR
+   * also counts as offline.
+   *
+   * This is used by the Helix REST {@code areReplicasOffline} command.
+   *
+   * @throws IllegalArgumentException if an exclusion type other than ERROR_PARTITIONS is given
+   */
+  public InstanceReplicaStatus getInstanceReplicaStatus(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    for (InstanceDrainExclusionType exclusionType : exclusionTypes) {
+      if (exclusionType != InstanceDrainExclusionType.ERROR_PARTITIONS) {
+        throw new IllegalArgumentException(
+            "Only ERROR_PARTITIONS can be excluded when checking whether replicas are offline: "
+                + exclusionType);
+      }
+    }
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
+    List<CurrentState> currentStates = liveInstance == null ? Collections.emptyList()
+        : accessor.getChildValues(
+            keyBuilder.currentStates(instanceName, liveInstance.getEphemeralOwner()), true);
+
+    Map<String, StateModelDefinition> stateModelDefs = new HashMap<>();
+    List<String> errorPartitions = new ArrayList<>();
+    int replicaCount = 0;
+    int offlineReplicaCount = 0;
+    for (CurrentState currentState : currentStates) {
+      String stateModelDefRef = currentState.getStateModelDefRef();
+      if (TaskConstants.STATE_MODEL_NAME.equals(stateModelDefRef)) {
+        continue;
+      }
+      StateModelDefinition stateModelDef = stateModelDefRef == null ? null
+          : stateModelDefs.computeIfAbsent(stateModelDefRef,
+              name -> getStateModelDef(clusterName, name));
+      String initialState = stateModelDef == null ? null : stateModelDef.getInitialState();
+      for (Map.Entry<String, String> entry : currentState.getPartitionStateMap().entrySet()) {
+        String partition = entry.getKey();
+        String state = entry.getValue();
+        replicaCount++;
+        if (HelixDefinedState.ERROR.name().equals(state)) {
+          errorPartitions.add(partition);
+        } else if (initialState != null && initialState.equals(state)) {
+          offlineReplicaCount++;
+        }
+      }
+    }
+    Collections.sort(errorPartitions);
+    int countedAsOffline = exclusionTypes.contains(InstanceDrainExclusionType.ERROR_PARTITIONS)
+        ? offlineReplicaCount + errorPartitions.size() : offlineReplicaCount;
+
+    InstanceReplicaStatus replicaStatus = new InstanceReplicaStatus();
+    replicaStatus.setOffline(countedAsOffline == replicaCount);
+    replicaStatus.setReplicaCount(replicaCount);
+    replicaStatus.setOfflineReplicaCount(offlineReplicaCount);
+    replicaStatus.setErrorPartitions(errorPartitions);
+    return replicaStatus;
   }
 
   /**
