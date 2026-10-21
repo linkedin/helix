@@ -20,7 +20,9 @@
 package org.apache.helix.guardrail;
 
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -150,6 +152,36 @@ public class TestGuardrailPipeline {
       Assert.fail("Expected the violations list to be unmodifiable");
     } catch (UnsupportedOperationException expected) {
       // expected
+    }
+  }
+
+  @Test
+  public void testValidateReportsPerRuleDurations() {
+    GuardrailRule boom = new GuardrailRule() {
+      @Override
+      public String getId() {
+        return "boom";
+      }
+
+      @Override
+      public ValidationResult validate(GuardrailContext context) {
+        throw new RuntimeException("kaboom");
+      }
+    };
+    GuardrailPipeline pipeline = new GuardrailPipeline(passingRule("a"), failingRule("b"), boom);
+
+    Map<String, Long> durations = new LinkedHashMap<>();
+    ValidationResult result = pipeline.validate(context(), durations::put);
+
+    // Observing timings does not change the verdict.
+    Assert.assertFalse(result.isFeasible());
+    // Every rule that ran is timed exactly once, including the one that failed closed.
+    Assert.assertEquals(durations.size(), 3);
+    Assert.assertTrue(durations.containsKey("a"));
+    Assert.assertTrue(durations.containsKey("b"));
+    Assert.assertTrue(durations.containsKey("boom"));
+    for (long nanos : durations.values()) {
+      Assert.assertTrue(nanos >= 0, "duration must be non-negative");
     }
   }
 
