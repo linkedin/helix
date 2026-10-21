@@ -44,6 +44,7 @@ import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelParser;
 import org.apache.helix.participant.statemachine.StateTransitionError;
 import org.apache.helix.task.TaskStateModel;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.util.StatusUpdateUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.ZNRecordBucketizer;
@@ -222,6 +223,13 @@ public class HelixStateTransitionHandler extends MessageHandler {
     String instanceName = _manager.getInstanceName();
 
     try {
+      // Note: cluster-membership registration is intentionally NOT re-validated here. Doing so
+      // would add a synchronous ZK stat read for every partition, including batch sub-messages
+      // below, whose delta is only staged in-memory here and persisted later (and re-validated)
+      // in BatchMessageHandler#postHandleMessage() -- an early check here would be redundant
+      // for those and wouldn't narrow the actual check-to-write race window at all. The direct
+      // (non-batch) write path below does its own single check immediately before the real ZK
+      // write, which is the only place that matters.
       // We did not update _stateModel for DROPPED state, so it won't match _stateModel.
       if (!_stateModel.getCurrentState().equals(_currentStateDelta.getState(partitionKey))
           && !_currentStateDelta.getState(partitionKey)
@@ -237,13 +245,30 @@ public class HelixStateTransitionHandler extends MessageHandler {
           .currentState(instanceName, sessionId, resource, bucketizer.getBucketName(partitionKey));
       if (_message.getAttribute(Attributes.PARENT_MSG_ID) == null) {
         // normal message
+        // Re-validate cluster membership immediately before the actual ZK write: the instance
+        // may have been cleanly dropped (InstanceConfig + /INSTANCES/{instance} removed) at any
+        // point up to this point. This is the only registration check for this write path, kept
+        // as close to the real accessor.updateProperty() call as possible to minimize the
+        // remaining check-to-write race window.
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+          logger.warn(
+              "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                  + "Skipping current state ZK update for resource {} partition {} to avoid "
+                  + "resurrecting a dropped instance's ZK node.", instanceName, resource,
+              partitionKey);
+          return;
+        }
         if (!accessor.updateProperty(key, _currentStateDelta)) {
           throw new HelixException(
               "Fails to persist current state back to ZK for resource " + resource + " partition: "
                   + _message.getPartitionName());
         }
       } else {
-        // sub-message of a batch message
+        // sub-message of a batch message: the actual ZK persistence for this delta happens
+        // later, in BatchMessageHandler#postHandleMessage(), once all sub-messages have been
+        // processed and the per-partition deltas are merged. That is where cluster membership
+        // is re-validated immediately before the real write, since by the time that write
+        // happens here-and-now registration checks would be stale.
         ConcurrentHashMap<String, CurrentStateUpdate> csUpdateMap =
             (ConcurrentHashMap<String, CurrentStateUpdate>) _notificationContext
                 .get(MapKey.CURRENT_STATE_UPDATE.toString());
@@ -395,11 +420,32 @@ public class HelixStateTransitionHandler extends MessageHandler {
             _isTaskMessage && !_isTaskCurrentStatePathDisabled ? keyBuilder
                 .taskCurrentState(instanceName, _message.getTgtSessionId(), resourceName)
                 : keyBuilder.currentState(instanceName, _message.getTgtSessionId(), resourceName);
-        if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
+
+        // Re-validate immediately before the actual ZK write, same as updateZKCurrentState():
+        // this is a separate, framework-level error-handling write path (not routed through
+        // updateZKCurrentState()), so it needs its own guard to avoid resurrecting a dropped
+        // instance's ZK node with an ERROR current state.
+        if (!InstanceValidationUtil.isInstanceRegistered(accessor, instanceName)) {
+          logger.warn(
+              "Instance {} is no longer a registered cluster member (InstanceConfig not found). "
+                  + "Skipping ERROR current state ZK update for resource {} partition {} to avoid "
+                  + "resurrecting a dropped instance's ZK node.", instanceName, resourceName,
+              partition);
+        } else if (!accessor.updateProperty(currentStateKey, currentStateDelta)) {
           logger.error("Fails to persist ERROR current state to ZK for resource " + resourceName
               + " partition: " + partition);
         }
       }
+    } catch (Exception validationOrPersistException) {
+      // isInstanceRegistered() only swallows ZkNoNodeException internally; anything else (e.g. a
+      // ZK read timeout) must be caught here rather than left to propagate. onError() is invoked
+      // in a loop over sibling sub-message handlers by BatchMessageHandler#onError(); letting an
+      // exception escape here would abort that loop, silently skipping the ERROR current-state
+      // update *and* the rollbackOnError() call (in the finally below) for every remaining
+      // sub-handler, not just this one.
+      logger.error("Failed to validate instance registration or persist ERROR current state to "
+          + "ZK for resource " + resourceName + " partition: " + partition,
+          validationOrPersistException);
     } finally {
       StateTransitionError error = new StateTransitionError(type, code, e);
       _stateModel.rollbackOnError(_message, _notificationContext, error);
