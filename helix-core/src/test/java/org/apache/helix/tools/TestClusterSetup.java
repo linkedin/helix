@@ -545,7 +545,6 @@ public class TestClusterSetup extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    cloudConfigInitBuilder.setCloudID("TestID");
     List<String> sourceList = new ArrayList<String>();
     sourceList.add("TestURL");
     cloudConfigInitBuilder.setCloudInfoSources(sourceList);
@@ -560,7 +559,6 @@ public class TestClusterSetup extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(_gZkClient);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessorName");
@@ -602,7 +600,6 @@ public class TestClusterSetup extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    cloudConfigInitBuilder.setCloudID("TestID");
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.AZURE);
 
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
@@ -613,7 +610,6 @@ public class TestClusterSetup extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
 
     // Since it is Azure, topology information should have been populated.

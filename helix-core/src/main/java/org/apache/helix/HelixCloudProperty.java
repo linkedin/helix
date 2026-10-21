@@ -49,9 +49,6 @@ public class HelixCloudProperty {
   // Denote whether the instance is considered as in a cloud environment.
   private boolean _isCloudEnabled;
 
-  // Unique id of the cloud environment where the instance is in.
-  private String _cloudId;
-
   // Cloud environment provider, e.g. Azure, AWS, GCP, etc.
   private String _cloudProvider;
 
@@ -90,7 +87,6 @@ public class HelixCloudProperty {
       cloudConfig = new CloudConfig();
     }
     setCloudEnabled(cloudConfig.isCloudEnabled());
-    setCloudId(cloudConfig.getCloudID());
     String cloudProviderStr = cloudConfig.getCloudProvider();
     setCloudProvider(cloudProviderStr);
     if (cloudProviderStr != null) {
@@ -137,10 +133,6 @@ public class HelixCloudProperty {
 
   public boolean getCloudEnabled() {
     return _isCloudEnabled;
-  }
-
-  public String getCloudId() {
-    return _cloudId;
   }
 
   public String getCloudProvider() {
@@ -190,10 +182,6 @@ public class HelixCloudProperty {
 
   public void setCloudEnabled(boolean isCloudEnabled) {
     _isCloudEnabled = isCloudEnabled;
-  }
-
-  public void setCloudId(String cloudId) {
-    _cloudId = cloudId;
   }
 
   public void setCloudProvider(String cloudProvider) {
