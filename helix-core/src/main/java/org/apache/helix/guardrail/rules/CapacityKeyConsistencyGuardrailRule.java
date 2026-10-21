@@ -19,9 +19,12 @@
 
 package org.apache.helix.guardrail.rules;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import org.apache.helix.HelixException;
@@ -33,15 +36,17 @@ import org.apache.helix.guardrail.ReadOnlyDataAccessor;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.ResourceConfig;
 
 /**
  * Guard rail that blocks a mutation which would leave the cluster's WAGED
  * {@code INSTANCE_CAPACITY_KEYS} unsatisfiable &mdash; i.e. when some assignable instance does not
- * declare a value for every capacity dimension (key) the cluster requires. It runs on two write
- * paths that can introduce such a gap: adding a WAGED resource (validated against the committed
- * cluster config) and changing the cluster config's capacity keys or default capacity map (validated
+ * declare a value for every capacity dimension (key) the cluster requires. It runs on the write
+ * paths that can newly subject resources to that model: adding a WAGED resource and flipping an
+ * existing resource (or every resource in the cluster) to WAGED, each validated against the committed
+ * cluster config; and changing the cluster config's capacity keys or default capacity map (validated
  * against the proposed, not-yet-written config, and only when that change actually alters the
  * capacity contract, so a newly-added key is checked before it is persisted while an unrelated edit
  * is not).
@@ -53,17 +58,29 @@ import org.apache.helix.model.ResourceConfig;
  * key, building the model throws and the WAGED global rebalance cannot compute an assignment for the
  * resource &mdash; so the resource is accepted but silently never places.
  * <p>
- * <b>Why only the instance side.</b> A WAGED resource add goes through
- * {@code HelixAdmin#addResourceWithWeight}, which already validates the <em>resource</em> side
- * up front: {@code ZKHelixAdmin#validateWeightForResourceConfig} rejects the add (before writing
- * anything to ZooKeeper) if the resource's weight map omits a required key. So a resource-side gap is
- * already pre-validated and never reaches ZooKeeper. The instance side, however, is <em>not</em>
- * checked on that path ({@code validateInstancesForWagedRebalance} lives on a separate admin call
- * that {@code addResourceWithWeight} does not invoke). So an operator can add a perfectly-formed
- * WAGED resource while some instance omits a key, get a {@code 200}, and the resource then sits in
- * ZooKeeper while WAGED fails to build a model on every rebalance &mdash; the only signal is a
- * rebalancer exception in the controller log. This rule runs the instance-side key-coverage check up
- * front so that mutation is rejected (or dry-run reported) before it reaches ZooKeeper.
+ * <b>Instance side vs. resource side.</b> WAGED needs two things to build its model: every assignable
+ * <em>instance</em> must declare every capacity key, and every WAGED <em>resource</em> must declare a
+ * weight for every key. Which side this rule checks depends on the path:
+ * <ul>
+ *   <li><b>Resource add</b> ({@code HelixAdmin#addResourceWithWeight}) already validates the resource
+ *       side up front &mdash; {@code ZKHelixAdmin#validateWeightForResourceConfig} rejects the add
+ *       before any ZooKeeper write if the resource's weight map omits a required key &mdash; but does
+ *       <em>not</em> check the instance side ({@code validateInstancesForWagedRebalance} is a separate
+ *       admin call it never invokes). So on the add path this rule contributes only the missing
+ *       instance-side check.</li>
+ *   <li><b>Bulk flip</b> ({@code enableWagedRebalanceForAllResources}) sweeps <em>every</em> resource
+ *       that has an IdealState into WAGED through {@code ZKHelixAdmin#enableWagedRebalance}, which does
+ *       <em>no</em> validation at all. Legacy resources flipped this way never went through
+ *       {@code addResourceWithWeight}, so their weights were never validated: a single flipped resource
+ *       whose weight map omits a required key (and that the cluster's
+ *       {@code DEFAULT_PARTITION_WEIGHT_MAP} does not cover) makes WAGED fail to build the one
+ *       cluster-wide model, stalling the rebalance for <em>every</em> resource. So on the bulk path this
+ *       rule checks <em>both</em> sides &mdash; the instance side and, naming each offending resource,
+ *       the resource side.</li>
+ * </ul>
+ * Either way an unvalidated gap would otherwise be accepted with a {@code 200} and surface only as a
+ * rebalancer exception in the controller log; this rule turns it into an up-front rejection (or
+ * dry-run verdict) before anything reaches ZooKeeper.
  * <p>
  * It is the coverage complement to {@link PartitionWeightCapacityGuardrailRule}: that rule checks
  * whether each partition's weight <em>fits</em> on some instance, and deliberately skips a dimension
@@ -74,16 +91,17 @@ import org.apache.helix.model.ResourceConfig;
  * (matching the rebalancer and {@link PartitionWeightCapacityGuardrailRule}); a non-assignable
  * instance's capacity is never consulted, so a gap there cannot break placement.
  * <p>
- * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request and every
- * cluster-config update; it is not gated behind a cluster config toggle. On the cluster-config path
+ * <b>Always on.</b> This guard rail runs on every {@code addWagedResource} request, every
+ * {@code enableWagedRebalance} request (both the single-resource and the bulk all-resources forms),
+ * and every cluster-config update; it is not gated behind a cluster config toggle. On the cluster-config path
  * it enforces only when the update actually changes the capacity contract &mdash; its
  * {@code INSTANCE_CAPACITY_KEYS} or {@code DEFAULT_INSTANCE_CAPACITY_MAP} &mdash; so an unrelated
  * cluster-config edit is never rejected for a pre-existing capacity gap it does not touch (mirroring
  * {@link RetiredClusterConfigGuardrailRule}). It is a no-op for a cluster that does not use the WAGED
  * capacity model (empty {@code INSTANCE_CAPACITY_KEYS}), returning feasible before reading any
  * instance config, so only a cluster that actually declares capacity keys is exposed to the
- * fail-closed instance-config scan below. {@code force=true} overrides the verdict;
- * {@code dryRun=true} reports it without writing.
+ * fail-closed instance-config scan (and, on the bulk flip, resource-config scan) below.
+ * {@code force=true} overrides the verdict; {@code dryRun=true} reports it without writing.
  */
 public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   public static final String RULE_ID = "WAGED_INSTANCE_CAPACITY_KEY_MISSING";
@@ -103,8 +121,11 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
   public ValidationResult validate(GuardrailContext context) {
     ResourceConfig proposedResourceConfig = context.getProposedResourceConfig();
     ClusterConfig proposedClusterConfig = context.getProposedClusterConfig();
-    if (proposedResourceConfig == null && proposedClusterConfig == null) {
-      // Neither a resource-scoped add nor a cluster-config change; nothing for this rule to certify.
+    boolean wagedEnableForAllResources = context.isWagedEnableForAllResources();
+    if (proposedResourceConfig == null && proposedClusterConfig == null
+        && !wagedEnableForAllResources) {
+      // Not a resource-scoped add/flip, a cluster-config capacity change, or a bulk WAGED enable;
+      // nothing for this rule to certify.
       return ValidationResult.feasible();
     }
 
@@ -148,30 +169,58 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
       return ValidationResult.feasible();
     }
 
-    // On the resource-add path the verdict is scoped to the resource being added; the cluster-config
-    // path has no such resource, so its violations carry no resource name.
+    // On the resource-add/flip path the verdict is scoped to the resource being added or flipped; the
+    // cluster-config and bulk WAGED-enable paths have no single such resource, so their violations
+    // carry no resource name.
     String resourceName =
         proposedResourceConfig != null ? proposedResourceConfig.getResourceName() : null;
 
     List<Violation> violations = new ArrayList<>();
-    int totalViolations =
-        collectInstanceViolations(dataAccessor, keyBuilder, resourceName, clusterConfig, violations);
-
-    if (violations.isEmpty()) {
-      return ValidationResult.feasible();
-    }
-    if (totalViolations > violations.size()) {
+    int totalInstanceViolations = collectInstanceViolations(dataAccessor, keyBuilder, resourceName,
+        wagedEnableForAllResources, clusterConfig, violations);
+    // Append the instance-side overflow summary (if the cap was hit) before collecting any
+    // resource-side violations, so the instance cap math reflects only the instance violations above.
+    if (totalInstanceViolations > violations.size()) {
       int reported = violations.size();
       Violation.Builder overflow = Violation.newBuilder(RULE_ID)
           .message(String.format(
               "Showing the first %d of %d instances missing a required capacity key; %d were omitted "
                   + "to bound the response size. The omitted instances are missing the same key(s); "
                   + "declare the reported keys on every assignable instance and resubmit.",
-              reported, totalViolations, totalViolations - reported));
+              reported, totalInstanceViolations, totalInstanceViolations - reported));
       if (resourceName != null) {
         overflow.resource(resourceName);
       }
       violations.add(overflow.build());
+    }
+
+    if (wagedEnableForAllResources) {
+      // The bulk flip (enableWagedRebalanceForAllResources) sweeps every resource that has an
+      // IdealState into WAGED through an admin path that does no weight validation. Legacy resources
+      // flipped this way never went through addResourceWithWeight, so a single one whose weight map
+      // omits a required key fails the one cluster-wide WAGED model and stalls the rebalance for every
+      // resource. Validate the resource side here too, naming each offending resource. (The
+      // resource-add path is already resource-validated by addResourceWithWeight, so this runs only
+      // for the bulk flip.)
+      int instanceViolationCount = violations.size();
+      int totalResourceViolations =
+          collectResourceViolations(dataAccessor, keyBuilder, clusterConfig, violations);
+      int reportedResourceViolations = violations.size() - instanceViolationCount;
+      if (totalResourceViolations > reportedResourceViolations) {
+        violations.add(Violation.newBuilder(RULE_ID)
+            .message(String.format(
+                "Showing the first %d of %d resources that cannot be flipped to WAGED; %d were "
+                    + "omitted to bound the response size. Give each reported resource a complete "
+                    + "partition weight map (or declare the missing key(s) in the cluster's "
+                    + "DEFAULT_PARTITION_WEIGHT_MAP) and resubmit.",
+                reportedResourceViolations, totalResourceViolations,
+                totalResourceViolations - reportedResourceViolations))
+            .build());
+      }
+    }
+
+    if (violations.isEmpty()) {
+      return ValidationResult.feasible();
     }
     return ValidationResult.of(violations);
   }
@@ -184,14 +233,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
    * guard rail from drifting from what WAGED actually enforces: a single assignable instance missing a
    * key fails the whole model, so every WAGED resource would be accepted but never place. Reads
    * instance configs fail-closed so a transient read error surfaces as a rejection rather than
-   * validation against partial state. {@code resourceName} scopes the resource-add path's violations to
-   * the resource being added and is {@code null} on the cluster-config path. Returns the total number
+   * validation against partial state. {@code resourceName} scopes the resource-add/flip path's
+   * violations to the resource being added or flipped and is {@code null} on the cluster-config and
+   * bulk WAGED-enable paths. Returns the total number
    * of violations found (which may exceed the number appended to {@code violations} once the report cap
    * is reached).
    */
   private int collectInstanceViolations(ReadOnlyDataAccessor dataAccessor,
-      PropertyKey.Builder keyBuilder, String resourceName, ClusterConfig clusterConfig,
-      List<Violation> violations) {
+      PropertyKey.Builder keyBuilder, String resourceName, boolean wagedEnableForAllResources,
+      ClusterConfig clusterConfig, List<Violation> violations) {
     List<InstanceConfig> instanceConfigs =
         dataAccessor.getChildValues(keyBuilder.instanceConfigs(), true);
 
@@ -219,8 +269,8 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
           continue;
         }
         Violation.Builder violation = Violation.newBuilder(RULE_ID)
-            .message(instanceViolationMessage(resourceName, instanceConfig.getInstanceName(),
-                e.getMessage()));
+            .message(instanceViolationMessage(resourceName, wagedEnableForAllResources,
+                instanceConfig.getInstanceName(), e.getMessage()));
         if (resourceName != null) {
           violation.resource(resourceName);
         }
@@ -232,14 +282,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
 
   /**
    * Builds the per-instance violation message, wrapping the exact WAGED model-build error
-   * ({@code wagedError}). The resource-add path ({@code resourceName != null}) blames the specific
-   * resource being added; the cluster-config path frames the same gap as a consequence of the
-   * proposed capacity-key change. Both point the operator at the two places a key can be declared
-   * (the instance's {@code INSTANCE_CAPACITY_MAP} or the cluster's
-   * {@code DEFAULT_INSTANCE_CAPACITY_MAP}).
+   * ({@code wagedError}). The resource-add/flip path ({@code resourceName != null}) blames the
+   * specific resource being added or flipped; the bulk WAGED-enable path
+   * ({@code wagedEnableForAllResources}) frames the gap as a consequence of enabling WAGED for every
+   * resource in the cluster; and the cluster-config path frames it as a consequence of the proposed
+   * capacity-key change. All point the operator at the two places a key can be declared (the
+   * instance's {@code INSTANCE_CAPACITY_MAP} or the cluster's {@code DEFAULT_INSTANCE_CAPACITY_MAP}).
    */
-  private static String instanceViolationMessage(String resourceName, String instanceName,
-      String wagedError) {
+  private static String instanceViolationMessage(String resourceName,
+      boolean wagedEnableForAllResources, String instanceName, String wagedError) {
     if (resourceName != null) {
       return String.format(
           "Instance %s is not valid for the WAGED capacity model: %s WAGED cannot build a "
@@ -249,6 +300,15 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
               + "DEFAULT_INSTANCE_CAPACITY_MAP.",
           instanceName, wagedError, resourceName);
     }
+    if (wagedEnableForAllResources) {
+      return String.format(
+          "Instance %s is not valid for the WAGED capacity model that enabling WAGED for all "
+              + "resources would require: %s WAGED cannot build a cluster model that includes it, so "
+              + "every WAGED resource would be accepted but never place. Add the missing key(s) to "
+              + "the instance's INSTANCE_CAPACITY_MAP or to the cluster's "
+              + "DEFAULT_INSTANCE_CAPACITY_MAP before enabling WAGED for all resources.",
+          instanceName, wagedError);
+    }
     return String.format(
         "Instance %s is not valid for the WAGED capacity model that this cluster config change would "
             + "require: %s WAGED cannot build a cluster model that includes it, so every WAGED "
@@ -256,5 +316,147 @@ public class CapacityKeyConsistencyGuardrailRule implements GuardrailRule {
             + "INSTANCE_CAPACITY_MAP or to the cluster's DEFAULT_INSTANCE_CAPACITY_MAP before "
             + "applying this change.",
         instanceName, wagedError);
+  }
+
+  /**
+   * Validates the <em>resource</em> side of the WAGED capacity model on the bulk-flip path: every
+   * resource that has an IdealState (exactly what {@code ZKHelixAdmin#enableWagedRebalance} flips to
+   * WAGED) must declare &mdash; itself or via the cluster's {@code DEFAULT_PARTITION_WEIGHT_MAP}
+   * &mdash; a weight for every required capacity key, or WAGED cannot build the one cluster-wide model
+   * and the rebalance stalls for every resource. Mirrors
+   * {@code ZKHelixAdmin#validateWeightForResourceConfig} and the exact per-partition check WAGED runs
+   * at model-build time ({@link WagedValidationUtil#validateAndGetPartitionCapacity}) so the guard rail
+   * cannot drift from what WAGED enforces, and records a violation naming each offending resource.
+   * Reads ideal states and resource configs fail-closed so a transient read error surfaces as a
+   * rejection rather than validation against partial state. Returns the total number of offending
+   * resources (which may exceed the number appended to {@code violations} once the report cap is
+   * reached).
+   */
+  private int collectResourceViolations(ReadOnlyDataAccessor dataAccessor,
+      PropertyKey.Builder keyBuilder, ClusterConfig clusterConfig, List<Violation> violations) {
+    List<IdealState> idealStates = dataAccessor.getChildValues(keyBuilder.idealStates(), true);
+    List<ResourceConfig> resourceConfigs =
+        dataAccessor.getChildValues(keyBuilder.resourceConfigs(), true);
+
+    Map<String, ResourceConfig> resourceConfigByName = new HashMap<>();
+    for (ResourceConfig resourceConfig : resourceConfigs) {
+      if (resourceConfig != null) {
+        resourceConfigByName.put(resourceConfig.getResourceName(), resourceConfig);
+      }
+    }
+
+    // Evaluate resources in a deterministic (name) order so reported violations are stable.
+    List<IdealState> sortedIdealStates = new ArrayList<>();
+    for (IdealState idealState : idealStates) {
+      if (idealState != null) {
+        sortedIdealStates.add(idealState);
+      }
+    }
+    sortedIdealStates.sort(Comparator.comparing(IdealState::getResourceName));
+
+    int total = 0;
+    int reported = 0;
+    for (IdealState idealState : sortedIdealStates) {
+      String resourceName = idealState.getResourceName();
+      String reason = resourceWeightViolationReason(idealState,
+          resourceConfigByName.get(resourceName), clusterConfig);
+      if (reason == null) {
+        continue;
+      }
+      total++;
+      if (reported >= MAX_REPORTED_VIOLATIONS) {
+        continue;
+      }
+      reported++;
+      violations.add(Violation.newBuilder(RULE_ID)
+          .resource(resourceName)
+          .message(resourceViolationMessage(resourceName, reason))
+          .build());
+    }
+    return total;
+  }
+
+  /**
+   * Returns a human-readable reason this resource cannot join the WAGED capacity model, or
+   * {@code null} if its partition weights fully cover the cluster's required capacity keys. Resolves
+   * weights exactly as {@link WagedValidationUtil#validateAndGetPartitionCapacity} does at model-build
+   * time: a partition's effective weight is its own weight (or the resource's
+   * {@code DEFAULT_PARTITION_KEY} weight) overlaid on the cluster's
+   * {@code DEFAULT_PARTITION_WEIGHT_MAP}, and every required key must be present. A resource with no
+   * {@code ResourceConfig} (a legacy resource the bulk flip would sweep in) has no weights of its own,
+   * so it is covered only if the cluster default weight map declares every required key &mdash; that
+   * null-config case is handled separately because
+   * {@code WagedValidationUtil#validateAndGetPartitionCapacity} dereferences the resource config when
+   * building its error message.
+   */
+  private static String resourceWeightViolationReason(IdealState idealState,
+      ResourceConfig resourceConfig, ClusterConfig clusterConfig) {
+    List<String> requiredKeys = clusterConfig.getInstanceCapacityKeys();
+    Map<String, Integer> clusterDefaultWeights = clusterConfig.getDefaultPartitionWeightMap();
+
+    if (resourceConfig == null) {
+      // Legacy resource with no weights of its own: every partition falls back to the cluster default
+      // weight map, so that map alone must declare every required key.
+      if (clusterDefaultWeights.keySet().containsAll(requiredKeys)) {
+        return null;
+      }
+      return String.format(
+          "has no ResourceConfig, so every partition falls back to the cluster's "
+              + "DEFAULT_PARTITION_WEIGHT_MAP %s, which does not declare every required capacity key %s",
+          clusterDefaultWeights, requiredKeys);
+    }
+
+    Map<String, Map<String, Integer>> capacityMap;
+    try {
+      capacityMap = resourceConfig.getPartitionCapacityMap();
+    } catch (IOException e) {
+      return "has a malformed partition capacity configuration: " + e.getMessage();
+    }
+
+    // Every explicitly-weighted partition (including the DEFAULT_PARTITION_KEY entry, if any) must
+    // itself resolve to full key coverage -- exactly the check WAGED runs per partition at model-build
+    // time.
+    for (String partitionName : capacityMap.keySet()) {
+      try {
+        WagedValidationUtil.validateAndGetPartitionCapacity(partitionName, resourceConfig,
+            capacityMap, clusterConfig);
+      } catch (HelixException e) {
+        return e.getMessage();
+      }
+    }
+
+    // Partitions with no explicit weight fall back to the DEFAULT_PARTITION_KEY entry, or -- absent
+    // that -- to the cluster default weight map alone. If some partition is unweighted and there is no
+    // DEFAULT_PARTITION_KEY entry, that cluster-default fallback must itself declare every required key
+    // (this mirrors WagedValidationUtil#validateAndGetPartitionCapacity's resolution for a partition
+    // that has neither its own nor a DEFAULT_PARTITION_KEY weight).
+    boolean hasDefaultEntry = capacityMap.containsKey(ResourceConfig.DEFAULT_PARTITION_KEY);
+    int explicitlyWeightedPartitions = capacityMap.size() - (hasDefaultEntry ? 1 : 0);
+    if (!hasDefaultEntry && explicitlyWeightedPartitions < idealState.getNumPartitions()
+        && !clusterDefaultWeights.keySet().containsAll(requiredKeys)) {
+      return String.format(
+          "has %d partition(s) with no weight and no DEFAULT_PARTITION_KEY entry, so they fall back to "
+              + "the cluster's DEFAULT_PARTITION_WEIGHT_MAP %s, which does not declare every required "
+              + "capacity key %s",
+          idealState.getNumPartitions() - explicitlyWeightedPartitions, clusterDefaultWeights,
+          requiredKeys);
+    }
+    return null;
+  }
+
+  /**
+   * Builds the per-resource violation message for the bulk-flip path, wrapping the specific
+   * {@code reason} the resource fails the WAGED capacity model and pointing the operator at the two
+   * places a weight can be declared.
+   */
+  private static String resourceViolationMessage(String resourceName, String reason) {
+    return String.format(
+        "Resource %s cannot be flipped to WAGED: it %s. WAGED builds one cluster-wide model from every "
+            + "WAGED resource, so this single resource would make the model fail to build and stall the "
+            + "WAGED rebalance for the whole cluster -- every resource would be accepted but none would "
+            + "place. Give the resource a complete partition weight map (as addResourceWithWeight "
+            + "requires) or declare the missing key(s) in the cluster's DEFAULT_PARTITION_WEIGHT_MAP "
+            + "before enabling WAGED for all resources.",
+        resourceName, reason);
   }
 }
