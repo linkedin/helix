@@ -25,6 +25,7 @@ import java.util.List;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkUnitTestBase;
+import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.StateModelDefinition;
@@ -98,6 +99,42 @@ public class TestClusterSetupWithAcl extends ZkUnitTestBase {
       Assert.assertEquals(getAcl(path), ACL_WITHOUT_ADMIN);
       Assert.assertEquals(new StateModelDefinition(_gZkClient.<ZNRecord>readData(path)).getId(),
           def.getId());
+    } finally {
+      setup.close();
+      TestHelper.dropCluster(clusterName, _gZkClient);
+    }
+  }
+
+  @Test
+  public void testInvalidStateModelDefWithAclDoesNotDeleteExistingDefinition() throws Exception {
+    String clusterName = "TestClusterSetupWithAcl_invalidStateModelDef";
+    ClusterSetup setup = new ClusterSetup(ZK_ADDR);
+    try {
+      setup.addCluster(clusterName, false, null);
+      StateModelDefinition def = BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
+      String path = PropertyPathBuilder.stateModelDef(clusterName) + "/" + def.getId();
+      ZNRecord before = _gZkClient.readData(path);
+
+      ZNRecord invalidRecord = new ZNRecord(def.getRecord());
+      invalidRecord.setSimpleField(
+          StateModelDefinition.StateModelDefinitionProperty.INITIAL_STATE.toString(),
+          "NOT_A_STATE");
+      StateModelDefinition invalid = new StateModelDefinition(invalidRecord);
+      Assert.assertFalse(invalid.isValid());
+
+      for (StateModelDefinition badDef : new StateModelDefinition[] {invalid, null}) {
+        try {
+          setup.getClusterManagementTool().addStateModelDef(clusterName, def.getId(), badDef, true,
+              ACL_WITHOUT_ADMIN);
+          Assert.fail("Expected an invalid state model definition to be rejected");
+        } catch (HelixMetaDataAccessException expected) {
+          // expected
+        }
+        // The existing definition and its ACL must survive the rejected recreate
+        Assert.assertTrue(_gZkClient.exists(path));
+        Assert.assertEquals(_gZkClient.<ZNRecord>readData(path), before);
+        Assert.assertEquals(getAcl(path), ZooDefs.Ids.OPEN_ACL_UNSAFE);
+      }
     } finally {
       setup.close();
       TestHelper.dropCluster(clusterName, _gZkClient);

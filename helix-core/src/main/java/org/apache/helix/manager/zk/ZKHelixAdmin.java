@@ -2091,6 +2091,12 @@ public class ZKHelixAdmin implements HelixAdmin {
     if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
       throw new HelixException("cluster " + clusterName + " is not setup yet");
     }
+    boolean withAcl = acl != null && !acl.isEmpty();
+    // Validate before deleting anything, so an invalid model cannot destroy an existing definition
+    if (withAcl && (stateModel == null || !stateModel.isValid())) {
+      throw new HelixMetaDataAccessException(
+          "The ZNRecord for state model definition " + stateModelDef + " is not valid.");
+    }
     String stateModelDefPath = PropertyPathBuilder.stateModelDef(clusterName);
     String stateModelPath = stateModelDefPath + "/" + stateModelDef;
     if (_zkClient.exists(stateModelPath)) {
@@ -2104,11 +2110,7 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
     }
 
-    if (acl != null && !acl.isEmpty()) {
-      if (stateModel == null || !stateModel.isValid()) {
-        throw new HelixMetaDataAccessException(
-            "The ZNRecord for state model definition " + stateModelDef + " is not valid.");
-      }
+    if (withAcl) {
       createPersistent(stateModelPath, stateModel.getRecord(), acl);
       return;
     }
