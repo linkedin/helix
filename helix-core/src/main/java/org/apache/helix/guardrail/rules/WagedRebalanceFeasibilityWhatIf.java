@@ -43,6 +43,8 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Shared read-only WAGED what-if used by the instance-mutation rebalance-feasibility guard rails.
@@ -57,6 +59,8 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
  * thin and cannot drift apart.
  */
 final class WagedRebalanceFeasibilityWhatIf {
+  private static final Logger LOG = LoggerFactory.getLogger(WagedRebalanceFeasibilityWhatIf.class);
+
   // Upper bound on per-partition violations enumerated in a single verdict. A large mutation can
   // under-replicate many partitions at once; a short, readable preview keeps the message actionable
   // while the trailing summary still reports the true total, so a pathological case cannot return a
@@ -185,11 +189,24 @@ final class WagedRebalanceFeasibilityWhatIf {
 
     // Opt-in accept-only fast path (drains only): a cheap WAGED partial rebalance that re-places only
     // the drained instance's replicas. A FEASIBLE result certifies without the full what-if; anything
-    // else is inconclusive and falls through below. Never blocks.
-    if (attemptDrainFastPath && provider.attemptDrainFeasibilityShortCircuit(simulationClusterConfig,
-        baselineInstanceConfigs, liveInstances, wagedIdealStates, wagedResourceConfigs, instanceName)
-        == WagedAssignmentProvider.DrainFeasibility.FEASIBLE) {
-      return ValidationResult.feasible();
+    // else is inconclusive and falls through below. Never blocks. Logged (outcome + elapsed) so the
+    // fast path's hit rate and added latency are observable while it is being ramped.
+    if (attemptDrainFastPath) {
+      long fastPathStartMs = System.currentTimeMillis();
+      WagedAssignmentProvider.DrainFeasibility drainFeasibility =
+          provider.attemptDrainFeasibilityShortCircuit(simulationClusterConfig,
+              baselineInstanceConfigs, liveInstances, wagedIdealStates, wagedResourceConfigs,
+              instanceName);
+      long fastPathElapsedMs = System.currentTimeMillis() - fastPathStartMs;
+      if (drainFeasibility == WagedAssignmentProvider.DrainFeasibility.FEASIBLE) {
+        LOG.info("Drain-feasibility fast path certified {} on instance {} in cluster {} in {} ms; "
+                + "skipping the full WAGED what-if.", mutationDescription, instanceName,
+            context.getClusterName(), fastPathElapsedMs);
+        return ValidationResult.feasible();
+      }
+      LOG.info("Drain-feasibility fast path was inconclusive ({}) for {} on instance {} in cluster "
+              + "{} after {} ms; falling back to the full WAGED what-if.", drainFeasibility,
+          mutationDescription, instanceName, context.getClusterName(), fastPathElapsedMs);
     }
 
     Map<String, ResourceAssignment> baseline;
