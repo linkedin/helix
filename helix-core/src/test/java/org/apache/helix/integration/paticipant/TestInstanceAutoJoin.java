@@ -85,6 +85,16 @@ public class TestInstanceAutoJoin extends ZkStandAloneCMTestBase {
           new HelixManagerProperty.Builder().setDefaultInstanceConfigBuilder(builder).build();
       participant = new ZKHelixManager(cluster, instance, InstanceType.PARTICIPANT, ZK_ADDR,
           null, property);
+      if (!alreadyUnknown) {
+        try {
+          participant.connect();
+          Assert.fail("An ENABLE participant must not join without its virtual zone");
+        } catch (InstanceConfigMismatchException expected) {
+          Assert.assertFalse(_gZkClient.exists(
+              new PropertyKey.Builder(cluster).instanceConfig(instance).getPath()));
+        }
+        return;
+      }
       participant.connect();
 
       InstanceConfig staged = configAccessor.getInstanceConfig(cluster, instance);

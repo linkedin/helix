@@ -249,10 +249,11 @@ public class ParticipantManager {
       try {
         instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, _instanceName);
       } catch (InstanceConfigMismatchException e) {
-        if (!isOnlyFaultZoneMissing(clusterConfig, instanceConfig)) {
+        if (instanceConfig.getInstanceOperation().getOperation()
+            != InstanceConstants.InstanceOperation.UNKNOWN
+            || !isOnlyFaultZoneMissing(clusterConfig, instanceConfig)) {
           throw e;
         }
-        instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
         LOG.warn("Registering {} in cluster {} as UNKNOWN until its fault zone is set: {}",
             _instanceName, _clusterName, e.getMessage());
       }
