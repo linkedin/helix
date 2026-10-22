@@ -375,9 +375,10 @@ public class TestResourceMonitor {
       Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
       Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
           .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 4000L);
-      // helixLatency < 0 is skipped (v1), so the helixLatency histogram stays empty.
+      // Do not add a Helix-only sample when the duration cannot be calculated.
       Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
           .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 0L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L);
 
       // A second successful recovery increments the counter and records the larger max, and a
       // non-negative helixLatency is now recorded.
@@ -387,10 +388,12 @@ public class TestResourceMonitor {
           .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L);
       Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
           .getAttributeValue("PartitionRecoveryHelixLatencyGauge.Max").longValue(), 2000L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
 
       // A non-successful update records nothing.
       monitor.updatePartitionRecoveryStats(1000L, 500L, false);
       Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 2L);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
 
       // A negative totalDuration (possible if the wall clock steps backward between the start and
       // end samples) must NOT be recorded into the histogram -- it would corrupt min/p99/max. The
@@ -401,6 +404,12 @@ public class TestResourceMonitor {
       Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
               .getAttributeValue("PartitionRecoveryDurationGauge.Max").longValue(), 9000L,
           "A negative duration must not be recorded into the histogram");
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
+
+      monitor.updatePartitionRecoveryStats(1000L, 0L, true);
+      Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 2L,
+          "A measured zero must be distinguishable from unavailable attribution");
+      Assert.assertEquals(monitor.getAttribute("PartitionRecoveryHelixLatencySampleCounter"), 2L);
 
       // The beyond-threshold counter is monotonic: it only ever increments and is never decremented,
       // so scrape-robust increase() queries can count breaches even when they heal between scrapes.
