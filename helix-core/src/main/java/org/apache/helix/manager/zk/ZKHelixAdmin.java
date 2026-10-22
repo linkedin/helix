@@ -59,6 +59,7 @@ import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.PropertyType;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.exceptions.HelixConflictException;
+import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.api.status.ClusterManagementMode;
 import org.apache.helix.api.status.ClusterManagementModeRequest;
 import org.apache.helix.api.topology.ClusterTopology;
@@ -2075,11 +2076,23 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public void addStateModelDef(String clusterName, String stateModelDef,
       StateModelDefinition stateModel, boolean recreateIfExists) {
+    addStateModelDef(clusterName, stateModelDef, stateModel, recreateIfExists, null);
+  }
+
+  @Override
+  public void addStateModelDef(String clusterName, String stateModelDef,
+      StateModelDefinition stateModel, boolean recreateIfExists, List<ACL> acl) {
     logger
         .info("Add StateModelDef {} in cluster {} with StateModel {}.", stateModelDef, clusterName,
             stateModel == null ? "NULL" : stateModel.toString());
     if (!ZKUtil.isClusterSetup(clusterName, _zkClient)) {
       throw new HelixException("cluster " + clusterName + " is not setup yet");
+    }
+    boolean withAcl = acl != null && !acl.isEmpty();
+    // Validate before deleting anything, so an invalid model cannot destroy an existing definition
+    if (withAcl && (stateModel == null || !stateModel.isValid())) {
+      throw new HelixMetaDataAccessException(
+          "The ZNRecord for state model definition " + stateModelDef + " is not valid.");
     }
     String stateModelDefPath = PropertyPathBuilder.stateModelDef(clusterName);
     String stateModelPath = stateModelDefPath + "/" + stateModelDef;
@@ -2092,6 +2105,11 @@ public class ZKHelixAdmin implements HelixAdmin {
         logger.info("Skip the operation. State Model directory exists:" + stateModelPath);
         return;
       }
+    }
+
+    if (withAcl) {
+      createPersistent(stateModelPath, stateModel.getRecord(), acl);
+      return;
     }
 
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);

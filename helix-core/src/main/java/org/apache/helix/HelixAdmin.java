@@ -574,6 +574,27 @@ public interface HelixAdmin {
       boolean recreateIfExists);
 
   /**
+   * Add a state model definition whose node is created with the given ACL.
+   * @param clusterName
+   * @param stateModelDef
+   * @param record
+   * @param recreateIfExists If the state definition already exists, it will delete it and recreate
+   * @param acl ACL applied to the state model definition node. If null or empty, the default ACL
+   *            of the underlying metadata store client is used, making this equivalent to
+   *            {@link #addStateModelDef(String, String, StateModelDefinition, boolean)}.
+   * @throws UnsupportedOperationException if a non-empty ACL is supplied and the implementation
+   *         does not support custom ACLs
+   */
+  default void addStateModelDef(String clusterName, String stateModelDef,
+      StateModelDefinition record, boolean recreateIfExists, List<ACL> acl) {
+    if (acl == null || acl.isEmpty()) {
+      addStateModelDef(clusterName, stateModelDef, record, recreateIfExists);
+      return;
+    }
+    throw new UnsupportedOperationException("addStateModelDef with ACL is not implemented.");
+  }
+
+  /**
    * Drop a resource from a cluster
    * @param clusterName
    * @param resourceName
