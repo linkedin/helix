@@ -91,7 +91,7 @@ class GlobalRebalanceRunner implements AutoCloseable {
   // async and sync modes so the gauge reflects baseline health regardless of mode.
   private final Consumer<Boolean> _baselineComputeStatusReporter;
 
-  private boolean _asyncGlobalRebalanceEnabled;
+  private final boolean _asyncGlobalRebalanceEnabled;
   // Captures the original exception thrown inside the executor task so we can preserve its
   // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
   private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
@@ -250,10 +250,6 @@ class GlobalRebalanceRunner implements AutoCloseable {
       LOG.info("Schedule a new rebalance after the new baseline calculation has finished.");
       RebalanceUtil.scheduleOnDemandPipeline(clusterData.getClusterName(), 0L, false);
     }
-  }
-
-  public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {
-    _asyncGlobalRebalanceEnabled = isAsyncGlobalRebalanceEnabled;
   }
 
   public ResourceChangeDetector getChangeDetector() {

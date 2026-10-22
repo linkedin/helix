@@ -257,31 +257,27 @@ public final class HelixUtil {
       ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
       List<IdealState> idealStates, List<ResourceConfig> resourceConfigs, boolean usePrefLists) {
 
-    // Copy the cluster config and make globalRebalance happen synchronously
-    // Otherwise, globalRebalance may not complete and this util might end up returning
-    // an empty assignment.
-    ClusterConfig globalSyncClusterConfig = new ClusterConfig(clusterConfig.getRecord());
-    globalSyncClusterConfig.setGlobalRebalanceAsyncMode(false);
+    ClusterConfig clusterConfigSnapshot = new ClusterConfig(clusterConfig.getRecord());
 
     // Prepare a data accessor for a dataProvider (cache) refresh
     HelixDataAccessor helixDataAccessor =
-        new ZKHelixDataAccessor(globalSyncClusterConfig.getClusterName(), baseDataAccessor);
+        new ZKHelixDataAccessor(clusterConfigSnapshot.getClusterName(), baseDataAccessor);
 
-    // Create an instance of read-only WAGED rebalancer
+    // Read-only WAGED waits for both global and partial assignment calculations.
     ReadOnlyWagedRebalancer readOnlyWagedRebalancer =
-        new ReadOnlyWagedRebalancer(zkBucketDataAccessor, globalSyncClusterConfig.getClusterName(),
-            globalSyncClusterConfig.getGlobalRebalancePreference());
+        new ReadOnlyWagedRebalancer(zkBucketDataAccessor, clusterConfigSnapshot.getClusterName(),
+            clusterConfigSnapshot.getGlobalRebalancePreference());
 
     // Use a dummy event to run the required stages for BestPossibleState calculation
     // Attributes RESOURCES and RESOURCES_TO_REBALANCE are populated in ResourceComputationStage
     ClusterEvent event =
-        new ClusterEvent(globalSyncClusterConfig.getClusterName(), ClusterEventType.Unknown);
+        new ClusterEvent(clusterConfigSnapshot.getClusterName(), ClusterEventType.Unknown);
 
     try {
       // First, prepare waged rebalancer with a snapshot, so that it can react on the difference
       // between the current snapshot and the provided parameters which act as the new snapshot
       ResourceControllerDataProvider dataProvider =
-          new ResourceControllerDataProvider(globalSyncClusterConfig.getClusterName());
+          new ResourceControllerDataProvider(clusterConfigSnapshot.getClusterName());
       dataProvider.requireFullRefresh();
       dataProvider.refresh(helixDataAccessor);
       readOnlyWagedRebalancer.updateChangeDetectorSnapshots(dataProvider);
@@ -289,7 +285,7 @@ public final class HelixUtil {
       dataProvider.requireFullRefresh();
       dataProvider.refresh(helixDataAccessor);
 
-      dataProvider.setClusterConfig(globalSyncClusterConfig);
+      dataProvider.setClusterConfig(clusterConfigSnapshot);
       dataProvider.setInstanceConfigMap(instanceConfigs.stream()
           .collect(Collectors.toMap(InstanceConfig::getInstanceName, Function.identity())));
       // For LiveInstances, we must preserve the existing session IDs
