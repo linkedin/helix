@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
@@ -310,7 +311,8 @@ public class InstanceUtil {
       instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
     }
 
-    // Update the instance operation
+    // The accessor logs updater exceptions and returns false; keep the validation cause.
+    AtomicReference<IllegalArgumentException> invalidTopology = new AtomicReference<>();
     boolean succeeded = baseDataAccessor.update(path, currentData -> {
       if (currentData == null) {
         throw new HelixException("Cluster: " + clusterName + ", instance: " + instanceName
@@ -320,13 +322,21 @@ public class InstanceUtil {
       InstanceConfig config = new InstanceConfig(currentData);
       if (requiresTopologyValidation) {
         // Recheck the current record so a concurrent DOMAIN change cannot enable an invalid node.
-        config.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+        try {
+          config.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+        } catch (IllegalArgumentException e) {
+          invalidTopology.set(e);
+          throw e;
+        }
       }
       config.setInstanceOperation(instanceOperation);
       return config.getRecord();
     }, AccessOption.PERSISTENT);
 
     if (!succeeded) {
+      if (invalidTopology.get() != null) {
+        throw invalidTopology.get();
+      }
       throw new HelixException(
           "Failed to update instance operation for instance " + instanceName + " in cluster "
               + clusterName + " (target operation: "
