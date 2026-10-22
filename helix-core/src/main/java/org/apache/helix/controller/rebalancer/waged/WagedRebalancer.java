@@ -906,6 +906,23 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             survivingFaultZones, requiredReplicas, resourceName),
             HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
       }
+      // Seed-coverage guard: the emergency model only pins or re-queues replicas that already exist
+      // in the seed (persisted best-possible). A partition in the IdealState but under-covered by the
+      // seed - a newly added resource/partitions, a replica-count bump, or anything added while the
+      // cluster was in maintenance (WAGED does not run, so the best-possible is never written) - only
+      // contributes to the cluster-wide capacity total, never to a per-node placement check. The probe
+      // could then certify a drain the full what-if rejects, so decline when the seed under-covers any
+      // partition and let the caller fall back to the authoritative full what-if.
+      ResourceAssignment seed = seedAssignment.get(resourceName);
+      for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
+        int seeded = seed == null ? 0 : seed.getReplicaMap(partition).size();
+        if (seeded < requiredReplicas) {
+          throw new HelixRebalanceException(String.format(
+              "Best possible for %s covers only %d of the %d replicas of %s; cannot certify drain "
+                  + "feasibility via the fast path.", resourceName, seeded, requiredReplicas,
+              partition.getPartitionName()), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+        }
+      }
     }
 
     // With the full replica set represented, a clean placement of the drained node's replicas onto
