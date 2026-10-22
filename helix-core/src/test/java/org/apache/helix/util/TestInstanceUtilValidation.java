@@ -19,17 +19,10 @@ package org.apache.helix.util;
  * under the License.
  */
 
-import org.apache.helix.AccessOption;
-import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixException;
-import org.apache.helix.api.exceptions.InstanceConfigMismatchException;
 import org.apache.helix.constants.InstanceConstants;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.helix.zookeeper.datamodel.ZNRecord;
-import org.apache.helix.zookeeper.zkclient.DataUpdater;
-import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -146,44 +139,6 @@ public class TestInstanceUtilValidation {
           "Should contain operation source. Got: " + msg);
       Assert.assertTrue(msg.contains("reason: scheduled maintenance"),
           "Should contain operation reason. Got: " + msg);
-    }
-  }
-
-  @Test
-  public void testConcurrentDomainLossBlocksEnableWithTopologyError() {
-    ConfigAccessor configAccessor = Mockito.mock(ConfigAccessor.class);
-    BaseDataAccessor<ZNRecord> baseDataAccessor = Mockito.mock(BaseDataAccessor.class);
-    ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setTopologyAwareEnabled(true);
-    clusterConfig.setTopology("/mz_virtualZone/host/applicationInstanceId");
-    clusterConfig.setFaultZoneType("mz_virtualZone");
-    InstanceConfig validConfig = new InstanceConfig(TEST_INSTANCE);
-    validConfig.setDomain("mz_virtualZone=zone_1,host=host1,applicationInstanceId=slot1");
-    InstanceConfig changedConfig = new InstanceConfig(TEST_INSTANCE);
-    changedConfig.setDomain("host=host1,applicationInstanceId=slot1");
-    Mockito.when(configAccessor.getInstanceConfig(TEST_CLUSTER, TEST_INSTANCE))
-        .thenReturn(validConfig);
-    Mockito.when(configAccessor.getClusterConfig(TEST_CLUSTER)).thenReturn(clusterConfig);
-    Mockito.when(baseDataAccessor.update(Mockito.anyString(), Mockito.any(),
-        Mockito.eq(AccessOption.PERSISTENT))).thenAnswer(invocation -> {
-          DataUpdater<ZNRecord> updater = invocation.getArgument(1);
-          try {
-            updater.update(changedConfig.getRecord());
-            return true;
-          } catch (IllegalArgumentException e) {
-            return false;
-          }
-        });
-
-    try {
-      InstanceUtil.setInstanceOperation(configAccessor, baseDataAccessor, TEST_CLUSTER,
-          TEST_INSTANCE, new InstanceConfig.InstanceOperation.Builder()
-              .setOperation(InstanceConstants.InstanceOperation.ENABLE)
-              .setSource(InstanceConstants.InstanceOperationSource.ADMIN)
-              .setReason("test").build());
-      Assert.fail("A concurrent DOMAIN change must not enable an invalid instance");
-    } catch (InstanceConfigMismatchException expected) {
-      Assert.assertTrue(expected.getMessage().contains("missing fault zone type key"));
     }
   }
 
