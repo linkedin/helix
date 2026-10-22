@@ -277,6 +277,34 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   }
 
   @Test
+  public void testBatchIsJudgedTogether() {
+    // Draining either instance alone fits, draining both loses a replica: one what-if must drain
+    // every target at once, so the pair is blocked even though each member passes on its own.
+    Map<String, ResourceAssignment> fits = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
+    Map<String, ResourceAssignment> shortfall = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance2", "MASTER"))));
+    WagedAssignmentProvider provider = (cfg, instanceConfigs, liveInstances, idealStates,
+        resourceConfigs) -> instanceConfigs.stream().filter(ic -> !ic.isAssignable()).count() == 2
+        ? shortfall : fits;
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    doReturn(assignableInstance("instance1")).when(dataAccessor)
+        .getProperty(BUILDER.instanceConfig("instance1"));
+    Assert.assertTrue(rule.validate(
+        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, provider)).isFeasible());
+
+    ValidationResult result = rule.validate(GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(dataAccessor)
+        .instanceNames(ImmutableList.of(INSTANCE, "instance1"))
+        .proposedInstanceOperation(InstanceConstants.InstanceOperation.EVACUATE)
+        .wagedAssignmentProvider(provider)
+        .build());
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertTrue(result.getViolations().get(0).getMessage()
+        .contains("on instances instance0, instance1 reduces"), result.getViolations().toString());
+  }
+
+  @Test
   public void testBaselineProviderThrowsFailsClosed() {
     HelixDataAccessor dataAccessor = simulationAccessor();
     WagedAssignmentProvider provider =

@@ -20,10 +20,12 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +42,8 @@ import javax.ws.rs.core.Response;
 
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
+import com.fasterxml.jackson.core.JsonLocation;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -55,8 +59,7 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.rest.client.CustomRestClientFactory;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
-import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
-import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler.BadRequestException;
+import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceHandler;
 import org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagementService;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.clusterMaintenanceService.StoppableInstancesSelector;
@@ -77,6 +80,9 @@ import static org.apache.helix.rest.clusterMaintenanceService.MaintenanceManagem
 @Path("/clusters/{clusterId}/instances")
 public class InstancesAccessor extends AbstractHelixResource {
   private final static Logger _logger = LoggerFactory.getLogger(InstancesAccessor.class);
+
+  private static final List<String> MAINTENANCE_FIELDS = Arrays.asList("instances",
+      "instanceOperation", "instanceOperationSource", "reason", "expiresAtMillis");
 
   public enum InstancesProperties {
     instances,
@@ -402,15 +408,27 @@ public class InstancesAccessor extends AbstractHelixResource {
     HelixAdmin admin = getHelixAdmin();
     try {
       JsonNode node = null;
-      if (content.length() != 0) {
-        node = OBJECT_MAPPER.readTree(content);
+      if (!content.trim().isEmpty()) {
+        try {
+          node = OBJECT_MAPPER.readTree(content);
+        } catch (JsonProcessingException e) {
+          JsonLocation location = e.getLocation();
+          return badRequest("The request body is not valid JSON" + (location == null ? ""
+              : " (line " + location.getLineNr() + ", column " + location.getColumnNr() + ")")
+              + ".");
+        }
       }
-      if (node == null) {
-        return badRequest("Invalid input for content : " + content);
+      if (node == null || node.isMissingNode()) {
+        return badRequest("The request body is empty. It must be a JSON object with "
+            + "\"instances\".");
       }
-      List<String> enableInstances = OBJECT_MAPPER
-          .readValue(node.get(InstancesAccessor.InstancesProperties.instances.name()).toString(),
-              OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class));
+      JsonNode instancesNode = node.get(InstancesAccessor.InstancesProperties.instances.name());
+      if (instancesNode == null || !instancesNode.isArray()
+          || hasContainerNode(instancesNode)) {
+        return badRequest("The request body must have \"instances\", a list of instance names.");
+      }
+      List<String> enableInstances = OBJECT_MAPPER.readValue(instancesNode.toString(),
+          OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, String.class));
       switch (cmd) {
         case enable:
           admin.enableInstance(clusterId, enableInstances, true);
@@ -422,7 +440,7 @@ public class InstancesAccessor extends AbstractHelixResource {
           return batchGetStoppableInstances(clusterId, node, skipZKRead, continueOnFailures,
               skipHealthCheckCategorySet, random, includeDetails);
         case instanceOperationMaintenance:
-          return batchSetInstanceOperationMaintenance(clusterId, node);
+          return setInstanceOperationMaintenance(clusterId, node, enableInstances);
         default:
           _logger.error("Unsupported command :" + command);
           return badRequest("Unsupported command :" + command);
@@ -439,63 +457,100 @@ public class InstancesAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Batch counterpart of {@code POST /clusters/{c}/instances/{i}/instanceOperationMaintenance}.
-   * Sets or clears the instance-operation maintenance marker on a list of instances. Mirrors
-   * the partial-accept contract of the batch stoppable check: instances are processed in
-   * input order, those that fit the cap quota (or that exist on a clear) are listed under
-   * {@code applied}, the rest under {@code rejected} keyed by reason. Caller-side bugs that
-   * invalidate the entire request (missing {@code instances}, bad JSON, past expiry,
-   * missing expiry with no cluster default) are still surfaced as 400.
+   * Writes the instance-operation maintenance marker, alone or together with an instance
+   * operation, on every instance that passes every check, in one commit. The marker cap fails
+   * closed. See {@link InstanceOperationMaintenanceHandler}.
    *
-   * <p>Request body:
+   * <p>Request body. {@code instanceOperation} and {@code instanceOperationSource} come together;
+   * without them only the marker is written. {@code reason} is optional. {@code expiresAtMillis}
+   * defaults to 0, the cluster's default marker duration. Without an operation, -1 clears the
+   * marker. ENABLE ignores it, and clears the marker only when ENABLE is then in effect;
+   * otherwise the marker stays until it expires or a later ENABLE or -1 clears it.
    * <pre>{@code
-   * { "instances": ["h1", "h2", ...],
-   *   "expiresAtMillis": 1776385800000 }
+   * { "instances": ["h1", "h2"], "instanceOperation": "EVACUATE",
+   *   "instanceOperationSource": "AUTOMATION", "reason": "...", "expiresAtMillis": 1776385800000 }
    * }</pre>
    *
-   * <p>Success response (HTTP 200):
+   * <p>Response (HTTP 200). The APPLIED instances were written together, with
+   * {@code expiresAtMillis} while a live marker remains, and the rest were not written; an ERROR or
+   * CONFLICT may leave the result unknown, and resending settles it. Each instance reports its
+   * {@link InstanceOperationMaintenanceHandler.Status} and a one-line message meant for operators,
+   * APPLIED included, and {@code message} summarizes the request. An invalid request, including an
+   * unknown field, is a 400 with an {@code error} that says what to fix.
    * <pre>{@code
-   * { "applied":  ["h1", "h2"],
-   *   "rejected": { "h3": "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=2" },
-   *   "expiresAtMillis": 1776385800000 }
+   * { "message": "Applied to 1 of 2 instances (1 INVALID_TRANSITION).",
+   *   "instances": {
+   *     "h1": { "status": "APPLIED", "message": "EVACUATE is now set by AUTOMATION. Took a
+   *             maintenance marker until 2026-04-17T00:30:00Z.", "expiresAtMillis": 1776385800000 },
+   *     "h2": { "status": "INVALID_TRANSITION", "message": "Cannot change to EVACUATE from its
+   *             current operation SWAP_IN, set by USER. Valid transitions from SWAP_IN: [SWAP_IN,
+   *             UNKNOWN]. An operator must resolve this before the instance is resent." } } }
    * }</pre>
    */
-  private Response batchSetInstanceOperationMaintenance(String clusterId, JsonNode node) {
+  private Response setInstanceOperationMaintenance(String clusterId, JsonNode node,
+      List<String> instances) {
+    for (Iterator<String> fields = node.fieldNames(); fields.hasNext(); ) {
+      String field = fields.next();
+      if (!MAINTENANCE_FIELDS.contains(field)) {
+        return badRequest("Unknown field \"" + field + "\". The fields are "
+            + String.join(", ", MAINTENANCE_FIELDS) + ".");
+      }
+    }
+    JsonNode expiresAtMillis = node.path("expiresAtMillis");
+    if (!expiresAtMillis.isMissingNode()
+        && !(expiresAtMillis.isIntegralNumber() && expiresAtMillis.canConvertToLong())) {
+      return badRequest("expiresAtMillis must be an integer: an epoch time in milliseconds, 0 for "
+          + "the cluster default, or -1 to clear the marker.");
+    }
+    InstanceConfig.InstanceOperation operation = null;
+    if (node.has("instanceOperation") || node.has("instanceOperationSource")) {
+      String operationName = node.path("instanceOperation").asText("");
+      String sourceName = node.path("instanceOperationSource").asText("");
+      try {
+        operation = new InstanceConfig.InstanceOperation.Builder()
+            .setOperation(InstanceConstants.InstanceOperation.valueOf(operationName))
+            .setSource(InstanceConstants.InstanceOperationSource.valueOf(sourceName))
+            .setReason(node.path("reason").asText(""))
+            .build();
+      } catch (IllegalArgumentException e) {
+        return badRequest(InstanceOperationMaintenanceHandler.unsupportedOperation(
+            operationName.isEmpty() ? "none" : operationName,
+            sourceName.isEmpty() ? "none" : sourceName));
+      }
+    } else if (node.has("reason")) {
+      return badRequest("reason is recorded with an operation, so it needs instanceOperation and "
+          + "instanceOperationSource.");
+    }
+    InstanceConstants.InstanceOperation proposed =
+        operation == null ? null : operation.getOperation();
+    Map<String, InstanceOperationMaintenanceHandler.Outcome> outcomes;
     try {
-      JsonNode instancesNode = node.get(InstancesProperties.instances.name());
-      if (instancesNode == null || !instancesNode.isArray() || instancesNode.size() == 0) {
-        return badRequest("Field 'instances' must be a non-empty array");
-      }
-      List<String> instances = new ArrayList<>(instancesNode.size());
-      for (JsonNode element : instancesNode) {
-        instances.add(element.asText());
-      }
-      long expiresAtMillis = node.path("expiresAtMillis")
-          .asLong(InstanceOperationMaintenanceWriteHandler.EXPIRES_AT_MILLIS_UNSET);
-
-      InstanceOperationMaintenanceWriteHandler handler =
-          new InstanceOperationMaintenanceWriteHandler(getHelixAdmin(), getConfigAccessor());
-      InstanceOperationMaintenanceWriteHandler.InstanceOperationMaintenanceResult result =
-          handler.apply(clusterId, instances, expiresAtMillis, System.currentTimeMillis());
-
-      ObjectNode body = JsonNodeFactory.instance.objectNode();
-      ArrayNode appliedArr = body.putArray("applied");
-      for (String name : result.getApplied()) {
-        appliedArr.add(name);
-      }
-      ObjectNode rejectedNode = body.putObject("rejected");
-      for (Map.Entry<String, String> entry : result.getRejected().entrySet()) {
-        rejectedNode.put(entry.getKey(), entry.getValue());
-      }
-      body.put("expiresAtMillis", result.getResolvedExpiresAtMillis());
-      return JSONRepresentation(body);
-    } catch (BadRequestException e) {
+      InstanceOperationMaintenanceHandler handler = new InstanceOperationMaintenanceHandler(
+          getRealmAwareZkClient(),
+          changing -> validateInstanceOperation(clusterId, changing, proposed));
+      outcomes = handler.apply(clusterId, instances, operation,
+          expiresAtMillis.asLong(InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY));
+    } catch (InstanceOperationMaintenanceHandler.BadRequestException e) {
       return badRequest(e.getMessage());
     } catch (Exception e) {
-      _logger.error("Failed to set instance-operation maintenance batch in cluster {}",
-          clusterId, e);
-      return serverError(e);
+      // The handler reports commit failures per instance, so anything here came before the commit.
+      _logger.error("Failed to set instance operation maintenance in cluster {}", clusterId, e);
+      addExceptionToAuditLog(e);
+      return serverError(InstanceOperationMaintenanceHandler.failureMessage(e, false));
     }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("message", InstanceOperationMaintenanceHandler.summarize(outcomes));
+    body.put("instances", outcomes);
+    return JSONRepresentation(body);
+  }
+
+  private static boolean hasContainerNode(JsonNode array) {
+    for (JsonNode element : array) {
+      if (element.isContainerNode()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private Response batchGetStoppableInstances(String clusterId, JsonNode node, boolean skipZKRead,
