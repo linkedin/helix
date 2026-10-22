@@ -364,11 +364,13 @@ public class AssignableNode implements Comparable<AssignableNode> {
    * For example, when
    * the domain is "zone=2, instance=testInstance" and the fault zone type is "zone", this function
    * returns "2".
-   * If cannot find the fault zone type, this function leaves the fault zone id as the instance name.
+   * A missing fault zone is invalid and must not fall back to a default assignment zone.
    * Note the WAGED rebalancer does not require full topology tree to be created. So this logic is
    * simpler than the CRUSH based rebalancer.
    */
   private String computeFaultZone(ClusterConfig clusterConfig, InstanceConfig instanceConfig) {
+    instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig,
+        instanceConfig.getInstanceName());
     LinkedHashMap<String, String> instanceTopologyMap = Topology
         .computeInstanceTopologyMap(clusterConfig, instanceConfig.getInstanceName(), instanceConfig,
             true /*earlyQuitTillFaultZone*/);

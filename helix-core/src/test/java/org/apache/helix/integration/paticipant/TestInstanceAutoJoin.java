@@ -13,7 +13,9 @@ import org.apache.helix.InstanceType;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.api.cloud.CloudInstanceInformation;
+import org.apache.helix.api.exceptions.InstanceConfigMismatchException;
 import org.apache.helix.cloud.constants.CloudProvider;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.integration.common.ZkStandAloneCMTestBase;
 import org.apache.helix.integration.manager.MockParticipantManager;
@@ -55,11 +57,118 @@ public class TestInstanceAutoJoin extends ZkStandAloneCMTestBase {
   String db3 = TEST_DB + "3";
 
   @DataProvider
-  public Object[][] cloudAutoRegistrationModes() {
+  public Object[][] booleanModes() {
     return new Object[][] {{false}, {true}};
   }
 
-  @Test(dataProvider = "cloudAutoRegistrationModes")
+  @Test(dataProvider = "booleanModes")
+  public void testMissingVirtualZoneJoinsOnlyAsUnknown(boolean alreadyUnknown) throws Exception {
+    String cluster = CLUSTER_NAME + "_VirtualZoneBootstrap_" + alreadyUnknown;
+    String instance = "localhost_279704";
+    _gSetupTool.addCluster(cluster, true);
+    ZKHelixManager participant = null;
+    try {
+      ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+      ClusterConfig clusterConfig = configAccessor.getClusterConfig(cluster);
+      clusterConfig.getRecord().setBooleanField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, true);
+      clusterConfig.setTopologyAwareEnabled(true);
+      clusterConfig.setTopology("/mz_virtualZone/host/applicationInstanceId");
+      clusterConfig.setFaultZoneType("mz_virtualZone");
+      configAccessor.setClusterConfig(cluster, clusterConfig);
+
+      InstanceConfig.Builder builder = new InstanceConfig.Builder()
+          .setDomain("mz=1,host=localhost,applicationInstanceId=slot_1");
+      if (alreadyUnknown) {
+        builder.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+      }
+      HelixManagerProperty property =
+          new HelixManagerProperty.Builder().setDefaultInstanceConfigBuilder(builder).build();
+      participant = new ZKHelixManager(cluster, instance, InstanceType.PARTICIPANT, ZK_ADDR,
+          null, property);
+      participant.connect();
+
+      InstanceConfig staged = configAccessor.getInstanceConfig(cluster, instance);
+      Assert.assertEquals(staged.getInstanceOperation().getOperation(),
+          InstanceConstants.InstanceOperation.UNKNOWN);
+      Assert.assertNotNull(participant.getHelixDataAccessor()
+          .getProperty(new PropertyKey.Builder(cluster).liveInstance(instance)));
+      participant.disconnect();
+      participant.connect();
+      Assert.assertEquals(configAccessor.getInstanceConfig(cluster, instance)
+          .getInstanceOperation().getOperation(), InstanceConstants.InstanceOperation.UNKNOWN);
+      Assert.assertNotNull(participant.getHelixDataAccessor()
+          .getProperty(new PropertyKey.Builder(cluster).liveInstance(instance)));
+      try {
+        _gSetupTool.getClusterManagementTool().setInstanceOperation(cluster, instance,
+            InstanceConstants.InstanceOperation.ENABLE);
+        Assert.fail("An instance without its fault zone must not be enabled");
+      } catch (InstanceConfigMismatchException expected) {
+        InstanceConfig blocked = configAccessor.getInstanceConfig(cluster, instance);
+        Assert.assertEquals(blocked.getInstanceOperation().getOperation(),
+            InstanceConstants.InstanceOperation.UNKNOWN);
+        Assert.assertFalse(blocked.isAssignable());
+      }
+
+      staged.setDomain(
+          "mz=1,mz_virtualZone=zone_1,host=localhost,applicationInstanceId=slot_1");
+      configAccessor.setInstanceConfig(cluster, instance, staged);
+      _gSetupTool.getClusterManagementTool().setInstanceOperation(cluster, instance,
+          InstanceConstants.InstanceOperation.ENABLE);
+      Assert.assertTrue(configAccessor.getInstanceConfig(cluster, instance).isAssignable());
+    } finally {
+      if (participant != null) {
+        participant.disconnect();
+      }
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
+
+  @DataProvider
+  public Object[][] incompletePhysicalDomains() {
+    return new Object[][] {
+        {"MissingIdentity", "mz=1,host=localhost", "mz_virtualZone"},
+        {"MissingPhysicalMz", "host=localhost,applicationInstanceId=slot_2", "mz_virtualZone"},
+        {"NonVirtualZone", "host=localhost,applicationInstanceId=slot_3", "zone"}
+    };
+  }
+
+  @Test(dataProvider = "incompletePhysicalDomains")
+  public void testMissingOtherTopologyKeysDoesNotJoinAsUnknown(String suffix, String domain,
+      String faultZone) throws Exception {
+    String cluster = CLUSTER_NAME + "_IncompletePhysicalDomain_" + suffix;
+    String instance = "localhost_279705";
+    _gSetupTool.addCluster(cluster, true);
+    ZKHelixManager participant = null;
+    try {
+      ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+      ClusterConfig clusterConfig = configAccessor.getClusterConfig(cluster);
+      clusterConfig.getRecord().setBooleanField(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, true);
+      clusterConfig.setTopologyAwareEnabled(true);
+      clusterConfig.setTopology("/" + faultZone + "/host/applicationInstanceId");
+      clusterConfig.setFaultZoneType(faultZone);
+      configAccessor.setClusterConfig(cluster, clusterConfig);
+
+      HelixManagerProperty property = new HelixManagerProperty.Builder()
+          .setDefaultInstanceConfigBuilder(new InstanceConfig.Builder().setDomain(domain))
+          .build();
+      participant = new ZKHelixManager(cluster, instance, InstanceType.PARTICIPANT, ZK_ADDR,
+          null, property);
+      try {
+        participant.connect();
+        Assert.fail("Missing physical identity must not be staged as a live UNKNOWN instance");
+      } catch (InstanceConfigMismatchException expected) {
+        Assert.assertFalse(_gZkClient.exists(
+            new PropertyKey.Builder(cluster).instanceConfig(instance).getPath()));
+      }
+    } finally {
+      if (participant != null) {
+        participant.disconnect();
+      }
+      _gSetupTool.deleteCluster(cluster);
+    }
+  }
+
+  @Test(dataProvider = "booleanModes")
   public void testAutoRegistrationWithLegacyCloudEventMetadata(boolean cloudEnabled)
       throws Exception {
     String cluster = CLUSTER_NAME + "_LegacyCloudEvent_" + cloudEnabled;

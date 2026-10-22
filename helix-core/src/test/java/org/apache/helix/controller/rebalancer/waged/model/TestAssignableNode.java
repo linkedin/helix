@@ -220,9 +220,13 @@ public class TestAssignableNode extends AbstractTestClusterModel {
     instanceConfigMap.put(_testInstanceId, testInstanceConfig);
     when(testCache.getAssignableInstanceConfigMap()).thenReturn(instanceConfigMap);
 
-    AssignableNode node = new AssignableNode(testCache.getClusterConfig(),
-        testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
-    Assert.assertEquals(node.getFaultZone(), "Helix_default_zone");
+    try {
+      new AssignableNode(testCache.getClusterConfig(),
+          testCache.getAssignableInstanceConfigMap().get(_testInstanceId), _testInstanceId);
+      Assert.fail("A missing fault zone must not become an assignable WAGED node");
+    } catch (IllegalArgumentException expected) {
+      Assert.assertTrue(expected.getMessage().contains("missing fault zone type key"));
+    }
   }
 
   @Test

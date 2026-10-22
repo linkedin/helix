@@ -298,6 +298,18 @@ public class InstanceUtil {
         instanceOperation == null ? InstanceConstants.InstanceOperation.ENABLE
             : instanceOperation.getOperation());
 
+    InstanceConstants.InstanceOperation targetOperation = instanceOperation == null
+        ? InstanceConstants.InstanceOperation.ENABLE : instanceOperation.getOperation();
+    boolean requiresTopologyValidation = targetOperation != InstanceConstants.InstanceOperation.UNKNOWN
+        && (instanceConfig.getInstanceOperation().getOperation()
+            == InstanceConstants.InstanceOperation.UNKNOWN
+            || targetOperation == InstanceConstants.InstanceOperation.ENABLE);
+    ClusterConfig clusterConfig = requiresTopologyValidation
+        ? configAccessor.getClusterConfig(clusterName) : null;
+    if (requiresTopologyValidation) {
+      instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+    }
+
     // Update the instance operation
     boolean succeeded = baseDataAccessor.update(path, currentData -> {
       if (currentData == null) {
@@ -306,6 +318,10 @@ public class InstanceUtil {
       }
 
       InstanceConfig config = new InstanceConfig(currentData);
+      if (requiresTopologyValidation) {
+        // Recheck the current record so a concurrent DOMAIN change cannot enable an invalid node.
+        config.validateTopologySettingInInstanceConfig(clusterConfig, instanceName);
+      }
       config.setInstanceOperation(instanceOperation);
       return config.getRecord();
     }, AccessOption.PERSISTENT);

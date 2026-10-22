@@ -44,7 +44,12 @@ import org.apache.helix.PropertyKey;
 import org.apache.helix.api.cloud.CloudInstanceInformation;
 import org.apache.helix.api.cloud.CloudInstanceInformationProcessor;
 import org.apache.helix.api.cloud.CloudInstanceInformationV2;
+import org.apache.helix.api.exceptions.InstanceConfigMismatchException;
+import org.apache.helix.cloud.constants.VirtualTopologyGroupConstants;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.messaging.DefaultMessagingService;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.HelixConfigScope.ConfigScopeProperty;
@@ -240,14 +245,58 @@ public class ParticipantManager {
                 ? cloudInstanceInformationFaultDomain + _instanceName
                 : cloudInstanceInformationFaultDomain).build(_instanceName);
       }
-      instanceConfig.validateTopologySettingInInstanceConfig(
-          _configAccessor.getClusterConfig(_clusterName), _instanceName);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(_clusterName);
+      try {
+        instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, _instanceName);
+      } catch (InstanceConfigMismatchException e) {
+        if (!isOnlyFaultZoneMissing(clusterConfig, instanceConfig)) {
+          throw e;
+        }
+        instanceConfig.setInstanceOperation(InstanceConstants.InstanceOperation.UNKNOWN);
+        LOG.warn("Registering {} in cluster {} as UNKNOWN until its fault zone is set: {}",
+            _instanceName, _clusterName, e.getMessage());
+      }
       _helixAdmin.addInstance(_clusterName, instanceConfig);
     } else {
-      _configAccessor.getInstanceConfig(_clusterName, _instanceName)
-          .validateTopologySettingInInstanceConfig(_configAccessor.getClusterConfig(_clusterName),
-              _instanceName);
+      instanceConfig = _configAccessor.getInstanceConfig(_clusterName, _instanceName);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(_clusterName);
+      try {
+        instanceConfig.validateTopologySettingInInstanceConfig(clusterConfig, _instanceName);
+      } catch (InstanceConfigMismatchException e) {
+        if (instanceConfig.getInstanceOperation().getOperation()
+            != InstanceConstants.InstanceOperation.UNKNOWN
+            || !isOnlyFaultZoneMissing(clusterConfig, instanceConfig)) {
+          throw e;
+        }
+        LOG.warn("Joining {} in cluster {} as UNKNOWN until its fault zone is set: {}",
+            _instanceName, _clusterName, e.getMessage());
+      }
     }
+  }
+
+  private static boolean isOnlyFaultZoneMissing(ClusterConfig clusterConfig,
+      InstanceConfig instanceConfig) {
+    ClusterTopologyConfig topology = ClusterTopologyConfig.createFromClusterConfig(clusterConfig);
+    Map<String, String> domain = instanceConfig.getDomainAsMap();
+    String faultZone = topology.getFaultZoneType();
+    String virtualZoneSuffix = VirtualTopologyGroupConstants.GROUP_NAME_SPLITTER
+        + VirtualTopologyGroupConstants.VIRTUAL_FAULT_ZONE_TYPE;
+    if (!topology.isTopologyAwareEnabled() || !faultZone.endsWith(virtualZoneSuffix)
+        || (domain.get(faultZone) != null && !domain.get(faultZone).isEmpty())) {
+      return false;
+    }
+    // ACM needs the real physical zone to assign the missing virtual zone after the node joins.
+    String physicalZone = faultZone.substring(0, faultZone.length() - virtualZoneSuffix.length());
+    if (physicalZone.isEmpty() || domain.get(physicalZone) == null
+        || domain.get(physicalZone).isEmpty()) {
+      return false;
+    }
+    for (String key : topology.getTopologyKeyDefaultValue().keySet()) {
+      if (!key.equals(faultZone) && (domain.get(key) == null || domain.get(key).isEmpty())) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private CloudInstanceInformation getCloudInstanceInformation() {
