@@ -93,7 +93,6 @@ public class TestClusterVerifier extends ZkUnitTestBase {
     // Enable persist best possible assignment
     ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
     ClusterConfig clusterConfig = configAccessor.getClusterConfig(_clusterName);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     configAccessor.setClusterConfig(_clusterName, clusterConfig);
 
 

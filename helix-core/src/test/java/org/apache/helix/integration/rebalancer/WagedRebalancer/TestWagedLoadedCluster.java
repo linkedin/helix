@@ -112,7 +112,6 @@ public class TestWagedLoadedCluster extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     _assignmentMetadataStore =
         new AssignmentMetadataStore(new ZkBucketDataAccessor(ZK_ADDR), CLUSTER_NAME) {

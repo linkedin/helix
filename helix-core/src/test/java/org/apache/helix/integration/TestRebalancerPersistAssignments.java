@@ -84,50 +84,8 @@ public class TestRebalancerPersistAssignments extends ZkStandAloneCMTestBase {
   }
 
   @Test(dataProvider = "rebalanceModes")
-  public void testDisablePersist(RebalanceMode rebalanceMode) {
-    String testDb = "TestDB2-" + rebalanceMode.name();
-
-    _gSetupTool.addResourceToCluster(CLUSTER_NAME, testDb, 5,
-        BuiltInStateModelDefinitions.LeaderStandby.name(), rebalanceMode.name(),
-        rebalanceMode.equals(RebalanceMode.FULL_AUTO) ? CrushEdRebalanceStrategy.class.getName()
-            : RebalanceStrategy.DEFAULT_REBALANCE_STRATEGY);
-    _gSetupTool.rebalanceStorageCluster(CLUSTER_NAME, testDb, 3);
-
-    BestPossibleExternalViewVerifier.Builder verifierBuilder =
-        new BestPossibleExternalViewVerifier.Builder(CLUSTER_NAME).setZkClient(_gZkClient)
-            .setResources(new HashSet<>(Collections.singleton(testDb)))
-            .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME);
-
-    Assert.assertTrue(verifierBuilder.build().verifyByPolling());
-
-    // kill 1 node
-    _participants[0].syncStop();
-
-    Set<String> liveInstances = new HashSet<>(_instanceNames);
-    liveInstances.remove(_participants[0].getInstanceName());
-    verifierBuilder.setExpectLiveInstances(liveInstances);
-    Assert.assertTrue(verifierBuilder.build().verifyByPolling());
-
-    IdealState idealState =
-        _gSetupTool.getClusterManagementTool().getResourceIdealState(CLUSTER_NAME, testDb);
-
-    Set<String> excludedInstances = new HashSet<>();
-    excludedInstances.add(_participants[0].getInstanceName());
-    verifyAssignmentInIdealStateWithPersistDisabled(idealState, excludedInstances);
-
-    // clean up
-    _gSetupTool.getClusterManagementTool().dropResource(CLUSTER_NAME, testDb);
-    _participants[0] =
-        new MockParticipantManager(ZK_ADDR, CLUSTER_NAME, _participants[0].getInstanceName());
-    _participants[0].syncStart();
-  }
-
-  @Test(dataProvider = "rebalanceModes", dependsOnMethods = {
-      "testDisablePersist"
-  })
   public void testEnablePersist(RebalanceMode rebalanceMode) {
     String testDb = "TestDB1-" + rebalanceMode.name();
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     _gSetupTool.addResourceToCluster(CLUSTER_NAME, testDb, 5,
         BuiltInStateModelDefinitions.LeaderStandby.name(), rebalanceMode.name(),
@@ -172,12 +130,9 @@ public class TestRebalancerPersistAssignments extends ZkStandAloneCMTestBase {
    * This test is to test the temporary solution for solving Espresso/Databus back-compatible map
    * format issue.
    */
-  @Test(dependsOnMethods = {
-      "testDisablePersist"
-  })
+  @Test
   public void testSemiAutoEnablePersistMasterSlave() {
     String testDb = "TestDB1-MasterSlave";
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     _gSetupTool.addResourceToCluster(CLUSTER_NAME, testDb, 5,
         BuiltInStateModelDefinitions.MasterSlave.name(), RebalanceMode.SEMI_AUTO.name());
@@ -269,35 +224,5 @@ public class TestRebalancerPersistAssignments extends ZkStandAloneCMTestBase {
         Assert.assertFalse(instancesInMap.contains(ins));
       }
     }
-  }
-
-  // verify that the bestPossible assignment should be empty or should not be changed.
-  private void verifyAssignmentInIdealStateWithPersistDisabled(IdealState idealState,
-      Set<String> excludedInstances) {
-    boolean mapFieldEmpty = true;
-    boolean assignmentNotChanged = false;
-    for (String partition : idealState.getPartitionSet()) {
-      Map<String, String> instanceStateMap = idealState.getInstanceStateMap(partition);
-      if (instanceStateMap == null || instanceStateMap.isEmpty()) {
-        continue;
-      }
-      mapFieldEmpty = false;
-      Set<String> instancesInMap = instanceStateMap.keySet();
-      for (String ins : excludedInstances) {
-        if (instancesInMap.contains(ins)) {
-          // if at least one excluded instance is included, it means assignment was not updated.
-          assignmentNotChanged = true;
-        }
-        if (idealState.getRebalanceMode() == RebalanceMode.FULL_AUTO) {
-          List<String> instanceList = idealState.getPreferenceList(partition);
-          if (instanceList.contains(ins)) {
-            assignmentNotChanged = true;
-          }
-        }
-      }
-    }
-
-    Assert.assertTrue((mapFieldEmpty || assignmentNotChanged),
-        "BestPossible assignment was updated.");
   }
 }
