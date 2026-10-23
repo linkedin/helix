@@ -214,32 +214,34 @@ public class ZNRecordStreamingSerializer implements ZkSerializer {
           id = jp.getText();
         } else if ("simpleFields".equals(fieldname)) {
           while (jp.nextToken() != JsonToken.END_OBJECT) {
-            String key = jp.getCurrentName();
+            // Canonicalize keys and values so logically-equal copies share one String
+            // instance (see ZNRecordStringInterner for the heap-dump motivation).
+            String key = ZNRecordStringInterner.intern(jp.getCurrentName());
             jp.nextToken(); // move to value
-            simpleFields.put(key, jp.getText());
+            simpleFields.put(key, ZNRecordStringInterner.intern(jp.getText()));
           }
         } else if ("mapFields".equals(fieldname)) {
           // user.setVerified(jp.getCurrentToken() == JsonToken.VALUE_TRUE);
           while (jp.nextToken() != JsonToken.END_OBJECT) {
-            String key = jp.getCurrentName();
+            String key = ZNRecordStringInterner.intern(jp.getCurrentName());
             mapFields.put(key, new TreeMap<String, String>());
             jp.nextToken(); // move to value
 
             while (jp.nextToken() != JsonToken.END_OBJECT) {
-              String mapKey = jp.getCurrentName();
+              String mapKey = ZNRecordStringInterner.intern(jp.getCurrentName());
               jp.nextToken(); // move to value
-              mapFields.get(key).put(mapKey, jp.getText());
+              mapFields.get(key).put(mapKey, ZNRecordStringInterner.intern(jp.getText()));
             }
           }
 
         } else if ("listFields".equals(fieldname)) {
           // user.setUserImage(jp.getBinaryValue());
           while (jp.nextToken() != JsonToken.END_OBJECT) {
-            String key = jp.getCurrentName();
+            String key = ZNRecordStringInterner.intern(jp.getCurrentName());
             listFields.put(key, new ArrayList<String>());
             jp.nextToken(); // move to value
             while (jp.nextToken() != JsonToken.END_ARRAY) {
-              listFields.get(key).add(jp.getText());
+              listFields.get(key).add(ZNRecordStringInterner.intern(jp.getText()));
             }
 
           }

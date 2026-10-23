@@ -136,7 +136,11 @@ public class ZNRecordSerializer implements ZkSerializer {
         bais = new ByteArrayInputStream(uncompressedBytes);
       }
 
-      return mapper.readValue(bais, ZNRecord.class);
+      // Canonicalize the many short, highly-repeated strings (states, instance/partition
+      // names, field keys) so logically-equal copies share one String instance. See
+      // ZNRecordStringInterner for the heap-dump motivation.
+      ZNRecord record = mapper.readValue(bais, ZNRecord.class);
+      return ZNRecordStringInterner.intern(record);
     } catch (Exception e) {
       LOG.error("Exception during deserialization of bytes: {}", new String(bytes), e);
       return null;
