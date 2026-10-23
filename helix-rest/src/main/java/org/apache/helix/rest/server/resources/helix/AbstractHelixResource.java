@@ -20,6 +20,8 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 import javax.ws.rs.core.MediaType;
@@ -142,8 +144,10 @@ public class AbstractHelixResource extends AbstractResource {
    */
   protected Optional<Response> preflight(GuardrailPipeline pipeline, GuardrailContext context,
       boolean force, boolean dryRun) {
-    ValidationResult result = pipeline.validate(context);
-    recordGuardrailMetrics(pipeline, result, force, dryRun);
+    Map<String, Long> ruleDurationNanos = new LinkedHashMap<>();
+    ValidationResult result = pipeline.validate(context,
+        (ruleId, nanos) -> ruleDurationNanos.merge(ruleId, nanos, Long::sum));
+    recordGuardrailMetrics(pipeline, result, ruleDurationNanos, force, dryRun);
     if (dryRun) {
       return Optional.of(verdictResponse(result, Response.Status.OK));
     }
@@ -164,10 +168,11 @@ public class AbstractHelixResource extends AbstractResource {
    * path, so any failure here is swallowed.
    */
   private void recordGuardrailMetrics(GuardrailPipeline pipeline, ValidationResult result,
-      boolean force, boolean dryRun) {
+      Map<String, Long> ruleDurationNanos, boolean force, boolean dryRun) {
     try {
       MetricRegistry metrics = SharedMetricRegistries.getOrCreate(getNamespace());
-      GuardrailMetrics.record(metrics, pipeline.getRuleIds(), result, force, dryRun);
+      GuardrailMetrics.record(metrics, pipeline.getRuleIds(), ruleDurationNanos, result, force,
+          dryRun);
     } catch (Exception e) {
       LOG.warn("Failed to record guard rail metrics", e);
     }
