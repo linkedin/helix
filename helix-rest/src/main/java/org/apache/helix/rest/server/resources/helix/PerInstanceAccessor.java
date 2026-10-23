@@ -65,16 +65,20 @@ import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Error;
 import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
+import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
@@ -584,11 +588,27 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
           // dryRun still computes the verdict (even together with force) so it can be previewed.
           if (dryRun || !force) {
-            WagedAssignmentProvider wagedAssignmentProvider =
-                (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
-                        new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                        liveInstances, idealStates, resourceConfigs);
+            WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
+              @Override
+              public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+                  List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+                  List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+                return HelixUtil.getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                    liveInstances, idealStates, resourceConfigs);
+              }
+
+              @Override
+              public DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig cfg,
+                  List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+                  List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+                  String drainedInstanceName) {
+                return HelixUtil.isDrainFeasibleViaPartialRebalance(getZkBucketDataAccessor(),
+                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                    liveInstances, idealStates, resourceConfigs, drainedInstanceName)
+                    ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
+              }
+            };
             GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
                 .dataAccessor(getDataAccssor(clusterId))
                 .instanceName(instanceName)

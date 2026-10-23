@@ -137,6 +137,6 @@ public class InstanceOperationRebalanceFeasibilityGuardrailRule implements Guard
 
     return WagedRebalanceFeasibilityWhatIf.evaluate(context, clusterConfig, instanceName,
         currentConfig, candidateConfig, wagedIdealStates, "operation " + proposedOp,
-        "Free up assignable capacity, or add instances to the assignable pool", RULE_ID);
+        "Free up assignable capacity, or add instances to the assignable pool", RULE_ID, true);
   }
 }

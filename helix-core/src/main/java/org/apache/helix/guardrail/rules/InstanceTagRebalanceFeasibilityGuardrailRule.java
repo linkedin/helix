@@ -153,6 +153,6 @@ public class InstanceTagRebalanceFeasibilityGuardrailRule implements GuardrailRu
         currentConfig, candidateConfig, wagedIdealStates,
         "removal of instance tag(s) " + effectiveRemovedTags,
         "Add the removed tag(s) " + effectiveRemovedTags + " to another live instance, or lower the "
-            + "replica count of the WAGED resource(s) pinned to them", RULE_ID);
+            + "replica count of the WAGED resource(s) pinned to them", RULE_ID, false);
   }
 }

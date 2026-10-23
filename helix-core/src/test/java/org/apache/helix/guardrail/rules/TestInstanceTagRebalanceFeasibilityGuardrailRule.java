@@ -392,6 +392,47 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Drain-feasibility fast path.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testTagRuleNeverTakesTheDrainFastPath() {
+    // The accept-only drain fast path is specific to instance-operation drains; the tag rule must
+    // always use the full what-if and never consult it. The provider's short-circuit throws, so any
+    // attempt to take the fast path fails the test; the full what-if drops a replica for _0 and blocks.
+    Map<String, ResourceAssignment> baseline = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE", "instance2", "SLAVE"))));
+    Map<String, ResourceAssignment> candidate = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    WagedAssignmentProvider provider = new WagedAssignmentProvider() {
+      @Override
+      public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+          List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+        boolean isCandidate = instanceConfigs.stream()
+            .filter(ic -> ic != null && INSTANCE.equals(ic.getInstanceName())).findFirst()
+            .map(ic -> !ic.containsTag(TAG)).orElse(true);
+        return isCandidate ? candidate : baseline;
+      }
+
+      @Override
+      public WagedAssignmentProvider.DrainFeasibility attemptDrainFeasibilityShortCircuit(
+          ClusterConfig cfg, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+          String drainedInstanceName) {
+        throw new AssertionError("the tag rule must never take the drain fast path");
+      }
+    };
+    ValidationResult result =
+        rule.validate(context(dataAccessor, ImmutableList.of(TAG), provider));
+    Assert.assertFalse(result.isFeasible(),
+        "the tag rule must block via the full what-if (never short-circuit on the drain fast path)");
+    Assert.assertEquals(result.getViolations().get(0).getPartitionName(), RESOURCE + "_0");
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
 
