@@ -56,6 +56,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
@@ -906,21 +907,43 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             survivingFaultZones, requiredReplicas, resourceName),
             HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
       }
-      // Seed-coverage guard: the emergency model only pins or re-queues replicas that already exist
-      // in the seed (persisted best-possible). A partition in the IdealState but under-covered by the
-      // seed - a newly added resource/partitions, a replica-count bump, or anything added while the
-      // cluster was in maintenance (WAGED does not run, so the best-possible is never written) - only
-      // contributes to the cluster-wide capacity total, never to a per-node placement check. The probe
-      // could then certify a drain the full what-if rejects, so decline when the seed under-covers any
-      // partition and let the caller fall back to the authoritative full what-if.
+      // Seed-coverage guard: ClusterModelProvider#getAllAssignableReplicas generates exactly
+      // getStateCountMap(survivingFaultZones, requiredReplicas) replicas per partition - one per
+      // target state - and findToBeAssignedReplicasOnDownInstances only pins or re-queues a generated
+      // replica when the seed (persisted best-possible) holds an entry in that SAME state
+      // (getStateInstanceMap keys partition -> state -> instance). Any target-state replica the seed
+      // does not cover contributes only to the cluster-wide capacity total, never to a per-node
+      // placement check, so the probe could certify a drain the full what-if rejects. The seed can
+      // under-cover two ways: (1) the partition is missing or short in the best-possible - a newly
+      // added resource/partitions, a replica-count bump, or anything added while the cluster was in
+      // maintenance (WAGED does not run, so the best-possible is never written); (2) the resource fell
+      // back to CurrentState and the seed carries ERROR/OFFLINE entries (an errored replica, a disabled
+      // node in maintenance) that pad the raw count without matching any target state. Comparing per
+      // state against what the model will generate catches both; decline and fall back to the
+      // authoritative full what-if when any state is under-covered.
       ResourceAssignment seed = seedAssignment.get(resourceName);
+      StateModelDefinition stateModelDef =
+          clusterData.getStateModelDef(idealState.getStateModelDefRef());
+      if (stateModelDef == null) {
+        throw new HelixRebalanceException(String.format(
+            "Cannot find state model definition %s for %s; cannot certify drain feasibility via the "
+                + "fast path.", idealState.getStateModelDefRef(), resourceName),
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+      }
+      Map<String, Integer> requiredStateCounts =
+          stateModelDef.getStateCountMap((int) survivingFaultZones, requiredReplicas);
       for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
-        int seeded = seed == null ? 0 : seed.getReplicaMap(partition).size();
-        if (seeded < requiredReplicas) {
-          throw new HelixRebalanceException(String.format(
-              "Best possible for %s covers only %d of the %d replicas of %s; cannot certify drain "
-                  + "feasibility via the fast path.", resourceName, seeded, requiredReplicas,
-              partition.getPartitionName()), HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+        Map<String, String> seeded =
+            seed == null ? Collections.emptyMap() : seed.getReplicaMap(partition);
+        for (Map.Entry<String, Integer> required : requiredStateCounts.entrySet()) {
+          long matching = seeded.values().stream().filter(required.getKey()::equals).count();
+          if (matching < required.getValue()) {
+            throw new HelixRebalanceException(String.format(
+                "Best possible for %s covers only %d of the %d %s replica(s) of %s; cannot certify "
+                    + "drain feasibility via the fast path.", resourceName, matching,
+                required.getValue(), required.getKey(), partition.getPartitionName()),
+                HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+          }
         }
       }
     }

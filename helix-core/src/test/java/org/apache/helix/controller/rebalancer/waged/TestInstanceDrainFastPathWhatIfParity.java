@@ -36,6 +36,7 @@ import org.apache.helix.guardrail.WagedAssignmentProvider.DrainFeasibility;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
@@ -64,6 +65,13 @@ import org.testng.annotations.Test;
  *       mode). The fast path must DECLINE (its seed under-covers that resource) and fall back to the
  *       full what-if, which blocks. This is the regression guard for the seed-coverage false-accept:
  *       before the fix the probe certified this drain as feasible while the full what-if rejected it.</li>
+ *   <li><b>Resource covered only in a non-target state:</b> a second resource is again absent from the
+ *       persisted best possible, but this time its current-state fallback reports the partition as
+ *       {@code {survivorA: MASTER, survivorB: ERROR}}. The padded ERROR entry clears a raw seed count
+ *       yet leaves the SLAVE uncovered, so the fast path must still DECLINE and fall back to the full
+ *       what-if, which blocks. This is the regression guard for the per-state seed-coverage follow-up
+ *       (PR #365 review): before that fix a raw {@code .size()} check counted the ERROR entry and the
+ *       probe certified the drain while the full what-if rejected it.</li>
  * </ul>
  */
 public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
@@ -145,6 +153,60 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
     tearDownCluster(cluster);
   }
 
+  /**
+   * Regression guard for the per-state seed-coverage follow-up (PR #365 review). A resource absent
+   * from the persisted best possible whose current-state fallback covers the partition only in a
+   * non-target state - {@code {survivorA: MASTER, survivorB: ERROR}} - must still make the fast path
+   * DECLINE, so the rule falls back to the full what-if, which blocks. A raw seed count was fooled by
+   * the ERROR padding (two entries >= two replicas) and certified the drain; comparing per state
+   * against what the emergency model generates closes the gap.
+   */
+  @Test
+  public void testResourceCoveredOnlyInNonTargetStateFastPathDeclinesAndAgreesWithFullWhatIf() {
+    String cluster = "TestDrainParityErrorPaddedSeed";
+    // Same bin-packing-infeasible shape as the missing-seed guard: 3 nodes, DISK 100, weight 60, so
+    // after draining one node the two survivors hold one weight-60 replica each (two slots) while the
+    // demand is R1 (1) + R2 (2) = 3 replicas, total weight 180 <= 200 (no aggregate CAPACITY_DEFICIT).
+    // The only difference from the missing-seed guard is HOW R2 under-covers the seed: here R2 is
+    // reported in CurrentState as {survivorA: MASTER, survivorB: ERROR}. That padding gives R2 two
+    // seed entries - enough to clear a raw count check - but only the MASTER is in a target state, so
+    // the emergency model pins just the MASTER and the SLAVE silently drops to contributing only to
+    // the aggregate capacity total. The per-state guard must still decline; the full what-if, placing
+    // all 3 replicas, blocks.
+    int numInstances = 3;
+    int weight = 60;
+    setupCluster(cluster, numInstances, weight);
+
+    // R1: 1 partition x 1 replica. Seed the best possible with ONLY R1.
+    createResourceWithWagedRebalance(cluster, "R1", "MasterSlave", 1, 1, 1);
+    Map<String, ResourceAssignment> seed = seedBestPossible(cluster, readIdealStates(cluster));
+
+    // R2: 1 partition x 2 replicas, added to the IdealStates AFTER seeding -> absent from the
+    // persisted best possible, so its seed falls back to CurrentState.
+    createResourceWithWagedRebalance(cluster, "R2", "MasterSlave", 1, 2, 2);
+
+    // Drain R1's host; its two peers are the survivors that carry R2's padded current state.
+    String target = hostOfSingleReplica(seed, "R1");
+    List<String> survivors = otherInstances(numInstances, target);
+    // R2's partition reported MASTER on one survivor and ERROR on the other: two seed entries, one
+    // target state (OFFLINE behaves the same).
+    writeCurrentState(cluster, survivors.get(0), "R2", "MasterSlave", "R2_0", "MASTER");
+    writeCurrentState(cluster, survivors.get(1), "R2", "MasterSlave", "R2_0", "ERROR");
+
+    Outcome fastPath = evaluateRule(cluster, target, true);
+    Outcome fullOnly = evaluateRule(cluster, target, false);
+
+    Assert.assertFalse(fullOnly.feasible, "the full what-if must block this drain");
+    Assert.assertTrue(fastPath.probeCalls > 0, "the fast path must have been attempted");
+    Assert.assertEquals(fastPath.probeHits, 0,
+        "the fast path must NOT certify a drain whose seed covers a replica only in a non-target "
+            + "state (per-state seed-coverage regression guard)");
+    Assert.assertFalse(fastPath.feasible,
+        "with the fast path declined, the rule must fall back to the full what-if and stay blocked");
+
+    tearDownCluster(cluster);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
@@ -163,6 +225,39 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
 
   private static String instanceName(int i) {
     return String.format("localhost_120%02d", i);
+  }
+
+  // The instance names other than {@code excluded} (the survivors of its drain).
+  private static List<String> otherInstances(int numInstances, String excluded) {
+    List<String> others = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String name = instanceName(i);
+      if (!name.equals(excluded)) {
+        others.add(name);
+      }
+    }
+    return others;
+  }
+
+  // Write a PERSISTENT CurrentState znode for {@code resource} on {@code instance} reporting
+  // {@code partition} in {@code state}, under the instance's live session. The data provider reads
+  // current states under getEphemeralOwner(), which for the persistent live znodes this test writes
+  // falls back to the SESSION_ID field, i.e. the same session set in setupCluster - so the staged
+  // current state is picked up as the current-state fallback seed for a resource absent from the
+  // persisted best possible.
+  private void writeCurrentState(String cluster, String instance, String resource, String stateModel,
+      String partition, String state) {
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    LiveInstance liveInstance =
+        accessor.getProperty(accessor.keyBuilder().liveInstance(instance));
+    String session = liveInstance.getSessionId();
+    CurrentState currentState = new CurrentState(resource);
+    currentState.setSessionId(session);
+    currentState.setStateModelDefRef(stateModel);
+    currentState.setState(partition, state);
+    accessor.getBaseDataAccessor().set(
+        accessor.keyBuilder().currentState(instance, session, resource).getPath(),
+        currentState.getRecord(), AccessOption.PERSISTENT);
   }
 
   // Build a WAGED-capable cluster: topology-aware with each instance in its own fault zone, a single
