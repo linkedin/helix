@@ -19,7 +19,7 @@ package org.apache.helix.zookeeper.datamodel;
  * under the License.
  */
 
-import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -62,13 +62,22 @@ public class ZNRecord {
   @JsonIgnore(true)
   public static final int SIZE_LIMIT = 1000 * 1024; // leave a margin out of 1M
 
-  // We don't want the _deltaList to be serialized and deserialized
-  private List<ZNRecordDelta> _deltaList = new ArrayList<ZNRecordDelta>();
+  // We don't want the _deltaList to be serialized and deserialized.
+  // Defaults to a shared immutable empty list to avoid a per-record allocation; it is replaced
+  // wholesale by setDeltaList(...) when deltas are actually present. The delta list is populated
+  // via setDeltaList rather than by mutating the list returned from getDeltaList.
+  private List<ZNRecordDelta> _deltaList = Collections.emptyList();
 
   private Map<String, String> simpleFields;
   private Map<String, Map<String, String>> mapFields;
   private Map<String, List<String>> listFields;
   private byte[] rawPayload;
+
+  // JacksonPayloadSerializer is stateless (a fresh ObjectMapper is built per call), so a single
+  // shared instance is used as the default instead of allocating one per record. A per-record
+  // serializer is only held when overridden via setPayloadSerializer.
+  private static final PayloadSerializer DEFAULT_PAYLOAD_SERIALIZER =
+      new JacksonPayloadSerializer();
 
   private PayloadSerializer _serializer;
 
@@ -92,7 +101,7 @@ public class ZNRecord {
     mapFields = new TreeMap<>();
     listFields = new TreeMap<>();
     rawPayload = null;
-    _serializer = new JacksonPayloadSerializer();
+    _serializer = DEFAULT_PAYLOAD_SERIALIZER;
   }
 
   /**

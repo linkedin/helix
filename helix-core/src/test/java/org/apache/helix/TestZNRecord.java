@@ -124,4 +124,28 @@ public class TestZNRecord {
     expectRecord.setMapField("mapKey2", expectMap2);
     Assert.assertEquals(record, expectRecord, "Should be equal.");
   }
+
+  @Test
+  public void testDeltaListDefaultsToEmpty() {
+    // The delta list now defaults to a shared immutable empty list rather than a per-record
+    // ArrayList. It must still be non-null and empty, and merging a record that carries no delta
+    // must read getDeltaList().size() without a NullPointerException.
+    ZNRecord record = new ZNRecord("deltaDefault");
+    Assert.assertNotNull(record.getDeltaList());
+    Assert.assertTrue(record.getDeltaList().isEmpty());
+
+    ZNRecord other = new ZNRecord("other");
+    other.setSimpleField("k", "v");
+    record.merge(other);
+    Assert.assertEquals(record.getSimpleField("k"), "v");
+  }
+
+  @Test
+  public void testPayloadRoundTripUsesDefaultSerializer() {
+    // No explicit setPayloadSerializer call: this exercises the shared default serializer that
+    // replaces the former per-record JacksonPayloadSerializer allocation.
+    ZNRecord record = new ZNRecord("payloadDefault");
+    record.setPayload("payloadValue");
+    Assert.assertEquals(record.getPayload(String.class), "payloadValue");
+  }
 }
