@@ -33,7 +33,9 @@ public interface RecursivePersistListener {
    * invoked when there is a node added, removed or node data change in the tree structure of
    * that RecursivePersistListener subscribed path
    * @param dataPath The path of ZNode that change happened
-   * @param eventType Event type, including NodeCreated, NodeDataChanged and NodeDeleted
+   * @param eventType Event type, including NodeCreated, NodeDataChanged and NodeDeleted. After a
+   *                  reconnect or a new session, it is None and dataPath is the subscribed path:
+   *                  changes under it may have been missed, so re-read the state you depend on.
    * @throws Exception
    */
   public void handleZNodeChange(String dataPath, Watcher.Event.EventType eventType)
