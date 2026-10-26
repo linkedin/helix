@@ -20,7 +20,9 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
  */
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -28,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Predicate;
 
 import com.google.common.base.Strings;
 import org.apache.helix.HelixRebalanceException;
@@ -35,6 +38,8 @@ import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
+import org.apache.helix.model.Partition;
+import org.apache.helix.model.ResourceAssignment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,11 +53,13 @@ import org.slf4j.LoggerFactory;
  * INSTANCE_GROUP_TAG) that means one unplaceable clique freezes every other clique.
  *
  * This class does not change how a placement is chosen, and it does not reorder anything. It only
- * changes what happens when a placement fails: the replicas already placed for that replica's
- * share block (its isolation group and every group connected to it through shared nodes) are
- * released, the rest of the block is skipped, and the pass carries on. The caller then carries the
- * skipped resources' previous assignment forward, so no resource is emitted half assigned, and
- * leaves out a skipped resource that has none.
+ * changes what happens when something fails. When a placement fails, the replicas already placed
+ * for that replica's share block (its isolation group and every group connected to it through
+ * shared nodes, see below) are released, the rest of the block is skipped, and the pass carries
+ * on. When the cluster wide capacity check that precedes any placement fails,
+ * {@link #absorbCapacityDeficit} sets the groups that caused the deficit aside before anything is
+ * placed. The caller then carries the skipped resources' previous assignment forward, so no
+ * resource is emitted half assigned, and leaves out a skipped resource that has none.
  *
  * <h3>Why the isolation unit is the tag and not the resource</h3>
  * Rolling back only the broken resource would free capacity that its healthy siblings on the same
@@ -99,6 +106,12 @@ class InstanceTagIsolation {
   // collide into one group.
   private static final String TAG_GROUP_PREFIX = "tag:";
   private static final String UNTAGGED_GROUP_PREFIX = "untagged-resource:";
+  // Names the block of a node that no group reaches, only when skipping blocks for a deficit.
+  private static final String INSTANCE_GROUP_PREFIX = "instance:";
+  private static final Comparator<AssignableReplica> REPLICA_ORDER =
+      Comparator.comparing(AssignableReplica::getResourceName)
+          .thenComparing(AssignableReplica::getPartitionName)
+          .thenComparing(AssignableReplica::getReplicaState);
 
   private final boolean _enabled;
   private final ClusterModel _clusterModel;
@@ -274,6 +287,346 @@ class InstanceTagIsolation {
   }
 
   /**
+   * Skips the blocks that cause a cluster wide capacity deficit, so the rest can still rebalance.
+   *
+   * The check is a sum over every replica that ignores tags, so one clique far over capacity can
+   * push it below zero while every other clique fits on its own nodes. This splits the check's
+   * totals by block and skips the blocks that do not fit on their own nodes. Replicas parked on
+   * nodes outside the model, such as a node still inside its delay window, are not placed in this
+   * scope, so they count first on no key, then only on the short keys, then on every key. The rest
+   * is always held to the full totals, as the default check would hold a cluster made of the rest
+   * alone. Only called where the default mode throws.
+   *
+   * @param deficit the failure the default mode would throw.
+   * @param divGuard the share of each key's capacity added to the scoring denominators, also their
+   *                 floor.
+   * @return the scoring capacity for the rest of the cluster, or null to throw as usual.
+   */
+  Map<String, Float> absorbCapacityDeficit(HelixRebalanceException deficit, float divGuard) {
+    if (!_enabled) {
+      return null;
+    }
+    // Same rule as tryIsolate: skipping a block only helps if another block with resources is
+    // left. A group whose tag no node carries is a block of its own, so it can be skipped here.
+    if (shareBlocks().size() < 2) {
+      return null;
+    }
+    BlockTotals totals = new BlockTotals();
+    Map<String, Long> left = _clusterModel.getContext().getEstimateUtilizationMap();
+    // Each pass skips at least the blocks the one before it did.
+    List<Predicate<String>> countParked =
+        Arrays.asList(key -> false, key -> left.getOrDefault(key, 0L) < 0, key -> true);
+    Set<Integer> atFault = Collections.emptySet();
+    Map<String, Float> residualScoringCap = null;
+    for (Predicate<String> counted : countParked) {
+      atFault = totals.blocksOverCapacity(counted);
+      residualScoringCap = totals.residualScoringCapacity(atFault, divGuard);
+      if (residualScoringCap != null) {
+        break;
+      }
+    }
+    if (residualScoringCap == null) {
+      return null;
+    }
+
+    Set<String> deficitGroups = new TreeSet<>();
+    for (int block : atFault) {
+      deficitGroups.addAll(totals._blocks.get(block));
+    }
+    // Skip the groups at fault like any failed group. If every group fails, the run throws this
+    // deficit. A block of nodes no resource can use has no group to skip.
+    Set<String> carried = new TreeSet<>(deficitGroups);
+    carried.retainAll(tagByGroup().keySet());
+    _failedGroups.addAll(carried);
+    _firstFailure = deficit;
+    if (carried.isEmpty()) {
+      LOG.warn("Instance tag isolation found the {} rebalance of cluster {} over capacity only on "
+              + "nodes no resource can use: {}. No group is skipped.",
+          _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+          deficitGroups, deficit);
+    } else {
+      LOG.warn("Instance tag isolation skipped group(s) {} in the {} rebalance of cluster {}, "
+              + "since their replicas do not fit on their own nodes.", carried,
+          _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+          deficit);
+    }
+    return residualScoringCap;
+  }
+
+  /**
+   * The check's totals split by block. Each replica is charged to one block and each node's
+   * capacity to one block, so the blocks add up to the check's totals. A node no group reaches
+   * gets a block of its own.
+   */
+  private final class BlockTotals {
+    private final List<Set<String>> _blocks = deficitBlocks();
+    private final Set<Integer> _resourceBlocks = new HashSet<>();
+    private final Map<Integer, Map<String, Long>> _capacity = new HashMap<>();
+    private final Map<Integer, Map<String, Long>> _demand = new HashMap<>();
+    // The part of each block's demand parked on nodes outside this scope's model.
+    private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
+
+    private BlockTotals() {
+      Map<String, Integer> blockOfGroup = new HashMap<>();
+      for (int i = 0; i < _blocks.size(); i++) {
+        for (String group : _blocks.get(i)) {
+          blockOfGroup.put(group, i);
+        }
+      }
+      Integer untaggedBlock = null;
+      for (Map.Entry<String, String> entry : tagByGroup().entrySet()) {
+        int block = blockOfGroup.get(entry.getKey());
+        _resourceBlocks.add(block);
+        if (entry.getValue() == null) {
+          // Every untagged group can use every node, so they all share one block.
+          untaggedBlock = block;
+        }
+      }
+      Map<String, Map<String, PartitionShare>> shares = chargeOwners(blockOfGroup);
+      chargeNodes(blockOfGroup, untaggedBlock, shares);
+      chargeParked(shares);
+    }
+
+    /** Charges every replica the check counts to the block that owns it. */
+    private Map<String, Map<String, PartitionShare>> chargeOwners(
+        Map<String, Integer> blockOfGroup) {
+      Map<String, Map<String, PartitionShare>> shares = new HashMap<>();
+      for (AssignableReplica replica : _clusterModel.getContext().getManagedReplicas()) {
+        int owner = blockOfGroup.get(groupKey(replica));
+        PartitionShare share =
+            shares.computeIfAbsent(replica.getResourceName(), key -> new HashMap<>())
+                .computeIfAbsent(replica.getPartitionName(),
+                    key -> new PartitionShare(owner, replica.getCapacity()));
+        share._owned++;
+        charge(_demand, owner, replica.getCapacity(), 1);
+      }
+      for (Set<AssignableReplica> replicas : _clusterModel.getAssignableReplicaMap().values()) {
+        for (AssignableReplica replica : replicas) {
+          PartitionShare share = shareOf(shares, replica);
+          if (share != null) {
+            share._toAssign++;
+          }
+        }
+      }
+      return shares;
+    }
+
+    /** Credits each node's capacity to its block, then charges the replicas placed on it. */
+    private void chargeNodes(Map<String, Integer> blockOfGroup, Integer untaggedBlock,
+        Map<String, Map<String, PartitionShare>> shares) {
+      // Sorted, so which replicas count toward a partition that has more placed than it owns never
+      // depends on hash order.
+      List<AssignableNode> nodes = new ArrayList<>(_nodes);
+      nodes.sort(Comparator.comparing(AssignableNode::getInstanceName));
+      int[] nodeBlock = new int[nodes.size()];
+      List<Map<String, Long>> room = new ArrayList<>(nodes.size());
+      List<List<AssignableReplica>> foreign = new ArrayList<>(nodes.size());
+      for (int i = 0; i < nodes.size(); i++) {
+        AssignableNode node = nodes.get(i);
+        int blockId = blockOfNode(node, blockOfGroup, untaggedBlock);
+        nodeBlock[i] = blockId;
+        charge(_capacity, blockId, node.getMaxCapacity(), 1);
+        Map<String, Long> nodeRoom = new HashMap<>();
+        node.getMaxCapacity().forEach((key, value) -> nodeRoom.put(key, (long) value));
+        room.add(nodeRoom);
+        // A block's own replicas are counted first, so a replica beyond what its partition owns is
+        // always one left on another block's node.
+        List<AssignableReplica> away = new ArrayList<>();
+        for (AssignableReplica replica : node.getAssignedReplicas()) {
+          PartitionShare share = shareOf(shares, replica);
+          if (share == null) {
+            continue;
+          }
+          if (share._owner != blockId) {
+            away.add(replica);
+          } else if (share.place()) {
+            replica.getCapacity()
+                .forEach((key, value) -> nodeRoom.merge(key, (long) -value, Long::sum));
+          }
+        }
+        // Sorted so which replicas fit on a node too full for all of them never depends on hash
+        // order.
+        away.sort(REPLICA_ORDER);
+        foreign.add(away);
+      }
+      for (int i = 0; i < nodes.size(); i++) {
+        chargeForeignReplicas(foreign.get(i), nodeBlock[i], room.get(i), shares);
+      }
+    }
+
+    /** The node's block. A node no group reaches gets a new block of its own. */
+    private int blockOfNode(AssignableNode node, Map<String, Integer> blockOfGroup,
+        Integer untaggedBlock) {
+      // All groups that reach a node are in one block, so any of them names the node's block.
+      // An untagged group reaches every node.
+      if (untaggedBlock != null) {
+        return untaggedBlock;
+      }
+      for (String tag : node.getInstanceTags()) {
+        Integer block = blockOfGroup.get(TAG_GROUP_PREFIX + tag);
+        if (block != null) {
+          return block;
+        }
+      }
+      _blocks.add(Collections.singleton(INSTANCE_GROUP_PREFIX + node.getInstanceName()));
+      return _blocks.size() - 1;
+    }
+
+    /** Charges each block for its replicas parked on nodes outside this scope's model. */
+    private void chargeParked(Map<String, Map<String, PartitionShare>> shares) {
+      Set<String> modelled = _clusterModel.getAssignableLogicalIds();
+      Map<String, ResourceAssignment> current =
+          _clusterModel.getContext().getBestPossibleAssignment();
+      shares.forEach((resource, byPartition) -> {
+        ResourceAssignment assignment = current.get(resource);
+        if (assignment == null) {
+          return;
+        }
+        byPartition.forEach((partition, share) -> {
+          int unaccounted = share._owned - share._placed - share._toAssign;
+          if (unaccounted <= 0) {
+            return;
+          }
+          // A replica to assign takes the place of one that sits on a node outside the model, so
+          // only what is left over is parked.
+          int outside = -share._toAssign;
+          for (String logicalId : assignment.getReplicaMap(new Partition(partition)).keySet()) {
+            if (!modelled.contains(logicalId)) {
+              outside++;
+            }
+          }
+          int parked = Math.min(unaccounted, outside);
+          if (parked > 0) {
+            charge(_parked, share._owner, share._weight, parked);
+          }
+        });
+      });
+    }
+
+    /**
+     * Moves each replica left on another block's node to that node's block, as far as the room
+     * left on the node allows. The rest stay with their own block. A block with no resources takes
+     * them all. A replica beyond what its partition owns moves nothing.
+     */
+    private void chargeForeignReplicas(List<AssignableReplica> replicas, int block,
+        Map<String, Long> room, Map<String, Map<String, PartitionShare>> shares) {
+      boolean nodeOnly = !_resourceBlocks.contains(block);
+      for (AssignableReplica replica : replicas) {
+        PartitionShare share = shareOf(shares, replica);
+        if (!share.place()) {
+          continue;
+        }
+        Map<String, Integer> weight = replica.getCapacity();
+        if (!nodeOnly && weight.entrySet().stream()
+            .anyMatch(used -> used.getValue() > room.getOrDefault(used.getKey(), 0L))) {
+          continue;
+        }
+        charge(_demand, share._owner, weight, -1);
+        charge(_demand, block, weight, 1);
+        weight.forEach((key, value) -> room.merge(key, (long) -value, Long::sum));
+      }
+    }
+
+    /**
+     * The blocks that need more than their own nodes have on any key, counting the parked
+     * replicas only on the keys given.
+     */
+    private Set<Integer> blocksOverCapacity(Predicate<String> countParked) {
+      Set<Integer> atFault = new TreeSet<>();
+      for (Map.Entry<Integer, Map<String, Long>> entry : _demand.entrySet()) {
+        Map<String, Long> capacity =
+            _capacity.getOrDefault(entry.getKey(), Collections.emptyMap());
+        Map<String, Long> parked = _parked.getOrDefault(entry.getKey(), Collections.emptyMap());
+        for (Map.Entry<String, Long> demand : entry.getValue().entrySet()) {
+          String key = demand.getKey();
+          long need =
+              demand.getValue() - (countParked.test(key) ? 0L : parked.getOrDefault(key, 0L));
+          if (need > capacity.getOrDefault(key, 0L)) {
+            atFault.add(entry.getKey());
+            break;
+          }
+        }
+      }
+      return atFault;
+    }
+
+    /**
+     * The scoring capacity left once the given blocks are skipped with everything they own, or
+     * null when the default mode's result stands.
+     */
+    private Map<String, Float> residualScoringCapacity(Set<Integer> atFault, float divGuard) {
+      // No block is over (first pass only), or every block with resources is. A block of nodes no
+      // resource can use may be skipped, but it never counts as a block left to rebalance.
+      if (atFault.isEmpty() || atFault.containsAll(_resourceBlocks)) {
+        return null;
+      }
+      Map<String, Long> residualCapacity =
+          new HashMap<>(_clusterModel.getContext().getClusterCapacityMap());
+      Map<String, Long> residualDemand = new HashMap<>();
+      _clusterModel.getContext().getEstimateUtilizationMap().forEach((key, remaining) ->
+          residualDemand.put(key, residualCapacity.getOrDefault(key, 0L) - remaining));
+      for (Integer block : atFault) {
+        _demand.getOrDefault(block, Collections.emptyMap())
+            .forEach((key, value) -> residualDemand.merge(key, -value, Long::sum));
+        _capacity.getOrDefault(block, Collections.emptyMap())
+            .forEach((key, value) -> residualCapacity.merge(key, -value, Long::sum));
+      }
+      Map<String, Float> residualScoringCap = new HashMap<>();
+      for (Map.Entry<String, Long> entry : residualCapacity.entrySet()) {
+        long remaining = entry.getValue() - residualDemand.getOrDefault(entry.getKey(), 0L);
+        if (remaining < 0) {
+          // The rest does not fit. Only the first two passes get here: in the last, every block
+          // left fits on its own nodes.
+          return null;
+        }
+        // Floored so the denominator stays above zero when the skipped blocks hold all of a key.
+        residualScoringCap.put(entry.getKey(),
+            Math.max((float) remaining + (entry.getValue() * divGuard), divGuard));
+      }
+      return residualScoringCap;
+    }
+
+    private PartitionShare shareOf(Map<String, Map<String, PartitionShare>> shares,
+        AssignableReplica replica) {
+      Map<String, PartitionShare> byPartition = shares.get(replica.getResourceName());
+      return byPartition == null ? null : byPartition.get(replica.getPartitionName());
+    }
+
+    private void charge(Map<Integer, Map<String, Long>> totals, int block,
+        Map<String, Integer> weight, long times) {
+      Map<String, Long> entry = totals.computeIfAbsent(block, key -> new HashMap<>());
+      weight.forEach((key, value) -> entry.merge(key, times * value, Long::sum));
+    }
+  }
+
+  /**
+   * How many replicas of one partition the check counts, and how many of them this scope has
+   * placed on its nodes or has still to assign. A replica's weight depends only on its partition,
+   * never on its state.
+   */
+  private static final class PartitionShare {
+    private final int _owner;
+    private final Map<String, Integer> _weight;
+    private int _owned;
+    private int _placed;
+    private int _toAssign;
+
+    private PartitionShare(int owner, Map<String, Integer> weight) {
+      _owner = owner;
+      _weight = weight;
+    }
+
+    /** Count one placed replica, or report that the partition has no replica left to place. */
+    private boolean place() {
+      if (_placed >= _owned) {
+        return false;
+      }
+      _placed++;
+      return true;
+    }
+  }
+
+  /**
    * The isolation group of a replica.
    *
    * A resource pinned to an instance group tag can only ever be placed on that tag's nodes, so the
@@ -317,6 +670,33 @@ class InstanceTagIsolation {
     _blockByGroup = blockByGroup;
     _shareBlocks = blocks;
     return _shareBlocks;
+  }
+
+  /**
+   * Like the share blocks, but also gives a block to each tag found only on nodes that carry no
+   * resource's tag, such as a spare pool, so its capacity and anything left on it stay with it.
+   * Tags on nodes that also carry a resource's tag (zone, hardware or pool labels) are left out,
+   * since they would join every clique into one block. Used only to split a capacity deficit.
+   */
+  private List<Set<String>> deficitBlocks() {
+    Map<String, String> tagByGroup = new HashMap<>(tagByGroup());
+    Set<String> resourceTags = new HashSet<>(tagByGroup.values());
+    resourceTags.remove(null);
+    // Operational labels on reachable nodes must not connect otherwise independent cliques.
+    Set<String> spanningTags = new HashSet<>();
+    for (AssignableNode node : _nodes) {
+      if (!Collections.disjoint(node.getInstanceTags(), resourceTags)) {
+        spanningTags.addAll(node.getInstanceTags());
+      }
+    }
+    for (AssignableNode node : _nodes) {
+      for (String tag : node.getInstanceTags()) {
+        if (!spanningTags.contains(tag)) {
+          tagByGroup.putIfAbsent(TAG_GROUP_PREFIX + tag, tag);
+        }
+      }
+    }
+    return blocksOf(tagByGroup);
   }
 
   private List<Set<String>> blocksOf(Map<String, String> tagByGroup) {
