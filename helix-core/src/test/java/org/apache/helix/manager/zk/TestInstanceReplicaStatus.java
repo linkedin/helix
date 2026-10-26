@@ -19,10 +19,14 @@ package org.apache.helix.manager.zk;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -34,7 +38,9 @@ import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.InstanceReplicaStatus;
+import org.apache.helix.model.InstanceReplicaStatus.State;
 import org.apache.helix.model.LiveInstance;
+import org.apache.helix.model.Message;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
 import org.testng.Assert;
@@ -73,38 +79,80 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     String sessionId = addLiveInstance();
     setCurrentState(sessionId, "db", MASTER_SLAVE,
         Map.of("db_0", "OFFLINE", "db_1", "ERROR", "db_2", "MASTER"));
-    setCurrentState(sessionId, "job", TaskConstants.STATE_MODEL_NAME, Map.of("job_0", "RUNNING"));
     // A replica without a current state counts toward replicaCount only.
     PropertyKey currentStateKey =
         _accessor.keyBuilder().currentState(INSTANCE_NAME, sessionId, "db");
     CurrentState currentState = _accessor.getProperty(currentStateKey);
     currentState.getRecord().setMapField("db_3", Collections.singletonMap("INFO", "no state yet"));
     _accessor.setProperty(currentStateKey, currentState);
+    setCurrentState(sessionId, "job", TaskConstants.STATE_MODEL_NAME, Map.of("job_0", "RUNNING"));
 
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
-    Assert.assertFalse(replicaStatus.isOffline());
+    Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
+    Assert.assertFalse(replicaStatus.isAllReplicasOffline());
     Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(4));
     Assert.assertEquals(replicaStatus.getOfflineReplicaCount(), Integer.valueOf(1));
-    Assert.assertEquals(replicaStatus.getErrorPartitions(), List.of("db_1"));
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(1));
+    Assert.assertEquals(replicaStatus.getPendingMessageCount(), Integer.valueOf(0));
+    Assert.assertEquals(replicaStatus.getErrorPartitions(), Map.of("db", List.of("db_1")));
+    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.FALSE);
+    // The task resource is left out, so the last activity is the change to the db resource.
+    Assert.assertEquals(replicaStatus.getLastActivityTimestamp(),
+        Long.valueOf(_accessor.getPropertyStat(currentStateKey).getModifiedTime()));
     Assert.assertFalse(replicaStatus.areAllReplicasInError());
-    Assert.assertFalse(getReplicaStatus(ERROR_AS_OFFLINE).isOffline());
+    Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.IN_PROGRESS);
   }
 
   @Test
   public void testErrorReplicas() {
     String sessionId = addLiveInstance();
     setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "OFFLINE", "db_1", "ERROR"));
-    Assert.assertFalse(getReplicaStatus(Collections.emptySet()).isOffline());
-    Assert.assertTrue(getReplicaStatus(ERROR_AS_OFFLINE).isOffline());
+    InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
+    Assert.assertEquals(replicaStatus.getState(), State.BLOCKED_BY_ERROR);
+    Assert.assertFalse(replicaStatus.isAllReplicasOffline());
+    Assert.assertFalse(replicaStatus.areAllReplicasInError());
+    replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
+    Assert.assertEquals(replicaStatus.getState(), State.REPLICAS_OFFLINE);
+    Assert.assertTrue(replicaStatus.isAllReplicasOffline());
 
     setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_1", "ERROR", "db_0", "ERROR"));
-    // Partition names can repeat across resources; each replica in ERROR is listed.
+    // Partition names can repeat across resources; each is listed under its own resource.
     setCurrentState(sessionId, "other", MASTER_SLAVE, Map.of("db_0", "ERROR"));
-    InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
+    replicaStatus = getReplicaStatus(Collections.emptySet());
+    Assert.assertEquals(replicaStatus.getState(), State.BLOCKED_BY_ERROR);
     Assert.assertEquals(replicaStatus.getOfflineReplicaCount(), Integer.valueOf(0));
-    Assert.assertEquals(replicaStatus.getErrorPartitions(), List.of("db_0", "db_0", "db_1"));
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(3));
+    Assert.assertEquals(replicaStatus.getErrorPartitions(),
+        Map.of("db", List.of("db_0", "db_1"), "other", List.of("db_0")));
     Assert.assertTrue(replicaStatus.areAllReplicasInError());
-    Assert.assertTrue(getReplicaStatus(ERROR_AS_OFFLINE).isOffline());
+    Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.REPLICAS_OFFLINE);
+  }
+
+  @Test
+  public void testErrorPartitionsAreCapped() {
+    String sessionId = addLiveInstance();
+    Map<String, String> errorStatesOfA = errorStates("a", 60);
+    Map<String, String> errorStatesOfB = errorStates("b", 60);
+    setCurrentState(sessionId, "a", MASTER_SLAVE, errorStatesOfA);
+    setCurrentState(sessionId, "b", MASTER_SLAVE, errorStatesOfB);
+    InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(120));
+    Assert.assertTrue(replicaStatus.areAllReplicasInError());
+    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.TRUE);
+    // Resources and their partitions are listed in name order until the cap is reached.
+    Assert.assertEquals(replicaStatus.getErrorPartitions().get("a"),
+        new ArrayList<>(new TreeSet<>(errorStatesOfA.keySet())));
+    Assert.assertEquals(replicaStatus.getErrorPartitions().get("b"),
+        new ArrayList<>(new TreeSet<>(errorStatesOfB.keySet()))
+            .subList(0, InstanceReplicaStatus.MAX_ERROR_PARTITIONS - 60));
+
+    // Exactly at the cap, nothing is left out.
+    setCurrentState(sessionId, "b", MASTER_SLAVE, errorStates("b", 40));
+    replicaStatus = getReplicaStatus(Collections.emptySet());
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(),
+        Integer.valueOf(InstanceReplicaStatus.MAX_ERROR_PARTITIONS));
+    Assert.assertEquals(replicaStatus.getErrorPartitions().get("b").size(), 40);
+    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.FALSE);
   }
 
   @Test
@@ -118,24 +166,105 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     setCurrentState(sessionId, "custom", "InitFirst", Map.of("custom_0", "INIT"));
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
     Assert.assertEquals(replicaStatus.getOfflineReplicaCount(), Integer.valueOf(2));
-    Assert.assertTrue(replicaStatus.isOffline());
+    Assert.assertEquals(replicaStatus.getState(), State.REPLICAS_OFFLINE);
+    Assert.assertTrue(replicaStatus.isAllReplicasOffline());
 
     // Without its state model definition, a replica is never offline.
     setCurrentState(sessionId, "unknown", "Missing", Map.of("unknown_0", "OFFLINE"));
     replicaStatus = getReplicaStatus(Collections.emptySet());
     Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(3));
     Assert.assertEquals(replicaStatus.getOfflineReplicaCount(), Integer.valueOf(2));
-    Assert.assertFalse(replicaStatus.isOffline());
+    Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
   }
 
   @Test
-  public void testNotLiveInstanceHasNoReplicas() {
+  public void testNotLiveInstance() {
     setCurrentState("1001", "db", MASTER_SLAVE, Map.of("db_0", "MASTER"));
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
-    Assert.assertTrue(replicaStatus.isOffline());
+    Assert.assertEquals(replicaStatus.getState(), State.NOT_LIVE);
+    Assert.assertTrue(replicaStatus.isAllReplicasOffline());
     Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(0));
-    Assert.assertEquals(replicaStatus.getErrorPartitions(), Collections.emptyList());
+    Assert.assertEquals(replicaStatus.getPendingMessageCount(), Integer.valueOf(0));
+    Assert.assertEquals(replicaStatus.getErrorPartitions(), Collections.emptyMap());
+    Assert.assertNull(replicaStatus.getLastActivityTimestamp());
     Assert.assertTrue(replicaStatus.areAllReplicasInError());
+  }
+
+  @Test
+  public void testCarryingOverAPreviousSession() {
+    String sessionId = addLiveInstance();
+    // A frozen participant carries over the current states of its previous session only when it
+    // unfreezes, so until then they may describe replicas that are serving.
+    setCurrentState("1001", "db", MASTER_SLAVE, Map.of("db_0", "MASTER"));
+    InstanceReplicaStatus replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
+    Assert.assertEquals(replicaStatus.getState(), State.MULTIPLE_SESSIONS);
+    Assert.assertFalse(replicaStatus.isAllReplicasOffline());
+    Assert.assertFalse(replicaStatus.areAllReplicasInError());
+    Assert.assertEquals(ImmutableSet.copyOf(OBJECT_MAPPER.valueToTree(replicaStatus).fieldNames()),
+        Set.of("state", "allReplicasOffline"));
+
+    setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "OFFLINE"));
+    Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.MULTIPLE_SESSIONS);
+
+    _accessor.removeProperty(_accessor.keyBuilder().currentStates(INSTANCE_NAME, "1001"));
+    Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.REPLICAS_OFFLINE);
+  }
+
+  @Test
+  public void testPendingMessages() {
+    String sessionId = addLiveInstance();
+    setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "OFFLINE"));
+    // A message on its way can still bring a replica up.
+    Message message = new Message(Message.MessageType.STATE_TRANSITION, "message_0");
+    message.setTgtName(INSTANCE_NAME);
+    message.setTgtSessionId(sessionId);
+    message.setResourceName("db");
+    message.setPartitionName("db_0");
+    message.setStateModelDef(MASTER_SLAVE);
+    message.setFromState("OFFLINE");
+    message.setToState("SLAVE");
+    PropertyKey messageKey = _accessor.keyBuilder().message(INSTANCE_NAME, message.getId());
+    _accessor.setProperty(messageKey, message);
+    InstanceReplicaStatus replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
+    Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
+    Assert.assertFalse(replicaStatus.isAllReplicasOffline());
+    Assert.assertEquals(replicaStatus.getPendingMessageCount(), Integer.valueOf(1));
+
+    _accessor.removeProperty(messageKey);
+    Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.REPLICAS_OFFLINE);
+  }
+
+  @Test
+  public void testLastActivityOfABucketizedResource() throws Exception {
+    String sessionId = addLiveInstance();
+    // Like a participant, write the resource's metadata to its node and its states to a bucket.
+    CurrentState metadata = new CurrentState("db");
+    metadata.setSessionId(sessionId);
+    metadata.setStateModelDefRef(MASTER_SLAVE);
+    metadata.setBucketSize(2);
+    PropertyKey currentStateKey =
+        _accessor.keyBuilder().currentState(INSTANCE_NAME, sessionId, "db");
+    _accessor.setProperty(currentStateKey, metadata);
+    PropertyKey bucketKey =
+        _accessor.keyBuilder().currentState(INSTANCE_NAME, sessionId, "db", "db_p0-p1");
+    CurrentState partitionStates = new CurrentState("db");
+    partitionStates.setState("db_0", "OFFLINE");
+    partitionStates.setState("db_1", "OFFLINE");
+    _accessor.updateProperty(bucketKey, partitionStates);
+
+    // A later state transition updates only the bucket.
+    Thread.sleep(10);
+    CurrentState transition = new CurrentState("db");
+    transition.setState("db_0", "SLAVE");
+    _accessor.updateProperty(bucketKey, transition);
+
+    InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
+    Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(2));
+    Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
+    long bucketModifiedTime = _accessor.getPropertyStat(bucketKey).getModifiedTime();
+    Assert.assertTrue(
+        bucketModifiedTime > _accessor.getPropertyStat(currentStateKey).getModifiedTime());
+    Assert.assertEquals(replicaStatus.getLastActivityTimestamp(), Long.valueOf(bucketModifiedTime));
   }
 
   @Test(expectedExceptions = IllegalArgumentException.class)
@@ -151,16 +280,23 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
 
     ObjectNode json = OBJECT_MAPPER.valueToTree(replicaStatus);
     Assert.assertEquals(ImmutableSet.copyOf(json.fieldNames()),
-        Set.of("offline", "replicaCount", "offlineReplicaCount", "errorPartitions"));
-    // Readers ignore fields added later.
+        Set.of("state", "allReplicasOffline", "replicaCount", "offlineReplicaCount",
+            "errorReplicaCount", "pendingMessageCount", "lastActivityTimestamp", "errorPartitions",
+            "errorPartitionsTruncated"));
+    // Readers ignore fields added later, and allReplicasOffline, which is derived from the state.
     json.put("futureField", 1);
     Assert.assertEquals(OBJECT_MAPPER.treeToValue(json, InstanceReplicaStatus.class).toString(),
         replicaStatus.toString());
 
-    // Without the replica fields, nothing counts as offline or in ERROR.
+    // Without the state and the counts, nothing counts as offline or in ERROR.
     InstanceReplicaStatus empty = OBJECT_MAPPER.readValue("{}", InstanceReplicaStatus.class);
-    Assert.assertFalse(empty.isOffline());
+    Assert.assertFalse(empty.isAllReplicasOffline());
     Assert.assertFalse(empty.areAllReplicasInError());
+  }
+
+  private static Map<String, String> errorStates(String resource, int partitionCount) {
+    return IntStream.range(0, partitionCount).boxed()
+        .collect(Collectors.toMap(i -> resource + "_" + i, i -> "ERROR"));
   }
 
   private InstanceReplicaStatus getReplicaStatus(Set<InstanceDrainExclusionType> exclusionTypes) {

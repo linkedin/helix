@@ -777,9 +777,11 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         OBJECT_MAPPER.readValue(response.readEntity(String.class), Map.class);
     int replicaCount = (int) replicaStatus.get("replicaCount");
     Assert.assertTrue(replicaCount > 0);
-    Assert.assertEquals(replicaStatus.get("offline"),
-        replicaStatus.get("offlineReplicaCount").equals(replicaCount));
-    Assert.assertTrue(replicaStatus.containsKey("errorPartitions"));
+    Assert.assertEquals(replicaStatus.get("allReplicasOffline"),
+        "REPLICAS_OFFLINE".equals(replicaStatus.get("state")));
+    Assert.assertTrue(replicaStatus.get("errorPartitions") instanceof Map);
+    Assert.assertTrue(replicaStatus.containsKey("pendingMessageCount"));
+    Assert.assertTrue(replicaStatus.containsKey("lastActivityTimestamp"));
     new JerseyUriRequestBuilder(
         "clusters/{}/instances/{}?command=areReplicasOffline&exclusions=ERROR_PARTITIONS")
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
