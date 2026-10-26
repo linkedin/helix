@@ -79,6 +79,9 @@ public class ClusterContext {
   // failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
   private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
+  // The replicas the totals below are summed over. Kept only when instance tag isolation is on and
+  // a capacity key is short, so the deficit can be split across the groups that own them.
+  private final Set<AssignableReplica> _managedReplicas;
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -144,6 +147,9 @@ public class ClusterContext {
       _estimateUtilizationMap = estimateUtilization(totalCapacity, totalUsage);
       _clusterCapacityMap = Collections.unmodifiableMap(totalCapacity);
     }
+    _managedReplicas = _instanceTagIsolationEnabled
+        && _estimateUtilizationMap.values().stream().anyMatch(left -> left < 0)
+        ? Collections.unmodifiableSet(replicaSet) : Collections.<AssignableReplica>emptySet();
     LOG.info(
         "clusterName: {}, preferredScoringKeys: {}, estimatedMaxUtilization: {}, estimatedTopStateMaxUtilization: {}",
         _clusterName, _preferredScoringKeys, _estimatedMaxUtilization,
@@ -179,6 +185,14 @@ public class ClusterContext {
    */
   public Map<String, String> getResourceInstanceGroupTags() {
     return Collections.unmodifiableMap(_resourceInstanceGroupTags);
+  }
+
+  /**
+   * Every replica the cluster wide totals are summed over, including ones on nodes outside the
+   * model. Empty unless instance tag isolation is on and a capacity key is short.
+   */
+  public Set<AssignableReplica> getManagedReplicas() {
+    return _managedReplicas;
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {
