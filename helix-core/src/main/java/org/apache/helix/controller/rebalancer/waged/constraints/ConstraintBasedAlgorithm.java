@@ -130,6 +130,8 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     List<AssignableNode> nodes = new ArrayList<>(clusterModel.getAssignableNodes().values());
     Set<String> busyInstances =
         getBusyInstances(clusterModel.getContext().getBestPossibleAssignment().values());
+    // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
+    InstanceTagIsolation isolation = new InstanceTagIsolation(clusterModel, nodes);
 
     // create a always >0 capacity map to avoid divide by 0.
     Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
@@ -161,29 +163,40 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
     for (AssignableReplicaWithScore replicaWithScore : toBeAssignedReplicas) {
       AssignableReplica replica = replicaWithScore.getAssignableReplica();
+      if (isolation.shouldSkip(replica)) {
+        continue;
+      }
+      OptimalAssignment failureSink = isolation.failureSink(optimalAssignment);
       Optional<AssignableNode> maybeBestNode =
           getNodeWithHighestPoints(replica, nodes, clusterModel.getContext(), busyInstances,
-              optimalAssignment, blockingTypes);
-      // stop immediately if any replica cannot find best assignable node
-      if (!maybeBestNode.isPresent() || optimalAssignment.hasAnyFailure()) {
+              failureSink, blockingTypes);
+      // Stop if the replica has no candidate node, unless isolation can skip its share block.
+      if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
         String errorMessage = String.format(
             "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
                 + "Failure summary: %s; Fail reasons: %s",
             replica.getPartitionName(),
             replica.getResourceName(),
             clusterModel.getContext().getClusterName(),
-            optimalAssignment.getFailureSummary(),
-            optimalAssignment.getFailures());
-        throw new HelixRebalanceException(errorMessage,
+            failureSink.getFailureSummary(),
+            failureSink.getFailures());
+        HelixRebalanceException failure = new HelixRebalanceException(errorMessage,
             HelixRebalanceException.Type.FAILED_TO_CALCULATE,
             HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+        if (!isolation.tryIsolate(replica, failure)) {
+          throw failure;
+        }
+        continue;
       }
       AssignableNode bestNode = maybeBestNode.get();
       // Assign the replica and update the cluster model.
       clusterModel
           .assign(replica.getResourceName(), replica.getPartitionName(), replica.getReplicaState(),
               bestNode.getInstanceName());
+      isolation.recordPlacement(replica, bestNode);
     }
+
+    isolation.finish(optimalAssignment);
     optimalAssignment.updateAssignments(clusterModel);
     return optimalAssignment;
   }

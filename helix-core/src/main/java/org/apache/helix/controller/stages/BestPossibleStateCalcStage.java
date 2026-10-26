@@ -275,7 +275,18 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     // 3. Find the assignment for each swap-in instance
     // <instanceName> : <resourceName> : <partitionName>
     Map<String, Map<String, Set<String>>> swapInInstanceAssignment = new HashMap<>();
+    ClusterConfig clusterConfig = cache.getClusterConfig();
+    boolean instanceTagIsolation =
+        clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
     resourceMap.forEach((resourceName, resource) -> {
+      if (instanceTagIsolation
+          && !bestPossibleStateOutput.getResourceStatesMap().containsKey(resourceName)
+          && WagedValidationUtil.isWagedEnabled(cache.getIdealState(resourceName))) {
+        // Instance tag isolation leaves a skipped resource that was never assigned out of the
+        // output. It has no replica to hand over, and must not abort the pipeline for every
+        // other clique.
+        return;
+      }
       bestPossibleStateOutput.getResourceStatesMap().get(resourceName).getStateMap()
           .forEach((partition, stateMap) -> {
             // We use the preferenceList for the case where the swapOutInstance goes offline.

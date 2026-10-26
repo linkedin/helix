@@ -22,13 +22,16 @@ package org.apache.helix.controller.rebalancer.waged;
 import com.google.common.collect.ImmutableMap;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -60,6 +63,7 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -878,6 +882,143 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
         Assert.assertEquals(is.getInstanceStateMap(partitionName),
             assignment.getReplicaMap(new Partition(partitionName)));
       }
+    }
+  }
+
+  /**
+   * With instance tag isolation on, a resource the baseline skipped is evaluated again by the next
+   * baseline even when that baseline is incremental and only another resource changed. Once it is
+   * placed it drops out of the retry list.
+   */
+  @Test
+  public void testIsolationRetriesSkippedResourcesInTheNextBaseline()
+      throws IOException, HelixRebalanceException {
+    BaselineRecorder algorithm = new BaselineRecorder();
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(new MockAssignmentMetadataStore(), algorithm, Optional.empty());
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    String skipped = _resourceNames.get(0);
+    String changed = _resourceNames.get(1);
+
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    algorithm._skip = Collections.singleton(skipped);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    algorithm._skip = Collections.emptySet();
+
+    changeResourceConfig(clusterData, changed, 1);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(algorithm.lastEvaluated(), new HashSet<>(_resourceNames));
+
+    changeResourceConfig(clusterData, changed, 2);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(algorithm.lastEvaluated(), Collections.singleton(changed));
+  }
+
+  /**
+   * With instance tag isolation on, a baseline that fails to calculate or to persist keeps every
+   * resource on the retry list, so the change it consumed is not lost.
+   */
+  @Test(dataProvider = "baselineFailurePoints")
+  public void testIsolationRetriesEveryResourceAfterAFailedBaseline(boolean failPersist)
+      throws IOException, HelixRebalanceException {
+    BaselineRecorder algorithm = new BaselineRecorder();
+    AtomicBoolean persistFails = new AtomicBoolean();
+    MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore() {
+      @Override
+      public void persistBaseline(Map<String, ResourceAssignment> globalBaseline) {
+        if (persistFails.get()) {
+          throw new IllegalStateException("Injected baseline write failure");
+        }
+        super.persistBaseline(globalBaseline);
+      }
+    };
+    WagedRebalancer rebalancer = new WagedRebalancer(metadataStore, algorithm, Optional.empty());
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    String changed = _resourceNames.get(1);
+
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+
+    changeResourceConfig(clusterData, changed, 1);
+    persistFails.set(failPersist);
+    algorithm._fail = !failPersist;
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    persistFails.set(false);
+    algorithm._fail = false;
+
+    changeResourceConfig(clusterData, changed, 2);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(algorithm.lastEvaluated(), new HashSet<>(_resourceNames));
+  }
+
+  @DataProvider
+  public static Object[][] baselineFailurePoints() {
+    return new Object[][]{{false}, {true}};
+  }
+
+  private static Map<String, Resource> toResourceMap(ResourceControllerDataProvider clusterData) {
+    return clusterData.getIdealStates().entrySet().stream()
+        .collect(Collectors.toMap(Map.Entry::getKey, entry -> {
+          Resource resource = new Resource(entry.getKey());
+          entry.getValue().getPartitionSet().forEach(resource::addPartition);
+          return resource;
+        }));
+  }
+
+  private static void changeResourceConfig(ResourceControllerDataProvider clusterData,
+      String resourceName, int weight) throws IOException {
+    ResourceConfig config =
+        new ResourceConfig(new ZNRecord(clusterData.getResourceConfig(resourceName).getRecord()));
+    Map<String, Map<String, Integer>> capacityMap = config.getPartitionCapacityMap();
+    capacityMap.get(ResourceConfig.DEFAULT_PARTITION_KEY).put("item3", weight);
+    config.setPartitionCapacityMap(capacityMap);
+    when(clusterData.getResourceConfig(resourceName)).thenReturn(config);
+    clusterData.getResourceConfigMap().put(resourceName, config);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.RESOURCE_CONFIG));
+  }
+
+  /**
+   * Places like {@link MockRebalanceAlgorithm}, skips the given resources in the baseline the way
+   * instance tag isolation does, and records which resources each baseline evaluated.
+   */
+  private static class BaselineRecorder implements RebalanceAlgorithm {
+    private final MockRebalanceAlgorithm _delegate = new MockRebalanceAlgorithm();
+    private final List<Set<String>> _evaluated = new ArrayList<>();
+    private Set<String> _skip = Collections.emptySet();
+    private boolean _fail;
+
+    @Override
+    public OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException {
+      if (clusterModel.getRebalanceScopeType() != ClusterModel.RebalanceScopeType.GLOBAL_BASELINE) {
+        return _delegate.calculate(clusterModel);
+      }
+      if (_fail) {
+        throw new HelixRebalanceException("Injected baseline failure",
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+      }
+      OptimalAssignment result = _delegate.calculate(clusterModel);
+      when(result.getSkippedResources()).thenReturn(new HashSet<>(_skip));
+      return result;
+    }
+
+    @Override
+    public void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+        Set<String> evaluatedResources, Set<String> skippedResources) {
+      if (scope == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE) {
+        _evaluated.add(new HashSet<>(evaluatedResources));
+      }
+    }
+
+    Set<String> lastEvaluated() {
+      return _evaluated.get(_evaluated.size() - 1);
     }
   }
 
