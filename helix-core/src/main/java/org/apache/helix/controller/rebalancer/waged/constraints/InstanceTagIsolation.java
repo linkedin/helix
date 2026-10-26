@@ -22,6 +22,7 @@ package org.apache.helix.controller.rebalancer.waged.constraints;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,10 +30,13 @@ import java.util.Set;
 import java.util.TreeSet;
 
 import com.google.common.base.Strings;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -77,8 +81,12 @@ import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
  * default one.
  *
  * <h3>Parity</h3>
- * While disabled, {@link #failureSink} hands back the caller's own sink, so nothing changes. While
- * enabled, it only changes where a failure is recorded, so a run in which nothing fails produces
+ * Every method is a no-op while disabled. While enabled, {@link #shouldSkip} and
+ * {@link #recordPlacement} run for every replica but never change where a replica goes: until
+ * something fails, the first returns false and the second only records the placement.
+ * {@link #failureSink} only changes where a failure is recorded, {@link #finish} returns at once
+ * unless something failed, and the remaining entry points are only reached on a path where the
+ * default mode has already decided to throw. A run in which nothing fails therefore produces
  * exactly the same assignment either way, for any topology.
  *
  * Instances are stateful and scoped to a single
@@ -86,6 +94,7 @@ import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
  * matches the single threaded assignment loop that owns them.
  */
 class InstanceTagIsolation {
+  private static final Logger LOG = LoggerFactory.getLogger(InstanceTagIsolation.class);
   // Prefixes for the isolation group keys, so a tag and a resource with the same name can never
   // collide into one group.
   private static final String TAG_GROUP_PREFIX = "tag:";
@@ -95,9 +104,15 @@ class InstanceTagIsolation {
   private final ClusterModel _clusterModel;
   private final List<AssignableNode> _nodes;
 
+  private final Set<String> _failedGroups = new HashSet<>();
+  private final Set<String> _skippedResources = new HashSet<>();
+  // What this run has placed so far per group, so a group can be rolled back exactly.
+  private final Map<String, List<Placement>> _placementsByGroup = new HashMap<>();
   // Failures are recorded here while isolating so a tolerated group failure never marks the
   // returned OptimalAssignment as failed, which would make getOptimalResourceAssignment throw.
-  private final OptimalAssignment _failureSink;
+  // Replaced on every tolerated failure so each group's diagnosis only reports its own reasons.
+  private OptimalAssignment _failureSink;
+  private HelixRebalanceException _firstFailure;
   // Computed on the first failure only, so the happy path stays identical to the default mode.
   private List<Set<String>> _shareBlocks;
   private Map<String, Set<String>> _blockByGroup;
@@ -119,6 +134,132 @@ class InstanceTagIsolation {
    */
   OptimalAssignment failureSink(OptimalAssignment defaultSink) {
     return _enabled ? _failureSink : defaultSink;
+  }
+
+  /**
+   * Whether this replica should be skipped because its group was set aside with its share block.
+   *
+   * @return true when the caller should move on to the next replica.
+   */
+  boolean shouldSkip(AssignableReplica replica) {
+    if (!_enabled || _failedGroups.isEmpty() || !_failedGroups.contains(groupKey(replica))) {
+      return false;
+    }
+    _skippedResources.add(replica.getResourceName());
+    return true;
+  }
+
+  /**
+   * Remember a placement so it can be released if this replica's group later fails.
+   */
+  void recordPlacement(AssignableReplica replica, AssignableNode node) {
+    if (!_enabled) {
+      return;
+    }
+    _placementsByGroup.computeIfAbsent(groupKey(replica), key -> new ArrayList<>())
+        .add(new Placement(replica, node));
+  }
+
+  /**
+   * Try to tolerate a replica that could not be placed by rolling back its whole share block and
+   * skipping whatever the block has left to place.
+   *
+   * @return true when the group was isolated and the caller should continue with the next replica,
+   *         false when the caller must throw and fail the whole rebalance as it does by default.
+   */
+  boolean tryIsolate(AssignableReplica replica, HelixRebalanceException failure) {
+    if (!_enabled) {
+      return false;
+    }
+    String group = groupKey(replica);
+    // Start the next group's diagnosis from a clean sink. The caller has already read the current
+    // one to build the failure passed in.
+    _failureSink = new OptimalAssignment();
+    // Carry over the failing group together with every group connected to it through shared
+    // nodes, so the capacity the whole set occupies is off limits to everything still being
+    // calculated.
+    Set<String> closure = blockOf(group);
+    // Isolation needs a second share block to keep rebalancing. Blocks are counted over every
+    // resource group, placed or not, since a partial rebalance may only have work for one clique.
+    // A tag no resource is pinned to (a spare pool) makes no block, so it cannot hide a failure of
+    // the only clique. A group that reaches no node is a block of its own, and finish fails the
+    // run if every group that reaches a node failed.
+    if (shareBlocks().size() < 2) {
+      LOG.warn("Instance tag isolation cannot isolate group {} in the {} rebalance of cluster {}, "
+              + "since its resource groups form {} share block(s) and isolation needs at least "
+              + "two. Failing the rebalance.", group, _clusterModel.getRebalanceScopeType(),
+          _clusterModel.getContext().getClusterName(), shareBlocks().size());
+      return false;
+    }
+    int released = 0;
+    // Releasing gives back the node capacity this run's placements for the whole block used and
+    // removes their fault zone entries, leaving the other blocks' placements in place. Each release
+    // only undoes its own placement, so the order of the releases does not matter.
+    for (String member : closure) {
+      List<Placement> placements = _placementsByGroup.remove(member);
+      if (placements != null) {
+        for (int i = placements.size() - 1; i >= 0; i--) {
+          Placement placement = placements.get(i);
+          AssignableReplica placed = placement._replica;
+          // The release path is keyed by state, so pass the placed replica's own state. With any
+          // other state the node keeps the replica and only logs a warning, while the fault zone
+          // entry is still removed, and a state the model does not index throws.
+          _clusterModel.release(placed.getResourceName(), placed.getPartitionName(),
+              placed.getReplicaState(), placement._node.getInstanceName());
+          _skippedResources.add(placed.getResourceName());
+          released++;
+        }
+      }
+      _failedGroups.add(member);
+    }
+    _skippedResources.add(replica.getResourceName());
+    if (_firstFailure == null) {
+      _firstFailure = failure;
+    }
+    LOG.warn("Instance tag isolation rolled back and skipped share block {} after group {} failed "
+            + "in the {} rebalance of cluster {}. Released {} replica(s) placed in this run.",
+        closure, group, _clusterModel.getRebalanceScopeType(),
+        _clusterModel.getContext().getClusterName(), released, failure);
+    return true;
+  }
+
+  /**
+   * Publish the isolation outcome onto the assignment the algorithm is about to return.
+   *
+   * @throws HelixRebalanceException when every independent block of the cluster that holds
+   *         resources and reaches a node of the scope's model failed, so that the caller's usual
+   *         failure handling, metrics and last known good fallback all apply.
+   */
+  void finish(OptimalAssignment optimalAssignment) throws HelixRebalanceException {
+    if (!_enabled || _failedGroups.isEmpty()) {
+      return;
+    }
+    // Survival is judged over every resource group, not only the replicas being reassigned, since a
+    // partial or incremental rebalance may only have work for the failing clique. Only groups that
+    // hold resources and reach a node of this model count. A spare pool never fails, and a group
+    // whose tag no node carries has nothing to place, so counting either as a survivor would hide a
+    // cluster wide failure.
+    if (_failedGroups.containsAll(groupsReachingANode())) {
+      // Every independent part of the cluster that reaches a node failed, so behave exactly like
+      // the default global mode.
+      throw _firstFailure;
+    }
+    List<Set<String>> blocks = shareBlocks();
+    long failedBlocks =
+        blocks.stream().filter(block -> block.stream().anyMatch(_failedGroups::contains)).count();
+    _clusterModel.getContext().getResourceInstanceGroupTags().forEach((resource, tag) -> {
+      if (_failedGroups.contains(groupKey(resource, tag))) {
+        _skippedResources.add(resource);
+      }
+    });
+    LOG.warn(
+        "Instance tag isolation skipped {} of {} group(s) ({} resource(s)) in {} of {} independent "
+            + "block(s) during the {} rebalance of cluster {}. Skipped groups: {}.",
+        _failedGroups.size(), tagByGroup().size(),
+        _skippedResources.size(), failedBlocks, blocks.size(),
+        _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
+        _failedGroups);
+    optimalAssignment.setSkippedResources(_skippedResources);
   }
 
   /**
@@ -247,6 +388,25 @@ class InstanceTagIsolation {
     return block != null ? block : Collections.singleton(group);
   }
 
+  /**
+   * The resource groups that reach at least one node of the scope's model, by the rule the share
+   * blocks are built from: an untagged group reaches every node, and a tagged group the nodes
+   * carrying its tag. Computed only on the failure path.
+   */
+  private Set<String> groupsReachingANode() {
+    Set<String> nodeTags = new HashSet<>();
+    for (AssignableNode node : _nodes) {
+      nodeTags.addAll(node.getInstanceTags());
+    }
+    Set<String> reaching = new HashSet<>();
+    tagByGroup().forEach((group, tag) -> {
+      if (tag == null ? !_nodes.isEmpty() : nodeTags.contains(tag)) {
+        reaching.add(group);
+      }
+    });
+    return reaching;
+  }
+
   /** Maps each group to its tag, or to null for an untagged group, which can use every node. */
   private Map<String, String> tagByGroup() {
     if (_tagByGroup != null) {
@@ -258,5 +418,24 @@ class InstanceTagIsolation {
     });
     _tagByGroup = tagByGroup;
     return _tagByGroup;
+  }
+
+  /**
+   * A placement made during this run, kept so it can be released if the group later fails.
+   *
+   * Holds only the replica and the node it went to, two references or 24 bytes with compressed
+   * oops, and reads the fields the release needs only during a rollback. Those fields are final, so
+   * they still hold the placed values. One record is kept per placed replica while isolation is
+   * enabled, until calculate returns, and none while it is disabled. A record cannot be dropped
+   * earlier, since a later failure anywhere in its share block still rolls its group back.
+   */
+  private static final class Placement {
+    private final AssignableReplica _replica;
+    private final AssignableNode _node;
+
+    private Placement(AssignableReplica replica, AssignableNode node) {
+      _replica = replica;
+      _node = node;
+    }
   }
 }
