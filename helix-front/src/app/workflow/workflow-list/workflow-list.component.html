@@ -17,13 +17,18 @@
   ~ under the License.
   -->
 
-<section fxLayout="column" fxLayoutAlign="center center">
-  <mat-spinner *ngIf="isLoading"></mat-spinner>
-  <section fxFlexFill>
-    <section *ngIf="!isLoading && workflowRows.length == 0" class="empty">
-      There's no workflow here.
-    </section>
-    <section>
+<section>
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="workflowRows ? workflowRows.length : null"
+    [updated]="updated"
+    label="workflows"
+    emptyText="There are no workflows in this cluster."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <section *ngIf="workflowRows && workflowRows.length">
       <ngx-datatable
         #workflowsTable
         class="material"
@@ -83,6 +88,5 @@
           </ng-template>
         </ngx-datatable-footer>
       </ngx-datatable>
-    </section>
   </section>
 </section>

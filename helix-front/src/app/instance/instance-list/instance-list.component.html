@@ -18,6 +18,71 @@
   -->
 
 <section>
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="instances ? instances.length : null"
+    [updated]="updated"
+    label="instances"
+    emptyText="No instances match this filter."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <div class="filter-bar">
+    <button
+      type="button"
+      class="filter-chip"
+      data-filter="all"
+      [class.active]="filter === 'all'"
+      [attr.aria-pressed]="filter === 'all'"
+      (click)="setFilter('all')"
+    >
+      All ({{ count('all') }})
+    </button>
+    <button
+      type="button"
+      class="filter-chip"
+      data-filter="membership"
+      [class.active]="filter === 'membership'"
+      [attr.aria-pressed]="filter === 'membership'"
+      (click)="setFilter('membership')"
+    >
+      Membership issues ({{ count('membership') }})
+    </button>
+    <button
+      type="button"
+      class="filter-chip"
+      data-filter="offline"
+      [class.active]="filter === 'offline'"
+      [attr.aria-pressed]="filter === 'offline'"
+      title="No live ZooKeeper session, regardless of instance operation."
+      (click)="setFilter('offline')"
+    >
+      Offline ({{ count('offline') }})
+    </button>
+    <button
+      *ngFor="let operation of operationFilters"
+      type="button"
+      class="filter-chip"
+      [attr.data-operation]="operation.state"
+      [class.active]="filter === operation.filter"
+      [attr.aria-pressed]="filter === operation.filter"
+      [title]="
+        operation.state + ' operation. Includes live and offline instances.'
+      "
+      (click)="setFilter(operation.filter)"
+    >
+      {{ operation.label }} ({{ count(operation.filter) }})
+    </button>
+    <span class="filter-note"
+      >Operation filters include live and offline instances. Membership issues
+      counts nodes that are offline or not enabled. Resource ERROR and
+      under-replication are shown on the Resources tab. Live means
+      the instance holds a ZooKeeper session; it does not indicate the host
+      process is healthy.</span
+    >
+  </div>
+
   <ngx-datatable
     #instancesTable
     class="material"
@@ -32,7 +97,7 @@
     (select)="onSelect($event)"
   >
     <ngx-datatable-column
-      name="Status"
+      name="Live"
       prop="healthy"
       [width]="85"
       [resizeable]="false"
@@ -40,7 +105,10 @@
       [canAutoResize]="false"
     >
       <ng-template let-row="row" ngx-datatable-cell-template>
-        <mat-icon *ngIf="row.healthy" class="status-healthy"
+        <mat-icon
+          *ngIf="row.healthy"
+          class="status-healthy"
+          matTooltip="Live and enabled (assignable). This does not indicate the host process is healthy."
           >check_circle</mat-icon
         >
         <mat-icon
@@ -70,7 +138,7 @@
         <mat-icon
           *ngIf="!row.healthy && row.operationState === 'ENABLE' && !row.online"
           class="status-offline"
-          matTooltip="The instance is offline."
+          matTooltip="The instance is offline (no ZooKeeper session)."
           >cancel</mat-icon
         >
       </ng-template>

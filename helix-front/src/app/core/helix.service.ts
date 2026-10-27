@@ -2,7 +2,7 @@ import { throwError as observableThrowError, Observable } from 'rxjs';
 
 import { catchError } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
-import { HttpHeaders, HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
+import { HttpHeaders, HttpClient, HttpParams, HttpErrorResponse } from '@angular/common/http';
 import { Router } from '@angular/router';
 
 import { Settings } from './settings';
@@ -71,15 +71,33 @@ export class HelixService {
 
     let message = error.message || 'Cannot reach Helix restful service.';
 
-    if (error instanceof HttpResponse) {
-      if (error.status == 404) {
-        // rest api throws 404 directly to app without any wrapper
+    // Angular's HttpClient surfaces failures as HttpErrorResponse (not HttpResponse),
+    // so match that type to parse status and body correctly.
+    if (error instanceof HttpErrorResponse) {
+      if (error.status === 0) {
+        message =
+          'No response from helix-rest. Check connectivity and the configured endpoint.';
+      } else if (error.status === 404) {
+        // helix-rest throws 404 directly without a wrapper; callers treat this as "not found"
         message = 'Not Found';
       } else {
-        message = error;
-        try {
-          message = JSON.parse(message).error;
-        } catch (e) {}
+        // the error body may be an already-parsed object, a JSON string, or plain text
+        const body = error.error;
+        if (
+          body &&
+          typeof body === 'object' &&
+          typeof body.error === 'string'
+        ) {
+          message = body.error;
+        } else if (typeof body === 'string' && body.length) {
+          try {
+            message = JSON.parse(body).error || body;
+          } catch (e) {
+            message = body;
+          }
+        } else if (error.message) {
+          message = error.message;
+        }
       }
     }
 
