@@ -17,7 +17,7 @@
   ~ under the License.
   -->
 
-<section class="groups" fxLayout="row">
+<section class="groups" fxLayout="row wrap">
   <section class="column" *ngFor="let pair of pairs">
     <div class="name">{{ pair.name }}</div>
     <div class="value" *ngIf="obj != null && getProp(obj, pair.prop) != null">

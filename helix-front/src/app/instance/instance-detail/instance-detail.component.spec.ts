@@ -6,7 +6,7 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { MatMenuModule } from '@angular/material/menu';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { of } from 'rxjs';
+import { BehaviorSubject, of, Subject, throwError } from 'rxjs';
 
 import { InstanceDetailComponent } from './instance-detail.component';
 import { InstanceService } from '../shared/instance.service';
@@ -18,13 +18,18 @@ describe('InstanceDetailComponent', () => {
   let fixture: ComponentFixture<InstanceDetailComponent>;
 
   const mockRoute = {
-    snapshot: {
-      params: {
-        cluster_name: 'TestCluster',
-        instance_name: 'host1_1234',
-      },
-    },
+    params: new BehaviorSubject({
+      cluster_name: 'TestCluster',
+      instance_name: 'host1_1234',
+    }),
   };
+
+  beforeEach(() =>
+    mockRoute.params.next({
+      cluster_name: 'TestCluster',
+      instance_name: 'host1_1234',
+    })
+  );
 
   const mockRouter = { navigate: () => {} };
 
@@ -169,4 +174,36 @@ describe('InstanceDetailComponent', () => {
     expect(typeof component.setInstanceState).toBe('function');
   });
 
+
+  it('drops the old read when the route switches to another instance', () => {
+    const responses: Subject<Instance>[] = [];
+    setupWithInstance(new Instance('host1_1234', 'TestCluster', true, true), {
+      get: () => {
+        const response = new Subject<Instance>();
+        responses.push(response);
+        return response;
+      },
+    });
+
+    mockRoute.params.next({
+      cluster_name: 'TestCluster',
+      instance_name: 'host2_1234',
+    });
+    const next = new Instance('host2_1234', 'TestCluster', true, true);
+    responses[1].next(next);
+    responses[0].next(new Instance('host1_1234', 'TestCluster', false, false));
+
+    expect(responses[0].observers).toHaveLength(0);
+    expect(component.instance).toBe(next);
+    expect(component.instanceName).toBe('host2_1234');
+  });
+
+  it('finishes loading and exposes a failed instance read', () => {
+    setupWithInstance(new Instance('host1_1234', 'TestCluster', true, true), {
+      get: () => throwError('Instance read failed'),
+    });
+
+    expect(component.isLoading).toBe(false);
+    expect(component.error).toBe('Instance read failed');
+  });
 });

@@ -17,7 +17,7 @@
   ~ under the License.
   -->
 
-<h4 fxLayout="row" fxLayoutAlign="center center">
+<h4 fxLayout="row wrap" fxLayoutAlign="start center">
   <span [ngClass]="{ secondary: isSecondary() }">{{ cluster }}</span>
   <mat-icon *ngIf="isSecondary()" class="secondary">navigate_next</mat-icon>
   <span *ngIf="controller">{{ controller }}</span>
