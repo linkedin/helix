@@ -49,6 +49,7 @@ import org.apache.helix.rest.server.filters.CORSFilter;
 import org.apache.helix.rest.server.filters.ClusterAuthFilter;
 import org.apache.helix.rest.server.filters.HelixAdminAuthFilter;
 import org.apache.helix.rest.server.filters.NamespaceAuthFilter;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationListener;
 import org.apache.helix.rest.server.resources.helix.AbstractHelixResource;
 import org.apache.helix.rest.server.resources.metadata.NamespacesAccessor;
 import org.apache.helix.rest.server.resources.metadatastore.MetadataStoreDirectoryAccessor;
@@ -97,6 +98,7 @@ public class HelixRestServer {
   private List<HelixRestNamespace> _helixNamespaces;
   private ServletContextHandler _servletContextHandler;
   private List<AuditLogger> _auditLoggers;
+  private List<GuardrailValidationListener> _guardrailValidationListeners;
   private AuthValidator _clusterAuthValidator;
   private AuthValidator _namespaceAuthValidator;
   private AclRegister _aclRegister;
@@ -122,6 +124,13 @@ public class HelixRestServer {
   }
 
   public HelixRestServer(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
+      List<AuditLogger> auditLoggers,
+      List<GuardrailValidationListener> guardrailValidationListeners) {
+    init(namespaces, port, urlPrefix, auditLoggers, new NoopAuthValidator(),
+        new NoopAuthValidator(), new NoopAclRegister(), guardrailValidationListeners);
+  }
+
+  public HelixRestServer(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
       List<AuditLogger> auditLoggers, AuthValidator clusterAuthValidator,
       AuthValidator namespaceAuthValidator, AclRegister aclRegister) {
     init(namespaces, port, urlPrefix, auditLoggers, clusterAuthValidator, namespaceAuthValidator,
@@ -137,6 +146,14 @@ public class HelixRestServer {
   private void init(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
       List<AuditLogger> auditLoggers, AuthValidator clusterAuthValidator,
       AuthValidator namespaceAuthValidator, AclRegister aclRegister) {
+    init(namespaces, port, urlPrefix, auditLoggers, clusterAuthValidator, namespaceAuthValidator,
+        aclRegister, Collections.<GuardrailValidationListener>emptyList());
+  }
+
+  private void init(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
+      List<AuditLogger> auditLoggers, AuthValidator clusterAuthValidator,
+      AuthValidator namespaceAuthValidator, AclRegister aclRegister,
+      List<GuardrailValidationListener> guardrailValidationListeners) {
     if (namespaces.size() == 0) {
       throw new IllegalArgumentException(
           "No namespace specified! Please provide ZOOKEEPER address or namespace manifest.");
@@ -146,6 +163,7 @@ public class HelixRestServer {
     _server = new Server(_port);
     _jmxReporterList = new ArrayList<>();
     _auditLoggers = auditLoggers;
+    _guardrailValidationListeners = guardrailValidationListeners;
     _resourceConfigMap = new HashMap<>();
     _servletContextHandler = new ServletContextHandler(_server, _urlPrefix);
     _helixNamespaces = namespaces;
@@ -221,6 +239,8 @@ public class HelixRestServer {
     }
     cfg.property(ContextPropertyKeys.METADATA.name(), namespace);
     cfg.property(ContextPropertyKeys.ACL_REGISTER.name(), _aclRegister);
+    cfg.property(ContextPropertyKeys.GUARDRAIL_VALIDATION_LISTENERS.name(),
+        _guardrailValidationListeners);
 
     if (Boolean.getBoolean(CORS_ENABLED)) {
       // NOTE: CORS is disabled by default unless otherwise specified in System Properties.

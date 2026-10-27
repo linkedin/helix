@@ -31,6 +31,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -70,10 +71,17 @@ public class TestGuardrailMetrics {
     return ValidationResult.of(violations);
   }
 
+  /** Record a validation through {@link GuardrailMetrics} using the shared event derivation. */
+  private static void record(MetricRegistry metrics, List<String> evaluatedRuleIds,
+      Map<String, Long> ruleDurationNanos, ValidationResult result, boolean force, boolean dryRun) {
+    GuardrailMetrics.record(metrics, new GuardrailValidationEvent("TestNamespace", evaluatedRuleIds,
+        ruleDurationNanos, result, force, dryRun));
+  }
+
   @Test
   public void testEvaluatedTimedAndPassedForFeasibleVerdict() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B", "C"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B", "C"), Collections.emptyMap(),
         ValidationResult.feasible(), false, false);
 
     // Every rule that ran is timed, and a feasible verdict tallies each as passed.
@@ -96,7 +104,7 @@ public class TestGuardrailMetrics {
     durations.put("A", TimeUnit.MILLISECONDS.toNanos(5));
     durations.put("B", TimeUnit.MILLISECONDS.toNanos(20));
     // "C" is evaluated but carries no recorded duration.
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B", "C"), durations,
+    record(metrics, Arrays.asList("A", "B", "C"), durations,
         ValidationResult.feasible(), false, false);
 
     Assert.assertEquals(evaluatedTimer(metrics, "A").getSnapshot().getMax(),
@@ -111,7 +119,7 @@ public class TestGuardrailMetrics {
   @Test
   public void testBlockedOnEnforceInfeasibleNotForced() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
         infeasible("B"), false, false);
 
     Assert.assertEquals(count(metrics, "B", GuardrailMetrics.BLOCKED), 1);
@@ -129,7 +137,7 @@ public class TestGuardrailMetrics {
   @Test
   public void testForcedWhenForceTrue() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A"), true, false);
 
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.FORCED), 1);
@@ -141,7 +149,7 @@ public class TestGuardrailMetrics {
   @Test
   public void testDryRunInfeasibleWhenDryRunTrue() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A"), false, true);
 
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.DRY_RUN_INFEASIBLE), 1);
@@ -154,7 +162,7 @@ public class TestGuardrailMetrics {
   public void testDryRunTakesPrecedenceOverForce() {
     MetricRegistry metrics = new MetricRegistry();
     // dryRun=true wins even when force=true, mirroring AbstractHelixResource#preflight.
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A"), true, true);
 
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.DRY_RUN_INFEASIBLE), 1);
@@ -166,7 +174,7 @@ public class TestGuardrailMetrics {
   public void testMultipleViolationsFromSameRuleCountedOncePerOutcome() {
     MetricRegistry metrics = new MetricRegistry();
     // The same rule reports two violations (e.g. two partitions) but blocked the write once.
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A", "A"), false, false);
 
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.BLOCKED), 1);
@@ -177,7 +185,7 @@ public class TestGuardrailMetrics {
   @Test
   public void testDistinctViolatingRulesEachCounted() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
         infeasible("A", "B"), false, false);
 
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.BLOCKED), 1);
@@ -189,9 +197,9 @@ public class TestGuardrailMetrics {
   @Test
   public void testCountersAccumulateAcrossCalls() {
     MetricRegistry metrics = new MetricRegistry();
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A"), false, false);
-    GuardrailMetrics.record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
         infeasible("A"), false, false);
 
     Assert.assertEquals(evaluatedCount(metrics, "A"), 2);
@@ -202,11 +210,11 @@ public class TestGuardrailMetrics {
   public void testEvaluatedCountEqualsSumOfOutcomesPerRule() {
     MetricRegistry metrics = new MetricRegistry();
     // Rule A passes, is blocked, then forced across three calls; rule B always passes.
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
         ValidationResult.feasible(), false, false);
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
         infeasible("A"), false, false);
-    GuardrailMetrics.record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),
         infeasible("A"), true, false);
 
     // The evaluated timer count is exactly the sum of the terminal outcome counters per rule.

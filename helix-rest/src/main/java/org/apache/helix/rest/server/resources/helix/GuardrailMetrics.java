@@ -19,15 +19,10 @@ package org.apache.helix.rest.server.resources.helix;
  * under the License.
  */
 
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.MetricRegistry;
-import org.apache.helix.guardrail.ValidationResult;
-import org.apache.helix.guardrail.Violation;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
 
 /**
  * Emits per-rule guard rail counters into a helix-rest {@link MetricRegistry} so operators can
@@ -61,10 +56,11 @@ import org.apache.helix.guardrail.Violation;
 final class GuardrailMetrics {
   static final String METRIC_PREFIX = "org.apache.helix.rest.guardrail";
   static final String EVALUATED = "evaluated";
-  static final String PASSED = "passed";
-  static final String BLOCKED = "blocked";
-  static final String FORCED = "forced";
-  static final String DRY_RUN_INFEASIBLE = "dryRunInfeasible";
+  static final String PASSED = GuardrailValidationEvent.Outcome.PASSED.getMetricName();
+  static final String BLOCKED = GuardrailValidationEvent.Outcome.BLOCKED.getMetricName();
+  static final String FORCED = GuardrailValidationEvent.Outcome.FORCED.getMetricName();
+  static final String DRY_RUN_INFEASIBLE =
+      GuardrailValidationEvent.Outcome.DRY_RUN_INFEASIBLE.getMetricName();
 
   private GuardrailMetrics() {
   }
@@ -73,33 +69,20 @@ final class GuardrailMetrics {
    * Record the outcome of a single guard rail evaluation. Every rule that ran is timed via its
    * {@code evaluated} {@link com.codahale.metrics.Timer} and tallied into exactly one terminal
    * outcome counter ({@code passed}, or one of {@code blocked}/{@code forced}/
-   * {@code dryRunInfeasible}).
+   * {@code dryRunInfeasible}). The per-rule outcomes are derived once in
+   * {@link GuardrailValidationEvent} and shared with any
+   * {@link org.apache.helix.rest.server.guardrail.GuardrailValidationListener}, so the JMX counters
+   * here and a listener can never disagree on a rule's verdict.
    *
-   * @param metrics           the per-namespace registry to update
-   * @param evaluatedRuleIds  the ids of every rule that ran (see
-   *                          {@link org.apache.helix.guardrail.GuardrailPipeline#getRuleIds()})
-   * @param ruleDurationNanos per-rule evaluation time in nanoseconds, keyed by rule id; a rule with
-   *                          no entry is timed as {@code 0}
-   * @param result            the aggregated verdict for the mutation
-   * @param force             whether the caller passed {@code force=true}
-   * @param dryRun            whether the caller passed {@code dryRun=true}
+   * @param metrics the per-namespace registry to update
+   * @param event   the guard rail validation whose per-rule outcomes and latencies to record
    */
-  static void record(MetricRegistry metrics, List<String> evaluatedRuleIds,
-      Map<String, Long> ruleDurationNanos, ValidationResult result, boolean force, boolean dryRun) {
-    // A rule may report several violations (e.g. one per partition), but it blocked the write once,
-    // so attribute its outcome once per distinct rule.
-    Set<String> violatedRuleIds = new LinkedHashSet<>();
-    for (Violation violation : result.getViolations()) {
-      violatedRuleIds.add(violation.getRuleId());
-    }
-    // dryRun takes precedence over force, mirroring AbstractHelixResource#preflight.
-    String failureOutcome = dryRun ? DRY_RUN_INFEASIBLE : (force ? FORCED : BLOCKED);
-    for (String ruleId : new LinkedHashSet<>(evaluatedRuleIds)) {
-      long durationNanos =
-          ruleDurationNanos == null ? 0L : ruleDurationNanos.getOrDefault(ruleId, 0L);
-      metrics.timer(metricName(ruleId, EVALUATED)).update(durationNanos, TimeUnit.NANOSECONDS);
-      String outcome = violatedRuleIds.contains(ruleId) ? failureOutcome : PASSED;
-      metrics.counter(metricName(ruleId, outcome)).inc();
+  static void record(MetricRegistry metrics, GuardrailValidationEvent event) {
+    for (GuardrailValidationEvent.RuleEvaluation evaluation : event.getRuleEvaluations()) {
+      metrics.timer(metricName(evaluation.getRuleId(), EVALUATED))
+          .update(evaluation.getDurationNanos(), TimeUnit.NANOSECONDS);
+      metrics.counter(metricName(evaluation.getRuleId(), evaluation.getOutcome().getMetricName()))
+          .inc();
     }
   }
 
