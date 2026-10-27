@@ -38,6 +38,7 @@ import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -341,6 +342,83 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
     Assert.assertNull(overflow.getPartitionName());
     Assert.assertTrue(overflow.getMessage().contains("of 150"),
         "overflow summary should record the true total: " + overflow.getMessage());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Drain-feasibility fast path.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testFastPathFeasibleShortCircuitsWithoutRunningWhatIf() {
+    // A FEASIBLE verdict from the accept-only drain fast path certifies the drain without the rule
+    // ever running the (expensive) baseline/candidate what-if: computeTargetAssignment throws, so any
+    // fall-through to the full what-if fails the test.
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    int[] fastPathCalls = {0};
+    WagedAssignmentProvider provider = new WagedAssignmentProvider() {
+      @Override
+      public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+          List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+        throw new AssertionError(
+            "the full what-if must not run once the fast path proves the drain feasible");
+      }
+
+      @Override
+      public WagedAssignmentProvider.DrainFeasibility attemptDrainFeasibilityShortCircuit(
+          ClusterConfig cfg, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+          String drainedInstanceName) {
+        fastPathCalls[0]++;
+        Assert.assertEquals(drainedInstanceName, INSTANCE,
+            "the rule must probe the drain of the instance under operation");
+        return WagedAssignmentProvider.DrainFeasibility.FEASIBLE;
+      }
+    };
+    ValidationResult result = rule.validate(
+        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, provider));
+    Assert.assertEquals(fastPathCalls[0], 1, "the rule must attempt the drain fast path exactly once");
+    Assert.assertTrue(result.isFeasible(),
+        "a FEASIBLE fast-path verdict must certify the drain as feasible");
+  }
+
+  @Test
+  public void testFastPathInconclusiveFallsBackToWhatIfAndBlocks() {
+    // An INCONCLUSIVE fast-path verdict must not short-circuit: the rule falls back to the full
+    // what-if, which here drops a replica for _0 and blocks.
+    Map<String, ResourceAssignment> baseline = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0",
+            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE", "instance2", "SLAVE"))));
+    Map<String, ResourceAssignment> candidate = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance1", "MASTER", "instance2", "SLAVE"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    int[] fastPathCalls = {0};
+    WagedAssignmentProvider provider = new WagedAssignmentProvider() {
+      @Override
+      public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+          List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+        boolean isCandidate = instanceConfigs.stream()
+            .filter(ic -> ic != null && INSTANCE.equals(ic.getInstanceName())).findFirst()
+            .map(ic -> !ic.isAssignable()).orElse(true);
+        return isCandidate ? candidate : baseline;
+      }
+
+      @Override
+      public WagedAssignmentProvider.DrainFeasibility attemptDrainFeasibilityShortCircuit(
+          ClusterConfig cfg, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+          String drainedInstanceName) {
+        fastPathCalls[0]++;
+        return WagedAssignmentProvider.DrainFeasibility.INCONCLUSIVE;
+      }
+    };
+    ValidationResult result = rule.validate(
+        context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE, provider));
+    Assert.assertTrue(fastPathCalls[0] > 0, "the rule must attempt the fast path");
+    Assert.assertFalse(result.isFeasible(),
+        "an INCONCLUSIVE fast path must fall back to the full what-if, which blocks here");
+    Assert.assertEquals(result.getViolations().get(0).getPartitionName(), RESOURCE + "_0");
   }
 
   // ---------------------------------------------------------------------------------------------

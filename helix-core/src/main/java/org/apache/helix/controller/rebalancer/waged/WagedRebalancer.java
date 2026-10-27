@@ -46,6 +46,7 @@ import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
+import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
 import org.apache.helix.controller.stages.CurrentStateOutput;
@@ -55,6 +56,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.MetricCollector;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
@@ -836,6 +838,120 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       AssignmentMetadataStore assignmentMetadataStore, CurrentStateOutput currentStateOutput,
       Set<String> resources) throws HelixRebalanceException {
     return _assignmentManager.getBestPossibleAssignment(assignmentMetadataStore, currentStateOutput, resources);
+  }
+
+  /**
+   * Read-only, accept-only feasibility probe. Models the evacuation of
+   * {@code drainedInstanceName} as a permanent node-down and reuses WAGED's emergency rebalance
+   * (best-possible seed, drained node excluded from the active set) to re-place exactly that node's
+   * replicas onto the survivors while pinning every surviving replica. Emergency rebalance is
+   * strictly more constrained than a global one, so a clean placement proves the drain is feasible;
+   * a thrown {@link HelixRebalanceException} is inconclusive -- not proof of infeasibility -- and
+   * callers must never block a drain on it.
+   *
+   * <p>Soundness guard: {@link org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider}
+   * caps each partition's replica count at the number of surviving assignable fault zones (see
+   * {@link org.apache.helix.model.StateModelDefinition#getStateCountMap}). When a drain drops the
+   * fault-zone count below a resource's configured replica count the model would silently
+   * under-replicate, so a successful placement would not prove the full replica set still fits. This
+   * probe detects that case up front and declines (throws) so the caller falls back to the
+   * authoritative full what-if.
+   *
+   * @param clusterData fully refreshed cluster data cache
+   * @param resourceMap the WAGED resources to consider
+   * @param currentStateOutput the computed current state (fallback seed)
+   * @param drainedInstanceName the instance being evacuated; must be in the active pool
+   * @return {@code true} iff the emergency rebalance placed every drained replica
+   * @throws HelixRebalanceException if the replicas could not be placed or the model could not be built
+   */
+  public boolean isInstanceDrainFeasibleViaPartialRebalance(
+      ResourceControllerDataProvider clusterData, Map<String, Resource> resourceMap,
+      CurrentStateOutput currentStateOutput, String drainedInstanceName)
+      throws HelixRebalanceException {
+    Set<String> activeNodes = new HashSet<>(
+        DelayedRebalanceUtil.getActiveNodes(clusterData.getAssignableInstances(),
+            clusterData.getEnabledLiveInstances(), clusterData.getInstanceOfflineTimeMap(),
+            clusterData.getAssignableLiveInstances().keySet(),
+            clusterData.getAssignableInstanceConfigMap(), clusterData.getClusterConfig()));
+    // Inconclusive if the drained instance is not in the active pool: we cannot model its removal.
+    if (!activeNodes.remove(drainedInstanceName)) {
+      throw new HelixRebalanceException(
+          "Instance " + drainedInstanceName + " is not in the active assignable pool; cannot model "
+              + "its drain.", HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+    }
+    // Seed from the persisted best-possible assignment, then model the drained node as a permanent
+    // node-down: emergency rebalance re-queues exactly the drained node's replicas and pins every
+    // surviving replica in place.
+    Map<String, ResourceAssignment> seedAssignment = _assignmentManager
+        .getBestPossibleAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
+    ClusterModel clusterModel = ClusterModelProvider.generateClusterModelForEmergencyRebalance(
+        clusterData, resourceMap, activeNodes, seedAssignment);
+
+    // Soundness guard: the model caps each partition's replica count at the number of surviving
+    // assignable fault zones (StateModelDefinition#getStateCountMap). If the drain drops the
+    // fault-zone count below a resource's configured replica count, the model under-replicates and a
+    // successful placement would not prove the full replica set fits, so decline and let the caller
+    // fall back to the authoritative full what-if.
+    long survivingFaultZones = clusterModel.getAssignableNodes().values().stream()
+        .map(AssignableNode::getFaultZone).distinct().count();
+    for (String resourceName : resourceMap.keySet()) {
+      IdealState idealState = clusterData.getIdealState(resourceName);
+      if (idealState == null) {
+        continue;
+      }
+      int requiredReplicas = idealState.getReplicaCount(activeNodes.size());
+      if (survivingFaultZones < requiredReplicas) {
+        throw new HelixRebalanceException(String.format(
+            "Draining %s leaves %d assignable fault zone(s), fewer than the %d replicas required by "
+                + "%s; cannot certify drain feasibility via the fast path.", drainedInstanceName,
+            survivingFaultZones, requiredReplicas, resourceName),
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+      }
+      // Seed-coverage guard: ClusterModelProvider#getAllAssignableReplicas generates exactly
+      // getStateCountMap(survivingFaultZones, requiredReplicas) replicas per partition - one per
+      // target state - and findToBeAssignedReplicasOnDownInstances only pins or re-queues a generated
+      // replica when the seed (persisted best-possible) holds an entry in that SAME state
+      // (getStateInstanceMap keys partition -> state -> instance). Any target-state replica the seed
+      // does not cover contributes only to the cluster-wide capacity total, never to a per-node
+      // placement check, so the probe could certify a drain the full what-if rejects. The seed can
+      // under-cover two ways: (1) the partition is missing or short in the best-possible - a newly
+      // added resource/partitions, a replica-count bump, or anything added while the cluster was in
+      // maintenance (WAGED does not run, so the best-possible is never written); (2) the resource fell
+      // back to CurrentState and the seed carries ERROR/OFFLINE entries (an errored replica, a disabled
+      // node in maintenance) that pad the raw count without matching any target state. Comparing per
+      // state against what the model will generate catches both; decline and fall back to the
+      // authoritative full what-if when any state is under-covered.
+      ResourceAssignment seed = seedAssignment.get(resourceName);
+      StateModelDefinition stateModelDef =
+          clusterData.getStateModelDef(idealState.getStateModelDefRef());
+      if (stateModelDef == null) {
+        throw new HelixRebalanceException(String.format(
+            "Cannot find state model definition %s for %s; cannot certify drain feasibility via the "
+                + "fast path.", idealState.getStateModelDefRef(), resourceName),
+            HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+      }
+      Map<String, Integer> requiredStateCounts =
+          stateModelDef.getStateCountMap((int) survivingFaultZones, requiredReplicas);
+      for (Partition partition : resourceMap.get(resourceName).getPartitions()) {
+        Map<String, String> seeded =
+            seed == null ? Collections.emptyMap() : seed.getReplicaMap(partition);
+        for (Map.Entry<String, Integer> required : requiredStateCounts.entrySet()) {
+          long matching = seeded.values().stream().filter(required.getKey()::equals).count();
+          if (matching < required.getValue()) {
+            throw new HelixRebalanceException(String.format(
+                "Best possible for %s covers only %d of the %d %s replica(s) of %s; cannot certify "
+                    + "drain feasibility via the fast path.", resourceName, matching,
+                required.getValue(), required.getKey(), partition.getPartitionName()),
+                HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+          }
+        }
+      }
+    }
+
+    // With the full replica set represented, a clean placement of the drained node's replicas onto
+    // the survivors proves the drain is feasible.
+    WagedRebalanceUtil.calculateAssignment(clusterModel, _rebalanceAlgorithm);
+    return true;
   }
 
   private void persistBestPossibleAssignment(Map<String, ResourceAssignment> bestPossibleAssignment)

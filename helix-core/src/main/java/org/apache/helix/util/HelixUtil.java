@@ -49,6 +49,7 @@ import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.ClusterEvent;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CurrentStateComputationStage;
+import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.controller.stages.ResourceComputationStage;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
@@ -61,6 +62,7 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.PauseSignal;
+import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
@@ -359,6 +361,139 @@ public final class HelixUtil {
       result.put(resourceName, resourceAssignment);
     }
     return result;
+  }
+
+  /**
+   * Accept-only fast-path probe for draining one instance out of the WAGED assignable pool. Reuses
+   * WAGED's own partial rebalance (best-possible seed) to re-place only the drained instance's
+   * replicas; a {@code true} result proves feasibility and may short-circuit the full what-if, while
+   * any failure is inconclusive and must fall back to it. Read-only; never blocks a write.
+   *
+   * @param zkBucketDataAccessor accessor for the WAGED assignment metadata store
+   * @param baseDataAccessor base accessor used to refresh the controller data cache
+   * @param clusterConfig the cluster config to simulate against
+   * @param instanceConfigs the instance configs with the target still in the assignable pool
+   * @param liveInstances names of the live instances
+   * @param idealStates the WAGED resources' ideal states
+   * @param resourceConfigs the WAGED resources' configs
+   * @param drainedInstanceName the instance being drained out of the assignable pool
+   * @return {@code true} iff the partial rebalance placed every drained replica; {@code false} otherwise
+   */
+  public static boolean isDrainFeasibleViaPartialRebalance(ZkBucketDataAccessor zkBucketDataAccessor,
+      BaseDataAccessor<ZNRecord> baseDataAccessor, ClusterConfig clusterConfig,
+      List<InstanceConfig> instanceConfigs, List<String> liveInstances, List<IdealState> idealStates,
+      List<ResourceConfig> resourceConfigs, String drainedInstanceName) {
+    // Synchronous global rebalance + no delay window, mirroring the full what-if (steady state).
+    ClusterConfig simulationClusterConfig = new ClusterConfig(clusterConfig.getRecord());
+    simulationClusterConfig.setGlobalRebalanceAsyncMode(false);
+    simulationClusterConfig.setDelayRebalaceEnabled(false);
+
+    HelixDataAccessor helixDataAccessor =
+        new ZKHelixDataAccessor(simulationClusterConfig.getClusterName(), baseDataAccessor);
+    // Read-only rebalancer: reuses WAGED's own metadata store, assignment manager and algorithm.
+    ReadOnlyWagedRebalancer readOnlyWagedRebalancer =
+        new ReadOnlyWagedRebalancer(zkBucketDataAccessor, simulationClusterConfig.getClusterName(),
+            simulationClusterConfig.getGlobalRebalancePreference());
+    ClusterEvent event =
+        new ClusterEvent(simulationClusterConfig.getClusterName(), ClusterEventType.Unknown);
+    try {
+      // Full ZK refresh, then override topology inputs with the caller's snapshot (as the what-if does).
+      ResourceControllerDataProvider dataProvider =
+          new ResourceControllerDataProvider(simulationClusterConfig.getClusterName());
+      dataProvider.requireFullRefresh();
+      dataProvider.refresh(helixDataAccessor);
+
+      dataProvider.setClusterConfig(simulationClusterConfig);
+      dataProvider.setInstanceConfigMap(instanceConfigs.stream()
+          .collect(Collectors.toMap(InstanceConfig::getInstanceName, Function.identity())));
+      // Preserve session IDs for known live instances; synthesize for unknown ones (as
+      // getAssignmentForWagedFullAutoImpl does).
+      Map<String, LiveInstance> assignableLiveInstanceMap = dataProvider.getAssignableLiveInstances();
+      List<LiveInstance> filteredLiveInstances = assignableLiveInstanceMap.entrySet().stream()
+          .filter(entry -> liveInstances.contains(entry.getKey())).map(Map.Entry::getValue)
+          .collect(Collectors.toList());
+      List<String> liveInstanceList = new ArrayList<>(liveInstances);
+      liveInstanceList.removeAll(filteredLiveInstances.stream().map(LiveInstance::getInstanceName)
+          .collect(Collectors.toList()));
+      liveInstanceList.forEach(liveInstanceName -> {
+        LiveInstance newLiveInstanceObj = new LiveInstance(liveInstanceName);
+        newLiveInstanceObj.getRecord()
+            .setSimpleField(LiveInstance.LiveInstanceProperty.SESSION_ID.name(),
+                UUID.randomUUID().toString().replace("-", ""));
+        filteredLiveInstances.add(newLiveInstanceObj);
+      });
+      dataProvider.setLiveInstances(new ArrayList<>(filteredLiveInstances));
+      dataProvider.setIdealStates(idealStates);
+      dataProvider.setResourceConfigMap(resourceConfigs.stream()
+          .collect(Collectors.toMap(ResourceConfig::getResourceName, Function.identity())));
+
+      event.addAttribute(AttributeName.ControllerDataProvider.name(), dataProvider);
+      // Compute the resource map and the current-state output used as the fallback seed.
+      RebalanceUtil.runStage(event, new ResourceComputationStage());
+      RebalanceUtil.runStage(event, new CurrentStateComputationStage());
+
+      Map<String, Resource> resourcesToRebalance =
+          event.getAttribute(AttributeName.RESOURCES_TO_REBALANCE.name());
+      CurrentStateOutput currentStateOutput =
+          event.getAttribute(AttributeName.CURRENT_STATE.name());
+      if (resourcesToRebalance == null || currentStateOutput == null) {
+        return false;
+      }
+      // Restrict the model to the WAGED resources the caller passed.
+      Map<String, Resource> resourceMap = new HashMap<>();
+      for (IdealState idealState : idealStates) {
+        Resource resource = resourcesToRebalance.get(idealState.getResourceName());
+        if (resource != null) {
+          resourceMap.put(idealState.getResourceName(), resource);
+        }
+      }
+      if (resourceMap.isEmpty()) {
+        // No WAGED resource is actually rebalanceable here, so there is nothing this drain can break.
+        return true;
+      }
+
+      return readOnlyWagedRebalancer.isInstanceDrainFeasibleViaPartialRebalance(dataProvider,
+          resourceMap, currentStateOutput, drainedInstanceName);
+    } catch (Exception e) {
+      // Any failure is inconclusive (partial rebalance is more constrained than global); fall back.
+      LOG.info("isDrainFeasibleViaPartialRebalance(): partial-rebalance feasibility probe did not "
+              + "succeed for instance {} in cluster {}; falling back to the full what-if. Reason: {}",
+          drainedInstanceName, simulationClusterConfig.getClusterName(), e.toString());
+      return false;
+    } finally {
+      readOnlyWagedRebalancer.close();
+    }
+  }
+
+  /**
+   * String-address convenience overload of
+   * {@link #isDrainFeasibleViaPartialRebalance(ZkBucketDataAccessor, BaseDataAccessor, ClusterConfig,
+   * List, List, List, List, String)} that opens (and closes) its own metadata-store and base data
+   * accessors against {@code metadataStoreAddress}. See that method for the full contract.
+   *
+   * @param metadataStoreAddress the ZK address of the WAGED assignment metadata store
+   * @param clusterConfig the cluster config to simulate against
+   * @param instanceConfigs the instance configs with the target still in the assignable pool
+   * @param liveInstances names of the live instances
+   * @param idealStates the WAGED resources' ideal states
+   * @param resourceConfigs the WAGED resources' configs (weights)
+   * @param drainedInstanceName the instance being drained out of the assignable pool
+   * @return {@code true} iff the partial rebalance placed every drained replica; {@code false}
+   *     on any failure, exception, or inconclusive condition
+   */
+  public static boolean isDrainFeasibleViaPartialRebalance(String metadataStoreAddress,
+      ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+      String drainedInstanceName) {
+    // The ZkBucketDataAccessor is closed by the inner rebalancer, so only the base accessor here.
+    BaseDataAccessor<ZNRecord> baseDataAccessor = new ZkBaseDataAccessor<>(metadataStoreAddress);
+    try {
+      return isDrainFeasibleViaPartialRebalance(new ZkBucketDataAccessor(metadataStoreAddress),
+          baseDataAccessor, clusterConfig, instanceConfigs, liveInstances, idealStates,
+          resourceConfigs, drainedInstanceName);
+    } finally {
+      baseDataAccessor.close();
+    }
   }
 
   /**
