@@ -77,4 +77,44 @@ describe('HistoryListComponent error and empty states', () => {
     expect(component.isLoading).toBe(false);
     expect(component.rows).toBeUndefined();
   });
+
+  it('marks only the latest online session as current', () => {
+    const component = build(
+      of([
+        { time: 1, event: 'Online', session: 'old' },
+        { time: 5, event: 'Offline' },
+        { time: 9, event: 'Online', session: 'new' },
+      ]),
+    );
+    expect(component.getSessionCellClass({ value: 'new' })).toEqual({
+      current: true,
+    });
+    expect(component.getSessionCellClass({ value: 'old' }).current).toBe(false);
+  });
+
+  it('remembers the chosen time zone', () => {
+    const component = build(of([]));
+    component.setZone('ist');
+    expect(build(of([])).zone.key).toBe('ist');
+    localStorage.removeItem('helix.history.zone');
+  });
+
+  it('still loads and switches zones when browser storage throws', () => {
+    const real = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new Error('SecurityError');
+      },
+    });
+    try {
+      const component = build(of([{ date: 'd', time: 1, controller: 'c' }]));
+      expect(component.rows.length).toBe(1);
+      expect(component.zone.key).toBe(component.zones[0].key);
+      expect(() => component.setZone('ist')).not.toThrow();
+      expect(component.zone.key).toBe('ist');
+    } finally {
+      Object.defineProperty(window, 'localStorage', real);
+    }
+  });
 });

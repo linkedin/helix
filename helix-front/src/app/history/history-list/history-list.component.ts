@@ -6,6 +6,9 @@ import * as _ from 'lodash';
 import { Settings } from '../../core/settings';
 import { HistoryService } from '../shared/history.service';
 import { History } from '../shared/history.model';
+import { HISTORY_ZONES, HistoryZone, formatTime } from '../shared/history-time';
+
+const ZONE_KEY = 'helix.history.zone';
 
 @Component({
   selector: 'hi-history-list',
@@ -23,7 +26,10 @@ export class HistoryListComponent implements OnInit {
   isLoading = true;
   error = '';
   updated: number | null = null;
-  sorts = [{ prop: 'date', dir: 'desc' }];
+  sorts = [{ prop: 'time', dir: 'desc' }];
+  zones = HISTORY_ZONES;
+  zone: HistoryZone = HISTORY_ZONES[0];
+  currentSession = '';
 
   private clusterName: string;
   private instanceName: string;
@@ -31,9 +37,19 @@ export class HistoryListComponent implements OnInit {
   // to let ngx-datatable helper funcs have 'this' context
   bindFunc = _.bind;
 
-  constructor(private route: ActivatedRoute, private service: HistoryService) {}
+  constructor(
+    private route: ActivatedRoute,
+    private service: HistoryService,
+  ) {}
 
   ngOnInit() {
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(ZONE_KEY);
+    } catch (e) {
+      // storage can be blocked, the default zone is used instead
+    }
+    this.zone = this.zones.find((z) => z.key === saved) || this.zones[0];
     if (this.route.parent) {
       this.clusterName = this.route.parent.snapshot.params['cluster_name'];
       this.instanceName = this.route.parent.snapshot.params['instance_name'];
@@ -52,6 +68,7 @@ export class HistoryListComponent implements OnInit {
     observable.subscribe(
       (histories) => {
         this.rows = histories;
+        this.currentSession = this.latestSession(histories);
         this.updated = Date.now();
       },
       (error) => {
@@ -67,8 +84,28 @@ export class HistoryListComponent implements OnInit {
         }
         this.isLoading = false;
       },
-      () => (this.isLoading = false)
+      () => (this.isLoading = false),
     );
+  }
+
+  setZone(key: string) {
+    this.zone = this.zones.find((z) => z.key === key) || this.zones[0];
+    try {
+      localStorage.setItem(ZONE_KEY, this.zone.key);
+    } catch (e) {
+      // remembering the zone is best effort, it stays in memory
+    }
+  }
+
+  format(ms: number) {
+    return formatTime(ms, this.zone.tz);
+  }
+
+  private latestSession(rows: History[]) {
+    const online = rows.filter((r) => r.event === 'Online');
+    return online.length
+      ? online.reduce((a, b) => (b.time > a.time ? b : a)).session
+      : '';
   }
 
   getControllerCellClass({ value }): any {
@@ -77,9 +114,13 @@ export class HistoryListComponent implements OnInit {
     };
   }
 
+  getEventCellClass({ value }): any {
+    return { offline: value === 'Offline' };
+  }
+
   getSessionCellClass({ value }): any {
     return {
-      current: value == this.rows[this.rows.length - 1].session,
+      current: value && value == this.currentSession,
     };
   }
 }

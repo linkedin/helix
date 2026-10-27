@@ -4,6 +4,7 @@ import * as _ from 'lodash';
 
 import { HelixService } from '../../core/helix.service';
 import { History } from './history.model';
+import { parseOfflineDate } from './history-time';
 
 @Injectable()
 export class HistoryService extends HelixService {
@@ -16,8 +17,28 @@ export class HistoryService extends HelixService {
   getInstanceHistory(clusterName: string, instanceName: string) {
     return this.request(
       `/clusters/${clusterName}/instances/${instanceName}/history`
-    ).pipe(map((data) => this.parseHistory(data.listFields.HISTORY)));
-    // TODO: implement data.simpleFields.LAST_OFFLINE_TIME
+    ).pipe(
+      map((data) => {
+        const online = this.parseHistory(data.listFields.HISTORY);
+        online.forEach((h) => (h.event = 'Online'));
+        return online.concat(this.parseOffline(data.listFields.OFFLINE));
+      })
+    );
+  }
+
+  protected parseOffline(data: string[]): History[] {
+    const rows: History[] = [];
+    for (const date of data || []) {
+      const time = parseOfflineDate(date);
+      if (time !== null) {
+        const history = new History();
+        history.date = date;
+        history.time = time;
+        history.event = 'Offline';
+        rows.push(history);
+      }
+    }
+    return rows;
   }
 
   protected parseHistory(data: any): History[] {

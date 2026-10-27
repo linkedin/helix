@@ -4,8 +4,24 @@
 @import 'src/theme.scss';
 
 hi-history-list {
-  .current {
-    color: mat.get-color-from-palette($hi-primary);
+  // the material table theme sets a cell color, so match its specificity
+  .ngx-datatable.material .datatable-body .datatable-body-row {
+    .datatable-body-cell.current {
+      color: mat.get-color-from-palette($hi-primary);
+    }
+
+    .datatable-body-cell.offline {
+      color: #c62828;
+    }
+  }
+
+  .zone-picker {
+    margin: 4px 0 8px;
+
+    .zone-label {
+      margin-right: 8px;
+      opacity: 0.7;
+    }
   }
 
   .mat-icon {
