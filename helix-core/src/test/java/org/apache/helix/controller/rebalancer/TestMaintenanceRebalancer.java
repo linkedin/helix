@@ -19,6 +19,7 @@ import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.controller.stages.MessageGenerationPhase;
 import org.apache.helix.controller.stages.MessageOutput;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.LiveInstance;
@@ -26,6 +27,7 @@ import org.apache.helix.model.MasterSlaveSMD;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.util.TestInputLoader;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
@@ -85,6 +87,72 @@ public class TestMaintenanceRebalancer {
         {InstanceOperation.EVACUATE, "MASTER", "MASTER"},
         {InstanceOperation.EVACUATE, "ERROR", "ERROR"}
     };
+  }
+
+  @DataProvider
+  public Object[][] drainedBatchModels() {
+    return new Object[][] {
+        {"MasterSlave", "3", 3, "SLAVE", true},
+        {"MasterSlave", "3", 2, "SLAVE", false},
+        {"MasterSlave", "5", 3, "SLAVE", false},
+        {"MasterSlave", "1", 1, "SLAVE", true},
+        {"MasterSlave", "ANY_LIVEINSTANCE", 2, "SLAVE", true},
+        {"OnlineOffline", "3", 3, "OFFLINE", true},
+        {"OnlineOffline", "3", 2, "ONLINE", false},
+        {"LeaderStandby", "3", 3, "STANDBY", true}
+    };
+  }
+
+  @Test(dataProvider = "drainedBatchModels")
+  public void testMultipleDrainedReplicasAcrossStateModels(String model, String replicas,
+      int peerCount, String peerState, boolean stayInitial) {
+    StateModelDefinition definition =
+        BuiltInStateModelDefinitions.valueOf(model).getStateModelDefinition();
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef(model);
+    CurrentStateOutput current = new CurrentStateOutput();
+    Set<String> evacuating = Set.of("old1", "old2");
+    Map<String, LiveInstance> live = new HashMap<>();
+    for (String old : evacuating) {
+      live.put(old, new LiveInstance(old));
+      current.setCurrentState(RESOURCE_NAME, partition, old, definition.getInitialState());
+    }
+    Map<String, LiveInstance> assignable = new HashMap<>();
+    List<String> peers = new ArrayList<>();
+    for (int i = 0; i < peerCount; i++) {
+      String peer = "peer" + i;
+      peers.add(peer);
+      LiveInstance instance = new LiveInstance(peer);
+      live.put(peer, instance);
+      assignable.put(peer, instance);
+      current.setCurrentState(RESOURCE_NAME, partition, peer, peerState);
+    }
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterConfig()).thenReturn(new ClusterConfig("maintenanceTest"));
+    when(cache.getStateModelDef(model)).thenReturn(definition);
+    when(cache.getLiveInstances()).thenReturn(live);
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    when(cache.getEvacuatingInstances()).thenReturn(evacuating);
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME)).thenReturn(Set.of());
+    when(cache.getAbnormalStateResolver(model))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef(model);
+    target.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    target.setReplicas(replicas);
+    target.setPreferenceList(PARTITION_NAME, peers);
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment =
+        rebalancer.computeBestPossiblePartitionState(cache, target, resource, current)
+            .getReplicaMap(partition);
+    for (String old : evacuating) {
+      Assert.assertEquals(definition.getInitialState().equals(assignment.get(old)), stayInitial);
+    }
+    Assert.assertTrue(assignment.containsValue(definition.getTopState()),
+        "Maintenance must still elect or recover a top-state replica");
   }
 
   @DataProvider

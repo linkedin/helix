@@ -61,7 +61,7 @@ public class TestMaintenanceEvacuation extends ZkTestBase {
   @DataProvider
   public Object[][] maintenanceScenarios() {
     return new Object[][] {
-        {"slave"}, {"master"}, {"batch"}, {"bounce"}, {"dead"}, {"disabled"}
+        {"slave"}, {"master"}, {"batch"}, {"bounce"}, {"dead"}, {"disabled"}, {"deadFailover"}
     };
   }
 
@@ -76,19 +76,24 @@ public class TestMaintenanceEvacuation extends ZkTestBase {
         fixture.stopParticipant(PEER);
         fixture.startParticipant(PEER);
         fixture.awaitState(PEER, "OFFLINE");
-      } else if (scenario.equals("dead")) {
+      } else if (scenario.startsWith("dead")) {
         fixture.stopParticipant(PEER);
       } else if (scenario.equals("disabled")) {
         fixture.setOperation(PEER, InstanceOperation.DISABLE);
       }
 
       fixture.startController();
-      boolean recoveryNeeded = scenario.equals("dead") || scenario.equals("disabled");
+      boolean recoveryNeeded = scenario.startsWith("dead") || scenario.equals("disabled");
       if (recoveryNeeded) {
         Assert.assertTrue(fixture.oldModel.promotionStarted.await(TIMEOUT, TimeUnit.MILLISECONDS),
             "The old replica must recover when a peer is unavailable");
         fixture.awaitState(OLD, "OFFLINE");
-        if (scenario.equals("dead")) {
+        if (scenario.equals("deadFailover")) {
+          fixture.controller.syncStop();
+          fixture.startController();
+          fixture.verifyMaintenancePasses("SLAVE");
+        }
+        if (scenario.startsWith("dead")) {
           fixture.startParticipant(PEER);
         } else {
           fixture.setOperation(PEER, InstanceOperation.ENABLE);
@@ -108,6 +113,11 @@ public class TestMaintenanceEvacuation extends ZkTestBase {
       }
       Assert.assertEquals(fixture.oldModel.cancellations.get(), 0,
           "No cancellation should reach the old replica during maintenance");
+      if (!scenario.equals("batch")) {
+        fixture.exitMaintenanceAndAwaitDrop();
+        Assert.assertEquals(fixture.oldModel.promotions.get(), recoveryNeeded ? 1 : 0);
+        Assert.assertEquals(fixture.oldModel.cancellations.get(), 0);
+      }
     }
   }
 
@@ -221,6 +231,17 @@ public class TestMaintenanceEvacuation extends ZkTestBase {
         Assert.assertEquals(oldModel.cancellations.get(), 0);
         Assert.assertTrue(_gSetupTool.getClusterManagementTool().isInMaintenanceMode(cluster));
       }
+    }
+
+    void exitMaintenanceAndAwaitDrop() throws Exception {
+      _gSetupTool.getClusterManagementTool()
+          .manuallyEnableMaintenanceMode(cluster, false, "test complete", null);
+      HelixManager old = participants.get(OLD);
+      Assert.assertTrue(TestHelper.verify(() -> {
+        CurrentState current = old.getHelixDataAccessor().getProperty(
+            old.getHelixDataAccessor().keyBuilder().currentState(OLD, old.getSessionId(), RESOURCE));
+        return current == null || current.getState(PARTITION) == null;
+      }, TIMEOUT), "Old replica was not dropped after maintenance ended");
     }
 
     @Override
