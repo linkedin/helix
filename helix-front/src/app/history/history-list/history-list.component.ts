@@ -55,9 +55,10 @@ export class HistoryListComponent implements OnInit {
         this.updated = Date.now();
       },
       (error) => {
-        // an absent history node reads as Not Found; treat that as empty,
-        // but surface real network or server failures instead of a blank list
-        if (error === 'Not Found') {
+        // only an instance with no history node reads as Not Found. The
+        // controller history returns an empty list when absent, so a 404 there
+        // is a real failure, as is any network or server error.
+        if (this.instanceName && error === 'Not Found') {
           this.rows = [];
           this.updated = Date.now();
         } else {

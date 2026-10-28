@@ -55,16 +55,10 @@ export class WorkflowListComponent implements OnInit {
         this.updated = Date.now();
       },
       (error) => {
-        // the REST API returns 404 rather than an empty list when the workflow
-        // config node does not exist yet, so treat Not Found as an empty result
-        // but surface real network or server failures as an error
-        if (error === 'Not Found') {
-          this.workflowRows = [];
-          this.updated = Date.now();
-        } else {
-          this.error =
-            typeof error === 'string' ? error : 'Cannot load workflows.';
-        }
+        // the REST API returns an empty list when there are no workflows, so
+        // any failure, including a 404, is reported instead of shown as empty
+        this.error =
+          typeof error === 'string' ? error : 'Cannot load workflows.';
         this.isLoading = false;
       },
       () => (this.isLoading = false)

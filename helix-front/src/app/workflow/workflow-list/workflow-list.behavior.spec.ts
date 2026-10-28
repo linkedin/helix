@@ -40,10 +40,10 @@ describe('WorkflowListComponent error and empty states', () => {
     expect(component.isLoading).toBe(false);
   });
 
-  it('treats Not Found as an empty cluster, not an error', () => {
+  it('reports a 404 as an error, not an empty list', () => {
     const component = build(throwError('Not Found'));
-    expect(component.workflowRows).toEqual([]);
-    expect(component.error).toBe('');
+    expect(component.error).toBe('Not Found');
+    expect(component.updated).toBeNull();
     expect(component.isLoading).toBe(false);
   });
 

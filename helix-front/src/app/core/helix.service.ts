@@ -77,8 +77,13 @@ export class HelixService {
       if (error.status === 0) {
         message =
           'No response from helix-rest. Check connectivity and the configured endpoint.';
-      } else if (error.status === 404) {
-        // helix-rest throws 404 directly without a wrapper; callers treat this as "not found"
+      } else if (
+        error.status === 404 &&
+        error.headers?.get('X-Helix-Front-Error') !== 'endpoint-not-configured'
+      ) {
+        // a 404 from helix-rest itself; callers may treat it as "not found".
+        // A 404 from the front-end proxy (endpoint not configured) is a real
+        // failure and falls through to be reported with its own message.
         message = 'Not Found';
       } else {
         // the error body may be an already-parsed object, a JSON string, or plain text

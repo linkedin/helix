@@ -22,9 +22,13 @@ import { of, throwError } from 'rxjs';
 
 import { HistoryListComponent } from './history-list.component';
 
-function build(data: any) {
+function build(data: any, instance?: string) {
   const route: any = {
-    parent: { snapshot: { params: { cluster_name: 'Demo' } } },
+    parent: {
+      snapshot: {
+        params: { cluster_name: 'Demo', instance_name: instance },
+      },
+    },
   };
   const service: any = {
     getControllerHistory: jest.fn(() => data),
@@ -44,11 +48,27 @@ describe('HistoryListComponent error and empty states', () => {
     expect(component.updated).not.toBeNull();
   });
 
-  it('treats Not Found as an empty history, not an error', () => {
-    const component = build(throwError('Not Found'));
+  it('treats Not Found as an empty history for an instance', () => {
+    const component = build(throwError('Not Found'), 'host_1');
     expect(component.rows).toEqual([]);
     expect(component.error).toBe('');
     expect(component.isLoading).toBe(false);
+  });
+
+  it('reports Not Found on the controller history as an error', () => {
+    const component = build(throwError('Not Found'));
+    expect(component.error).toBe('Not Found');
+    expect(component.rows).toBeUndefined();
+    expect(component.updated).toBeNull();
+  });
+
+  it('reports a proxy configuration failure instead of an empty history', () => {
+    const message =
+      'The Helix endpoint is not configured for this cluster key.';
+    const component = build(throwError(message), 'host_1');
+    expect(component.error).toBe(message);
+    expect(component.rows).toBeUndefined();
+    expect(component.updated).toBeNull();
   });
 
   it('surfaces a real failure instead of a silent empty list', () => {

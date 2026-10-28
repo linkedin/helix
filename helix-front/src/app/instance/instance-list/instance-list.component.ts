@@ -43,7 +43,7 @@ export class InstanceListComponent implements OnInit {
   rowHeight = Settings.tableRowHeight;
   headerHeight = Settings.tableHeaderHeight;
   sorts = [
-    { prop: 'liveInstance', dir: 'asc' },
+    { prop: 'online', dir: 'asc' },
     { prop: 'name', dir: 'asc' },
   ];
 

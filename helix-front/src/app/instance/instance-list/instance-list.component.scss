@@ -14,30 +14,6 @@
   );
 }
 
-.status-disabled-icon {
-  color: mat.get-color-from-palette(
-    mat.define-palette(mat.$red-palette, 700, 700, 700)
-  );
-}
-
-.status-unknown {
-  color: mat.get-color-from-palette(
-    mat.define-palette(mat.$amber-palette, 700, 700, 700)
-  );
-}
-
-.status-evacuate {
-  color: mat.get-color-from-palette(
-    mat.define-palette(mat.$orange-palette, 700, 700, 700)
-  );
-}
-
-.status-swap-in {
-  color: mat.get-color-from-palette(
-    mat.define-palette(mat.$purple-palette, 500, 500, 500)
-  );
-}
-
 ::ng-deep .label-unknown .status-disabled {
   border-color: mat.get-color-from-palette(
     mat.define-palette(mat.$amber-palette),

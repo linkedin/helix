@@ -98,7 +98,7 @@
   >
     <ngx-datatable-column
       name="Live"
-      prop="healthy"
+      prop="online"
       [width]="85"
       [resizeable]="false"
       [draggable]="false"
@@ -106,39 +106,15 @@
     >
       <ng-template let-row="row" ngx-datatable-cell-template>
         <mat-icon
-          *ngIf="row.healthy"
+          *ngIf="row.online"
           class="status-healthy"
-          matTooltip="Live and enabled (assignable). This does not indicate the host process is healthy."
+          matTooltip="Live: the instance holds a ZooKeeper session. This does not indicate the host process is healthy."
           >check_circle</mat-icon
         >
         <mat-icon
-          *ngIf="!row.healthy && row.operationState === 'UNKNOWN'"
-          class="status-unknown"
-          matTooltip="The instance is in UNKNOWN state."
-          >help</mat-icon
-        >
-        <mat-icon
-          *ngIf="!row.healthy && row.operationState === 'EVACUATE'"
-          class="status-evacuate"
-          matTooltip="The instance is being evacuated."
-          >exit_to_app</mat-icon
-        >
-        <mat-icon
-          *ngIf="!row.healthy && row.operationState === 'SWAP_IN'"
-          class="status-swap-in"
-          matTooltip="The instance is swapping in."
-          >swap_horiz</mat-icon
-        >
-        <mat-icon
-          *ngIf="!row.healthy && row.operationState === 'DISABLE'"
-          class="status-disabled-icon"
-          matTooltip="The instance is disabled."
-          >block</mat-icon
-        >
-        <mat-icon
-          *ngIf="!row.healthy && row.operationState === 'ENABLE' && !row.online"
+          *ngIf="!row.online"
           class="status-offline"
-          matTooltip="The instance is offline (no ZooKeeper session)."
+          matTooltip="Offline: no ZooKeeper session."
           >cancel</mat-icon
         >
       </ng-template>

@@ -1,5 +1,9 @@
 import { TestBed, inject } from '@angular/core/testing';
-import { HttpClientModule, HttpErrorResponse } from '@angular/common/http';
+import {
+  HttpClientModule,
+  HttpErrorResponse,
+  HttpHeaders,
+} from '@angular/common/http';
 import { RouterTestingModule } from '@angular/router/testing';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 
@@ -35,6 +39,22 @@ describe('HelixService', () => {
       new HttpErrorResponse({ status: 404, error: 'missing' }),
     );
     expect(message).toBe('Not Found');
+  });
+
+  it('reports a proxy 404 for an unconfigured endpoint instead of Not Found', async () => {
+    const service = new ProbeService(null as any, null as any);
+    const message = await service.run(
+      new HttpErrorResponse({
+        status: 404,
+        headers: new HttpHeaders({
+          'X-Helix-Front-Error': 'endpoint-not-configured',
+        }),
+        error: 'The Helix endpoint is not configured for this cluster key.',
+      }),
+    );
+    expect(message).toBe(
+      'The Helix endpoint is not configured for this cluster key.',
+    );
   });
 
   it('explains a transport failure without claiming that an operation failed on the server', async () => {
