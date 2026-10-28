@@ -32,6 +32,7 @@ import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolv
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.util.InstanceValidationUtil;
@@ -60,6 +61,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
    * <p>Replicas on evacuating instances that have reached the initial state stay there
    * only when other live, assignable replicas satisfy the full replica count and state
    * requirements without pending transitions. Otherwise normal recovery is preserved.
+   * An upward transition already pending on the evacuating replica is allowed to finish.
    * Serving replicas on evacuating instances retain the normal maintenance behavior.
    */
   @Override
@@ -188,6 +190,13 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
         String instance = replica.getKey();
         if (stateModelDef.getInitialState().equals(replica.getValue())
             && evacuatingInstances.contains(instance)) {
+          Message pending =
+              currentStateOutput.getPendingMessage(idealState.getResourceName(), partition, instance);
+          if (pending != null && stateModelDef
+              .isUpwardStateTransition(replica.getValue(), pending.getToState())) {
+            // Do not cancel recovery already started by an earlier maintenance pipeline.
+            continue;
+          }
           if (instancesToKeepOffline == disabledInstancesForPartition) {
             instancesToKeepOffline = new HashSet<>(disabledInstancesForPartition);
           }

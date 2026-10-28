@@ -88,6 +88,94 @@ public class TestMaintenanceRebalancer {
   }
 
   @DataProvider
+  public Object[][] pendingEvacuationTransitions() {
+    return new Object[][] {{"SLAVE", "SLAVE"}, {"DROPPED", "OFFLINE"}};
+  }
+
+  @Test(dataProvider = "pendingEvacuationTransitions")
+  public void testPendingRecoverySurvivesPeerReturnInMaintenance(String pendingTarget,
+      String expectedState) throws Exception {
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef("MasterSlave");
+    CurrentStateOutput current = new CurrentStateOutput();
+    current.setCurrentState(RESOURCE_NAME, partition, "old", "OFFLINE");
+    current.setCurrentState(RESOURCE_NAME, partition, "master", "MASTER");
+    current.setCurrentState(RESOURCE_NAME, partition, "follower", "SLAVE");
+    Map<String, LiveInstance> live = new HashMap<>();
+    for (String host : List.of("old", "master", "follower")) {
+      LiveInstance instance = new LiveInstance(host);
+      instance.setSessionId("session");
+      live.put(host, instance);
+    }
+    Map<String, LiveInstance> assignable = new HashMap<>(live);
+    assignable.remove("old");
+    ClusterConfig clusterConfig = new ClusterConfig("maintenanceTest");
+    clusterConfig.stateTransitionCancelEnabled(true);
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterConfig()).thenReturn(clusterConfig);
+    when(cache.getStateModelDef("MasterSlave")).thenReturn(MasterSlaveSMD.build());
+    when(cache.getLiveInstances()).thenReturn(live);
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    when(cache.getEvacuatingInstances()).thenReturn(Set.of("old"));
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME)).thenReturn(Set.of());
+    when(cache.getAbnormalStateResolver("MasterSlave"))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef("MasterSlave");
+    target.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    target.setReplicas("3");
+    target.setPreferenceList(PARTITION_NAME,
+        new ArrayList<>(List.of("master", "follower", "replacement")));
+    when(cache.getIdealState(RESOURCE_NAME)).thenReturn(target);
+    HelixManager manager = mock(HelixManager.class);
+    when(manager.getInstanceName()).thenReturn("controller");
+    when(manager.getSessionId()).thenReturn("controllerSession");
+    ClusterEvent event = new ClusterEvent("maintenanceTest", ClusterEventType.ControllerChange);
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), Map.of(RESOURCE_NAME, resource));
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), current);
+    BestPossibleStateOutput bestPossible = new BestPossibleStateOutput();
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossible);
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    bestPossible.setState(RESOURCE_NAME, partition, rebalancer
+        .computeBestPossiblePartitionState(cache, target, resource, current).getReplicaMap(partition));
+    new MessageGenerationPhase().process(event);
+    MessageOutput messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    List<Message> initialMessages = messages.getMessages(RESOURCE_NAME, partition);
+    Assert.assertEquals(initialMessages.size(), 1);
+    Message recovery = initialMessages.get(0);
+    Assert.assertEquals(recovery.getTgtName(), "old");
+    Assert.assertEquals(recovery.getFromState(), "OFFLINE");
+    Assert.assertEquals(recovery.getToState(), "SLAVE");
+
+    // The promotion has not completed when the missing peer comes back.
+    // The DROPPED row substitutes a downward pending message as a negative control.
+    recovery.setToState(pendingTarget);
+    current.setPendingMessage(RESOURCE_NAME, partition, "old", recovery);
+    current.setCurrentState(RESOURCE_NAME, partition, "replacement", "SLAVE");
+    LiveInstance replacement = new LiveInstance("replacement");
+    replacement.setSessionId("session");
+    live.put("replacement", replacement);
+    assignable.put("replacement", replacement);
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment = rebalancer
+        .computeBestPossiblePartitionState(cache, target, resource, current).getReplicaMap(partition);
+    bestPossible.setState(RESOURCE_NAME, partition, assignment);
+    new MessageGenerationPhase().process(event);
+    messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    if (pendingTarget.equals("SLAVE")) {
+      Assert.assertTrue(messages.getMessages(RESOURCE_NAME, partition).isEmpty(),
+          "Peer recovery in maintenance must not cancel the pending promotion");
+    }
+    Assert.assertEquals(assignment.get("old"), expectedState);
+  }
+
+  @DataProvider
   public Object[][] replacementAvailability() {
     return new Object[][] {
         {0, "SLAVE", true, false, null, "MASTER"},
