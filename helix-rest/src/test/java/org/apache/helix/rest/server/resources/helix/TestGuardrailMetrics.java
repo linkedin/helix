@@ -59,7 +59,8 @@ public class TestGuardrailMetrics {
     return count(metrics, ruleId, GuardrailMetrics.PASSED)
         + count(metrics, ruleId, GuardrailMetrics.BLOCKED)
         + count(metrics, ruleId, GuardrailMetrics.FORCED)
-        + count(metrics, ruleId, GuardrailMetrics.DRY_RUN_INFEASIBLE);
+        + count(metrics, ruleId, GuardrailMetrics.DRY_RUN_INFEASIBLE)
+        + count(metrics, ruleId, GuardrailMetrics.DRY_RUN_PASSED);
   }
 
   /** An infeasible verdict carrying one violation per supplied rule id (ids may repeat). */
@@ -168,6 +169,20 @@ public class TestGuardrailMetrics {
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.DRY_RUN_INFEASIBLE), 1);
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.BLOCKED), 0);
     Assert.assertEquals(count(metrics, "A", GuardrailMetrics.FORCED), 0);
+  }
+
+  @Test
+  public void testDryRunFeasibleTalliedAsDryRunPassed() {
+    MetricRegistry metrics = new MetricRegistry();
+    // A dryRun probe that raises no violation is tallied separately, never as a real pass.
+    record(metrics, Collections.singletonList("A"), Collections.emptyMap(),
+        ValidationResult.feasible(), false, true);
+
+    Assert.assertEquals(count(metrics, "A", GuardrailMetrics.DRY_RUN_PASSED), 1);
+    Assert.assertEquals(count(metrics, "A", GuardrailMetrics.PASSED), 0);
+    Assert.assertEquals(count(metrics, "A", GuardrailMetrics.DRY_RUN_INFEASIBLE), 0);
+    Assert.assertEquals(evaluatedCount(metrics, "A"), 1);
+    Assert.assertEquals(outcomeSum(metrics, "A"), 1);
   }
 
   @Test

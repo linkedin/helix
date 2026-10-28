@@ -37,9 +37,11 @@ import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
  *       rate" (and, because a rule also runs during a dry-run simulation, includes dry-run
  *       evaluations); its percentiles expose how long the rule takes to evaluate. Every rule run is
  *       also tallied into exactly one terminal outcome counter below, so
- *       {@code evaluated.count == passed + blocked + forced + dryRunInfeasible} per rule.</li>
- *   <li>{@code passed} &mdash; the rule ran and raised no violation, certifying the mutation as
- *       safe. This is the per-rule "successes" number.</li>
+ *       {@code evaluated.count == passed + blocked + forced + dryRunInfeasible + dryRunPassed} per
+ *       rule.</li>
+ *   <li>{@code passed} &mdash; the rule ran and raised no violation during a real (non-dry-run)
+ *       request, certifying the mutation as safe. This is the per-rule "successes" number for
+ *       admitted writes.</li>
  *   <li>{@code blocked} &mdash; the rule flagged the mutation and the write was rejected with
  *       {@code 400} (enforce mode, not forced): a real prevented production change. This is the
  *       headline "prevented failures" number.</li>
@@ -47,6 +49,9 @@ import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
  *       {@code force=true}, so the write proceeded anyway.</li>
  *   <li>{@code dryRunInfeasible} &mdash; the rule flagged the mutation during a {@code dryRun=true}
  *       simulation, where no write is ever attempted.</li>
+ *   <li>{@code dryRunPassed} &mdash; the rule ran and raised no violation during a {@code
+ *       dryRun=true} simulation, where no write is ever attempted. Kept distinct from
+ *       {@code passed} so dry-run probes never inflate the real success count.</li>
  * </ul>
  * Metrics are named {@code org.apache.helix.rest.guardrail.<RULE_ID>.<outcome>} so the helix-rest
  * JMX reporter exports them under the same domain as every other REST metric. These are Codahale
@@ -61,6 +66,8 @@ final class GuardrailMetrics {
   static final String FORCED = GuardrailValidationEvent.Outcome.FORCED.getMetricName();
   static final String DRY_RUN_INFEASIBLE =
       GuardrailValidationEvent.Outcome.DRY_RUN_INFEASIBLE.getMetricName();
+  static final String DRY_RUN_PASSED =
+      GuardrailValidationEvent.Outcome.DRY_RUN_PASSED.getMetricName();
 
   private GuardrailMetrics() {
   }
@@ -68,8 +75,9 @@ final class GuardrailMetrics {
   /**
    * Record the outcome of a single guard rail evaluation. Every rule that ran is timed via its
    * {@code evaluated} {@link com.codahale.metrics.Timer} and tallied into exactly one terminal
-   * outcome counter ({@code passed}, or one of {@code blocked}/{@code forced}/
-   * {@code dryRunInfeasible}). The per-rule outcomes are derived once in
+   * outcome counter (a pass outcome {@code passed}/{@code dryRunPassed}, or a flag outcome
+   * {@code blocked}/{@code forced}/{@code dryRunInfeasible}). The per-rule outcomes are derived
+   * once in
    * {@link GuardrailValidationEvent} and shared with any
    * {@link org.apache.helix.rest.server.guardrail.GuardrailValidationListener}, so the JMX counters
    * here and a listener can never disagree on a rule's verdict.

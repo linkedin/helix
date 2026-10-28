@@ -114,6 +114,19 @@ public class TestGuardrailValidationEvent {
   }
 
   @Test
+  public void testDryRunFeasibleMarksRulePassedAsDryRunPassed() {
+    // A dryRun probe that raises no violation must land in DRY_RUN_PASSED, never the real PASSED
+    // count, so simulations can't inflate a rule's success number or skew its block rate.
+    GuardrailValidationEvent event = new GuardrailValidationEvent(NS, Arrays.asList("A", "B"),
+        Collections.emptyMap(), ValidationResult.feasible(), false, true);
+
+    Assert.assertEquals(evaluationFor(event, "A").getOutcome(), Outcome.DRY_RUN_PASSED);
+    Assert.assertEquals(evaluationFor(event, "B").getOutcome(), Outcome.DRY_RUN_PASSED);
+    Assert.assertTrue(event.isFeasible());
+    Assert.assertTrue(event.isDryRun());
+  }
+
+  @Test
   public void testPerRuleDurationCapturedAndDefaultedToZero() {
     Map<String, Long> durations = new HashMap<>();
     durations.put("A", TimeUnit.MILLISECONDS.toNanos(5));

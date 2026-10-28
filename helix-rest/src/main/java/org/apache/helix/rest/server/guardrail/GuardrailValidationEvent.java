@@ -49,14 +49,24 @@ public class GuardrailValidationEvent {
    * listener, so the two surfaces never drift.
    */
   public enum Outcome {
-    /** The rule ran and raised no violation, certifying the mutation as safe. */
+    /**
+     * The rule ran and raised no violation during a real (non-dry-run) request, certifying the
+     * mutation as safe. Counts admitted writes only; a passing {@code dryRun=true} simulation lands
+     * in {@link #DRY_RUN_PASSED} instead, so this stays a clean "real successes" number.
+     */
     PASSED("passed"),
     /** The rule flagged the mutation and the write was rejected (enforce mode, not forced). */
     BLOCKED("blocked"),
     /** The rule flagged the mutation but the caller overrode the block with {@code force=true}. */
     FORCED("forced"),
     /** The rule flagged the mutation during a {@code dryRun=true} simulation (no write attempted). */
-    DRY_RUN_INFEASIBLE("dryRunInfeasible");
+    DRY_RUN_INFEASIBLE("dryRunInfeasible"),
+    /**
+     * The rule ran and raised no violation during a {@code dryRun=true} simulation (no write
+     * attempted). Kept distinct from {@link #PASSED} so dry-run probes never inflate the real
+     * success count or skew a rule's block rate.
+     */
+    DRY_RUN_PASSED("dryRunPassed");
 
     private final String _metricName;
 
@@ -178,11 +188,15 @@ public class GuardrailValidationEvent {
     // dryRun takes precedence over force, mirroring AbstractHelixResource#preflight.
     Outcome failureOutcome =
         dryRun ? Outcome.DRY_RUN_INFEASIBLE : (force ? Outcome.FORCED : Outcome.BLOCKED);
+    // A rule that raised no violation passed; keep a dry-run pass distinct from a real admitted
+    // write so the PASSED counter stays a clean "real successes" number (mirrors the dryRun branch
+    // above for the failure outcome).
+    Outcome passOutcome = dryRun ? Outcome.DRY_RUN_PASSED : Outcome.PASSED;
     List<RuleEvaluation> ruleEvaluations = new ArrayList<>();
     for (String ruleId : new LinkedHashSet<>(evaluatedRuleIds)) {
       long durationNanos =
           ruleDurationNanos == null ? 0L : ruleDurationNanos.getOrDefault(ruleId, 0L);
-      Outcome outcome = violatedRuleIds.contains(ruleId) ? failureOutcome : Outcome.PASSED;
+      Outcome outcome = violatedRuleIds.contains(ruleId) ? failureOutcome : passOutcome;
       ruleEvaluations.add(new RuleEvaluation(ruleId, outcome, durationNanos));
     }
     return Collections.unmodifiableList(ruleEvaluations);

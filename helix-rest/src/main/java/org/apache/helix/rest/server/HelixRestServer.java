@@ -137,6 +137,24 @@ public class HelixRestServer {
         aclRegister);
   }
 
+  /**
+   * Full constructor: supply both the auth seam (cluster/namespace {@link AuthValidator}s and the
+   * {@link AclRegister}) and the guard rail {@link GuardrailValidationListener}s. Use this when an
+   * embedding process needs custom auth <em>and</em> wants to forward guard rail counts/latency into
+   * its own metrics pipeline; the shorter listener-only constructor defaults the auth seam to
+   * no-ops, so it cannot be combined with custom auth.
+   *
+   * @param guardrailValidationListeners listeners notified for every guard rail validation; may be
+   *                                     {@code null} or empty
+   */
+  public HelixRestServer(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
+      List<AuditLogger> auditLoggers, AuthValidator clusterAuthValidator,
+      AuthValidator namespaceAuthValidator, AclRegister aclRegister,
+      List<GuardrailValidationListener> guardrailValidationListeners) {
+    init(namespaces, port, urlPrefix, auditLoggers, clusterAuthValidator, namespaceAuthValidator,
+        aclRegister, guardrailValidationListeners);
+  }
+
   private void init(List<HelixRestNamespace> namespaces, int port, String urlPrefix,
       List<AuditLogger> auditLoggers) {
     init(namespaces, port, urlPrefix, auditLoggers, new NoopAuthValidator(),
@@ -163,7 +181,11 @@ public class HelixRestServer {
     _server = new Server(_port);
     _jmxReporterList = new ArrayList<>();
     _auditLoggers = auditLoggers;
-    _guardrailValidationListeners = guardrailValidationListeners;
+    // Defensive copy: take an immutable snapshot so a caller can't mutate the listener list after
+    // construction. The list is published to the Jersey resource context and read on every request.
+    _guardrailValidationListeners = (guardrailValidationListeners == null)
+        ? Collections.<GuardrailValidationListener>emptyList()
+        : Collections.unmodifiableList(new ArrayList<>(guardrailValidationListeners));
     _resourceConfigMap = new HashMap<>();
     _servletContextHandler = new ServletContextHandler(_server, _urlPrefix);
     _helixNamespaces = namespaces;
