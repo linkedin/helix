@@ -24,6 +24,7 @@ import { InputInlineComponent } from './input-inline/input-inline.component';
 import { DataTableComponent } from './data-table/data-table.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
 import { DisabledLabelComponent } from './disabled-label/disabled-label.component';
+import { ListStatusComponent } from './list-status/list-status.component';
 
 @NgModule({
   imports: [
@@ -49,6 +50,7 @@ import { DisabledLabelComponent } from './disabled-label/disabled-label.componen
     DataTableComponent,
     ConfirmDialogComponent,
     DisabledLabelComponent,
+    ListStatusComponent,
   ],
   exports: [
     RouterModule,
@@ -63,6 +65,7 @@ import { DisabledLabelComponent } from './disabled-label/disabled-label.componen
     StateLabelComponent,
     NodeViewerComponent,
     DisabledLabelComponent,
+    ListStatusComponent,
   ],
   providers: [HelperService],
 })

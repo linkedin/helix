@@ -65,7 +65,10 @@ export class HelixCtrl {
     }
 
     if (!apiPrefix) {
-      res.status(404).send('Not found');
+      res
+        .status(404)
+        .set('X-Helix-Front-Error', 'endpoint-not-configured')
+        .send('The Helix endpoint is not configured for this cluster key.');
       return;
     }
 

@@ -21,7 +21,12 @@ export class HistoryListComponent implements OnInit {
   headerHeight = Settings.tableHeaderHeight;
   isController: boolean;
   isLoading = true;
+  error = '';
+  updated: number | null = null;
   sorts = [{ prop: 'date', dir: 'desc' }];
+
+  private clusterName: string;
+  private instanceName: string;
 
   // to let ngx-datatable helper funcs have 'this' context
   bindFunc = _.bind;
@@ -30,20 +35,40 @@ export class HistoryListComponent implements OnInit {
 
   ngOnInit() {
     if (this.route.parent) {
-      const clusterName = this.route.parent.snapshot.params['cluster_name'];
-      const instanceName = this.route.parent.snapshot.params['instance_name'];
-      const observable = instanceName
-        ? this.service.getInstanceHistory(clusterName, instanceName)
-        : this.service.getControllerHistory(clusterName);
-
-      this.isController = !instanceName;
-
-      observable.subscribe(
-        (histories) => (this.rows = histories),
-        (error) => {},
-        () => (this.isLoading = false)
-      );
+      this.clusterName = this.route.parent.snapshot.params['cluster_name'];
+      this.instanceName = this.route.parent.snapshot.params['instance_name'];
+      this.isController = !this.instanceName;
+      this.load();
     }
+  }
+
+  load() {
+    this.isLoading = true;
+    this.error = '';
+    const observable = this.instanceName
+      ? this.service.getInstanceHistory(this.clusterName, this.instanceName)
+      : this.service.getControllerHistory(this.clusterName);
+
+    observable.subscribe(
+      (histories) => {
+        this.rows = histories;
+        this.updated = Date.now();
+      },
+      (error) => {
+        // only an instance with no history node reads as Not Found. The
+        // controller history returns an empty list when absent, so a 404 there
+        // is a real failure, as is any network or server error.
+        if (this.instanceName && error === 'Not Found') {
+          this.rows = [];
+          this.updated = Date.now();
+        } else {
+          this.error =
+            typeof error === 'string' ? error : 'Cannot load history.';
+        }
+        this.isLoading = false;
+      },
+      () => (this.isLoading = false)
+    );
   }
 
   getControllerCellClass({ value }): any {

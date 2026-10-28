@@ -19,6 +19,8 @@ export class WorkflowListComponent implements OnInit {
   table: DatatableComponent;
 
   isLoading = true;
+  error = '';
+  updated: number | null = null;
   clusterName: string;
   workflowRows: WorkflowRow[];
 
@@ -35,28 +37,32 @@ export class WorkflowListComponent implements OnInit {
 
   ngOnInit() {
     if (this.route.parent) {
-      this.isLoading = true;
       this.clusterName = this.route.parent.snapshot.params['name'];
-
-      this.workflowService.getAll(this.clusterName).subscribe(
-        (workflows) => {
-          this.workflowRows = workflows.map((workflowName) => {
-            return {
-              name: workflowName,
-            };
-          });
-        },
-        (error) => {
-          // since rest API simply throws 404 instead of empty config when config is not initialized yet
-          // frontend has to treat 404 as normal result
-          if (error != 'Not Found') {
-            console.error(error);
-          }
-          this.isLoading = false;
-        },
-        () => (this.isLoading = false)
-      );
+      this.load();
     }
+  }
+
+  load() {
+    this.isLoading = true;
+    this.error = '';
+    this.workflowService.getAll(this.clusterName).subscribe(
+      (workflows) => {
+        this.workflowRows = workflows.map((workflowName) => {
+          return {
+            name: workflowName,
+          };
+        });
+        this.updated = Date.now();
+      },
+      (error) => {
+        // the REST API returns an empty list when there are no workflows, so
+        // any failure, including a 404, is reported instead of shown as empty
+        this.error =
+          typeof error === 'string' ? error : 'Cannot load workflows.';
+        this.isLoading = false;
+      },
+      () => (this.isLoading = false)
+    );
   }
 
   // Disable table row selection using the

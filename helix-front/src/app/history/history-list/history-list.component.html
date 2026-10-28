@@ -18,6 +18,16 @@
   -->
 
 <section>
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="rows ? rows.length : null"
+    [updated]="updated"
+    label="history entries"
+    emptyText="No history has been recorded yet."
+    (refresh)="load()"
+  ></hi-list-status>
+
   <ngx-datatable
     #historyTable
     class="material"
