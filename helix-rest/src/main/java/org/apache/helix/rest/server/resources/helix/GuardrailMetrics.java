@@ -19,25 +19,29 @@ package org.apache.helix.rest.server.resources.helix;
  * under the License.
  */
 
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.MetricRegistry;
-import org.apache.helix.guardrail.ValidationResult;
-import org.apache.helix.guardrail.Violation;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
 
 /**
  * Emits per-rule guard rail counters into a helix-rest {@link MetricRegistry} so operators can
  * quantify how often each rule stopped an unsafe mutation &mdash; i.e. answer "rule X prevented N
  * failures in production".
  * <p>
- * For every guard rail evaluation the following counters are incremented, keyed by the offending
+ * For every guard rail evaluation the following metrics are emitted, keyed by the
  * rule's {@link org.apache.helix.guardrail.GuardrailRule#getId() id}:
  * <ul>
- *   <li>{@code evaluated} &mdash; once per rule that ran, regardless of verdict or mode. This is the
- *       denominator for a per-rule "block rate". Because a rule also runs during a dry-run
- *       simulation, this count includes dry-run evaluations.</li>
+ *   <li>{@code evaluated} &mdash; a {@link com.codahale.metrics.Timer} updated once per rule that
+ *       ran, regardless of verdict or mode. Its count is the denominator for a per-rule "block
+ *       rate" (and, because a rule also runs during a dry-run simulation, includes dry-run
+ *       evaluations); its percentiles expose how long the rule takes to evaluate. Every rule run is
+ *       also tallied into exactly one terminal outcome counter below, so
+ *       {@code evaluated.count == passed + blocked + forced + dryRunInfeasible + dryRunPassed} per
+ *       rule.</li>
+ *   <li>{@code passed} &mdash; the rule ran and raised no violation during a real (non-dry-run)
+ *       request, certifying the mutation as safe. This is the per-rule "successes" number for
+ *       admitted writes.</li>
  *   <li>{@code blocked} &mdash; the rule flagged the mutation and the write was rejected with
  *       {@code 400} (enforce mode, not forced): a real prevented production change. This is the
  *       headline "prevented failures" number.</li>
@@ -45,50 +49,48 @@ import org.apache.helix.guardrail.Violation;
  *       {@code force=true}, so the write proceeded anyway.</li>
  *   <li>{@code dryRunInfeasible} &mdash; the rule flagged the mutation during a {@code dryRun=true}
  *       simulation, where no write is ever attempted.</li>
+ *   <li>{@code dryRunPassed} &mdash; the rule ran and raised no violation during a {@code
+ *       dryRun=true} simulation, where no write is ever attempted. Kept distinct from
+ *       {@code passed} so dry-run probes never inflate the real success count.</li>
  * </ul>
- * Counters are named {@code org.apache.helix.rest.guardrail.<RULE_ID>.<outcome>} so the helix-rest
+ * Metrics are named {@code org.apache.helix.rest.guardrail.<RULE_ID>.<outcome>} so the helix-rest
  * JMX reporter exports them under the same domain as every other REST metric. These are Codahale
- * {@link com.codahale.metrics.Counter}s in the per-namespace registry, matching the existing
- * helix-rest metric convention; nothing here assumes a particular downstream metric backend.
+ * metrics in the per-namespace registry, matching the existing helix-rest metric convention;
+ * nothing here assumes a particular downstream metric backend.
  */
 final class GuardrailMetrics {
   static final String METRIC_PREFIX = "org.apache.helix.rest.guardrail";
   static final String EVALUATED = "evaluated";
-  static final String BLOCKED = "blocked";
-  static final String FORCED = "forced";
-  static final String DRY_RUN_INFEASIBLE = "dryRunInfeasible";
+  static final String PASSED = GuardrailValidationEvent.Outcome.PASSED.getMetricName();
+  static final String BLOCKED = GuardrailValidationEvent.Outcome.BLOCKED.getMetricName();
+  static final String FORCED = GuardrailValidationEvent.Outcome.FORCED.getMetricName();
+  static final String DRY_RUN_INFEASIBLE =
+      GuardrailValidationEvent.Outcome.DRY_RUN_INFEASIBLE.getMetricName();
+  static final String DRY_RUN_PASSED =
+      GuardrailValidationEvent.Outcome.DRY_RUN_PASSED.getMetricName();
 
   private GuardrailMetrics() {
   }
 
   /**
-   * Record the outcome of a single guard rail evaluation.
+   * Record the outcome of a single guard rail evaluation. Every rule that ran is timed via its
+   * {@code evaluated} {@link com.codahale.metrics.Timer} and tallied into exactly one terminal
+   * outcome counter (a pass outcome {@code passed}/{@code dryRunPassed}, or a flag outcome
+   * {@code blocked}/{@code forced}/{@code dryRunInfeasible}). The per-rule outcomes are derived
+   * once in
+   * {@link GuardrailValidationEvent} and shared with any
+   * {@link org.apache.helix.rest.server.guardrail.GuardrailValidationListener}, so the JMX counters
+   * here and a listener can never disagree on a rule's verdict.
    *
-   * @param metrics          the per-namespace registry to increment
-   * @param evaluatedRuleIds the ids of every rule that ran (see
-   *                         {@link org.apache.helix.guardrail.GuardrailPipeline#getRuleIds()})
-   * @param result           the aggregated verdict for the mutation
-   * @param force            whether the caller passed {@code force=true}
-   * @param dryRun           whether the caller passed {@code dryRun=true}
+   * @param metrics the per-namespace registry to update
+   * @param event   the guard rail validation whose per-rule outcomes and latencies to record
    */
-  static void record(MetricRegistry metrics, List<String> evaluatedRuleIds, ValidationResult result,
-      boolean force, boolean dryRun) {
-    for (String ruleId : evaluatedRuleIds) {
-      metrics.counter(metricName(ruleId, EVALUATED)).inc();
-    }
-    if (result.isFeasible()) {
-      return;
-    }
-    // dryRun takes precedence over force, mirroring AbstractHelixResource#preflight.
-    String outcome = dryRun ? DRY_RUN_INFEASIBLE : (force ? FORCED : BLOCKED);
-    // A rule may report several violations (e.g. one per partition), but it blocked the write once,
-    // so attribute the outcome once per distinct rule.
-    Set<String> violatedRuleIds = new LinkedHashSet<>();
-    for (Violation violation : result.getViolations()) {
-      violatedRuleIds.add(violation.getRuleId());
-    }
-    for (String ruleId : violatedRuleIds) {
-      metrics.counter(metricName(ruleId, outcome)).inc();
+  static void record(MetricRegistry metrics, GuardrailValidationEvent event) {
+    for (GuardrailValidationEvent.RuleEvaluation evaluation : event.getRuleEvaluations()) {
+      metrics.timer(metricName(evaluation.getRuleId(), EVALUATED))
+          .update(evaluation.getDurationNanos(), TimeUnit.NANOSECONDS);
+      metrics.counter(metricName(evaluation.getRuleId(), evaluation.getOutcome().getMetricName()))
+          .inc();
     }
   }
 

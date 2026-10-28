@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BiConsumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -71,8 +72,21 @@ public class GuardrailPipeline {
    * feasible only if no rule produced a violation.
    */
   public ValidationResult validate(GuardrailContext context) {
+    return validate(context, null);
+  }
+
+  /**
+   * Evaluate every rule against {@code context} and return the combined result, reporting how long
+   * each rule took so callers can record per-rule latency. {@code ruleDurationNanosObserver}, when
+   * non-null, is invoked once per rule with that rule's {@link GuardrailRule#getId() id} and its
+   * wall-clock evaluation time in nanoseconds &mdash; including the time spent failing closed when a
+   * rule throws or returns no verdict, since that work still contributes to request latency.
+   */
+  public ValidationResult validate(GuardrailContext context,
+      BiConsumer<String, Long> ruleDurationNanosObserver) {
     List<Violation> violations = new ArrayList<>();
     for (GuardrailRule rule : rules) {
+      long startNanos = System.nanoTime();
       try {
         ValidationResult result = rule.validate(context);
         if (result == null) {
@@ -90,6 +104,10 @@ public class GuardrailPipeline {
             rule.getId(), context.getClusterName(), e);
         violations.add(Violation.newBuilder(rule.getId())
             .message("Rule evaluation failed: " + e.getMessage()).build());
+      } finally {
+        if (ruleDurationNanosObserver != null) {
+          ruleDurationNanosObserver.accept(rule.getId(), System.nanoTime() - startNanos);
+        }
       }
     }
     return violations.isEmpty() ? ValidationResult.feasible() : ValidationResult.of(violations);

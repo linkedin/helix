@@ -24,4 +24,5 @@ public enum ContextPropertyKeys {
   METADATA,
   ALL_NAMESPACES,
   ACL_REGISTER,
+  GUARDRAIL_VALIDATION_LISTENERS,
 }

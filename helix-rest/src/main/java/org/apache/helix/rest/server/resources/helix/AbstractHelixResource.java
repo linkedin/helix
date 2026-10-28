@@ -20,6 +20,9 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import javax.ws.rs.core.MediaType;
@@ -37,6 +40,8 @@ import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.server.ServerContext;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
+import org.apache.helix.rest.server.guardrail.GuardrailValidationListener;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.task.TaskDriver;
 import org.apache.helix.tools.ClusterSetup;
@@ -142,8 +147,13 @@ public class AbstractHelixResource extends AbstractResource {
    */
   protected Optional<Response> preflight(GuardrailPipeline pipeline, GuardrailContext context,
       boolean force, boolean dryRun) {
-    ValidationResult result = pipeline.validate(context);
-    recordGuardrailMetrics(pipeline, result, force, dryRun);
+    Map<String, Long> ruleDurationNanos = new LinkedHashMap<>();
+    ValidationResult result = pipeline.validate(context,
+        (ruleId, nanos) -> ruleDurationNanos.merge(ruleId, nanos, Long::sum));
+    GuardrailValidationEvent event = new GuardrailValidationEvent(getNamespace(),
+        pipeline.getRuleIds(), ruleDurationNanos, result, force, dryRun);
+    recordGuardrailMetrics(event);
+    notifyGuardrailValidationListeners(event);
     if (dryRun) {
       return Optional.of(verdictResponse(result, Response.Status.OK));
     }
@@ -163,13 +173,35 @@ public class AbstractHelixResource extends AbstractResource {
    * rule blocked an unsafe mutation. Metric emission is best-effort and must never break the request
    * path, so any failure here is swallowed.
    */
-  private void recordGuardrailMetrics(GuardrailPipeline pipeline, ValidationResult result,
-      boolean force, boolean dryRun) {
+  private void recordGuardrailMetrics(GuardrailValidationEvent event) {
     try {
       MetricRegistry metrics = SharedMetricRegistries.getOrCreate(getNamespace());
-      GuardrailMetrics.record(metrics, pipeline.getRuleIds(), result, force, dryRun);
+      GuardrailMetrics.record(metrics, event);
     } catch (Exception e) {
       LOG.warn("Failed to record guard rail metrics", e);
+    }
+  }
+
+  /**
+   * Notify any registered {@link GuardrailValidationListener}s of this evaluation so an embedded
+   * helix-rest can forward guard rail counts and latency into its own metrics pipeline. Each
+   * listener is invoked best-effort: a listener failure is logged and swallowed so it can never
+   * break the request path, mirroring {@link #recordGuardrailMetrics(GuardrailValidationEvent)}.
+   */
+  @SuppressWarnings("unchecked")
+  private void notifyGuardrailValidationListeners(GuardrailValidationEvent event) {
+    List<GuardrailValidationListener> listeners =
+        (List<GuardrailValidationListener>) _application.getProperties()
+            .get(ContextPropertyKeys.GUARDRAIL_VALIDATION_LISTENERS.name());
+    if (listeners == null || listeners.isEmpty()) {
+      return;
+    }
+    for (GuardrailValidationListener listener : listeners) {
+      try {
+        listener.onValidation(event);
+      } catch (Exception e) {
+        LOG.warn("Guard rail validation listener {} threw", listener.getClass().getName(), e);
+      }
     }
   }
 
