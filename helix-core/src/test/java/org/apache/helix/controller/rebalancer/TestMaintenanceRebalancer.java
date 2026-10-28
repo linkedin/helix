@@ -3,14 +3,31 @@ package org.apache.helix.controller.rebalancer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+import org.apache.helix.HelixManager;
+import org.apache.helix.constants.InstanceConstants.InstanceOperation;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
+import org.apache.helix.controller.rebalancer.constraint.MonitoredAbnormalResolver;
+import org.apache.helix.controller.stages.AttributeName;
+import org.apache.helix.controller.stages.BestPossibleStateOutput;
+import org.apache.helix.controller.stages.ClusterEvent;
+import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CurrentStateOutput;
+import org.apache.helix.controller.stages.MessageGenerationPhase;
+import org.apache.helix.controller.stages.MessageOutput;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MasterSlaveSMD;
+import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
+import org.apache.helix.model.Resource;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.util.TestInputLoader;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
@@ -58,6 +75,331 @@ public class TestMaintenanceRebalancer {
         "comment", "stateModel", "liveInstances", "preferenceList", "currentStateMap", "expectedPreferenceList"
     };
     return TestInputLoader.loadTestInputs("MaintenanceRebalancer.ComputeNewIdealState.json", params);
+  }
+
+  @DataProvider
+  public Object[][] maintenanceEvacuationStates() {
+    return new Object[][] {
+        {InstanceOperation.EVACUATE, "OFFLINE", "OFFLINE"},
+        {InstanceOperation.ENABLE, "OFFLINE", "SLAVE"},
+        {InstanceOperation.DISABLE, "OFFLINE", "OFFLINE"},
+        {InstanceOperation.EVACUATE, "SLAVE", "SLAVE"},
+        {InstanceOperation.EVACUATE, "MASTER", "MASTER"},
+        {InstanceOperation.EVACUATE, "ERROR", "ERROR"}
+    };
+  }
+
+  @DataProvider
+  public Object[][] drainedBatchModels() {
+    return new Object[][] {
+        {"MasterSlave", "3", 3, "SLAVE", true},
+        {"MasterSlave", "3", 2, "SLAVE", false},
+        {"MasterSlave", "5", 3, "SLAVE", false},
+        {"MasterSlave", "1", 1, "SLAVE", true},
+        {"MasterSlave", "ANY_LIVEINSTANCE", 2, "SLAVE", true},
+        {"OnlineOffline", "3", 3, "OFFLINE", true},
+        {"OnlineOffline", "3", 2, "ONLINE", false},
+        {"LeaderStandby", "3", 3, "STANDBY", true}
+    };
+  }
+
+  @Test(dataProvider = "drainedBatchModels")
+  public void testMultipleDrainedReplicasAcrossStateModels(String model, String replicas,
+      int peerCount, String peerState, boolean stayInitial) {
+    StateModelDefinition definition =
+        BuiltInStateModelDefinitions.valueOf(model).getStateModelDefinition();
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef(model);
+    CurrentStateOutput current = new CurrentStateOutput();
+    Set<String> evacuating = Set.of("old1", "old2");
+    Map<String, LiveInstance> live = new HashMap<>();
+    for (String old : evacuating) {
+      live.put(old, new LiveInstance(old));
+      current.setCurrentState(RESOURCE_NAME, partition, old, definition.getInitialState());
+    }
+    Map<String, LiveInstance> assignable = new HashMap<>();
+    List<String> peers = new ArrayList<>();
+    for (int i = 0; i < peerCount; i++) {
+      String peer = "peer" + i;
+      peers.add(peer);
+      LiveInstance instance = new LiveInstance(peer);
+      live.put(peer, instance);
+      assignable.put(peer, instance);
+      current.setCurrentState(RESOURCE_NAME, partition, peer, peerState);
+    }
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterConfig()).thenReturn(new ClusterConfig("maintenanceTest"));
+    when(cache.getStateModelDef(model)).thenReturn(definition);
+    when(cache.getLiveInstances()).thenReturn(live);
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    when(cache.getEvacuatingInstances()).thenReturn(evacuating);
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME)).thenReturn(Set.of());
+    when(cache.getAbnormalStateResolver(model))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef(model);
+    target.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    target.setReplicas(replicas);
+    target.setPreferenceList(PARTITION_NAME, peers);
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment =
+        rebalancer.computeBestPossiblePartitionState(cache, target, resource, current)
+            .getReplicaMap(partition);
+    for (String old : evacuating) {
+      Assert.assertEquals(definition.getInitialState().equals(assignment.get(old)), stayInitial);
+    }
+    Assert.assertTrue(assignment.containsValue(definition.getTopState()),
+        "Maintenance must still elect or recover a top-state replica");
+  }
+
+  @DataProvider
+  public Object[][] pendingEvacuationTransitions() {
+    return new Object[][] {{"SLAVE", "SLAVE"}, {"DROPPED", "OFFLINE"}};
+  }
+
+  @Test(dataProvider = "pendingEvacuationTransitions")
+  public void testPendingRecoverySurvivesPeerReturnInMaintenance(String pendingTarget,
+      String expectedState) throws Exception {
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef("MasterSlave");
+    CurrentStateOutput current = new CurrentStateOutput();
+    current.setCurrentState(RESOURCE_NAME, partition, "old", "OFFLINE");
+    current.setCurrentState(RESOURCE_NAME, partition, "master", "MASTER");
+    current.setCurrentState(RESOURCE_NAME, partition, "follower", "SLAVE");
+    Map<String, LiveInstance> live = new HashMap<>();
+    for (String host : List.of("old", "master", "follower")) {
+      LiveInstance instance = new LiveInstance(host);
+      instance.setSessionId("session");
+      live.put(host, instance);
+    }
+    Map<String, LiveInstance> assignable = new HashMap<>(live);
+    assignable.remove("old");
+    ClusterConfig clusterConfig = new ClusterConfig("maintenanceTest");
+    clusterConfig.stateTransitionCancelEnabled(true);
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterConfig()).thenReturn(clusterConfig);
+    when(cache.getStateModelDef("MasterSlave")).thenReturn(MasterSlaveSMD.build());
+    when(cache.getLiveInstances()).thenReturn(live);
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    when(cache.getEvacuatingInstances()).thenReturn(Set.of("old"));
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME)).thenReturn(Set.of());
+    when(cache.getAbnormalStateResolver("MasterSlave"))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef("MasterSlave");
+    target.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    target.setReplicas("3");
+    target.setPreferenceList(PARTITION_NAME,
+        new ArrayList<>(List.of("master", "follower", "replacement")));
+    when(cache.getIdealState(RESOURCE_NAME)).thenReturn(target);
+    HelixManager manager = mock(HelixManager.class);
+    when(manager.getInstanceName()).thenReturn("controller");
+    when(manager.getSessionId()).thenReturn("controllerSession");
+    ClusterEvent event = new ClusterEvent("maintenanceTest", ClusterEventType.ControllerChange);
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), Map.of(RESOURCE_NAME, resource));
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), current);
+    BestPossibleStateOutput bestPossible = new BestPossibleStateOutput();
+    event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossible);
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    bestPossible.setState(RESOURCE_NAME, partition, rebalancer
+        .computeBestPossiblePartitionState(cache, target, resource, current).getReplicaMap(partition));
+    new MessageGenerationPhase().process(event);
+    MessageOutput messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    List<Message> initialMessages = messages.getMessages(RESOURCE_NAME, partition);
+    Assert.assertEquals(initialMessages.size(), 1);
+    Message recovery = initialMessages.get(0);
+    Assert.assertEquals(recovery.getTgtName(), "old");
+    Assert.assertEquals(recovery.getFromState(), "OFFLINE");
+    Assert.assertEquals(recovery.getToState(), "SLAVE");
+
+    // The promotion has not completed when the missing peer comes back.
+    // The DROPPED row substitutes a downward pending message as a negative control.
+    recovery.setToState(pendingTarget);
+    current.setPendingMessage(RESOURCE_NAME, partition, "old", recovery);
+    current.setCurrentState(RESOURCE_NAME, partition, "replacement", "SLAVE");
+    LiveInstance replacement = new LiveInstance("replacement");
+    replacement.setSessionId("session");
+    live.put("replacement", replacement);
+    assignable.put("replacement", replacement);
+    rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment = rebalancer
+        .computeBestPossiblePartitionState(cache, target, resource, current).getReplicaMap(partition);
+    bestPossible.setState(RESOURCE_NAME, partition, assignment);
+    new MessageGenerationPhase().process(event);
+    messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+    if (pendingTarget.equals("SLAVE")) {
+      Assert.assertTrue(messages.getMessages(RESOURCE_NAME, partition).isEmpty(),
+          "Peer recovery in maintenance must not cancel the pending promotion");
+    }
+    Assert.assertEquals(assignment.get("old"), expectedState);
+  }
+
+  @DataProvider
+  public Object[][] replacementAvailability() {
+    return new Object[][] {
+        {0, "SLAVE", true, InstanceOperation.ENABLE, null, "MASTER"},
+        {2, "SLAVE", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.ENABLE, null, "OFFLINE"},
+        {3, "ERROR", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "DROPPED", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "OFFLINE", true, InstanceOperation.ENABLE, null, "OFFLINE"},
+        {3, "SLAVE", false, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.DISABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.ENABLE, "OFFLINE", "OFFLINE"},
+        {3, "SLAVE", true, InstanceOperation.EVACUATE, null, "OFFLINE"},
+        {3, "OFFLINE", true, InstanceOperation.EVACUATE, null, "SLAVE"}
+    };
+  }
+
+  @Test(dataProvider = "replacementAvailability")
+  public void testEvacuationUsesAvailableReplicaHolders(int peerCount,
+      String replacementState, boolean replacementLive, InstanceOperation replacementOperation,
+      String pendingState, String expectedState) {
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef("MasterSlave");
+    CurrentStateOutput current = new CurrentStateOutput();
+    current.setCurrentState(RESOURCE_NAME, partition, "old", "OFFLINE");
+    Map<String, LiveInstance> live = new HashMap<>();
+    live.put("old", new LiveInstance("old"));
+    List<String> preferenceList = new ArrayList<>();
+    for (int i = 0; i < peerCount; i++) {
+      String peer = "peer" + i;
+      String state = i == 0 ? "MASTER" : replacementState;
+      current.setCurrentState(RESOURCE_NAME, partition, peer, state);
+      preferenceList.add(peer);
+      if (i != peerCount - 1 || replacementLive) {
+        live.put(peer, new LiveInstance(peer));
+      }
+    }
+    String replacement = "peer" + (peerCount - 1);
+    if (pendingState != null) {
+      Message pending = new Message(Message.MessageType.STATE_TRANSITION, "pending");
+      pending.setFromState(replacementState);
+      pending.setToState(pendingState);
+      current.setPendingMessage(RESOURCE_NAME, partition, replacement, pending);
+    }
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterConfig()).thenReturn(new ClusterConfig("maintenanceTest"));
+    when(cache.getStateModelDef("MasterSlave")).thenReturn(MasterSlaveSMD.build());
+    when(cache.getEvacuatingInstances()).thenReturn(
+        replacementOperation == InstanceOperation.EVACUATE ? Set.of("old", replacement) : Set.of("old"));
+    when(cache.getLiveInstances()).thenReturn(live);
+    Map<String, LiveInstance> assignable = new HashMap<>(live);
+    assignable.remove("old");
+    if (replacementOperation == InstanceOperation.EVACUATE) {
+      assignable.remove(replacement);
+    }
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME))
+        .thenReturn(replacementOperation == InstanceOperation.DISABLE ? Set.of(replacement) : Set.of());
+    when(cache.getAbnormalStateResolver("MasterSlave"))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef("MasterSlave");
+    target.setReplicas("3");
+    target.setPreferenceList(PARTITION_NAME, preferenceList);
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+    IdealState maintenanceTarget =
+        rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment = rebalancer
+        .computeBestPossiblePartitionState(cache, maintenanceTarget, resource, current)
+        .getReplicaMap(partition);
+    Assert.assertEquals(assignment.get("old"), expectedState);
+  }
+
+  @Test(dataProvider = "maintenanceEvacuationStates")
+  public void testMaintenanceRespectsDrainedEvacuatingReplica(InstanceOperation operation,
+      String oldState, String expectedState) throws Exception {
+    Partition partition = new Partition(PARTITION_NAME);
+    Resource resource = new Resource(RESOURCE_NAME);
+    resource.addPartition(PARTITION_NAME);
+    resource.setStateModelDefRef("MasterSlave");
+    CurrentStateOutput current = new CurrentStateOutput();
+    Map<String, String> states = Map.of("old", oldState, "replacement", "SLAVE",
+        "follower", "SLAVE", "master", oldState.equals("MASTER") ? "SLAVE" : "MASTER");
+    Map<String, LiveInstance> live = new HashMap<>();
+    states.forEach((host, state) -> {
+      current.setCurrentState(RESOURCE_NAME, partition, host, state);
+      LiveInstance instance = new LiveInstance(host);
+      instance.setSessionId("session");
+      live.put(host, instance);
+    });
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    ClusterConfig clusterConfig = new ClusterConfig("maintenanceTest");
+    clusterConfig.stateTransitionCancelEnabled(true);
+    when(cache.getClusterConfig()).thenReturn(clusterConfig);
+    when(cache.getStateModelDef("MasterSlave")).thenReturn(MasterSlaveSMD.build());
+    when(cache.getLiveInstances()).thenReturn(live);
+    when(cache.getEvacuatingInstances()).thenReturn(
+        operation == InstanceOperation.EVACUATE ? Set.of("old") : Collections.emptySet());
+    Map<String, LiveInstance> assignable = new HashMap<>(live);
+    if (operation == InstanceOperation.EVACUATE) {
+      assignable.remove("old");
+    }
+    when(cache.getAssignableLiveInstances()).thenReturn(assignable);
+    Set<String> disabled = operation == InstanceOperation.DISABLE ? Set.of("old") : Set.of();
+    when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME)).thenReturn(disabled);
+    when(cache.getAbnormalStateResolver("MasterSlave"))
+        .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
+    IdealState target = new IdealState(RESOURCE_NAME);
+    target.setStateModelDefRef("MasterSlave");
+    target.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    target.setReplicas("3");
+    target.setPreferenceList(PARTITION_NAME,
+        new ArrayList<>(List.of("master", "follower", "replacement")));
+    when(cache.getIdealState(RESOURCE_NAME)).thenReturn(target);
+
+    MaintenanceRebalancer rebalancer = new MaintenanceRebalancer();
+    IdealState maintenanceTarget =
+        rebalancer.computeNewIdealState(RESOURCE_NAME, target, current, cache);
+    Map<String, String> assignment = rebalancer
+        .computeBestPossiblePartitionState(cache, maintenanceTarget, resource, current)
+        .getReplicaMap(partition);
+    Assert.assertEquals(assignment.get("old"), expectedState);
+    Assert.assertEquals(assignment.get("replacement"), "SLAVE");
+    Assert.assertEquals(assignment.get("follower"), "SLAVE");
+    Assert.assertEquals(current.getCurrentState(RESOURCE_NAME, partition, "old"), oldState);
+
+    if (operation == InstanceOperation.EVACUATE && oldState.equals("OFFLINE")) {
+      HelixManager manager = mock(HelixManager.class);
+      when(manager.getInstanceName()).thenReturn("controller");
+      when(manager.getSessionId()).thenReturn("controllerSession");
+      ClusterEvent event = new ClusterEvent("maintenanceTest", ClusterEventType.ControllerChange);
+      event.addAttribute(AttributeName.helixmanager.name(), manager);
+      event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+      event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), Map.of(RESOURCE_NAME, resource));
+      event.addAttribute(AttributeName.CURRENT_STATE.name(), current);
+      BestPossibleStateOutput bestPossible = new BestPossibleStateOutput();
+      bestPossible.setState(RESOURCE_NAME, partition, assignment);
+      event.addAttribute(AttributeName.BEST_POSSIBLE_STATE.name(), bestPossible);
+      new MessageGenerationPhase().process(event);
+      MessageOutput messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+      Assert.assertTrue(messages.getMessages(RESOURCE_NAME, partition).isEmpty(),
+          "Maintenance must not reactivate the drained replica");
+
+      Map<String, String> afterMaintenance = new HashMap<>(assignment);
+      afterMaintenance.put("old", "DROPPED");
+      bestPossible.setState(RESOURCE_NAME, partition, afterMaintenance);
+      new MessageGenerationPhase().process(event);
+      messages = event.getAttribute(AttributeName.MESSAGES_ALL.name());
+      List<Message> drops = messages.getMessages(RESOURCE_NAME, partition);
+      Assert.assertEquals(drops.size(), 1);
+      Assert.assertEquals(drops.get(0).getMsgType(), Message.MessageType.STATE_TRANSITION.name());
+      Assert.assertEquals(drops.get(0).getTgtName(), "old");
+      Assert.assertEquals(drops.get(0).getFromState(), "OFFLINE");
+      Assert.assertEquals(drops.get(0).getToState(), "DROPPED");
+    }
   }
 
   /**
