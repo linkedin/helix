@@ -90,6 +90,8 @@ import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.exception.ZkClientException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.eclipse.jetty.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -753,7 +755,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             LOG.error("Invalid exclusions for cluster: {}, instance: {}, exclusions: {}", clusterId,
                 instanceName, exclusions, e);
             return badRequest(e.getMessage());
-          } catch (HelixException e) {
+          } catch (HelixException | ZkException | ZkClientException e) {
+            // A failed ZooKeeper read is a server error, not a bad request.
             LOG.error("Encountered error when checking if replicas are offline for cluster: {}, "
                 + "instance: {}", clusterId, instanceName, e);
             return serverError(e);
