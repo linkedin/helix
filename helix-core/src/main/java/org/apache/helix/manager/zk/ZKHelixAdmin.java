@@ -525,14 +525,15 @@ public class ZKHelixAdmin implements HelixAdmin {
    * OFFLINE. With {@link InstanceDrainExclusionType#ERROR_PARTITIONS} excluded, a replica in ERROR
    * also counts as offline.
    *
-   * The state is NOT_LIVE when the instance is not live, and MULTIPLE_SESSIONS while it is
-   * carrying over current states from a previous session, which may still describe serving
+   * The state is NOT_LIVE when the instance exists but is not live, and MULTIPLE_SESSIONS while
+   * it is carrying over current states from a previous session, which may still describe serving
    * replicas. Otherwise it is IN_PROGRESS while messages are pending or a replica is neither
    * offline nor in ERROR, BLOCKED_BY_ERROR when only replicas in ERROR are left, and
    * REPLICAS_OFFLINE when every replica is offline.
    *
    * This is used by the Helix REST {@code areReplicasOffline} command.
    *
+   * @return the status, or null if the instance does not exist in the cluster
    * @throws IllegalArgumentException if an exclusion type other than ERROR_PARTITIONS is given
    */
   public InstanceReplicaStatus getInstanceReplicaStatus(String clusterName, String instanceName,
@@ -550,6 +551,9 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
     if (liveInstance == null) {
+      if (!_zkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName))) {
+        return null;
+      }
       replicaStatus.setState(InstanceReplicaStatus.State.NOT_LIVE);
       replicaStatus.setReplicaCount(0);
       replicaStatus.setOfflineReplicaCount(0);

@@ -191,6 +191,13 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
   }
 
   @Test
+  public void testUnknownInstance() {
+    // An instance that was never added must not be reported as offline.
+    Assert.assertNull(
+        _admin.getInstanceReplicaStatus(CLUSTER_NAME, "localhost_12919", Collections.emptySet()));
+  }
+
+  @Test
   public void testCarryingOverAPreviousSession() {
     String sessionId = addLiveInstance();
     // A frozen participant carries over the current states of its previous session only when it

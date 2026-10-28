@@ -790,6 +790,10 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         "clusters/{}/instances/{}?command=areReplicasOffline&exclusions=DISABLED_PARTITION")
         .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
         .format(CLUSTER_NAME, INSTANCE_NAME).post(this, entity);
+    // An instance that doesn't exist is not reported as offline.
+    new JerseyUriRequestBuilder("clusters/{}/instances/{}?command=areReplicasOffline")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format(CLUSTER_NAME, INSTANCE_NAME + "_unknown").post(this, entity);
 
     // test isEvacuateFinished on instance with EVACUATE and no currentState
     // Create new instance so no currentState or messages assigned to it

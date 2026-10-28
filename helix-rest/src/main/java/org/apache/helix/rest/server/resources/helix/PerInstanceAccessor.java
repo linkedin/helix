@@ -758,6 +758,10 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                 + "instance: {}", clusterId, instanceName, e);
             return serverError(e);
           }
+          if (replicaStatus == null) {
+            return notFound(String.format("Instance %s does not exist in cluster %s.", instanceName,
+                clusterId));
+          }
           return OK(OBJECT_MAPPER.writeValueAsString(replicaStatus));
         case forceKillInstance:
           boolean instanceForceKilled = admin.forceKillInstance(clusterId, instanceName, reason, instanceOperationSource);
