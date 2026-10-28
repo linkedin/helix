@@ -59,8 +59,9 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
    * the resource uses.
    *
    * <p>Replicas on evacuating instances that have reached the initial state stay there
-   * only when other live, assignable replicas satisfy the full replica count and state
-   * requirements without pending transitions. Otherwise normal recovery is preserved.
+   * only when other live, enabled holders satisfy the replica count. Enabled holders
+   * in the initial state count because maintenance can promote them in the same pass;
+   * other evacuating holders count only while serving. Otherwise recovery is preserved.
    * An upward transition already pending on the evacuating replica is allowed to finish.
    * Serving replicas on evacuating instances retain the normal maintenance behavior.
    */
@@ -204,7 +205,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
         }
       }
       if (instancesToKeepOffline != disabledInstancesForPartition
-          && !hasHealthyReplacementReplicas(cache, idealState, stateModelDef, partition,
+          && !hasEnoughReplicaHolders(cache, idealState, stateModelDef, partition,
               currentStateOutput, liveInstances, disabledInstancesForPartition)) {
         instancesToKeepOffline = disabledInstancesForPartition;
       }
@@ -215,7 +216,7 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
         monitoredResolver, cache);
   }
 
-  private boolean hasHealthyReplacementReplicas(ResourceControllerDataProvider cache,
+  private boolean hasEnoughReplicaHolders(ResourceControllerDataProvider cache,
       IdealState idealState, StateModelDefinition stateModelDef, Partition partition,
       CurrentStateOutput currentStateOutput, Set<String> liveInstances,
       Set<String> disabledInstancesForPartition) {
@@ -224,24 +225,27 @@ public class MaintenanceRebalancer extends SemiAutoRebalancer<ResourceController
     if (replicas <= 0) {
       return false;
     }
-    // Do not cap the requirement to currently available replicas during an outage.
-    Map<String, Integer> requiredStates = stateModelDef.getStateCountMap(replicas, replicas);
-    if (requiredStates.isEmpty()) {
-      return false;
-    }
     String resource = idealState.getResourceName();
     Set<String> unhealthyStates =
         InstanceValidationUtil.getUnhealthyStates(cache.getResourceConfig(resource), stateModelDef);
+    Set<String> evacuatingInstances = cache.getEvacuatingInstances();
+    int holders = 0;
     for (Map.Entry<String, String> replica :
         currentStateOutput.getCurrentStateMap(resource, partition).entrySet()) {
       String instance = replica.getKey();
       String state = replica.getValue();
-      if (liveInstances.contains(instance) && assignableLiveInstances.contains(instance)
-          && !disabledInstancesForPartition.contains(instance) && !unhealthyStates.contains(state)
-          && currentStateOutput.getPendingMessage(resource, partition, instance) == null) {
-        requiredStates.computeIfPresent(state, (key, count) -> count > 1 ? count - 1 : null);
+      if (!liveInstances.contains(instance) || disabledInstancesForPartition.contains(instance)) {
+        continue;
+      }
+      boolean initial = stateModelDef.getInitialState().equals(state);
+      boolean serving = !initial && !unhealthyStates.contains(state);
+      boolean eligible = assignableLiveInstances.contains(instance)
+          ? serving || initial
+          : evacuatingInstances.contains(instance) && serving;
+      if (eligible && ++holders >= replicas) {
+        return true;
       }
     }
-    return requiredStates.isEmpty();
+    return false;
   }
 }

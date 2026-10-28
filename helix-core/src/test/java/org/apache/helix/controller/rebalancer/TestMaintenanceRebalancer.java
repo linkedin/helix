@@ -178,20 +178,23 @@ public class TestMaintenanceRebalancer {
   @DataProvider
   public Object[][] replacementAvailability() {
     return new Object[][] {
-        {0, "SLAVE", true, false, null, "MASTER"},
-        {2, "SLAVE", true, false, null, "SLAVE"},
-        {3, "SLAVE", true, false, null, "OFFLINE"},
-        {3, "ERROR", true, false, null, "SLAVE"},
-        {3, "OFFLINE", true, false, null, "SLAVE"},
-        {3, "SLAVE", false, false, null, "SLAVE"},
-        {3, "SLAVE", true, true, null, "SLAVE"},
-        {3, "SLAVE", true, false, "OFFLINE", "SLAVE"}
+        {0, "SLAVE", true, InstanceOperation.ENABLE, null, "MASTER"},
+        {2, "SLAVE", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.ENABLE, null, "OFFLINE"},
+        {3, "ERROR", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "DROPPED", true, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "OFFLINE", true, InstanceOperation.ENABLE, null, "OFFLINE"},
+        {3, "SLAVE", false, InstanceOperation.ENABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.DISABLE, null, "SLAVE"},
+        {3, "SLAVE", true, InstanceOperation.ENABLE, "OFFLINE", "OFFLINE"},
+        {3, "SLAVE", true, InstanceOperation.EVACUATE, null, "OFFLINE"},
+        {3, "OFFLINE", true, InstanceOperation.EVACUATE, null, "SLAVE"}
     };
   }
 
   @Test(dataProvider = "replacementAvailability")
-  public void testEvacuationPreservesRecoveryWithoutHealthyReplacements(int peerCount,
-      String replacementState, boolean replacementLive, boolean replacementDisabled,
+  public void testEvacuationUsesAvailableReplicaHolders(int peerCount,
+      String replacementState, boolean replacementLive, InstanceOperation replacementOperation,
       String pendingState, String expectedState) {
     Partition partition = new Partition(PARTITION_NAME);
     Resource resource = new Resource(RESOURCE_NAME);
@@ -221,13 +224,17 @@ public class TestMaintenanceRebalancer {
     ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
     when(cache.getClusterConfig()).thenReturn(new ClusterConfig("maintenanceTest"));
     when(cache.getStateModelDef("MasterSlave")).thenReturn(MasterSlaveSMD.build());
-    when(cache.getEvacuatingInstances()).thenReturn(Set.of("old"));
+    when(cache.getEvacuatingInstances()).thenReturn(
+        replacementOperation == InstanceOperation.EVACUATE ? Set.of("old", replacement) : Set.of("old"));
     when(cache.getLiveInstances()).thenReturn(live);
     Map<String, LiveInstance> assignable = new HashMap<>(live);
     assignable.remove("old");
+    if (replacementOperation == InstanceOperation.EVACUATE) {
+      assignable.remove(replacement);
+    }
     when(cache.getAssignableLiveInstances()).thenReturn(assignable);
     when(cache.getDisabledInstancesForPartition(RESOURCE_NAME, PARTITION_NAME))
-        .thenReturn(replacementDisabled ? Set.of(replacement) : Set.of());
+        .thenReturn(replacementOperation == InstanceOperation.DISABLE ? Set.of(replacement) : Set.of());
     when(cache.getAbnormalStateResolver("MasterSlave"))
         .thenReturn(MonitoredAbnormalResolver.DUMMY_STATE_RESOLVER);
     IdealState target = new IdealState(RESOURCE_NAME);
