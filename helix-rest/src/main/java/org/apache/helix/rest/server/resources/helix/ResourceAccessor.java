@@ -23,11 +23,13 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
@@ -48,7 +50,9 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
@@ -59,6 +63,7 @@ import org.apache.helix.guardrail.rules.PartitionWeightCapacityGuardrailRule;
 import org.apache.helix.guardrail.rules.ResourceInUseGuardrailRule;
 import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
 import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
+import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
@@ -86,6 +91,7 @@ public class ResourceAccessor extends AbstractHelixResource {
     externalView,
     externalViews,
     resourceConfig,
+    resource_summaries,
   }
 
   public enum HealthStatus {
@@ -119,6 +125,69 @@ public class ResourceAccessor extends AbstractHelixResource {
       externalViewsNode.addAll((ArrayNode) OBJECT_MAPPER.valueToTree(externalViews));
     }
 
+    return JSONRepresentation(root);
+  }
+
+  /**
+   * Lists every resource with a fixed, trimmed set of IdealState fields, from one bulk read, so a
+   * client does not have to fetch each IdealState to render a resource table.
+   *
+   * <p>Response (HTTP 200), keyed by resource name in sorted order:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "resource_summaries": {
+   *     "db0": { "rebalanceMode": "FULL_AUTO", "stateModelDef": "MasterSlave",
+   *              "numPartitions": 16, "replicas": "3", "minActiveReplicas": 2,
+   *              "maxPartitionsPerInstance": 2147483647, "instanceGroupTag": "tagA",
+   *              "enabled": true, "waged": true, "hasExternalView": true } } }
+   * }</pre>
+   *
+   * <p>{@code waged} is true when the resource's rebalancer class is the WAGED rebalancer.
+   * {@code replicas} is a string because it can be {@code ANY_LIVEINSTANCE}.
+   */
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("summaries")
+  public Response getResourceSummaries(@PathParam("clusterId") String clusterId) {
+    // 404 rather than an empty listing: a missing cluster reads as an empty child list.
+    if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      return notFound();
+    }
+    HelixDataAccessor accessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    List<IdealState> idealStates = accessor.getChildValues(keyBuilder.idealStates(), true);
+    List<String> externalViews = accessor.getChildNames(keyBuilder.externalViews());
+    Set<String> withExternalView = externalViews == null ? Collections.emptySet()
+        : new HashSet<>(externalViews);
+
+    // Sorted so the payload is stable across calls for the same cluster state.
+    Map<String, IdealState> sorted = new TreeMap<>();
+    if (idealStates != null) {
+      for (IdealState idealState : idealStates) {
+        if (idealState != null) {
+          sorted.put(idealState.getResourceName(), idealState);
+        }
+      }
+    }
+
+    ObjectNode root = JsonNodeFactory.instance.objectNode();
+    root.put(Properties.id.name(), clusterId);
+    ObjectNode summariesNode = root.putObject(ResourceProperties.resource_summaries.name());
+    for (Map.Entry<String, IdealState> entry : sorted.entrySet()) {
+      IdealState idealState = entry.getValue();
+      ObjectNode node = summariesNode.putObject(entry.getKey());
+      node.put("rebalanceMode", String.valueOf(idealState.getRebalanceMode()));
+      node.put("stateModelDef", idealState.getStateModelDefRef());
+      node.put("numPartitions", idealState.getNumPartitions());
+      node.put("replicas", idealState.getReplicas());
+      node.put("minActiveReplicas", idealState.getMinActiveReplicas());
+      node.put("maxPartitionsPerInstance", idealState.getMaxPartitionsPerInstance());
+      node.put("instanceGroupTag", idealState.getInstanceGroupTag());
+      node.put("enabled", idealState.isEnabled());
+      node.put("waged", WagedRebalancer.class.getName().equals(idealState.getRebalancerClassName()));
+      node.put("hasExternalView", withExternalView.contains(entry.getKey()));
+    }
     return JSONRepresentation(root);
   }
 

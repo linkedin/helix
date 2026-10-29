@@ -95,6 +95,53 @@ public class TestResourceAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testGetResourceSummaries() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String cluster = "TestResourceSummariesCluster";
+    _gSetupTool.addCluster(cluster, true);
+    _clusters.add(cluster);
+    _gSetupTool.addResourceToCluster(cluster, "rsDb1", 4, "OnlineOffline", "SEMI_AUTO");
+    _gSetupTool.addResourceToCluster(cluster, "rsDb0", 8, "MasterSlave", "FULL_AUTO");
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, "rsDb0");
+    idealState.setRebalancerClassName(WagedRebalancer.class.getName());
+    idealState.setReplicas("2");
+    idealState.setInstanceGroupTag("tagA");
+    idealState.enable(false);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, "rsDb0", idealState);
+
+    JsonNode summaries = OBJECT_MAPPER
+        .readTree(get("clusters/" + cluster + "/resources/summaries", null,
+            Response.Status.OK.getStatusCode(), true))
+        .get(ResourceAccessor.ResourceProperties.resource_summaries.name());
+
+    List<String> listed = new ArrayList<>();
+    summaries.fieldNames().forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("rsDb0", "rsDb1"));
+
+    JsonNode waged = summaries.get("rsDb0");
+    Assert.assertEquals(waged.get("rebalanceMode").asText(), "FULL_AUTO");
+    Assert.assertEquals(waged.get("stateModelDef").asText(), "MasterSlave");
+    Assert.assertEquals(waged.get("numPartitions").asInt(), 8);
+    Assert.assertEquals(waged.get("replicas").asText(), "2");
+    Assert.assertEquals(waged.get("instanceGroupTag").asText(), "tagA");
+    Assert.assertFalse(waged.get("enabled").asBoolean());
+    Assert.assertTrue(waged.get("waged").asBoolean());
+    Assert.assertFalse(waged.get("hasExternalView").asBoolean());
+
+    JsonNode semiAuto = summaries.get("rsDb1");
+    Assert.assertEquals(semiAuto.get("rebalanceMode").asText(), "SEMI_AUTO");
+    Assert.assertTrue(semiAuto.get("enabled").asBoolean());
+    Assert.assertFalse(semiAuto.get("waged").asBoolean());
+
+    get("clusters/TestResourceSummariesClusterDoesNotExist/resources/summaries", null,
+        Response.Status.NOT_FOUND.getStatusCode(), false);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   @Test(dependsOnMethods = "testGetResources")
   public void testGetResource() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
