@@ -150,8 +150,9 @@ public class ResourceAccessor extends AbstractHelixResource {
   @GET
   @Path("summaries")
   public Response getResourceSummaries(@PathParam("clusterId") String clusterId) {
-    // 404 rather than an empty listing: a missing cluster reads as an empty child list.
-    if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+    // 404 rather than an empty listing: a missing cluster reads as an empty child list. Unlike
+    // ZKUtil#isClusterSetup, a failed read propagates as a 500 instead of reading as missing.
+    if (!getRealmAwareZkClient().exists("/" + clusterId)) {
       return notFound();
     }
     HelixDataAccessor accessor = getDataAccssor(clusterId);
