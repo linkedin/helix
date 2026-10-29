@@ -95,7 +95,8 @@ public class InstancesAccessor extends AbstractHelixResource {
     instance_stoppable_parallel,
     instance_not_stoppable_with_reasons,
     instances_unable_to_accept_online_replicas,
-    instances_under_instance_operation_maintenance
+    instances_under_instance_operation_maintenance,
+    instance_summaries
   }
 
   public enum InstanceHealthSelectionBase {
@@ -196,6 +197,8 @@ public class InstancesAccessor extends AbstractHelixResource {
       return getInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
     case getInstancesUnderInstanceOperationMaintenance:
       return getInstancesUnderInstanceOperationMaintenance(clusterId, accessor);
+    case getInstanceSummaries:
+      return getInstanceSummaries(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
@@ -364,6 +367,76 @@ public class InstancesAccessor extends AbstractHelixResource {
       instanceNode.put("expiresAtMillis", instanceConfig.getInstanceOperationMaintenanceUntilMs());
     }
     return JSONRepresentation(root);
+  }
+
+  /**
+   * Lists every instance with a fixed, trimmed set of fields, from one bulk read of the instance
+   * configs and one of the live instance names, so a client does not have to fetch each instance
+   * config to render an instance table or a topology.
+   *
+   * <p>Response (HTTP 200), keyed by instance name in sorted order:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instance_summaries": {
+   *     "h1_12918": { "live": true, "host": "h1", "port": "12918",
+   *                   "instanceOperation": "ENABLE", "domain": "zone=z1,host=h1",
+   *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 } } } }
+   * }</pre>
+   *
+   * <p>{@code live} is the raw {@code /LIVEINSTANCES} membership and {@code instanceOperation} is
+   * the effective operation, as in {@code getInstancesUnderInstanceOperationMaintenance}.
+   * {@code capacity} is the WAGED instance capacity map, empty when unset or unparsable.
+   */
+  private Response getInstanceSummaries(String clusterId, HelixDataAccessor accessor) {
+    try {
+      // 404 rather than an empty listing: HelixDataAccessor#getChildValues normalizes a missing
+      // cluster to an empty list.
+      if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+        return notFound();
+      }
+      PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+      List<InstanceConfig> instanceConfigs =
+          accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+      List<String> liveInstanceNames = accessor.getChildNames(keyBuilder.liveInstances());
+      Set<String> liveInstances =
+          liveInstanceNames == null ? Collections.emptySet() : new HashSet<>(liveInstanceNames);
+
+      // Sorted so the payload is stable across calls for the same cluster state.
+      Map<String, InstanceConfig> sortedConfigs = new TreeMap<>();
+      if (instanceConfigs != null) {
+        for (InstanceConfig instanceConfig : instanceConfigs) {
+          if (instanceConfig != null) {
+            sortedConfigs.put(instanceConfig.getInstanceName(), instanceConfig);
+          }
+        }
+      }
+
+      ObjectNode root = JsonNodeFactory.instance.objectNode();
+      root.put(Properties.id.name(), clusterId);
+      ObjectNode summariesNode = root.putObject(InstancesProperties.instance_summaries.name());
+      for (Map.Entry<String, InstanceConfig> entry : sortedConfigs.entrySet()) {
+        InstanceConfig instanceConfig = entry.getValue();
+        ObjectNode instanceNode = summariesNode.putObject(entry.getKey());
+        instanceNode.put("live", liveInstances.contains(entry.getKey()));
+        instanceNode.put("host", instanceConfig.getHostName());
+        instanceNode.put("port", instanceConfig.getPort());
+        instanceNode.put("instanceOperation",
+            instanceConfig.getInstanceOperation().getOperation().name());
+        instanceNode.put("domain", instanceConfig.getDomainAsString());
+        ArrayNode tagsNode = instanceNode.putArray("tags");
+        instanceConfig.getTags().forEach(tagsNode::add);
+        ObjectNode capacityNode = instanceNode.putObject("capacity");
+        try {
+          instanceConfig.getInstanceCapacityMap().forEach(capacityNode::put);
+        } catch (NumberFormatException e) {
+          capacityNode.removeAll();
+        }
+      }
+      return JSONRepresentation(root);
+    } catch (Exception e) {
+      _logger.error("Failed to list instance summaries for {}", clusterId, e);
+      return serverError(e);
+    }
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)

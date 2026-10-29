@@ -1072,6 +1072,53 @@ public class TestInstancesAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  @Test
+  public void testGetInstanceSummaries() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String clusterName = "TestInstanceSummariesCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    for (String instance : Arrays.asList("isInstance1", "isInstance0")) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+    startInstances(clusterName, new TreeSet<>(Collections.singletonList("isInstance0")), 1);
+    setInstanceOperation(clusterName, "isInstance1", InstanceConstants.InstanceOperation.DISABLE);
+    InstanceConfig config = _configAccessor.getInstanceConfig(clusterName, "isInstance0");
+    config.setDomain("zone=z1,host=isInstance0");
+    config.addTag("tagA");
+    config.setInstanceCapacityMap(ImmutableMap.of("CPU", 100, "DISK", 500));
+    _configAccessor.setInstanceConfig(clusterName, "isInstance0", config);
+
+    JsonNode summaries = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
+            .isBodyReturnExpected(true).format(clusterName).get(this))
+        .get(InstancesAccessor.InstancesProperties.instance_summaries.name());
+
+    List<String> listed = new ArrayList<>();
+    summaries.fieldNames().forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("isInstance0", "isInstance1"));
+
+    JsonNode live = summaries.get("isInstance0");
+    Assert.assertTrue(live.get("live").asBoolean());
+    Assert.assertEquals(live.get("instanceOperation").asText(), "ENABLE");
+    Assert.assertEquals(live.get("domain").asText(), "zone=z1,host=isInstance0");
+    Assert.assertEquals(live.get("tags").get(0).asText(), "tagA");
+    Assert.assertEquals(live.get("capacity").get("CPU").asInt(), 100);
+    Assert.assertEquals(live.get("capacity").get("DISK").asInt(), 500);
+
+    JsonNode disabled = summaries.get("isInstance1");
+    Assert.assertFalse(disabled.get("live").asBoolean());
+    Assert.assertEquals(disabled.get("instanceOperation").asText(), "DISABLE");
+    Assert.assertEquals(disabled.get("capacity").size(), 0);
+
+    new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestInstanceSummariesClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   private JsonNode fetchInstancesUnderInstanceOperationMaintenance(String clusterName)
       throws IOException {
     JsonNode node = OBJECT_MAPPER.readTree(

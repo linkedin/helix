@@ -75,6 +75,7 @@ public class AbstractResource {
     instanceOperationMaintenance,
     getInstancesUnableToAcceptOnlineReplicas,
     getInstancesUnderInstanceOperationMaintenance,
+    getInstanceSummaries,
     rebalance,
     reset,
     resetPartitions,
