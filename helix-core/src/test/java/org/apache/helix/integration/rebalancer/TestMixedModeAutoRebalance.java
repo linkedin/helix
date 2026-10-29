@@ -93,7 +93,6 @@ import org.testng.annotations.Test;
             .setWaitTillVerify(TestHelper.DEFAULT_REBALANCE_PROCESSING_WAIT_TIME)
             .build();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     _configAccessor = new ConfigAccessor(_gZkClient);
   }

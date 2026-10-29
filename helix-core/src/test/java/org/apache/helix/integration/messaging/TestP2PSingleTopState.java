@@ -100,7 +100,6 @@ public class TestP2PSingleTopState extends ZkTestBase {
 
     enableDelayRebalanceInCluster(_gZkClient, CLUSTER_NAME, true, 1000000);
     // enableDelayRebalanceInCluster(_gZkClient, CLUSTER_NAME, false);
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     enableP2PInCluster(CLUSTER_NAME, _configAccessor, true);
 
     // start controller
