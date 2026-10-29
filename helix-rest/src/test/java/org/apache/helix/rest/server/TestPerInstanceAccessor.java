@@ -1095,6 +1095,101 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   /**
+   * Verifies the always-on min-active-replica guard rail also protects {@code
+   * setInstanceOperation=DISABLE} (the path the helix-front UI and other REST clients use), not just
+   * the legacy {@code command=disable} path. DISABLE drains the instance's replicas in place, so a
+   * cluster whose {@code minActiveReplicas} equals its replica count has zero headroom: disabling
+   * any one instance drops every partition it hosts below {@code minActiveReplicas}, a deterministic
+   * breach the guard rail must catch before writing to ZooKeeper. Unlike the feasibility guard rail
+   * this rule is always-on, so no cluster-config opt-in is needed.
+   */
+  @Test(dependsOnMethods = "setInstanceOperationRebalanceFeasibilityGuardrail")
+  public void setInstanceOperationDisableMinActiveReplicaGuardrail() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestClusterDisableMinActiveGuardrail";
+    try {
+      verifySetInstanceOperationDisableMinActiveReplicaGuardrail(cluster);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void verifySetInstanceOperationDisableMinActiveReplicaGuardrail(String cluster)
+      throws Exception {
+    int numInstances = 3;
+    int numPartitions = 3;
+    int replica = 3;
+    // minActiveReplicas == replica: no headroom, so disabling any instance that hosts a partition
+    // drops it below min-active on the remaining instances.
+    int minActiveReplicas = replica;
+
+    _gSetupTool.addCluster(cluster, true);
+
+    List<String> instances = new ArrayList<>();
+    for (int i = 0; i < numInstances; i++) {
+      String instance = cluster + "_localhost_" + (13200 + i);
+      _gSetupTool.addInstanceToCluster(cluster, instance);
+      instances.add(instance);
+      MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+      participant.syncStart();
+      _mockParticipantManagers.add(participant);
+    }
+
+    ClusterControllerManager controller = startController(cluster);
+    _clusterControllerManagers.add(controller);
+
+    // A SEMI_AUTO MasterSlave resource (matching the proven AbstractTestClass#addResource setup)
+    // publishes a populated ExternalView in this embedded harness, which the min-active-replica
+    // what-if reads. The guard rail is rebalancer-agnostic, so SEMI_AUTO exercises it faithfully.
+    String resource = "TestDB_MinActive";
+    _gSetupTool.addResourceToCluster(cluster, resource, numPartitions, "MasterSlave");
+    IdealState idealState =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    idealState.setMinActiveReplicas(minActiveReplicas);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should converge before exercising the guard rail");
+    }
+
+    String target = instances.get(0);
+    Entity entity = Entity.entity("", MediaType.APPLICATION_JSON_TYPE);
+
+    // 1. DISABLE would drop a hosted partition below minActiveReplicas -> 400 and nothing written.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, target).post(this, entity);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "DISABLE must not be written when the guard rail blocks it");
+
+    // 2. dryRun: returns a 200 verdict naming the rule, still writes nothing.
+    Response dryRunResponse = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    String verdictBody = dryRunResponse.readEntity(String.class);
+    Assert.assertTrue(
+        verdictBody.contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "dry-run verdict should carry the rule id, but was: " + verdictBody);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
+        "dryRun must not write");
+
+    // 3. force: an operator override bypasses the verdict and writes DISABLE.
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE&force=true")
+        .format(cluster, target).post(this, entity);
+    InstanceConfig disabledConfig = _configAccessor.getInstanceConfig(cluster, target);
+    Assert.assertEquals(disabledConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.DISABLE, "force=true should write DISABLE");
+    Assert.assertFalse(disabledConfig.getInstanceEnabled(),
+        "a DISABLE operation must render the instance disabled");
+  }
+
+  /**
    * Test "update" command for updateInstanceConfig endpoint.
    * @throws IOException
    */

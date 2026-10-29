@@ -574,49 +574,79 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                   node.get(PerInstanceProperties.partitions.name()).toString(), OBJECT_MAPPER
                       .getTypeFactory().constructCollectionType(List.class, String.class)));
           break;
-        case setInstanceOperation:
-          // Guard rail: when the cluster opts in, block (or simulate) a setInstanceOperation that
-          // would move this instance out of the WAGED assignable pool (e.g. EVACUATE / UNKNOWN) and
-          // leave one or more partitions unable to place all their replicas. The rule self-selects
-          // the capacity-reducing operations from isAssignable(); ENABLE/DISABLE/SWAP_IN are no-ops
-          // for it. force=true overrides the verdict (draining a failing node is often mandatory);
-          // dryRun=true reports the verdict without writing. The provider keeps the ZK-accessor
-          // plumbing for the read-only WAGED what-if here in the REST layer.
+        case setInstanceOperation: {
+          // Guard rail: block (or simulate) a setInstanceOperation that would reduce availability.
+          // Two operation-specific rules apply, mutually exclusive by the proposed operation:
+          //   - DISABLE drains this instance's replicas in place (the same end state as
+          //     command=disable: InstanceConfig.getInstanceEnabled() becomes false either way), so it
+          //     runs the always-on min-active-replica guard rail. This closes the gap for callers
+          //     that disable via setInstanceOperation=DISABLE (e.g. the helix-front UI) instead of
+          //     command=disable; the WAGED feasibility rule intentionally no-ops for DISABLE.
+          //   - EVACUATE / UNKNOWN move this instance out of the WAGED assignable pool and can leave
+          //     partitions unable to place all their replicas, so (when the cluster opts in) they run
+          //     the WAGED rebalance-feasibility rule. That rule self-selects the capacity-reducing
+          //     operations from isAssignable(); ENABLE/SWAP_IN are no-ops for it. For EVACUATE the
+          //     full-placement feasibility check already subsumes the min-active-replica check.
+          // force=true overrides the verdict (draining a failing node is often mandatory);
+          // dryRun=true reports the verdict without writing.
           //
-          // Skip the (relatively expensive) double WAGED what-if entirely for a real force write:
-          // force overrides any verdict anyway, so an operator force-draining a failing node must
-          // not be blocked on -- or delayed by -- a simulation whose result would be discarded. A
-          // dryRun still computes the verdict (even together with force) so it can be previewed.
+          // Skip the (relatively expensive) what-if entirely for a real force write: force overrides
+          // any verdict anyway, so an operator force-draining a failing node must not be blocked on --
+          // or delayed by -- a simulation whose result would be discarded. A dryRun still computes the
+          // verdict (even together with force) so it can be previewed.
+          boolean isDisableOperation =
+              instanceOperation == InstanceConstants.InstanceOperation.DISABLE;
           if (dryRun || !force) {
-            WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
-              @Override
-              public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
-                  List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-                  List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
-                return HelixUtil.getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
-                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                    liveInstances, idealStates, resourceConfigs);
-              }
+            GuardrailContext setInstanceOperationContext;
+            GuardrailPipeline setInstanceOperationPipeline;
+            if (isDisableOperation) {
+              // Same read-only ExternalView min-active-replica what-if as command=disable.
+              HelixDataAccessor disableDataAccessor = getDataAccssor(clusterId);
+              MinActiveReplicaChecker minActiveReplicaChecker =
+                  (targetInstance, toBeStoppedInstances) -> InstanceValidationUtil
+                      .siblingNodesActiveReplicaCheckWithDetails(disableDataAccessor, targetInstance,
+                          toBeStoppedInstances, true);
+              setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
+                  .dataAccessor(disableDataAccessor)
+                  .instanceName(instanceName)
+                  .minActiveReplicaChecker(minActiveReplicaChecker)
+                  .build();
+              setInstanceOperationPipeline =
+                  new GuardrailPipeline(new InstanceDisableMinActiveReplicaGuardrailRule());
+            } else {
+              // The provider keeps the ZK-accessor plumbing for the read-only WAGED what-if here in
+              // the REST layer. An accept-only partial-rebalance fast path short-circuits the full
+              // double what-if when it can constructively prove the drain is feasible.
+              WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
+                @Override
+                public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+                    List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+                    List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+                  return HelixUtil.getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                      new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                      liveInstances, idealStates, resourceConfigs);
+                }
 
-              @Override
-              public DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig cfg,
-                  List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-                  List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
-                  String drainedInstanceName) {
-                return HelixUtil.isDrainFeasibleViaPartialRebalance(getZkBucketDataAccessor(),
-                    new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                    liveInstances, idealStates, resourceConfigs, drainedInstanceName)
-                    ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
-              }
-            };
-            GuardrailContext setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
-                .dataAccessor(getDataAccssor(clusterId))
-                .instanceName(instanceName)
-                .proposedInstanceOperation(instanceOperation)
-                .wagedAssignmentProvider(wagedAssignmentProvider)
-                .build();
-            GuardrailPipeline setInstanceOperationPipeline =
-                new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+                @Override
+                public DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig cfg,
+                    List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+                    List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+                    String drainedInstanceName) {
+                  return HelixUtil.isDrainFeasibleViaPartialRebalance(getZkBucketDataAccessor(),
+                      new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+                      liveInstances, idealStates, resourceConfigs, drainedInstanceName)
+                      ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
+                }
+              };
+              setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
+                  .dataAccessor(getDataAccssor(clusterId))
+                  .instanceName(instanceName)
+                  .proposedInstanceOperation(instanceOperation)
+                  .wagedAssignmentProvider(wagedAssignmentProvider)
+                  .build();
+              setInstanceOperationPipeline =
+                  new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+            }
             Optional<Response> setInstanceOperationPreflight =
                 preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
             if (setInstanceOperationPreflight.isPresent()) {
@@ -626,9 +656,10 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
             // auditable (an operator can still see the override happened without a dryRun preflight).
             LOG.info(
-                "Bypassing the instance-operation rebalance-feasibility guard rail for a force "
-                    + "setInstanceOperation {} on instance {} in cluster {} (reason: {}); force "
-                    + "overrides the verdict, so the WAGED what-if is skipped.",
+                "Bypassing the {} guard rail for a force setInstanceOperation {} on instance {} in "
+                    + "cluster {} (reason: {}); force overrides the verdict, so the what-if is skipped.",
+                isDisableOperation ? "instance-disable min-active-replica"
+                    : "instance-operation rebalance-feasibility",
                 instanceOperation, instanceName, clusterId, reason);
           }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
@@ -638,6 +669,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       force ? InstanceConstants.InstanceOperationSource.ADMIN : instanceOperationSource)
                   .build());
           break;
+        }
         case canCompleteSwap:
           OperationCheckResult swapCheckResult = admin.canCompleteSwapWithDetails(clusterId, instanceName);
           return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of(
