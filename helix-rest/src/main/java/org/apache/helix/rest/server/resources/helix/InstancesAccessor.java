@@ -412,7 +412,8 @@ public class InstancesAccessor extends AbstractHelixResource {
       Map<String, InstanceConfig> sortedConfigs = new TreeMap<>();
       if (instanceConfigs != null) {
         for (InstanceConfig instanceConfig : instanceConfigs) {
-          if (instanceConfig != null) {
+          // A config znode with no record id has no instance name to list.
+          if (instanceConfig != null && instanceConfig.getInstanceName() != null) {
             sortedConfigs.put(instanceConfig.getInstanceName(), instanceConfig);
           }
         }

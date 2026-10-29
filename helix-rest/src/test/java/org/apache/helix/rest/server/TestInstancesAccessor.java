@@ -37,6 +37,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.helix.AccessOption;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
@@ -47,6 +48,7 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
 import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -1094,6 +1096,9 @@ public class TestInstancesAccessor extends AbstractTestClass {
     // An expired marker is omitted.
     setInstanceOperationMaintenanceUntilMs(clusterName, "isInstance1",
         System.currentTimeMillis() - 1L);
+    // A config znode with no record id must not break the listing.
+    _baseAccessor.create("/" + clusterName + "/CONFIGS/PARTICIPANT/orphan",
+        new ZNRecord((String) null), AccessOption.PERSISTENT);
 
     JsonNode summaries = OBJECT_MAPPER.readTree(
         new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
