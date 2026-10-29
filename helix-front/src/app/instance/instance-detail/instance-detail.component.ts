@@ -1,5 +1,7 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
+import { Subscription } from 'rxjs';
+import { finalize } from 'rxjs/operators';
 
 import { Instance, InstanceOperationState } from '../shared/instance.model';
 import { HelperService } from '../../shared/helper.service';
@@ -11,7 +13,7 @@ import { InstanceService } from '../shared/instance.service';
   styleUrls: ['./instance-detail.component.scss'],
   providers: [InstanceService],
 })
-export class InstanceDetailComponent implements OnInit {
+export class InstanceDetailComponent implements OnInit, OnDestroy {
   readonly tabLinks = [
     { label: 'Resources', link: 'resources' },
     { label: 'Configuration', link: 'configs' },
@@ -22,7 +24,11 @@ export class InstanceDetailComponent implements OnInit {
   instanceName: string;
   instance: Instance;
   isLoading = true;
+  error = '';
+  updated: number | null = null;
   can = false;
+  private routeSub: Subscription;
+  private requestSub: Subscription;
 
   constructor(
     protected route: ActivatedRoute,
@@ -33,8 +39,22 @@ export class InstanceDetailComponent implements OnInit {
 
   ngOnInit() {
     this.service.can().subscribe((data) => (this.can = data));
-    this.clusterName = this.route.snapshot.params.cluster_name;
-    this.instanceName = this.route.snapshot.params.instance_name;
+    // diagnostic links reuse this route with a different instance, so follow the params
+    this.routeSub = this.route.params.subscribe((params) => {
+      this.clusterName = params.cluster_name;
+      this.instanceName = params.instance_name;
+      this.instance = null;
+      this.updated = null;
+      this.loadInstance();
+    });
+  }
+
+  ngOnDestroy() {
+    this.routeSub?.unsubscribe();
+    this.requestSub?.unsubscribe();
+  }
+
+  refresh() {
     this.loadInstance();
   }
 
@@ -115,11 +135,23 @@ export class InstanceDetailComponent implements OnInit {
   }
 
   protected loadInstance() {
+    // drop an in-flight read so a slow old response cannot overwrite a newer one
+    this.requestSub?.unsubscribe();
     this.isLoading = true;
-    this.service.get(this.clusterName, this.instanceName).subscribe(
-      /* happy path */ (instance) => (this.instance = instance),
-      /* error path */ (error) => this.helperService.showError(error),
-      /* onComplete */ () => (this.isLoading = false)
-    );
+    this.error = '';
+    this.requestSub = this.service
+      .get(this.clusterName, this.instanceName)
+      .pipe(finalize(() => (this.isLoading = false)))
+      .subscribe(
+        /* happy path */ (instance) => {
+          this.instance = instance;
+          this.updated = Date.now();
+        },
+        /* error path */ (error) => {
+          this.error =
+            typeof error === 'string' ? error : 'Cannot load this instance.';
+          this.helperService.showError(error);
+        }
+      );
   }
 }

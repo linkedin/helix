@@ -1,5 +1,15 @@
 @use '@angular/material' as mat;
 
+:host {
+  min-width: 0;
+}
+h4 {
+  gap: 4px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .secondary {
   color: rgba(0, 0, 0, 0.54);
 }

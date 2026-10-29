@@ -25,25 +25,25 @@
         [instance]="instanceName"
       ></hi-detail-header>
       <hi-disabled-label
-        *ngIf="!isLoading && !instance.online"
+        *ngIf="!isLoading && instance && !instance.online"
         text="OFFLINE"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && instance.operationState === 'DISABLE'"
+        *ngIf="!isLoading && instance && instance.operationState === 'DISABLE'"
         text="DISABLED"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && instance.operationState === 'UNKNOWN'"
+        *ngIf="!isLoading && instance && instance.operationState === 'UNKNOWN'"
         text="UNKNOWN"
         class="label-unknown"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && instance.operationState === 'EVACUATE'"
+        *ngIf="!isLoading && instance && instance.operationState === 'EVACUATE'"
         text="EVACUATING"
         class="label-evacuate"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && instance.operationState === 'SWAP_IN'"
+        *ngIf="!isLoading && instance && instance.operationState === 'SWAP_IN'"
         text="SWAP IN"
         class="label-swap-in"
       ></hi-disabled-label>
@@ -51,7 +51,8 @@
     <mat-toolbar-row class="information">
       <a mat-mini-fab routerLink="../"><mat-icon>arrow_back</mat-icon></a>
       <mat-spinner *ngIf="isLoading" diameter="30"></mat-spinner>
-      <hi-key-value-pairs *ngIf="!isLoading" [obj]="instance">
+      <span class="load-error" *ngIf="!isLoading && error">{{ error }}</span>
+      <hi-key-value-pairs *ngIf="!isLoading && instance" [obj]="instance">
         <hi-key-value-pair
           name="Instance"
           prop="liveInstance"
@@ -66,6 +67,17 @@
         ></hi-key-value-pair>
       </hi-key-value-pairs>
       <span fxFlex="1 1 auto"></span>
+      <span class="sampled" *ngIf="!isLoading && updated"
+        >Sampled {{ updated | date: 'HH:mm:ss' : 'UTC' }} UTC</span
+      >
+      <button
+        mat-mini-fab
+        (click)="refresh()"
+        [disabled]="isLoading"
+        matTooltip="Refresh"
+      >
+        <mat-icon>refresh</mat-icon>
+      </button>
       <button mat-mini-fab *ngIf="can" [matMenuTriggerFor]="menu">
         <mat-icon>menu</mat-icon>
       </button>
