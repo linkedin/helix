@@ -98,6 +98,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   private HistogramDynamicMetric _partitionRecoveryHelixLatencyGauge;
   private SimpleDynamicMetric<Long> _partitionsRecoveryDurationBeyondThresholdCounter;
   private SimpleDynamicMetric<Long> _succeededPartitionRecoveryCounter;
+  private SimpleDynamicMetric<Long> _partitionRecoveryHelixLatencySampleCounter;
 
   private SimpleDynamicMetric<String> _rebalanceState;
 
@@ -187,6 +188,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _partitionsRecoveryDurationBeyondThresholdCounter =
         new SimpleDynamicMetric("PartitionsRecoveryDurationBeyondThresholdCounter", 0L);
     _succeededPartitionRecoveryCounter = new SimpleDynamicMetric("SucceededPartitionRecoveryCounter", 0L);
+    _partitionRecoveryHelixLatencySampleCounter =
+        new SimpleDynamicMetric<>("PartitionRecoveryHelixLatencySampleCounter", 0L);
 
     _rebalanceState = new SimpleDynamicMetric<>("RebalanceStatus", RebalanceStatus.UNKNOWN.name());
   }
@@ -264,6 +267,10 @@ public class ResourceMonitor extends DynamicMBeanProvider {
 
   public long getSucceededPartitionRecoveryCounter() {
     return _succeededPartitionRecoveryCounter.getValue();
+  }
+
+  public long getPartitionRecoveryHelixLatencySampleCounter() {
+    return _partitionRecoveryHelixLatencySampleCounter.getValue();
   }
 
   @Deprecated
@@ -440,9 +447,9 @@ public class ResourceMonitor extends DynamicMBeanProvider {
    * below its {@code minActiveReplicas} returning to at least {@code minActiveReplicas}.
    *
    * @param totalDuration end-to-end degraded window ({@code T_end - T_start}), in ms
-   * @param helixLatency  the Helix-controlled portion of the window (detect / compute / throttle /
-   *                      delay-wait / dispatch), in ms; the remainder is participant execution time.
-   *                      Pass a negative value when it has not been computed (v1) to skip the gauge.
+   * @param helixLatency  recovery time after excluding participant execution on the required
+   *                      recovery path, in ms. Pass a negative value when this cannot be determined;
+   *                      the Helix-only histogram will not receive a sample.
    * @param succeeded     whether the partition recovered (vs. still degraded beyond threshold)
    */
   public void updatePartitionRecoveryStats(long totalDuration, long helixLatency,
@@ -454,6 +461,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
       }
       if (helixLatency >= 0) {
         _partitionRecoveryHelixLatencyGauge.updateValue(helixLatency);
+        _partitionRecoveryHelixLatencySampleCounter
+            .updateValue(_partitionRecoveryHelixLatencySampleCounter.getValue() + 1);
       }
     }
   }
@@ -645,6 +654,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _partitionRecoveryHelixLatencyGauge,
         _partitionsRecoveryDurationBeyondThresholdCounter,
         _succeededPartitionRecoveryCounter,
+        _partitionRecoveryHelixLatencySampleCounter,
         _totalMessageReceived,
         _totalMessageReceivedCounter,
         _numPendingStateTransitions,
