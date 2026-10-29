@@ -560,7 +560,6 @@ public class ZKHelixAdmin implements HelixAdmin {
       replicaStatus.setErrorReplicaCount(0);
       replicaStatus.setPendingMessageCount(0);
       replicaStatus.setErrorPartitions(Collections.emptyMap());
-      replicaStatus.setErrorPartitionsTruncated(false);
       return replicaStatus;
     }
     String sessionId = liveInstance.getEphemeralOwner();
@@ -609,20 +608,8 @@ public class ZKHelixAdmin implements HelixAdmin {
       }
     }
 
-    Map<String, List<String>> errorPartitions = new TreeMap<>();
-    int listedCount = 0;
-    for (Map.Entry<String, List<String>> entry : errorPartitionsByResource.entrySet()) {
-      int remaining = InstanceReplicaStatus.MAX_ERROR_PARTITIONS - listedCount;
-      if (remaining == 0) {
-        break;
-      }
-      List<String> partitions = entry.getValue();
-      Collections.sort(partitions);
-      List<String> listed =
-          new ArrayList<>(partitions.subList(0, Math.min(remaining, partitions.size())));
-      errorPartitions.put(entry.getKey(), listed);
-      listedCount += listed.size();
-    }
+    // The resources are already in name order; list the partitions of each in name order too.
+    errorPartitionsByResource.values().forEach(Collections::sort);
     int pendingMessageCount = accessor.getChildNames(keyBuilder.messages(instanceName)).size();
 
     InstanceReplicaStatus.State state;
@@ -639,8 +626,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     replicaStatus.setOfflineReplicaCount(offlineReplicaCount);
     replicaStatus.setErrorReplicaCount(errorReplicaCount);
     replicaStatus.setPendingMessageCount(pendingMessageCount);
-    replicaStatus.setErrorPartitions(errorPartitions);
-    replicaStatus.setErrorPartitionsTruncated(listedCount < errorReplicaCount);
+    replicaStatus.setErrorPartitions(errorPartitionsByResource);
     accessor.getPropertyStats(currentStateKeys).stream()
         .filter(Objects::nonNull)
         .map(HelixProperty.Stat::getModifiedTime)

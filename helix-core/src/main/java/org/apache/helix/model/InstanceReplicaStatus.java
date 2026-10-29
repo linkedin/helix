@@ -36,11 +36,6 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class InstanceReplicaStatus {
-  /**
-   * The most partitions that {@link #getErrorPartitions()} lists.
-   */
-  public static final int MAX_ERROR_PARTITIONS = 100;
-
   public enum State {
     NOT_LIVE,          // The instance is not live, so none of its replicas are serving.
     MULTIPLE_SESSIONS, // The instance is carrying over current states from a previous session.
@@ -56,7 +51,6 @@ public class InstanceReplicaStatus {
   private Integer pendingMessageCount;
   private Long lastActivityTimestamp;
   private Map<String, List<String>> errorPartitions;
-  private Boolean errorPartitionsTruncated;
 
   /**
    * Default constructor for Jackson deserialization.
@@ -139,8 +133,7 @@ public class InstanceReplicaStatus {
   }
 
   /**
-   * Returns the partitions whose replica is in ERROR, by resource, both in name order. At most
-   * {@link #MAX_ERROR_PARTITIONS} partitions are listed.
+   * Returns every partition whose replica is in ERROR, by resource, both in name order.
    */
   public Map<String, List<String>> getErrorPartitions() {
     return errorPartitions;
@@ -148,17 +141,6 @@ public class InstanceReplicaStatus {
 
   public void setErrorPartitions(Map<String, List<String>> errorPartitions) {
     this.errorPartitions = errorPartitions;
-  }
-
-  /**
-   * Returns whether {@link #getErrorPartitions()} leaves out some replicas in ERROR.
-   */
-  public Boolean getErrorPartitionsTruncated() {
-    return errorPartitionsTruncated;
-  }
-
-  public void setErrorPartitionsTruncated(Boolean errorPartitionsTruncated) {
-    this.errorPartitionsTruncated = errorPartitionsTruncated;
   }
 
   /**
@@ -179,7 +161,6 @@ public class InstanceReplicaStatus {
         ", pendingMessageCount=" + pendingMessageCount +
         ", lastActivityTimestamp=" + lastActivityTimestamp +
         ", errorPartitions=" + errorPartitions +
-        ", errorPartitionsTruncated=" + errorPartitionsTruncated +
         '}';
   }
 }

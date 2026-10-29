@@ -95,7 +95,6 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(1));
     Assert.assertEquals(replicaStatus.getPendingMessageCount(), Integer.valueOf(0));
     Assert.assertEquals(replicaStatus.getErrorPartitions(), Map.of("db", List.of("db_1")));
-    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.FALSE);
     // The task resource is left out, so the last activity is the change to the db resource.
     Assert.assertEquals(replicaStatus.getLastActivityTimestamp(),
         Long.valueOf(_accessor.getPropertyStat(currentStateKey).getModifiedTime()));
@@ -129,30 +128,22 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
   }
 
   @Test
-  public void testErrorPartitionsAreCapped() {
+  public void testEveryErrorPartitionIsListed() {
     String sessionId = addLiveInstance();
     Map<String, String> errorStatesOfA = errorStates("a", 60);
     Map<String, String> errorStatesOfB = errorStates("b", 60);
-    setCurrentState(sessionId, "a", MASTER_SLAVE, errorStatesOfA);
     setCurrentState(sessionId, "b", MASTER_SLAVE, errorStatesOfB);
+    setCurrentState(sessionId, "a", MASTER_SLAVE, errorStatesOfA);
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
     Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(120));
     Assert.assertTrue(replicaStatus.areAllReplicasInError());
-    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.TRUE);
-    // Resources and their partitions are listed in name order until the cap is reached.
+    // Resources and their partitions are listed in name order.
+    Assert.assertEquals(new ArrayList<>(replicaStatus.getErrorPartitions().keySet()),
+        List.of("a", "b"));
     Assert.assertEquals(replicaStatus.getErrorPartitions().get("a"),
         new ArrayList<>(new TreeSet<>(errorStatesOfA.keySet())));
     Assert.assertEquals(replicaStatus.getErrorPartitions().get("b"),
-        new ArrayList<>(new TreeSet<>(errorStatesOfB.keySet()))
-            .subList(0, InstanceReplicaStatus.MAX_ERROR_PARTITIONS - 60));
-
-    // Exactly at the cap, nothing is left out.
-    setCurrentState(sessionId, "b", MASTER_SLAVE, errorStates("b", 40));
-    replicaStatus = getReplicaStatus(Collections.emptySet());
-    Assert.assertEquals(replicaStatus.getErrorReplicaCount(),
-        Integer.valueOf(InstanceReplicaStatus.MAX_ERROR_PARTITIONS));
-    Assert.assertEquals(replicaStatus.getErrorPartitions().get("b").size(), 40);
-    Assert.assertEquals(replicaStatus.getErrorPartitionsTruncated(), Boolean.FALSE);
+        new ArrayList<>(new TreeSet<>(errorStatesOfB.keySet())));
   }
 
   @Test
@@ -288,8 +279,8 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     ObjectNode json = OBJECT_MAPPER.valueToTree(replicaStatus);
     Assert.assertEquals(ImmutableSet.copyOf(json.fieldNames()),
         Set.of("state", "allReplicasOffline", "replicaCount", "offlineReplicaCount",
-            "errorReplicaCount", "pendingMessageCount", "lastActivityTimestamp", "errorPartitions",
-            "errorPartitionsTruncated"));
+            "errorReplicaCount", "pendingMessageCount", "lastActivityTimestamp",
+            "errorPartitions"));
     // Readers ignore fields added later, and allReplicasOffline, which is derived from the state.
     json.put("futureField", 1);
     Assert.assertEquals(OBJECT_MAPPER.treeToValue(json, InstanceReplicaStatus.class).toString(),
