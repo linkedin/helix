@@ -396,8 +396,9 @@ public class InstancesAccessor extends AbstractHelixResource {
   private Response getInstanceSummaries(String clusterId, HelixDataAccessor accessor) {
     try {
       // 404 rather than an empty listing: HelixDataAccessor#getChildValues normalizes a missing
-      // cluster to an empty list.
-      if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      // cluster to an empty list. Unlike ZKUtil#isClusterSetup this lets a failed read surface as
+      // a 500 instead of reading as a missing cluster.
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
         return notFound();
       }
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
