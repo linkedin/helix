@@ -25,7 +25,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.helix.AccessOption;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.ZNRecord;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
@@ -39,8 +41,8 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 /**
- * Tests {@link WagedCapacitySnapshotProvider} against znodes written directly, with no controller or
- * participants, so each ExternalView is exactly what the test authored.
+ * Tests {@link WagedCapacitySnapshotProvider} against znodes written directly, with no controller
+ * or participants, so each ExternalView is exactly what the test authored.
  */
 public class TestWagedCapacitySnapshotProvider extends ZkTestBase {
   private static final String CAP = "CU";
@@ -167,6 +169,20 @@ public class TestWagedCapacitySnapshotProvider extends ZkTestBase {
     Assert.assertFalse(n1.enabled);
     Assert.assertEquals(n1.operation, InstanceConstants.InstanceOperation.EVACUATE.name());
     Assert.assertEquals(snapshot.summary.enabledInstances, 0);
+    deleteCluster(cluster);
+  }
+
+  @Test
+  public void testInstanceConfigWithoutIdIsSkipped() {
+    String cluster = newCluster("noId");
+    addInstance(cluster, "n0", null);
+    // A config znode whose record has no id, as a bad config write can leave behind.
+    _baseAccessor.create("/" + cluster + "/CONFIGS/PARTICIPANT/orphan",
+        new ZNRecord((String) null), AccessOption.PERSISTENT);
+
+    WagedCapacitySnapshot snapshot = snapshotOf(cluster);
+    Assert.assertEquals(snapshot.instances.size(), 1);
+    Assert.assertEquals(snapshot.instances.get(0).name, "n0");
     deleteCluster(cluster);
   }
 

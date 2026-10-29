@@ -339,7 +339,16 @@ public class WagedCapacitySnapshotProvider {
   private static <T extends HelixProperty> Map<String, T> childMap(HelixDataAccessor dataAccessor,
       PropertyKey key) {
     Map<String, T> result = dataAccessor.getChildValuesMap(key, true);
-    return result == null ? new HashMap<>() : result;
+    // A malformed znode with no record id comes back under a null key and cannot be named.
+    Map<String, T> named = new HashMap<>();
+    if (result != null) {
+      result.forEach((name, value) -> {
+        if (name != null) {
+          named.put(name, value);
+        }
+      });
+    }
+    return named;
   }
 
   private static final class ResourceContext {
@@ -349,7 +358,8 @@ public class WagedCapacitySnapshotProvider {
   }
 
   // Resolves a WAGED partition weight with the controller's own precedence (resource per-partition,
-  // resource default, cluster default). An unresolvable partition returns null, never a fake default.
+  // resource default, cluster default). An unresolvable partition returns null, never a fake
+  // default.
   private static final class WeightContext {
     private final ResourceConfig resourceConfig;
     private final ClusterConfig clusterConfig;
