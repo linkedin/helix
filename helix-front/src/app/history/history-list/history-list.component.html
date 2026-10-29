@@ -28,6 +28,19 @@
     (refresh)="load()"
   ></hi-list-status>
 
+  <div class="zone-picker" fxLayout="row" fxLayoutAlign="end center">
+    <span class="zone-label">Time zone</span>
+    <mat-button-toggle-group
+      [value]="zone.key"
+      (change)="setZone($event.value)"
+      aria-label="Time zone"
+    >
+      <mat-button-toggle *ngFor="let z of zones" [value]="z.key">
+        {{ z.label }}
+      </mat-button-toggle>
+    </mat-button-toggle-group>
+  </div>
+
   <ngx-datatable
     #historyTable
     class="material"
@@ -39,11 +52,15 @@
     [sorts]="sorts"
   >
     <ngx-datatable-column
-      name="Date (GMT)"
-      prop="date"
+      [name]="'Date (' + zone.label + ')'"
+      prop="time"
       [width]="240"
       [canAutoResize]="false"
-    ></ngx-datatable-column>
+    >
+      <ng-template let-value="value" ngx-datatable-cell-template>
+        {{ format(value) }}
+      </ng-template>
+    </ngx-datatable-column>
     <ngx-datatable-column
       name="Epoch Time"
       prop="time"
@@ -51,9 +68,7 @@
       [canAutoResize]="false"
     >
       <ng-template let-value="value" ngx-datatable-cell-template>
-        <span matTooltip="Local time: {{ value | date: 'medium' }}">
-          {{ value }}
-        </span>
+        <span>{{ value }}</span>
         <button
           mat-icon-button
           matTooltip="Copy to clipboard"
@@ -68,6 +83,15 @@
       name="Controller"
       *ngIf="isController"
       [cellClass]="bindFunc(getControllerCellClass, this)"
+    >
+    </ngx-datatable-column>
+    <ngx-datatable-column
+      name="Event"
+      prop="event"
+      *ngIf="!isController"
+      [width]="110"
+      [canAutoResize]="false"
+      [cellClass]="bindFunc(getEventCellClass, this)"
     >
     </ngx-datatable-column>
     <ngx-datatable-column

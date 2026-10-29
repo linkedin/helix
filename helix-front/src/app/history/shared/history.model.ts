@@ -3,4 +3,5 @@ export class History {
   time: number;
   session: string;
   controller: string;
+  event?: 'Online' | 'Offline';
 }
