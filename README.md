@@ -41,6 +41,29 @@ mvn clean install -Dmaven.test.skip.exec=true
 
 ## Configuration compatibility
 
+### Cloud identifier compatibility
+
+`CLOUD_ID` is no longer a supported CloudConfig option. Its enum constant,
+CloudConfig and builder getters/setters, constructor argument, and
+`HelixCloudProperty.getCloudId()` / `setCloudId(String)` have been removed.
+Remove those references, then rebuild and release callers before upgrading Helix.
+Callers of the old field constructor can switch to `CloudConfig.Builder` before
+the upgrade; the revised constructor without the ID argument requires the new API.
+This is a source and binary compatibility break; downstream cloud-config writers
+also need updating, even when their processors never read the ID.
+
+Fresh configs built from supported typed options omit this field. Existing raw
+`CLOUD_ID` fields remain opaque metadata: record wrapping, builder reconstruction, and generic REST/config
+operations preserve them unless explicitly replaced or deleted. They are not
+copied into `HelixCloudProperty`, and there is no automatic stored-record migration
+or replacement setting. Cloud enablement, provider resolution, information
+sources, processor selection, and Azure topology defaults are unchanged.
+Custom processors using the removed API must be migrated before rollout; do not
+assume that preserving a raw field preserves that API or its behavior.
+Historical versioned website tutorials describe older releases.
+
+### ResourceConfig delayed-rebalance compatibility
+
 `ResourceConfigProperty.DELAY_REBALANCE_ENABLED` has been removed. Its ResourceConfig
 copy was not consumed by delayed rebalancing, and merging an IdealState into a
 ResourceConfig no longer adds it. Existing raw ResourceConfig fields with this name
