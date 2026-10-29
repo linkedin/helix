@@ -16,6 +16,7 @@ import { InstanceService } from '../shared/instance.service';
 export class InstanceDetailComponent implements OnInit, OnDestroy {
   readonly tabLinks = [
     { label: 'Resources', link: 'resources' },
+    { label: 'Diagnostics', link: 'diagnostics' },
     { label: 'Configuration', link: 'configs' },
     { label: 'History', link: 'history' },
   ];

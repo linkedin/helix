@@ -17,6 +17,7 @@ import { WorkflowListComponent } from './workflow/workflow-list/workflow-list.co
 import { WorkflowDetailComponent } from './workflow/workflow-detail/workflow-detail.component';
 import { HelixListComponent } from './chooser/helix-list/helix-list.component';
 import { DashboardComponent } from './dashboard/dashboard.component';
+import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
 
 const HELIX_ROUTES: Routes = [
   {
@@ -119,6 +120,10 @@ const HELIX_ROUTES: Routes = [
         path: ':cluster_name/instances/:instance_name',
         component: InstanceDetailComponent,
         children: [
+          {
+            path: 'diagnostics',
+            component: InstanceDiagnosticsComponent,
+          },
           {
             path: '',
             redirectTo: 'resources',

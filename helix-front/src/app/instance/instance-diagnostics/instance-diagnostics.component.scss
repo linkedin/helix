@@ -1,0 +1,16 @@
+@use '../../shared/diagnostics';
+
+.scope-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.messages-table {
+  min-width: 780px;
+  table-layout: fixed;
+}
+.message-id,
+.participant-info {
+  overflow-wrap: anywhere;
+}

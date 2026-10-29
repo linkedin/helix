@@ -1,0 +1,292 @@
+<section class="diagnostics">
+  <header class="toolbar">
+    <div>
+      <h1>Instance diagnostics</h1>
+    </div>
+    <div class="actions">
+      <button mat-stroked-button (click)="refresh()" [disabled]="isLoading">
+        <mat-icon>refresh</mat-icon> Refresh
+      </button>
+    </div>
+  </header>
+  <div class="empty" *ngIf="isLoading && !updated" role="status">
+    <mat-spinner diameter="32"></mat-spinner> Reading instance evidence.
+  </div>
+  <div *ngIf="instanceError" class="notice error" role="alert">
+    Instance identity could not be read: {{ instanceError }}.
+  </div>
+  <ng-container *ngIf="updated">
+    <div class="timestamp">
+      Index read {{ updated | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC.
+    </div>
+    <div class="summary-grid">
+      <div class="summary-card">
+        <strong>{{
+          !instance ? 'Unknown' : instance.online ? 'Live' : 'Not live'
+        }}</strong>
+        ZooKeeper session
+      </div>
+      <button
+        class="summary-card"
+        [class.active]="view === 'messages'"
+        (click)="setView('messages')"
+      >
+        <strong>{{ messageIndex === null ? '?' : messageIndex.length }}</strong>
+        Queued messages
+      </button>
+      <button
+        class="summary-card"
+        [class.active]="view === 'errors'"
+        (click)="setView('errors')"
+      >
+        <strong>{{ errorIndex === null ? '?' : errorIndex.length }}</strong>
+        Recorded error paths
+      </button>
+    </div>
+    <div *ngIf="resourceScope || partitionScope" class="notice scope-note">
+      <span
+        >Scoped to <strong>{{ resourceScope }}</strong
+        ><span *ngIf="partitionScope"> / {{ partitionScope }}</span
+        >.</span
+      >
+      <button mat-button (click)="clearScope()">Clear scope</button>
+    </div>
+
+    <section
+      class="evidence-panel"
+      *ngIf="resourceScope && partitionScope"
+      aria-label="Participant current state"
+    >
+      <h2>Participant report: {{ partitionScope }}</h2>
+      <p class="muted">
+        CurrentState from the live session at read time. This is independent of
+        the published ExternalView.
+      </p>
+      <div *ngIf="currentStateError" class="notice warning" role="status">
+        {{ currentStateError }}
+      </div>
+      <ng-container *ngIf="currentPartition as fields">
+        <div class="evidence-columns">
+          <div>
+            <h3>Reported state</h3>
+            <span
+              class="badge"
+              [class.ERROR]="fields.CURRENT_STATE === 'ERROR'"
+              >{{ fields.CURRENT_STATE || 'Unknown' }}</span
+            >
+          </div>
+          <div>
+            <h3>Participant information</h3>
+            <p class="participant-info">
+              {{
+                fields.INFO || 'No information was recorded for this partition.'
+              }}
+            </p>
+          </div>
+        </div>
+      </ng-container>
+      <p *ngIf="currentState && !currentPartition" class="notice">
+        This partition is not present in the current-session resource record.
+      </p>
+    </section>
+
+    <section *ngIf="view === 'errors'">
+      <div class="section-head">
+        <h2>Recorded errors</h2>
+      </div>
+      <div *ngIf="errorIndexError" class="notice error" role="alert">
+        Error index unavailable: {{ errorIndexError }}
+      </div>
+      <div class="filters">
+        <label class="search"
+          >Search
+          <input
+            aria-label="Search recorded errors"
+            placeholder="Resource, partition or session"
+            [(ngModel)]="search"
+            (ngModelChange)="setFilters()"
+        /></label>
+      </div>
+      <div class="table-scroll" *ngIf="filteredErrors.length">
+        <table aria-label="Recorded transition error paths">
+          <thead>
+            <tr>
+              <th>Resource</th>
+              <th>Partition</th>
+              <th>Session</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let entry of visibleErrors" data-testid="error-path">
+              <td>{{ entry.resource }}</td>
+              <td>{{ entry.partition }}</td>
+              <td>
+                <span class="badge">{{ sessionLabel(entry.session) }}</span>
+                <div class="sub">{{ entry.session }}</div>
+              </td>
+              <td>
+                <button class="link-button" (click)="selectError(entry)">
+                  Read error &rsaquo;
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div
+        class="empty"
+        *ngIf="errorIndex !== null && !filteredErrors.length"
+        role="status"
+      >
+        <h2>No recorded error paths for this scope</h2>
+        <p>
+          Absence of an error record does not rule out a failed transition.
+          Check CurrentState and participant logs.
+        </p>
+      </div>
+      <div class="pager" *ngIf="errorIndex !== null">
+        <span class="count"
+          >{{ filteredErrors.length }} matching paths /
+          {{ errorIndex.length }} indexed paths</span
+        >
+        <button
+          mat-button
+          (click)="setFilters(page - 1)"
+          [disabled]="page === 0"
+        >
+          Previous
+        </button>
+        <span>Page {{ page + 1 }} of {{ errorPages }}</span>
+        <button
+          mat-button
+          (click)="setFilters(page + 1)"
+          [disabled]="page + 1 >= errorPages"
+        >
+          Next
+        </button>
+      </div>
+      <section
+        *ngIf="selectedError"
+        class="evidence-panel"
+        aria-label="Selected error record"
+      >
+        <h2>{{ selectedError.partition }} / recorded error</h2>
+        <p class="muted">
+          {{ sessionLabel(selectedError.session) }}:
+          {{ selectedError.session }}. Read this before considering a reset.
+        </p>
+        <p *ngIf="errorLoading" role="status">Reading error record.</p>
+        <div class="notice error" *ngIf="errorRecordError" role="alert">
+          {{ errorRecordError }}
+        </div>
+        <div
+          *ngIf="errorRecord && errorMessages.length"
+          class="notice error"
+          data-testid="error-summary"
+        >
+          <strong>Recorded messages</strong>
+          <ul>
+            <li *ngFor="let message of errorMessages">{{ message }}</li>
+          </ul>
+        </div>
+        <details *ngIf="errorRecord">
+          <summary>Full error record and stack trace</summary>
+          <pre class="raw-record" data-testid="error-record">{{
+            errorRecord | json
+          }}</pre>
+        </details>
+      </section>
+    </section>
+
+    <section *ngIf="view === 'messages'">
+      <div class="section-head">
+        <h2>Queued messages</h2>
+      </div>
+      <div class="notice error" *ngIf="messageError" role="alert">
+        Message index unavailable: {{ messageError }}
+      </div>
+      <p class="notice">
+        Instance-wide, not filtered by partition. Age is time since creation,
+        not execution time, and a queued message is not necessarily stuck. The
+        index read lists the whole queue, then details are read at most 20 per
+        page, four at a time.
+        <span *ngIf="indexLoading" role="status"
+          >Reading the index, this can be slow on a large backlog.</span
+        >
+      </p>
+      <p *ngIf="messagesLoading" role="status">
+        Reading this page of messages.
+      </p>
+      <div class="table-scroll" *ngIf="messages.length">
+        <table class="messages-table" aria-label="Queued message evidence">
+          <thead>
+            <tr>
+              <th>Message / state</th>
+              <th>Resource / partition</th>
+              <th>Transition</th>
+              <th>Age</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let message of messages" data-testid="queued-message">
+              <td>
+                <span class="badge">{{
+                  message.record?.simpleFields.MSG_STATE || message.state
+                    | uppercase
+                }}</span>
+                <div class="sub message-id">{{ message.id }}</div>
+              </td>
+              <td>
+                {{
+                  message.record?.simpleFields.RESOURCE_NAME || 'Not recorded'
+                }}
+                <div class="sub">
+                  {{ message.record?.simpleFields.PARTITION_NAME || '' }}
+                </div>
+              </td>
+              <td>
+                {{ message.record?.simpleFields.FROM_STATE || '?' }} &rarr;
+                {{ message.record?.simpleFields.TO_STATE || '?' }}
+              </td>
+              <td>{{ messageAge(message.record) }}</td>
+              <td>
+                <span *ngIf="message.error">{{ message.error }}</span>
+                <details *ngIf="message.record">
+                  <summary>Raw message</summary>
+                  <pre class="raw-record">{{ message.record | json }}</pre>
+                </details>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div *ngIf="messageIndex?.length === 0" class="empty" role="status">
+        <h2>No NEW or READ messages returned</h2>
+        <p>This does not prove that all replicas match their target state.</p>
+      </div>
+      <div class="pager" *ngIf="messageIndex?.length">
+        <span class="count"
+          >{{ messageIndex.length }} indexed messages. Messages can disappear
+          between reads.</span
+        >
+        <button
+          mat-button
+          (click)="loadMessages(messagePage - 1)"
+          [disabled]="messagesLoading || messagePage === 0"
+        >
+          Previous
+        </button>
+        <span>Page {{ messagePage + 1 }} of {{ messagePages }}</span>
+        <button
+          mat-button
+          (click)="loadMessages(messagePage + 1)"
+          [disabled]="messagesLoading || messagePage + 1 >= messagePages"
+        >
+          Next
+        </button>
+      </div>
+    </section>
+  </ng-container>
+</section>

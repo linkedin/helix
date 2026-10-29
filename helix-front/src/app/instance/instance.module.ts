@@ -7,10 +7,15 @@ import { SharedModule } from '../shared/shared.module';
 import { InstanceService } from './shared/instance.service';
 import { InstanceListComponent } from './instance-list/instance-list.component';
 import { InstanceDetailComponent } from './instance-detail/instance-detail.component';
+import { InstanceDiagnosticsComponent } from './instance-diagnostics/instance-diagnostics.component';
 
 @NgModule({
   imports: [CommonModule, NgxDatatableModule, SharedModule],
-  declarations: [InstanceListComponent, InstanceDetailComponent],
+  declarations: [
+    InstanceListComponent,
+    InstanceDetailComponent,
+    InstanceDiagnosticsComponent,
+  ],
   providers: [InstanceService],
 })
 export class InstanceModule {}
