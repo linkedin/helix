@@ -69,7 +69,7 @@ public class TestInstancesAccessorExistenceCheck {
 
   @Test
   public void testMissingClusterIs404AndFailedReadIs500() {
-    for (String command : new String[] {"getInstanceSummaries"}) {
+    for (String command : new String[] {"getInstanceSummaries", "getInstanceErrorSummaries"}) {
       RealmAwareZkClient missing = Mockito.mock(RealmAwareZkClient.class);
       Mockito.when(missing.exists("/" + CLUSTER)).thenReturn(false);
       Assert.assertEquals(getSummaries(command, missing).getStatus(),

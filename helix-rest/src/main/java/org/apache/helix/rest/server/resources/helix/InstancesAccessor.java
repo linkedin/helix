@@ -496,7 +496,7 @@ public class InstancesAccessor extends AbstractHelixResource {
    */
   private Response getInstanceErrorSummaries(String clusterId, HelixDataAccessor accessor) {
     try {
-      if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
         return notFound();
       }
       PropertyKey.Builder keyBuilder = accessor.keyBuilder();
