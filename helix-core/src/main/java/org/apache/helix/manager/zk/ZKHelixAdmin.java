@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -87,6 +88,7 @@ import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.IdealState.RebalanceMode;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Message;
@@ -98,6 +100,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.msdcommon.exception.InvalidRoutingDataException;
+import org.apache.helix.task.TaskConstants;
 import org.apache.helix.tools.DefaultIdealStateCalculator;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
@@ -514,6 +517,124 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public boolean isInstanceDrained(String clusterName, String instanceName) {
     return !instanceHasCurrentStateOrMessage(clusterName, instanceName, Collections.emptySet());
+  }
+
+  /**
+   * Returns whether the instance's replicas are offline, with the state behind the answer and a
+   * summary of the replicas in the current states of its live session. Task resources are
+   * excluded. A replica is offline in the initial state of its own state model, for example
+   * OFFLINE. With {@link InstanceDrainExclusionType#ERROR_PARTITIONS} excluded, a replica in ERROR
+   * also counts as offline.
+   *
+   * The state is NOT_LIVE when the instance exists but is not live, and MULTIPLE_SESSIONS while
+   * it is carrying over current states from a previous session, which may still describe serving
+   * replicas. Otherwise it is IN_PROGRESS while messages are pending or a replica is neither
+   * offline nor in ERROR, BLOCKED_BY_ERROR when only replicas in ERROR are left, and
+   * REPLICAS_OFFLINE when every replica is offline.
+   *
+   * This is used by the Helix REST {@code areReplicasOffline} command.
+   *
+   * @return the status, or null if the instance does not exist in the cluster
+   * @throws IllegalArgumentException if an exclusion type other than ERROR_PARTITIONS is given
+   */
+  public InstanceReplicaStatus getInstanceReplicaStatus(String clusterName, String instanceName,
+      Set<InstanceDrainExclusionType> exclusionTypes) {
+    for (InstanceDrainExclusionType exclusionType : exclusionTypes) {
+      if (exclusionType != InstanceDrainExclusionType.ERROR_PARTITIONS) {
+        throw new IllegalArgumentException(
+            "Only ERROR_PARTITIONS can be excluded when checking whether replicas are offline: "
+                + exclusionType);
+      }
+    }
+    HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    InstanceReplicaStatus replicaStatus = new InstanceReplicaStatus();
+
+    LiveInstance liveInstance = accessor.getProperty(keyBuilder.liveInstance(instanceName));
+    if (liveInstance == null) {
+      if (!_zkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName))) {
+        return null;
+      }
+      replicaStatus.setState(InstanceReplicaStatus.State.NOT_LIVE);
+      replicaStatus.setReplicaCount(0);
+      replicaStatus.setOfflineReplicaCount(0);
+      replicaStatus.setErrorReplicaCount(0);
+      replicaStatus.setPendingMessageCount(0);
+      replicaStatus.setErrorPartitions(Collections.emptyMap());
+      return replicaStatus;
+    }
+    String sessionId = liveInstance.getEphemeralOwner();
+    if (accessor.getChildNames(keyBuilder.sessions(instanceName)).stream()
+        .anyMatch(session -> !session.equals(sessionId))) {
+      replicaStatus.setState(InstanceReplicaStatus.State.MULTIPLE_SESSIONS);
+      return replicaStatus;
+    }
+
+    List<CurrentState> currentStates =
+        accessor.getChildValues(keyBuilder.currentStates(instanceName, sessionId), true);
+    Map<String, StateModelDefinition> stateModelDefs = new HashMap<>();
+    Map<String, List<String>> errorPartitionsByResource = new TreeMap<>();
+    List<PropertyKey> currentStateKeys = new ArrayList<>();
+    int replicaCount = 0;
+    int offlineReplicaCount = 0;
+    int errorReplicaCount = 0;
+    for (CurrentState currentState : currentStates) {
+      String stateModelDefRef = currentState.getStateModelDefRef();
+      if (TaskConstants.STATE_MODEL_NAME.equals(stateModelDefRef)) {
+        continue;
+      }
+      String resource = currentState.getResourceName();
+      PropertyKey currentStateKey = keyBuilder.currentState(instanceName, sessionId, resource);
+      currentStateKeys.add(currentStateKey);
+      if (currentState.getBucketSize() > 0) {
+        // State transitions of a bucketized resource update its buckets, not the parent node.
+        for (String bucket : accessor.getChildNames(currentStateKey)) {
+          currentStateKeys.add(keyBuilder.currentState(instanceName, sessionId, resource, bucket));
+        }
+      }
+      StateModelDefinition stateModelDef = stateModelDefRef == null ? null
+          : stateModelDefs.computeIfAbsent(stateModelDefRef,
+              name -> getStateModelDef(clusterName, name));
+      String initialState = stateModelDef == null ? null : stateModelDef.getInitialState();
+      for (Map.Entry<String, String> entry : currentState.getPartitionStateMap().entrySet()) {
+        String state = entry.getValue();
+        replicaCount++;
+        if (HelixDefinedState.ERROR.name().equals(state)) {
+          errorReplicaCount++;
+          errorPartitionsByResource.computeIfAbsent(resource, name -> new ArrayList<>())
+              .add(entry.getKey());
+        } else if (initialState != null && initialState.equals(state)) {
+          offlineReplicaCount++;
+        }
+      }
+    }
+
+    // The resources are already in name order; list the partitions of each in name order too.
+    errorPartitionsByResource.values().forEach(Collections::sort);
+    int pendingMessageCount = accessor.getChildNames(keyBuilder.messages(instanceName)).size();
+
+    InstanceReplicaStatus.State state;
+    if (pendingMessageCount > 0 || offlineReplicaCount + errorReplicaCount < replicaCount) {
+      state = InstanceReplicaStatus.State.IN_PROGRESS;
+    } else if (errorReplicaCount > 0
+        && !exclusionTypes.contains(InstanceDrainExclusionType.ERROR_PARTITIONS)) {
+      state = InstanceReplicaStatus.State.BLOCKED_BY_ERROR;
+    } else {
+      state = InstanceReplicaStatus.State.REPLICAS_OFFLINE;
+    }
+    replicaStatus.setState(state);
+    replicaStatus.setReplicaCount(replicaCount);
+    replicaStatus.setOfflineReplicaCount(offlineReplicaCount);
+    replicaStatus.setErrorReplicaCount(errorReplicaCount);
+    replicaStatus.setPendingMessageCount(pendingMessageCount);
+    replicaStatus.setErrorPartitions(errorPartitionsByResource);
+    accessor.getPropertyStats(currentStateKeys).stream()
+        .filter(Objects::nonNull)
+        .map(HelixProperty.Stat::getModifiedTime)
+        .max(Comparator.naturalOrder())
+        .filter(modifiedTime -> modifiedTime > 0)
+        .ifPresent(replicaStatus::setLastActivityTimestamp);
+    return replicaStatus;
   }
 
   /**

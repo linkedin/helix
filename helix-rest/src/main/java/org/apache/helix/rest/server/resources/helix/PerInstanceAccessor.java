@@ -73,6 +73,7 @@ import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
@@ -93,6 +94,8 @@ import org.apache.helix.util.HelixUtil;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.exception.ZkClientException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.eclipse.jetty.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -760,6 +763,29 @@ public class PerInstanceAccessor extends AbstractHelixResource {
             return serverError(e);
           }
           return OK(OBJECT_MAPPER.writeValueAsString(ImmutableMap.of("successful", instanceDrained)));
+        case areReplicasOffline:
+          InstanceReplicaStatus replicaStatus;
+          try {
+            if (!(admin instanceof ZKHelixAdmin)) {
+              return serverError("Command areReplicasOffline requires a ZKHelixAdmin.");
+            }
+            replicaStatus = ((ZKHelixAdmin) admin).getInstanceReplicaStatus(clusterId, instanceName,
+                InstanceDrainExclusionType.parseExclusionTypes(exclusions));
+          } catch (IllegalArgumentException e) {
+            LOG.error("Invalid exclusions for cluster: {}, instance: {}, exclusions: {}", clusterId,
+                instanceName, exclusions, e);
+            return badRequest(e.getMessage());
+          } catch (HelixException | ZkException | ZkClientException e) {
+            // A failed ZooKeeper read is a server error, not a bad request.
+            LOG.error("Encountered error when checking if replicas are offline for cluster: {}, "
+                + "instance: {}", clusterId, instanceName, e);
+            return serverError(e);
+          }
+          if (replicaStatus == null) {
+            return notFound(String.format("Instance %s does not exist in cluster %s.", instanceName,
+                clusterId));
+          }
+          return OK(OBJECT_MAPPER.writeValueAsString(replicaStatus));
         case forceKillInstance:
           boolean instanceForceKilled = admin.forceKillInstance(clusterId, instanceName, reason, instanceOperationSource);
           if (!instanceForceKilled) {
