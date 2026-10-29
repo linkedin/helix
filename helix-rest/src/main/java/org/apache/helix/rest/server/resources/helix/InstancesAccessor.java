@@ -380,8 +380,14 @@ public class InstancesAccessor extends AbstractHelixResource {
    *   "instance_summaries": {
    *     "h1_12918": { "live": true, "host": "h1", "port": "12918",
    *                   "instanceOperation": "ENABLE", "domain": "zone=z1,host=h1",
-   *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 } } } }
+   *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 },
+   *                   "maintenanceMarkerExpiresAtMillis": 1776385800000 } } }
    * }</pre>
+   *
+   * <p>{@code maintenanceMarkerExpiresAtMillis} is present only while the instance holds a valid
+   * instance-operation maintenance marker (see
+   * {@link InstanceConfig#isUnderInstanceOperationMaintenance(long)}); an expired marker is
+   * omitted.
    *
    * <p>{@code live} is the raw {@code /LIVEINSTANCES} membership and {@code instanceOperation} is
    * the effective operation, as in {@code getInstancesUnderInstanceOperationMaintenance}.
@@ -401,6 +407,7 @@ public class InstancesAccessor extends AbstractHelixResource {
       Set<String> liveInstances =
           liveInstanceNames == null ? Collections.emptySet() : new HashSet<>(liveInstanceNames);
 
+      long nowMs = System.currentTimeMillis();
       // Sorted so the payload is stable across calls for the same cluster state.
       Map<String, InstanceConfig> sortedConfigs = new TreeMap<>();
       if (instanceConfigs != null) {
@@ -430,6 +437,10 @@ public class InstancesAccessor extends AbstractHelixResource {
           instanceConfig.getInstanceCapacityMap().forEach(capacityNode::put);
         } catch (NumberFormatException e) {
           capacityNode.removeAll();
+        }
+        if (instanceConfig.isUnderInstanceOperationMaintenance(nowMs)) {
+          instanceNode.put("maintenanceMarkerExpiresAtMillis",
+              instanceConfig.getInstanceOperationMaintenanceUntilMs());
         }
       }
       return JSONRepresentation(root);

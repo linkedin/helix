@@ -1084,11 +1084,16 @@ public class TestInstancesAccessor extends AbstractTestClass {
     }
     startInstances(clusterName, new TreeSet<>(Collections.singletonList("isInstance0")), 1);
     setInstanceOperation(clusterName, "isInstance1", InstanceConstants.InstanceOperation.DISABLE);
+    long markerExpiresAtMillis = System.currentTimeMillis() + 600_000L;
     InstanceConfig config = _configAccessor.getInstanceConfig(clusterName, "isInstance0");
     config.setDomain("zone=z1,host=isInstance0");
     config.addTag("tagA");
     config.setInstanceCapacityMap(ImmutableMap.of("CPU", 100, "DISK", 500));
+    config.setInstanceOperationMaintenanceUntilMs(markerExpiresAtMillis);
     _configAccessor.setInstanceConfig(clusterName, "isInstance0", config);
+    // An expired marker is omitted.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "isInstance1",
+        System.currentTimeMillis() - 1L);
 
     JsonNode summaries = OBJECT_MAPPER.readTree(
         new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
@@ -1106,11 +1111,14 @@ public class TestInstancesAccessor extends AbstractTestClass {
     Assert.assertEquals(live.get("tags").get(0).asText(), "tagA");
     Assert.assertEquals(live.get("capacity").get("CPU").asInt(), 100);
     Assert.assertEquals(live.get("capacity").get("DISK").asInt(), 500);
+    Assert.assertEquals(live.get("maintenanceMarkerExpiresAtMillis").asLong(),
+        markerExpiresAtMillis);
 
     JsonNode disabled = summaries.get("isInstance1");
     Assert.assertFalse(disabled.get("live").asBoolean());
     Assert.assertEquals(disabled.get("instanceOperation").asText(), "DISABLE");
     Assert.assertEquals(disabled.get("capacity").size(), 0);
+    Assert.assertFalse(disabled.has("maintenanceMarkerExpiresAtMillis"));
 
     new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
