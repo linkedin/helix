@@ -42,7 +42,6 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import org.apache.helix.controller.rebalancer.waged.WagedCapacitySnapshot;
 import org.apache.helix.controller.rebalancer.waged.WagedCapacitySnapshotProvider;
-import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
@@ -94,7 +93,8 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
       @DefaultValue("" + DEFAULT_MAX_STALE_MS) @QueryParam("maxStaleMs") long maxStaleMs,
       @HeaderParam("If-None-Match") String ifNoneMatch) {
     try {
-      if (!ZKUtil.isClusterSetup(clusterId, getRealmAwareZkClient())) {
+      // Unlike ZKUtil#isClusterSetup, a failed read is a 500 here, not a missing cluster.
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
         return notFound("Cluster " + clusterId + " does not exist");
       }
       long boundedStaleMs = Math.max(MIN_STALE_MS, Math.min(maxStaleMs, MAX_STALE_MS));
