@@ -1095,13 +1095,16 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   /**
-   * Verifies the always-on min-active-replica guard rail also protects {@code
-   * setInstanceOperation=DISABLE} (the path the helix-front UI and other REST clients use), not just
-   * the legacy {@code command=disable} path. DISABLE drains the instance's replicas in place, so a
-   * cluster whose {@code minActiveReplicas} equals its replica count has zero headroom: disabling
-   * any one instance drops every partition it hosts below {@code minActiveReplicas}, a deterministic
-   * breach the guard rail must catch before writing to ZooKeeper. Unlike the feasibility guard rail
-   * this rule is always-on, so no cluster-config opt-in is needed.
+   * Verifies the always-on min-active-replica guard rail also protects the {@code
+   * setInstanceOperation} drain-in-place operations -- {@code DISABLE} (the path the helix-front UI
+   * and other REST clients use) and {@code UNKNOWN} -- not just the legacy {@code command=disable}
+   * path. Both operations reduce the instance's replicas in place with no replacement bootstrapped
+   * first, so a cluster whose {@code minActiveReplicas} equals its replica count has zero headroom:
+   * draining any one instance drops every partition it hosts below {@code minActiveReplicas}, a
+   * deterministic breach the guard rail must catch before writing to ZooKeeper. The test also lowers
+   * {@code minActiveReplicas} and asserts a now-safe DISABLE is allowed through and written, so a
+   * wiring bug that rejected every drain could not pass. Unlike the feasibility guard rail this rule
+   * is always-on, so no cluster-config opt-in is needed.
    */
   @Test(dependsOnMethods = "setInstanceOperationRebalanceFeasibilityGuardrail")
   public void setInstanceOperationDisableMinActiveReplicaGuardrail() throws Exception {
@@ -1178,7 +1181,25 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).getInstanceEnabled(),
         "dryRun must not write");
 
-    // 3. force: an operator override bypasses the verdict and writes DISABLE.
+    // 3. The same in-place-drain guard also covers setInstanceOperation=UNKNOWN, which drops this
+    // instance's replicas immediately (no replacement bootstrapped first) -- exactly the hazard the
+    // min-active-replica rule guards. It must be blocked too, by the same rule, writing nothing.
+    String unknownTarget = instances.get(1);
+    Response unknownBlocked = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=UNKNOWN")
+        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .format(cluster, unknownTarget).post(this, entity);
+    JsonNode unknownVerdict = OBJECT_MAPPER.readTree(unknownBlocked.readEntity(String.class));
+    Assert.assertFalse(unknownVerdict.get("feasible").asBoolean(),
+        "an UNKNOWN drain that underflows minActiveReplicas must be infeasible");
+    Assert.assertTrue(
+        unknownVerdict.toString().contains(InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID),
+        "UNKNOWN verdict should carry the min-active-replica rule id, but was: " + unknownVerdict);
+    Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, unknownTarget)
+            .getInstanceOperation().getOperation(), InstanceConstants.InstanceOperation.ENABLE,
+        "a blocked UNKNOWN must not be written");
+
+    // 4. force: an operator override bypasses the verdict and writes DISABLE.
     new JerseyUriRequestBuilder(
         "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE&force=true")
         .format(cluster, target).post(this, entity);
@@ -1187,6 +1208,32 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         InstanceConstants.InstanceOperation.DISABLE, "force=true should write DISABLE");
     Assert.assertFalse(disabledConfig.getInstanceEnabled(),
         "a DISABLE operation must render the instance disabled");
+
+    // 5. Allowed path: restore the instance and lower minActiveReplicas so a drain is safe, then
+    // reconverge. A plain setInstanceOperation=DISABLE that respects minActiveReplicas must now pass
+    // the guard rail and be written -- proving the rule is not simply rejecting every drain.
+    _gSetupTool.getClusterManagementTool().enableInstance(cluster, target, true);
+    IdealState lowered =
+        _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+    lowered.setMinActiveReplicas(1);
+    _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, lowered);
+    _gSetupTool.rebalanceStorageCluster(cluster, resource, replica);
+    try (BestPossibleExternalViewVerifier verifier =
+        new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+      Assert.assertTrue(verifier.verifyByPolling(),
+          "cluster should reconverge after lowering minActiveReplicas");
+    }
+
+    String feasibleTarget = instances.get(2);
+    new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=DISABLE")
+        .format(cluster, feasibleTarget).post(this, entity);
+    InstanceConfig feasibleConfig = _configAccessor.getInstanceConfig(cluster, feasibleTarget);
+    Assert.assertEquals(feasibleConfig.getInstanceOperation().getOperation(),
+        InstanceConstants.InstanceOperation.DISABLE,
+        "a DISABLE that respects minActiveReplicas should pass the guard rail and be written");
+    Assert.assertFalse(feasibleConfig.getInstanceEnabled(),
+        "a written DISABLE must render the instance disabled");
   }
 
   /**
