@@ -223,8 +223,8 @@ public class ZkDistributedLeaderElection implements IZkDataListener, IZkStateLis
   @Override
   public synchronized void handleStateChanged(Watcher.Event.KeeperState state) {
     if (state == Watcher.Event.KeeperState.SyncConnected) {
-      if (isCurrentSession(_sessionId)) {
-        refreshSession(_sessionId);
+      if (!_closed && !_zkClient.isClosed()) {
+        refreshSession(Long.toHexString(_zkClient.getSessionId()));
       }
     } else {
       _isLeader = false;

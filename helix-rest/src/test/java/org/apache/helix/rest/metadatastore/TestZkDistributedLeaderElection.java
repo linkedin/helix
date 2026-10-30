@@ -20,8 +20,10 @@ package org.apache.helix.rest.metadatastore;
  */
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.apache.helix.TestHelper;
 import org.apache.helix.ZkTestHelper;
 import org.apache.helix.ZkUnitTestBase;
@@ -74,6 +76,63 @@ public class TestZkDistributedLeaderElection extends ZkUnitTestBase {
         new ZkDistributedLeaderElection(client, _path, new ZNRecord(name));
     _elections.add(election);
     return election;
+  }
+
+  private HelixZkClient withManualCallbacks(HelixZkClient realClient) {
+    HelixZkClient client =
+        Mockito.mock(HelixZkClient.class, AdditionalAnswers.delegatesTo(realClient));
+    Mockito.doNothing().when(client).subscribeStateChanges(Mockito.any());
+    Mockito.doReturn(Collections.emptyList()).when(client)
+        .subscribeChildChanges(Mockito.anyString(), Mockito.any());
+    return client;
+  }
+
+  @Test(timeOut = 15000)
+  public void testInitialDisconnectRetriesMembershipOnReconnect() throws Exception {
+    HelixZkClient realClient = newClient();
+    HelixZkClient client = withManualCallbacks(realClient);
+    Mockito.doReturn(false).when(client).waitUntilConnected(0, TimeUnit.MILLISECONDS);
+    ZkDistributedLeaderElection election =
+        new ZkDistributedLeaderElection(client, _path, new ZNRecord("first"));
+    _elections.add(election);
+    Assert.assertFalse(election.isLeader());
+    Assert.assertFalse(_gZkClient.exists(_path));
+
+    Mockito.doReturn(true).when(client).waitUntilConnected(0, TimeUnit.MILLISECONDS);
+    election.handleStateChanged(KeeperState.SyncConnected);
+    Assert.assertTrue(TestHelper.verify(election::isLeader, 5000));
+    String candidate = _gZkClient.getChildren(_path).get(0);
+    election.handleNewSession(Long.toHexString(realClient.getSessionId()));
+    Assert.assertEquals(_gZkClient.getChildren(_path), Collections.singletonList(candidate));
+  }
+
+  @Test(timeOut = 30000)
+  public void testInterruptedNewSessionRetriesMembershipOnReconnect() throws Exception {
+    HelixZkClient realClient = newClient();
+    HelixZkClient client = withManualCallbacks(realClient);
+    ZkDistributedLeaderElection election =
+        new ZkDistributedLeaderElection(client, _path, new ZNRecord("first"));
+    _elections.add(election);
+    Assert.assertTrue(election.isLeader());
+    long oldSession = realClient.getSessionId();
+
+    Mockito.doReturn(false).when(client).waitUntilConnected(0, TimeUnit.MILLISECONDS);
+    election.handleStateChanged(KeeperState.Expired);
+    ZkTestHelper.expireSession(realClient);
+    Assert.assertTrue(TestHelper.verify(
+        () -> realClient.waitUntilConnected(0, TimeUnit.MILLISECONDS)
+            && realClient.getSessionId() != oldSession, 5000));
+    String sessionId = Long.toHexString(realClient.getSessionId());
+    election.handleNewSession(sessionId);
+    Assert.assertFalse(election.isLeader());
+    Assert.assertTrue(_gZkClient.getChildren(_path).isEmpty());
+
+    Mockito.doReturn(true).when(client).waitUntilConnected(0, TimeUnit.MILLISECONDS);
+    election.handleStateChanged(KeeperState.SyncConnected);
+    Assert.assertTrue(TestHelper.verify(election::isLeader, 5000));
+    String candidate = _gZkClient.getChildren(_path).get(0);
+    election.handleNewSession(sessionId);
+    Assert.assertEquals(_gZkClient.getChildren(_path), Collections.singletonList(candidate));
   }
 
   @Test(timeOut = 30000)
@@ -150,6 +209,7 @@ public class TestZkDistributedLeaderElection extends ZkUnitTestBase {
     _clients.get(0).close();
     election.close();
     election.handleNewSession("1");
+    election.handleStateChanged(KeeperState.SyncConnected);
     Assert.assertFalse(election.isLeader());
   }
 }
