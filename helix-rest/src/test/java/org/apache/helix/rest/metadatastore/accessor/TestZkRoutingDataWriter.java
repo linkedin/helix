@@ -19,6 +19,7 @@ package org.apache.helix.rest.metadatastore.accessor;
  * under the License.
  */
 
+import java.lang.reflect.Field;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collections;
@@ -28,10 +29,12 @@ import javax.net.ssl.SSLContext;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.TestHelper;
+import org.apache.helix.ZkTestHelper;
 import org.apache.helix.msdcommon.constant.MetadataStoreRoutingConstants;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.AbstractTestClass;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -89,6 +92,42 @@ public class TestZkRoutingDataWriter extends AbstractTestClass {
     ZNRecord znRecord = _gZkClientTestNS
         .readData(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + DUMMY_REALM);
     Assert.assertNotNull(znRecord);
+  }
+
+  @Test(timeOut = 30000)
+  public void testExpiredAdmissionCannotWriteOnNewSession() throws Exception {
+    String realm = "EXPIRED_ADMISSION_" + java.util.UUID.randomUUID();
+    String address = _zkAddrTestNS + "/expired-admission-" + java.util.UUID.randomUUID();
+    String root = address.substring(_zkAddrTestNS.length());
+    _gZkClientTestNS.createPersistent(root, true);
+    String originalHostname = System.getProperty(MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY);
+    System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY, "localhost");
+    ZkRoutingDataWriter writer = new ZkRoutingDataWriter(TEST_NAMESPACE, address) {
+      @Override
+      protected boolean createZkRealm(String name) {
+        try {
+          Field field = ZkRoutingDataWriter.class.getDeclaredField("_zkClient");
+          field.setAccessible(true);
+          ZkTestHelper.expireSession((HelixZkClient) field.get(this));
+        } catch (Exception e) {
+          throw new AssertionError(e);
+        }
+        return super.createZkRealm(name);
+      }
+    };
+    try {
+      Assert.assertFalse(writer.addMetadataStoreRealm(realm));
+      Assert.assertFalse(_gZkClientTestNS.exists(
+          root + MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + realm));
+    } finally {
+      writer.close();
+      _gZkClientTestNS.deleteRecursively(root);
+      if (originalHostname == null) {
+        System.clearProperty(MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY);
+      } else {
+        System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY, originalHostname);
+      }
+    }
   }
 
   @Test(dependsOnMethods = "testAddMetadataStoreRealm")
