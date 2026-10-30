@@ -296,7 +296,13 @@ class InstanceTagIsolation {
    * scope, so they count first on no key, then only on the short keys, then on every key. A block
    * only the parked replicas push over is skipped only while the rest still does not fit, largest
    * overflow first. The rest is always held to the full totals, as the default check would hold a
-   * cluster made of the rest alone. Only called where the default mode throws.
+   * cluster made of the rest alone, and is scored as that cluster. Only called where the default
+   * mode throws.
+   *
+   * A block over on any key is skipped, even when only a node already above its capacity, such as
+   * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
+   * deficit: the skipped resources are logged and reported to
+   * {@link org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm#onAssignmentComputed}.
    *
    * @param deficit the failure the default mode would throw.
    * @param divGuard the share of each key's capacity added to the scoring denominators, also their
@@ -342,6 +348,7 @@ class InstanceTagIsolation {
     if (residualScoringCap == null) {
       return null;
     }
+    totals.scopeEstimates(atFault);
 
     Set<String> deficitGroups = new TreeSet<>();
     for (int block : atFault) {
@@ -374,6 +381,8 @@ class InstanceTagIsolation {
    */
   private final class BlockTotals {
     private final List<Set<String>> _blocks = deficitBlocks();
+    private final Map<String, Integer> _blockOfGroup = new HashMap<>();
+    private final Map<Integer, List<AssignableNode>> _nodesByBlock = new HashMap<>();
     private final Set<Integer> _resourceBlocks = new HashSet<>();
     private final Map<Integer, Map<String, Long>> _capacity = new HashMap<>();
     private final Map<Integer, Map<String, Long>> _demand = new HashMap<>();
@@ -381,23 +390,22 @@ class InstanceTagIsolation {
     private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
 
     private BlockTotals() {
-      Map<String, Integer> blockOfGroup = new HashMap<>();
       for (int i = 0; i < _blocks.size(); i++) {
         for (String group : _blocks.get(i)) {
-          blockOfGroup.put(group, i);
+          _blockOfGroup.put(group, i);
         }
       }
       Integer untaggedBlock = null;
       for (Map.Entry<String, String> entry : tagByGroup().entrySet()) {
-        int block = blockOfGroup.get(entry.getKey());
+        int block = _blockOfGroup.get(entry.getKey());
         _resourceBlocks.add(block);
         if (entry.getValue() == null) {
           // Every untagged group can use every node, so they all share one block.
           untaggedBlock = block;
         }
       }
-      Map<String, Map<String, PartitionShare>> shares = chargeOwners(blockOfGroup);
-      chargeNodes(blockOfGroup, untaggedBlock, shares);
+      Map<String, Map<String, PartitionShare>> shares = chargeOwners(_blockOfGroup);
+      chargeNodes(_blockOfGroup, untaggedBlock, shares);
       chargeParked(shares);
     }
 
@@ -439,6 +447,7 @@ class InstanceTagIsolation {
         AssignableNode node = nodes.get(i);
         int blockId = blockOfNode(node, blockOfGroup, untaggedBlock);
         nodeBlock[i] = blockId;
+        _nodesByBlock.computeIfAbsent(blockId, key -> new ArrayList<>()).add(node);
         charge(_capacity, blockId, node.getMaxCapacity(), 1);
         Map<String, Long> nodeRoom = new HashMap<>();
         node.getMaxCapacity().forEach((key, value) -> nodeRoom.put(key, (long) value));
@@ -603,6 +612,23 @@ class InstanceTagIsolation {
             Math.max((float) remaining + (entry.getValue() * divGuard), divGuard));
       }
       return residualScoringCap;
+    }
+
+    /** Scores the rest as the default mode would score a cluster made of the rest alone. */
+    private void scopeEstimates(Set<Integer> skipped) {
+      List<AssignableReplica> replicas = new ArrayList<>();
+      for (AssignableReplica replica : _clusterModel.getContext().getManagedReplicas()) {
+        if (!skipped.contains(_blockOfGroup.get(groupKey(replica)))) {
+          replicas.add(replica);
+        }
+      }
+      List<AssignableNode> nodes = new ArrayList<>();
+      _nodesByBlock.forEach((block, blockNodes) -> {
+        if (!skipped.contains(block)) {
+          nodes.addAll(blockNodes);
+        }
+      });
+      _clusterModel.getContext().scopeEstimates(replicas, nodes);
     }
 
     private PartitionShare shareOf(Map<String, Map<String, PartitionShare>> shares,
