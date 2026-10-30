@@ -99,8 +99,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
   // Captures the original exception thrown inside the executor task so we can preserve its
   // FailureCategory when re-throwing on the synchronous path. Reset before each submit.
   private final AtomicReference<HelixRebalanceException> _lastAsyncFailure = new AtomicReference<>();
-  // Resources to recalculate in the next baseline run: the ones isolation skipped, or every
-  // resource if the last run failed.
+  // Resources to recalculate in the next baseline run: the ones isolation skipped, or every one
+  // the last run recalculated if it failed.
   private final AtomicReference<Set<String>> _isolationResourcesToRetry =
       new AtomicReference<>(Collections.emptySet());
 
@@ -227,16 +227,12 @@ class GlobalRebalanceRunner implements AutoCloseable {
     Map<HelixConstants.ChangeType, Set<String>> requestedChanges = clusterChanges;
     RebalanceAlgorithm calculationAlgorithm = algorithm;
     if (isolationEnabled) {
-      // If the calculation or the write fails, retry every resource so no change is lost.
+      // If the model cannot even be built, retry every resource so no change is lost.
       _isolationResourcesToRetry.compareAndSet(previousRetries, inFlightRetries);
       if (!previousRetries.isEmpty()) {
         retriedResources = new HashSet<>(previousRetries);
         retriedResources.retainAll(resourceMap.keySet());
-        Set<String> changedResources = new HashSet<>(retriedResources);
-        changedResources.addAll(clusterChanges.getOrDefault(
-            HelixConstants.ChangeType.RESOURCE_CONFIG, Collections.emptySet()));
-        clusterChanges = new HashMap<>(clusterChanges);
-        clusterChanges.put(HelixConstants.ChangeType.RESOURCE_CONFIG, changedResources);
+        clusterChanges = withRetries(clusterChanges, retriedResources);
       }
       calculationAlgorithm = new RebalanceAlgorithm() {
         @Override
@@ -266,20 +262,63 @@ class GlobalRebalanceRunner implements AutoCloseable {
     // 2. Use the previous Baseline as the only parameter about the previous assignment.
     Map<String, ResourceAssignment> currentBaseline =
         _assignmentManager.getBaselineAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
+    ClusterModel clusterModel = generateBaselineModel(clusterData, resourceMap,
+        allAssignableInstances, clusterChanges, currentBaseline);
+    int evaluatedReplicas = 0;
+    if (isolationEnabled) {
+      evaluatedReplicas = countReplicas(clusterModel);
+      // A failed calculation or write only leaves unsettled what this one recalculates.
+      Set<String> unsettled = new HashSet<>(clusterModel.getAssignableReplicaMap().keySet());
+      if (_isolationResourcesToRetry.compareAndSet(inFlightRetries, unsettled)) {
+        inFlightRetries = unsettled;
+      }
+    }
     Map<String, ResourceAssignment> newBaseline;
     try {
-      newBaseline = calculateBaseline(clusterData, resourceMap, allAssignableInstances,
-          clusterChanges, currentBaseline, calculationAlgorithm);
+      newBaseline = WagedRebalanceUtil.calculateAssignment(clusterModel, calculationAlgorithm,
+          currentBaseline);
+      Set<String> failedRetries = new HashSet<>(retriedResources);
+      failedRetries.retainAll(nextRetries);
+      if (!failedRetries.isEmpty()) {
+        // A retried resource failed again and skipped its block. If that block also held a change
+        // the default mode would apply, recalculate without the failing retries so they never
+        // block it.
+        Set<String> settledRetries = new HashSet<>(retriedResources);
+        settledRetries.removeAll(failedRetries);
+        ClusterModel narrowerModel = generateBaselineModel(clusterData, resourceMap,
+            allAssignableInstances, withRetries(requestedChanges, settledRetries), currentBaseline);
+        if (countReplicas(narrowerModel) < evaluatedReplicas && !Collections.disjoint(
+            narrowerModel.getAssignableReplicaMap().keySet(), nextRetries)) {
+          Set<String> skipped = new HashSet<>(nextRetries);
+          nextRetries.clear();
+          try {
+            newBaseline = WagedRebalanceUtil.calculateAssignment(narrowerModel,
+                calculationAlgorithm, currentBaseline);
+            nextRetries.addAll(failedRetries);
+          } catch (HelixRebalanceException retryEx) {
+            LOG.warn("Baseline calculation without {} failing retried resources failed, keeping "
+                + "the result with them.", failedRetries.size(), retryEx);
+            nextRetries.clear();
+            nextRetries.addAll(skipped);
+          }
+        }
+      }
     } catch (HelixRebalanceException ex) {
       if (retriedResources.isEmpty()) {
         throw ex;
       }
       // Retried resources must not fail a baseline that the default mode completes, so calculate
-      // the requested changes alone and retry those resources in the next baseline.
+      // the requested changes alone and retry those resources in the next baseline. That only
+      // helps if the retries widened what was calculated.
+      ClusterModel requestedModel = generateBaselineModel(clusterData, resourceMap,
+          allAssignableInstances, requestedChanges, currentBaseline);
+      if (countReplicas(requestedModel) == evaluatedReplicas) {
+        throw ex;
+      }
       LOG.warn("Baseline calculation with {} retried resources failed, calculating without them.",
           retriedResources.size(), ex);
-      newBaseline = calculateBaseline(clusterData, resourceMap, allAssignableInstances,
-          requestedChanges, currentBaseline, calculationAlgorithm);
+      newBaseline = WagedRebalanceUtil.calculateAssignment(requestedModel, calculationAlgorithm,
+          currentBaseline);
       nextRetries.addAll(retriedResources);
     }
     boolean isBaselineChanged =
@@ -310,22 +349,32 @@ class GlobalRebalanceRunner implements AutoCloseable {
     }
   }
 
-  private static Map<String, ResourceAssignment> calculateBaseline(
-      ResourceControllerDataProvider clusterData, Map<String, Resource> resourceMap,
-      Set<String> allAssignableInstances,
+  private static ClusterModel generateBaselineModel(ResourceControllerDataProvider clusterData,
+      Map<String, Resource> resourceMap, Set<String> allAssignableInstances,
       Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
-      Map<String, ResourceAssignment> currentBaseline, RebalanceAlgorithm algorithm)
-      throws HelixRebalanceException {
-    ClusterModel clusterModel;
+      Map<String, ResourceAssignment> currentBaseline) throws HelixRebalanceException {
     try {
-      clusterModel = ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
+      return ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
           allAssignableInstances, clusterChanges, currentBaseline);
     } catch (Exception ex) {
       throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
-    return WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, currentBaseline);
+  }
+
+  private static Map<HelixConstants.ChangeType, Set<String>> withRetries(
+      Map<HelixConstants.ChangeType, Set<String>> clusterChanges, Set<String> retries) {
+    Set<String> changedResources = new HashSet<>(retries);
+    changedResources.addAll(clusterChanges.getOrDefault(
+        HelixConstants.ChangeType.RESOURCE_CONFIG, Collections.emptySet()));
+    Map<HelixConstants.ChangeType, Set<String>> changes = new HashMap<>(clusterChanges);
+    changes.put(HelixConstants.ChangeType.RESOURCE_CONFIG, changedResources);
+    return changes;
+  }
+
+  private static int countReplicas(ClusterModel clusterModel) {
+    return clusterModel.getAssignableReplicaMap().values().stream().mapToInt(Set::size).sum();
   }
 
   public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {

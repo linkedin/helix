@@ -196,8 +196,8 @@ public class ClusterConfig extends HelixProperty {
      * not only for cleanly partitioned ones. After a baseline fails or skips a group, the next
      * baseline also recalculates the resources it could not settle, which the default mode leaves
      * as they were, so from then on the two modes can differ even in a rebalance in which nothing
-     * fails. If that recalculation fails again, the baseline falls back to the changes it was asked
-     * for, so a retry never blocks a change the default mode would apply.
+     * fails. If such a resource fails again and takes with it a change the default mode would
+     * apply, the baseline is recalculated without it, so a retry never blocks that change.
      *
      * The cluster wide capacity check that runs before any placement is tag blind, so one wildly
      * oversubscribed clique can drag it negative while every other clique still fits on its own

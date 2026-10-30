@@ -921,10 +921,10 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
 
   /**
    * With instance tag isolation on, a baseline that fails to calculate or to persist keeps every
-   * resource on the retry list, so the change it consumed is not lost.
+   * resource it recalculated on the retry list, so the change it consumed is not lost.
    */
   @Test(dataProvider = "baselineFailurePoints")
-  public void testIsolationRetriesEveryResourceAfterAFailedBaseline(boolean failPersist)
+  public void testIsolationRetriesWhatAFailedBaselineRecalculated(boolean failPersist)
       throws IOException, HelixRebalanceException {
     BaselineRecorder algorithm = new BaselineRecorder();
     AtomicBoolean persistFails = new AtomicBoolean();
@@ -954,7 +954,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     persistFails.set(false);
     algorithm._fail = false;
 
-    changeResourceConfig(clusterData, changed, 2);
+    changeResourceConfig(clusterData, _resourceNames.get(0), 2);
     rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
     Assert.assertEquals(algorithm.lastEvaluated(), new HashSet<>(_resourceNames));
   }
@@ -1002,20 +1002,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     when(clusterData.getRefreshedChangeTypes())
         .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
     rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
-
-    String heavy = _resourceNames.get(0);
-    ResourceConfig config =
-        new ResourceConfig(new ZNRecord(clusterData.getResourceConfig(heavy).getRecord()));
-    Map<String, Map<String, Integer>> capacityMap = config.getPartitionCapacityMap();
-    Map<String, Integer> weights =
-        new HashMap<>(capacityMap.get(ResourceConfig.DEFAULT_PARTITION_KEY));
-    weights.put("item3", _capacityDataMap.get("item3") + 1);
-    capacityMap.put(_partitionNames.get(0), weights);
-    config.setPartitionCapacityMap(capacityMap);
-    when(clusterData.getResourceConfig(heavy)).thenReturn(config);
-    clusterData.getResourceConfigMap().put(heavy, config);
-    when(clusterData.getRefreshedChangeTypes())
-        .thenReturn(Collections.singleton(HelixConstants.ChangeType.RESOURCE_CONFIG));
+    makePartitionUnplaceable(clusterData, _resourceNames.get(0));
     rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
 
     IdealState idealState =
@@ -1028,6 +1015,111 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
         new CurrentStateOutput());
     return Arrays.asList(metadataStore.getBaseline(), metadataStore.getBestPossibleAssignment());
+  }
+
+  /**
+   * With instance tag isolation on, a retried resource that keeps failing must never block a change
+   * the default mode applies next to it. Clique A holds the first resource and clique B the second.
+   * One partition of the first resource becomes too heavy for any instance, so isolation skips
+   * clique A and retries it in every later baseline. A resource added to clique A must still be
+   * placed like the default mode places it, and so must a partition added to it once isolation
+   * retries it too.
+   */
+  @Test
+  public void testIsolationRetryNeverBlocksAChangeInItsClique()
+      throws IOException, HelixRebalanceException {
+    List<Map<String, ResourceAssignment>> off = changeCliqueOfUnplaceableResource(false);
+    List<Map<String, ResourceAssignment>> on = changeCliqueOfUnplaceableResource(true);
+
+    Assert.assertEquals(off.get(0).get(ADDED_RESOURCE).getMappedPartitions(),
+        Collections.singletonList(new Partition(_partitionNames.get(0))));
+    Assert.assertEquals(off.get(2).get(ADDED_RESOURCE).getMappedPartitions().size(), 2);
+    Assert.assertEquals(on, off);
+  }
+
+  private static final String ADDED_RESOURCE = "AddedResource";
+
+  /**
+   * The baseline and best possible assignment once a resource has been added next to an
+   * unplaceable one, and again once a partition has been added to it.
+   */
+  private List<Map<String, ResourceAssignment>> changeCliqueOfUnplaceableResource(
+      boolean isolation) throws IOException, HelixRebalanceException {
+    MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore();
+    WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
+        ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    String cliqueA = _testInstanceTags.get(0);
+    String cliqueB = "CliqueB";
+    InstanceConfig nodeB = clusterData.getAssignableInstanceConfigMap().get(_testInstanceId + 2);
+    nodeB.removeTag(cliqueA);
+    nodeB.addTag(cliqueB);
+    clusterData.getIdealStates().values().forEach(idealState -> idealState.setReplicas("1"));
+    clusterData.getIdealState(_resourceNames.get(0)).setInstanceGroupTag(cliqueA);
+    clusterData.getIdealState(_resourceNames.get(1)).setInstanceGroupTag(cliqueB);
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(isolation);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+        new CurrentStateOutput());
+    makePartitionUnplaceable(clusterData, _resourceNames.get(0));
+    rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+        new CurrentStateOutput());
+
+    IdealState added = new IdealState(ADDED_RESOURCE);
+    added.setNumPartitions(1);
+    added.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+    added.setStateModelDefRef("MasterSlave");
+    added.setReplicas("1");
+    added.setRebalancerClassName(WagedRebalancer.class.getName());
+    added.setPreferenceList(_partitionNames.get(0), Collections.emptyList());
+    added.setInstanceGroupTag(cliqueA);
+    clusterData.getIdealStates().put(ADDED_RESOURCE, added);
+    ResourceConfig addedConfig = new ResourceConfig(ADDED_RESOURCE);
+    addedConfig.setPartitionCapacityMap(Collections.singletonMap(
+        ResourceConfig.DEFAULT_PARTITION_KEY, ImmutableMap.of("item1", 3, "item2", 6)));
+    when(clusterData.getResourceConfig(ADDED_RESOURCE)).thenReturn(addedConfig);
+    clusterData.getResourceConfigMap().put(ADDED_RESOURCE, addedConfig);
+    when(clusterData.getRefreshedChangeTypes()).thenReturn(new HashSet<>(Arrays
+        .asList(HelixConstants.ChangeType.IDEAL_STATE, HelixConstants.ChangeType.RESOURCE_CONFIG)));
+    rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+        new CurrentStateOutput());
+    List<Map<String, ResourceAssignment>> assignments = new ArrayList<>(Arrays.asList(
+        new HashMap<>(metadataStore.getBaseline()),
+        new HashMap<>(metadataStore.getBestPossibleAssignment())));
+
+    // A change in clique B makes isolation retry every resource of clique A, the added one too.
+    changeResourceConfig(clusterData, _resourceNames.get(1), 1);
+    rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+        new CurrentStateOutput());
+    IdealState grown = new IdealState(new ZNRecord(added.getRecord()));
+    grown.setNumPartitions(2);
+    grown.setPreferenceList(_partitionNames.get(1), Collections.emptyList());
+    clusterData.getIdealStates().put(ADDED_RESOURCE, grown);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.IDEAL_STATE));
+    rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+        new CurrentStateOutput());
+    assignments.add(new HashMap<>(metadataStore.getBaseline()));
+    assignments.add(new HashMap<>(metadataStore.getBestPossibleAssignment()));
+    return assignments;
+  }
+
+  /** Makes the first partition of the resource too heavy for any instance. */
+  private void makePartitionUnplaceable(ResourceControllerDataProvider clusterData,
+      String resourceName) throws IOException {
+    ResourceConfig config =
+        new ResourceConfig(new ZNRecord(clusterData.getResourceConfig(resourceName).getRecord()));
+    Map<String, Map<String, Integer>> capacityMap = config.getPartitionCapacityMap();
+    Map<String, Integer> weights =
+        new HashMap<>(capacityMap.get(ResourceConfig.DEFAULT_PARTITION_KEY));
+    weights.put("item3", _capacityDataMap.get("item3") + 1);
+    capacityMap.put(_partitionNames.get(0), weights);
+    config.setPartitionCapacityMap(capacityMap);
+    when(clusterData.getResourceConfig(resourceName)).thenReturn(config);
+    clusterData.getResourceConfigMap().put(resourceName, config);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.RESOURCE_CONFIG));
   }
 
   private static Map<String, Resource> toResourceMap(ResourceControllerDataProvider clusterData) {
