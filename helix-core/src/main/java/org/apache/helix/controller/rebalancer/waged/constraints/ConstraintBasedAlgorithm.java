@@ -172,6 +172,10 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
               failureSink, blockingTypes);
       // Stop if the replica has no candidate node, unless isolation can skip its share block.
       if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
+        // Only the first placement failure of a run can be thrown. Later ones are tolerated and
+        // only logged, so they skip the per node reasons, which grow with the cluster size.
+        String failReasons = isolation.hasToleratedPlacementFailure()
+            ? "listed for the first failure only" : failureSink.getFailures();
         String errorMessage = String.format(
             "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
                 + "Failure summary: %s; Fail reasons: %s",
@@ -179,7 +183,7 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
             replica.getResourceName(),
             clusterModel.getContext().getClusterName(),
             failureSink.getFailureSummary(),
-            failureSink.getFailures());
+            failReasons);
         HelixRebalanceException failure = new HelixRebalanceException(errorMessage,
             HelixRebalanceException.Type.FAILED_TO_CALCULATE,
             HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);

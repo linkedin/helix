@@ -113,6 +113,7 @@ class InstanceTagIsolation {
   // Replaced on every tolerated failure so each group's diagnosis only reports its own reasons.
   private OptimalAssignment _failureSink;
   private HelixRebalanceException _firstFailure;
+  private boolean _placementFailureTolerated;
   // Computed on the first failure only, so the happy path stays identical to the default mode.
   private List<Set<String>> _shareBlocks;
   private Map<String, Set<String>> _blockByGroup;
@@ -147,6 +148,15 @@ class InstanceTagIsolation {
     }
     _skippedResources.add(replica.getResourceName());
     return true;
+  }
+
+  /**
+   * Whether this run already tolerated a replica that could not be placed. Every later one is
+   * tolerated too, since the share blocks do not change during a run, so its failure is never
+   * thrown.
+   */
+  boolean hasToleratedPlacementFailure() {
+    return _placementFailureTolerated;
   }
 
   /**
@@ -213,6 +223,7 @@ class InstanceTagIsolation {
       _failedGroups.add(member);
     }
     _skippedResources.add(replica.getResourceName());
+    _placementFailureTolerated = true;
     if (_firstFailure == null) {
       _firstFailure = failure;
     }
