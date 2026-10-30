@@ -52,7 +52,7 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyPathBuilder;
-import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
@@ -83,6 +83,7 @@ import org.slf4j.LoggerFactory;
 @ClusterAuth
 @Path("/clusters/{clusterId}/resources")
 public class ResourceAccessor extends AbstractHelixResource {
+  private static final String GET_RESOURCE_SUMMARIES = "getResourceSummaries";
   private final static Logger _logger = LoggerFactory.getLogger(ResourceAccessor.class);
 
   public enum ResourceProperties {
@@ -103,7 +104,12 @@ public class ResourceAccessor extends AbstractHelixResource {
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
   @Timed(name = HttpConstants.READ_REQUEST)
   @GET
-  public Response getResources(@PathParam("clusterId") String clusterId) {
+  public Response getResources(@PathParam("clusterId") String clusterId,
+      @QueryParam("command") String command) {
+    // Opt-in only: a literal sub-path would shadow a resource that is named "summaries".
+    if (GET_RESOURCE_SUMMARIES.equals(command)) {
+      return getResourceSummaries(clusterId);
+    }
     ObjectNode root = JsonNodeFactory.instance.objectNode();
     root.put(Properties.id.name(), JsonNodeFactory.instance.textNode(clusterId));
 
@@ -129,7 +135,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   }
 
   /**
-   * Lists every resource with a fixed, trimmed set of IdealState fields, from one bulk read, so a
+   * Served as {@code GET /clusters/{c}/resources?command=getResourceSummaries}. Lists every
+   * resource with a fixed, trimmed set of IdealState fields, from one bulk read, so a
    * client does not have to fetch each IdealState to render a resource table.
    *
    * <p>Response (HTTP 200), keyed by resource name in sorted order:
@@ -142,13 +149,10 @@ public class ResourceAccessor extends AbstractHelixResource {
    *              "enabled": true, "waged": true, "hasExternalView": true } } }
    * }</pre>
    *
-   * <p>{@code waged} is true when the resource's rebalancer class is the WAGED rebalancer.
+   * <p>{@code waged} is true when WAGED is in effect for the resource: the WAGED rebalancer class
+   * and FULL_AUTO, the same predicate the controller and the capacity snapshot use.
    * {@code replicas} is a string because it can be {@code ANY_LIVEINSTANCE}.
    */
-  @ResponseMetered(name = HttpConstants.READ_REQUEST)
-  @Timed(name = HttpConstants.READ_REQUEST)
-  @GET
-  @Path("summaries")
   public Response getResourceSummaries(@PathParam("clusterId") String clusterId) {
     // 404 rather than an empty listing: a missing cluster reads as an empty child list. Unlike
     // ZKUtil#isClusterSetup, a failed read propagates as a 500 instead of reading as missing.
@@ -186,7 +190,7 @@ public class ResourceAccessor extends AbstractHelixResource {
       node.put("maxPartitionsPerInstance", idealState.getMaxPartitionsPerInstance());
       node.put("instanceGroupTag", idealState.getInstanceGroupTag());
       node.put("enabled", idealState.isEnabled());
-      node.put("waged", WagedRebalancer.class.getName().equals(idealState.getRebalancerClassName()));
+      node.put("waged", WagedValidationUtil.isWagedEnabled(idealState));
       node.put("hasExternalView", withExternalView.contains(entry.getKey()));
     }
     return JSONRepresentation(root);
