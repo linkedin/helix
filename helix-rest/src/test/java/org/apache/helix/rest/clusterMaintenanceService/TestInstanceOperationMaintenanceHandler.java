@@ -597,10 +597,6 @@ public class TestInstanceOperationMaintenanceHandler {
     // Failures name no partition, and their own text points at force=true, which this endpoint
     // does not take.
     String subject = "EVACUATE on the 1 instance this request changes";
-    Assert.assertEquals(guardrailMessage("Could not compute a baseline WAGED assignment for "
-        + "cluster c to validate EVACUATE on [h] against (boom). ... retry with force=true ..."),
-        "Rejected by guardrail RULE: the cluster's current WAGED assignment cannot be computed, so "
-            + subject + " cannot be shown safe. Fix the cluster's WAGED rebalance first.");
     Assert.assertEquals(guardrailMessage("Applying EVACUATE to [h] makes the WAGED rebalancer "
         + "unable to compute an assignment for cluster c (boom). ... retry with force=true ..."),
         "Rejected by guardrail RULE: " + subject + " would leave WAGED unable to compute any "
@@ -617,35 +613,35 @@ public class TestInstanceOperationMaintenanceHandler {
   }
 
   @Test
-  public void testGuardrailThatFailsToEvaluateIsAnError() {
-    String failed = "Not written: the rebalance-feasibility guardrail failed to evaluate "
-        + "EVACUATE on the 1 instance this request changes. Resend it; if it keeps failing, check "
-        + "the Helix REST server log.";
-    for (String violation : Arrays.asList("Rule evaluation failed: ZK read timed out",
-        "Rule evaluation failed: null", "Rule returned no result.")) {
-      Map<String, Outcome> outcomes = apply(instances -> ValidationResult.infeasible(
-          Violation.newBuilder("RULE").message(violation).build()), InstanceOperation.EVACUATE,
-          instance(0));
-      assertStatuses(outcomes, Status.ERROR);
-      Assert.assertEquals(outcomes.get(instance(0)).getMessage(), failed);
-    }
+  public void testGuardrailThatCannotJudgeWritesNothing() {
+    String failed = "Not written: the rebalance-feasibility guardrail could not judge EVACUATE "
+        + "on the 1 instance this request changes. Resend it once; if it comes back, the "
+        + "cluster's WAGED rebalance must be fixed.";
+    Map<String, Outcome> outcomes = apply(instances -> ValidationResult.infeasible(
+        Violation.newBuilder("RULE").indeterminate().message("Rule returned no result.").build()),
+        InstanceOperation.EVACUATE, instance(0));
+    assertStatuses(outcomes, Status.GUARDRAIL_INDETERMINATE);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), failed);
+    Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes),
+        "Applied to 0 of 1 instance (1 GUARDRAIL_INDETERMINATE).");
 
     // Another rule's verdict still stands.
-    Map<String, Outcome> outcomes = apply(instances -> ValidationResult.of(Arrays.asList(
-        Violation.newBuilder("BROKEN").message("Rule returned no result.").build(),
+    outcomes = apply(instances -> ValidationResult.of(Arrays.asList(
+        Violation.newBuilder("BROKEN").indeterminate().message("boom").build(),
         Violation.newBuilder("RULE").partition("db_0").build())), InstanceOperation.EVACUATE,
         instance(0));
     assertStatuses(outcomes, Status.GUARDRAIL_REJECTED);
     Assert.assertTrue(outcomes.get(instance(0)).getMessage().startsWith(
         "Rejected by guardrail RULE: "), outcomes.toString());
 
-    // Only the instances it failed to judge are errors; one that already holds the operation
+    // Only the instances it could not judge are held back; one that already holds the operation
     // needs no judging and is still applied.
     apply(SAFE, InstanceOperation.EVACUATE, instance(1));
     outcomes = apply(instances -> ValidationResult.infeasible(
-        Violation.newBuilder("RULE").message("Rule returned no result.").build()),
+        Violation.newBuilder("RULE").indeterminate().message("boom").build()),
         InstanceOperation.EVACUATE, "missing", instance(0), instance(1));
-    assertStatuses(outcomes, Status.INSTANCE_NOT_FOUND, Status.ERROR, Status.APPLIED);
+    assertStatuses(outcomes, Status.INSTANCE_NOT_FOUND, Status.GUARDRAIL_INDETERMINATE,
+        Status.APPLIED);
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), failed);
     Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.ENABLE);
     Assert.assertEquals(read(1).getInstanceOperationMaintenanceUntilMs(), _expiresAt);

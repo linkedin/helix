@@ -19,7 +19,7 @@ package org.apache.helix.controller.rebalancer.waged;
  * under the License.
  */
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -47,13 +47,13 @@ public class ReadOnlyWagedRebalancer extends WagedRebalancer {
         ConstraintBasedAlgorithmFactory.getInstance(preferences), Optional.empty());
   }
 
+  /**
+   * Propagates every failure. A what-if must not fall back to the last persisted assignment: both
+   * sides of a comparison would then match, and the change would look safe.
+   */
   @Override
   protected List<HelixRebalanceException.Type> failureTypesToPropagate() {
-    // Also propagate FAILED_TO_CALCULATE for ReadOnlyWagedRebalancer
-    List<HelixRebalanceException.Type> failureTypes =
-        new ArrayList<>(super.failureTypesToPropagate());
-    failureTypes.add(HelixRebalanceException.Type.FAILED_TO_CALCULATE);
-    return failureTypes;
+    return Arrays.asList(HelixRebalanceException.Type.values());
   }
 
   public void updateChangeDetectorSnapshots(ResourceControllerDataProvider dataProvider) {

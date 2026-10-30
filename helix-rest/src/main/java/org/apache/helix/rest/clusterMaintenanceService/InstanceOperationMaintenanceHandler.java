@@ -112,9 +112,6 @@ public class InstanceOperationMaintenanceHandler {
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
   public static final long CLEAR_MARKER = -1L;
-  /** How {@link org.apache.helix.guardrail.GuardrailPipeline} reports a rule that failed. */
-  private static final String RULE_FAILED = "Rule evaluation failed: ";
-  private static final String RULE_RETURNED_NOTHING = "Rule returned no result.";
   private static final Set<InstanceConstants.InstanceOperation> OPERATIONS = EnumSet.of(
       InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE,
       InstanceConstants.InstanceOperation.EVACUATE);
@@ -137,10 +134,14 @@ public class InstanceOperationMaintenanceHandler {
     DUPLICATE_LOGICAL_ID,
     /**
      * The rebalance-feasibility guardrail judged the instances this request changes unsafe
-     * together, or cannot judge them because the cluster's own WAGED assignment fails. Needs an
-     * operator; the message says whether to change fewer instances or fix the cluster.
+     * together. Change fewer instances at once, or add assignable capacity.
      */
     GUARDRAIL_REJECTED,
+    /**
+     * The guardrail could not judge the instances this request changes, so nothing was written.
+     * Resend once; if it comes back, an operator must fix the cluster's WAGED rebalance.
+     */
+    GUARDRAIL_INDETERMINATE,
     /**
      * The marker cap has no room for this instance. Retry once markers are cleared or expire. A
      * cap of 0 admits none, and the message says it must be raised.
@@ -154,8 +155,8 @@ public class InstanceOperationMaintenanceHandler {
     /** Lost the race to concurrent writers on every attempt. Resend. */
     CONFLICT,
     /**
-     * Failed on an unexpected error, such as a ZooKeeper failure or a guardrail that could not be
-     * evaluated. The message says whether the commit may have landed. Resend to settle it.
+     * Failed on an unexpected error, such as a ZooKeeper failure. The message says whether the
+     * commit may have landed. Resend to settle it.
      */
     ERROR
   }
@@ -510,15 +511,15 @@ public class InstanceOperationMaintenanceHandler {
       ValidationResult verdict = _guardrail.apply(changing);
       List<Violation> judged = verdict.isFeasible() ? new ArrayList<>()
           : verdict.getViolations().stream()
-              .filter(violation -> !failedToEvaluate(violation)).collect(Collectors.toList());
+              .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
       if (!verdict.isFeasible() && judged.isEmpty()) {
-        LOG.warn("The guardrail failed to evaluate {} on {} in cluster {}: {}",
+        LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}",
             operation.getOperation(), changing, clusterId, verdict.getViolations());
-        Outcome error = new Outcome(Status.ERROR, "Not written: the rebalance-feasibility "
-            + "guardrail failed to evaluate " + operation.getOperation() + " on the "
-            + plural(changing.size(), "instance") + " this request changes. Resend it; if it "
-            + "keeps failing, check the Helix REST server log.");
-        changing.forEach(instance -> outcomes.put(instance, error));
+        Outcome outcome = new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
+            + "rebalance-feasibility guardrail could not judge " + operation.getOperation()
+            + " on the " + plural(changing.size(), "instance") + " this request changes. Resend "
+            + "it once; if it comes back, the cluster's WAGED rebalance must be fixed.");
+        changing.forEach(instance -> outcomes.put(instance, outcome));
       } else if (!judged.isEmpty()) {
         LOG.warn("The guardrail rejected {} on {} in cluster {}: {}", operation.getOperation(),
             changing, clusterId, verdict.getViolations());
@@ -711,22 +712,12 @@ public class InstanceOperationMaintenanceHandler {
           + ". Change fewer instances at once, or add assignable capacity.";
     }
     String text = String.valueOf(first.getMessage());
-    if (text.startsWith("Could not compute a baseline WAGED assignment")) {
-      return head + "the cluster's current WAGED assignment cannot be computed, so " + subject
-          + " cannot be shown safe. Fix the cluster's WAGED rebalance first.";
-    }
     if (text.startsWith("Applying ")
         && text.contains("makes the WAGED rebalancer unable to compute")) {
       return head + subject + " would leave WAGED unable to compute any assignment for the "
           + "cluster. Change fewer instances at once, or add assignable capacity.";
     }
     return head + clip(oneLine(text), 500);
-  }
-
-  /** Whether the guardrail failed to judge rather than judged the change unsafe. */
-  private static boolean failedToEvaluate(Violation violation) {
-    String text = String.valueOf(violation.getMessage());
-    return text.startsWith(RULE_FAILED) || text.equals(RULE_RETURNED_NOTHING);
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */

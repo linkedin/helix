@@ -278,44 +278,24 @@ public class TestWagedRebalance extends ZkTestBase {
       Assert.assertTrue(instancesWithAssignmentsImmediate.contains(instance_0));
       Assert.assertTrue(instancesWithAssignmentsImmediate.contains(instance_1));
 
-      // Force FAILED_TO_CALCULATE and ensure that both util functions indicate failure.
-      // The rebalancer may either throw a HelixException or return assignments with
-      // no valid partition mappings, depending on how the stage handles the error.
+      // Force FAILED_TO_CALCULATE: both util functions fail rather than return no replicas.
       String testCapacityKey = "key";
       clusterConfig.setDefaultPartitionWeightMap(Collections.singletonMap(testCapacityKey, 2));
       clusterConfig.setDefaultInstanceCapacityMap(Collections.singletonMap(testCapacityKey, 1));
       clusterConfig.setInstanceCapacityKeys(Collections.singletonList(testCapacityKey));
       try {
-        Map<String, ResourceAssignment> failedResult =
-            HelixUtil.getTargetAssignmentForWagedFullAuto(ZK_ADDR, clusterConfig, instanceConfigs,
-                liveInstances, idealStates, resourceConfigs);
-        // No exception: verify every resource got empty partition state maps
-        for (ResourceAssignment assignment : failedResult.values()) {
-          for (Map<String, String> stateMap : assignment.getRecord().getMapFields().values()) {
-            Assert.assertTrue(stateMap.isEmpty(),
-                "Expected empty state mapping when capacity is exceeded");
-          }
-        }
-      } catch (HelixException e) {
-        Assert.assertTrue(e.getMessage().contains("Calculation failed")
-                || e.getMessage().contains("Failed to compute"),
-            "Unexpected exception message: " + e.getMessage());
+        HelixUtil.getTargetAssignmentForWagedFullAuto(ZK_ADDR, clusterConfig, instanceConfigs,
+            liveInstances, idealStates, resourceConfigs);
+        Assert.fail("Expected a HelixException when capacity is exceeded");
+      } catch (HelixException expected) {
+        // expected
       }
-
       try {
-        Map<String, ResourceAssignment> failedResult =
-            HelixUtil.getImmediateAssignmentForWagedFullAuto(ZK_ADDR, clusterConfig, instanceConfigs,
-                liveInstances, idealStates, resourceConfigs);
-        for (ResourceAssignment assignment : failedResult.values()) {
-          for (Map<String, String> stateMap : assignment.getRecord().getMapFields().values()) {
-            Assert.assertTrue(stateMap.isEmpty(),
-                "Expected empty state mapping when capacity is exceeded");
-          }
-        }
-      } catch (HelixException e) {
-        Assert.assertTrue(e.getMessage().contains("Calculation failed")
-                || e.getMessage().contains("Failed to compute"),
-            "Unexpected exception message: " + e.getMessage());
+        HelixUtil.getImmediateAssignmentForWagedFullAuto(ZK_ADDR, clusterConfig, instanceConfigs,
+            liveInstances, idealStates, resourceConfigs);
+        Assert.fail("Expected a HelixException when capacity is exceeded");
+      } catch (HelixException expected) {
+        // expected
       }
     } finally {
       // restore the config with async mode

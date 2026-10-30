@@ -22,6 +22,7 @@ package org.apache.helix.rest.server.resources.helix;
 import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.MetricRegistry;
+import org.apache.helix.guardrail.Violation;
 import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
 
 /**
@@ -53,6 +54,9 @@ import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
  *       dryRun=true} simulation, where no write is ever attempted. Kept distinct from
  *       {@code passed} so dry-run probes never inflate the real success count.</li>
  * </ul>
+ * A rule that could not judge the mutation also increments {@code indeterminate}, on top of its
+ * outcome, so a guardrail that keeps failing can be alerted on.
+ * <p>
  * Metrics are named {@code org.apache.helix.rest.guardrail.<RULE_ID>.<outcome>} so the helix-rest
  * JMX reporter exports them under the same domain as every other REST metric. These are Codahale
  * metrics in the per-namespace registry, matching the existing helix-rest metric convention;
@@ -68,6 +72,7 @@ final class GuardrailMetrics {
       GuardrailValidationEvent.Outcome.DRY_RUN_INFEASIBLE.getMetricName();
   static final String DRY_RUN_PASSED =
       GuardrailValidationEvent.Outcome.DRY_RUN_PASSED.getMetricName();
+  static final String INDETERMINATE = "indeterminate";
 
   private GuardrailMetrics() {
   }
@@ -92,6 +97,9 @@ final class GuardrailMetrics {
       metrics.counter(metricName(evaluation.getRuleId(), evaluation.getOutcome().getMetricName()))
           .inc();
     }
+    event.getResult().getViolations().stream().filter(Violation::isIndeterminate)
+        .map(Violation::getRuleId).distinct()
+        .forEach(ruleId -> metrics.counter(metricName(ruleId, INDETERMINATE)).inc());
   }
 
   static String metricName(String ruleId, String outcome) {

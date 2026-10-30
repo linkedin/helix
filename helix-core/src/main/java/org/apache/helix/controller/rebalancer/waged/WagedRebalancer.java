@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
 import com.google.common.collect.ImmutableMap;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixRebalanceException;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.changedetector.ResourceChangeDetector;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
@@ -948,10 +949,72 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       }
     }
 
+    // Pinned-placement guard: the model pins every surviving replica where the seed put it and never
+    // re-checks it. If a capacity, limit, tag, disabled partition or fault zone changed after the
+    // seed was written, a pinned replica can already break a hard constraint the full rebalance must
+    // honor, and placing the drained replicas around it proves nothing. Decline instead.
+    String invalidPin = findInvalidPinnedReplica(clusterModel, clusterData, resourceMap.keySet());
+    if (invalidPin != null) {
+      throw new HelixRebalanceException(String.format(
+          "%s; cannot certify the drain of %s via the fast path.", invalidPin, drainedInstanceName),
+          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS);
+    }
+
     // With the full replica set represented, a clean placement of the drained node's replicas onto
     // the survivors proves the drain is feasible.
     WagedRebalanceUtil.calculateAssignment(clusterModel, _rebalanceAlgorithm);
     return true;
+  }
+
+  // Why a replica pinned in the drain model already breaks a WAGED hard constraint, or null if none.
+  private static String findInvalidPinnedReplica(ClusterModel clusterModel,
+      ResourceControllerDataProvider clusterData, Set<String> resourceNames) {
+    Map<String, Set<String>> faultZonesByPartition = new HashMap<>();
+    for (AssignableNode node : clusterModel.getAssignableNodes().values()) {
+      String instance = node.getInstanceName();
+      for (Map.Entry<String, Integer> remaining : node.getRemainingCapacity().entrySet()) {
+        if (remaining.getValue() < 0) {
+          return String.format("Pinned replicas put %s %d over its %s capacity", instance,
+              -remaining.getValue(), remaining.getKey());
+        }
+      }
+      if (node.getMaxPartition() >= 0 && node.getAssignedReplicaCount() > node.getMaxPartition()) {
+        return String.format("Pinned replicas put %s over its limit of %d partitions", instance,
+            node.getMaxPartition());
+      }
+      Map<String, List<String>> disabled = node.getDisabledPartitionsMap();
+      for (String resourceName : resourceNames) {
+        Set<String> pinned = node.getAssignedPartitionsByResource(resourceName);
+        IdealState idealState = clusterData.getIdealState(resourceName);
+        if (pinned.isEmpty() || idealState == null) {
+          continue;
+        }
+        String tag = idealState.getInstanceGroupTag();
+        if (tag != null && !node.getInstanceTags().contains(tag)) {
+          return String.format("%s holds %s but lacks its instance group tag %s", instance,
+              resourceName, tag);
+        }
+        int resourceLimit = idealState.getMaxPartitionsPerInstance();
+        if (resourceLimit >= 0 && pinned.size() > resourceLimit) {
+          return String.format("%s holds %d partitions of %s, above its limit of %d", instance,
+              pinned.size(), resourceName, resourceLimit);
+        }
+        if (disabled.containsKey(InstanceConstants.ALL_RESOURCES_DISABLED_PARTITION_KEY)
+            || !Collections.disjoint(pinned,
+            disabled.getOrDefault(resourceName, Collections.emptyList()))) {
+          return String.format("%s holds a disabled partition of %s", instance, resourceName);
+        }
+        for (String partition : pinned) {
+          if (node.hasFaultZone() && !faultZonesByPartition
+              .computeIfAbsent(resourceName + "/" + partition, k -> new HashSet<>())
+              .add(node.getFaultZone())) {
+            return String.format("Two pinned replicas of %s share fault zone %s", partition,
+                node.getFaultZone());
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private void persistBestPossibleAssignment(Map<String, ResourceAssignment> bestPossibleAssignment)
