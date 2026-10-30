@@ -1092,6 +1092,13 @@ public class TestInstancesAccessor extends AbstractTestClass {
     config.addTag("tagA");
     config.setInstanceCapacityMap(ImmutableMap.of("CPU", 100, "DISK", 500));
     config.setInstanceOperationMaintenanceUntilMs(markerExpiresAtMillis);
+    // Two sources hold an operation on the same instance.
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.EVACUATE).setReason("moving off")
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
     _configAccessor.setInstanceConfig(clusterName, "isInstance0", config);
     // An expired marker is omitted.
     setInstanceOperationMaintenanceUntilMs(clusterName, "isInstance1",
@@ -1111,7 +1118,15 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
     JsonNode live = summaries.get("isInstance0");
     Assert.assertTrue(live.get("live").asBoolean());
-    Assert.assertEquals(live.get("instanceOperation").asText(), "ENABLE");
+    Assert.assertEquals(live.get("instanceOperation").asText(), "EVACUATE");
+    JsonNode operations = live.get("instanceOperations");
+    Assert.assertEquals(operations.size(), 2);
+    Assert.assertEquals(operations.get(0).get("operation").asText(), "ENABLE");
+    Assert.assertEquals(operations.get(0).get("source").asText(), "USER");
+    Assert.assertEquals(operations.get(1).get("operation").asText(), "EVACUATE");
+    Assert.assertEquals(operations.get(1).get("source").asText(), "AUTOMATION");
+    Assert.assertEquals(operations.get(1).get("reason").asText(), "moving off");
+    Assert.assertTrue(operations.get(1).get("timestamp").asLong() > 0);
     Assert.assertEquals(live.get("domain").asText(), "zone=z1,host=isInstance0");
     Assert.assertEquals(live.get("tags").get(0).asText(), "tagA");
     Assert.assertEquals(live.get("capacity").get("CPU").asInt(), 100);
@@ -1122,6 +1137,8 @@ public class TestInstancesAccessor extends AbstractTestClass {
     JsonNode disabled = summaries.get("isInstance1");
     Assert.assertFalse(disabled.get("live").asBoolean());
     Assert.assertEquals(disabled.get("instanceOperation").asText(), "DISABLE");
+    Assert.assertEquals(disabled.get("instanceOperations").get(0).get("operation").asText(),
+        "DISABLE");
     Assert.assertEquals(disabled.get("capacity").size(), 0);
     Assert.assertFalse(disabled.has("maintenanceMarkerExpiresAtMillis"));
 

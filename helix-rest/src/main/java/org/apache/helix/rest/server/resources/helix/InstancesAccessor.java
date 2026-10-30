@@ -369,6 +369,22 @@ public class InstancesAccessor extends AbstractHelixResource {
     return JSONRepresentation(root);
   }
 
+  // One entry per source that holds an operation, oldest first. The last one is the active one.
+  private static void putInstanceOperations(ArrayNode operationsNode,
+      InstanceConfig instanceConfig) {
+    for (InstanceConfig.InstanceOperation operation : instanceConfig.getInstanceOperationList()) {
+      ObjectNode operationNode = operationsNode.addObject();
+      try {
+        operationNode.put("operation", operation.getOperation().name());
+      } catch (IllegalArgumentException e) {
+        operationNode.put("operation", InstanceConstants.InstanceOperation.UNKNOWN.name());
+      }
+      operationNode.put("source", operation.getSource().name());
+      operationNode.put("reason", operation.getReason());
+      operationNode.put("timestamp", operation.getTimestamp());
+    }
+  }
+
   /**
    * Lists every instance with a fixed, trimmed set of fields, from one bulk read of the instance
    * configs and one of the live instance names, so a client does not have to fetch each instance
@@ -379,7 +395,10 @@ public class InstancesAccessor extends AbstractHelixResource {
    * { "id": "cluster0",
    *   "instance_summaries": {
    *     "h1_12918": { "live": true, "host": "h1", "port": "12918",
-   *                   "instanceOperation": "ENABLE", "domain": "zone=z1,host=h1",
+   *                   "instanceOperation": "ENABLE",
+   *                   "instanceOperations": [ { "operation": "DISABLE", "source": "AUTOMATION",
+   *                       "reason": "bad disk", "timestamp": 1776385000000 } ],
+   *                   "domain": "zone=z1,host=h1",
    *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 },
    *                   "maintenanceMarkerExpiresAtMillis": 1776385800000 } } }
    * }</pre>
@@ -392,6 +411,8 @@ public class InstancesAccessor extends AbstractHelixResource {
    * <p>{@code live} is the raw {@code /LIVEINSTANCES} membership and {@code instanceOperation} is
    * the effective operation, as in {@code getInstancesUnderInstanceOperationMaintenance}.
    * {@code capacity} is the WAGED instance capacity map, empty when unset or unparsable.
+   * {@code instanceOperations} lists every stored operation, one per source, oldest first, so a
+   * client can see which sources hold the instance and since when; the last one is the active one.
    */
   private Response getInstanceSummaries(String clusterId, HelixDataAccessor accessor) {
     try {
@@ -431,6 +452,7 @@ public class InstancesAccessor extends AbstractHelixResource {
         instanceNode.put("port", instanceConfig.getPort());
         instanceNode.put("instanceOperation",
             instanceConfig.getInstanceOperation().getOperation().name());
+        putInstanceOperations(instanceNode.putArray("instanceOperations"), instanceConfig);
         instanceNode.put("domain", instanceConfig.getDomainAsString());
         ArrayNode tagsNode = instanceNode.putArray("tags");
         instanceConfig.getTags().forEach(tagsNode::add);
