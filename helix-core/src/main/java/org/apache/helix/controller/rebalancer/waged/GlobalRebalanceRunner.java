@@ -223,13 +223,16 @@ class GlobalRebalanceRunner implements AutoCloseable {
     Set<String> inFlightRetries =
         isolationEnabled ? new HashSet<>(resourceMap.keySet()) : Collections.emptySet();
     Set<String> nextRetries = isolationEnabled ? new HashSet<>() : Collections.emptySet();
+    Set<String> retriedResources = Collections.emptySet();
+    Map<HelixConstants.ChangeType, Set<String>> requestedChanges = clusterChanges;
     RebalanceAlgorithm calculationAlgorithm = algorithm;
     if (isolationEnabled) {
       // If the calculation or the write fails, retry every resource so no change is lost.
       _isolationResourcesToRetry.compareAndSet(previousRetries, inFlightRetries);
       if (!previousRetries.isEmpty()) {
-        Set<String> changedResources = new HashSet<>(previousRetries);
-        changedResources.retainAll(resourceMap.keySet());
+        retriedResources = new HashSet<>(previousRetries);
+        retriedResources.retainAll(resourceMap.keySet());
+        Set<String> changedResources = new HashSet<>(retriedResources);
         changedResources.addAll(clusterChanges.getOrDefault(
             HelixConstants.ChangeType.RESOURCE_CONFIG, Collections.emptySet()));
         clusterChanges = new HashMap<>(clusterChanges);
@@ -263,18 +266,22 @@ class GlobalRebalanceRunner implements AutoCloseable {
     // 2. Use the previous Baseline as the only parameter about the previous assignment.
     Map<String, ResourceAssignment> currentBaseline =
         _assignmentManager.getBaselineAssignment(_assignmentMetadataStore, currentStateOutput, resourceMap.keySet());
-    ClusterModel clusterModel;
+    Map<String, ResourceAssignment> newBaseline;
     try {
-      clusterModel = ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
-          allAssignableInstances, clusterChanges, currentBaseline);
-    } catch (Exception ex) {
-      throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
-          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
-          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
+      newBaseline = calculateBaseline(clusterData, resourceMap, allAssignableInstances,
+          clusterChanges, currentBaseline, calculationAlgorithm);
+    } catch (HelixRebalanceException ex) {
+      if (retriedResources.isEmpty()) {
+        throw ex;
+      }
+      // Retried resources must not fail a baseline that the default mode completes, so calculate
+      // the requested changes alone and retry those resources in the next baseline.
+      LOG.warn("Baseline calculation with {} retried resources failed, calculating without them.",
+          retriedResources.size(), ex);
+      newBaseline = calculateBaseline(clusterData, resourceMap, allAssignableInstances,
+          requestedChanges, currentBaseline, calculationAlgorithm);
+      nextRetries.addAll(retriedResources);
     }
-
-    Map<String, ResourceAssignment> newBaseline =
-        WagedRebalanceUtil.calculateAssignment(clusterModel, calculationAlgorithm, currentBaseline);
     boolean isBaselineChanged =
         _assignmentMetadataStore != null && _assignmentMetadataStore.isBaselineChanged(newBaseline);
     // Write the new baseline to metadata store
@@ -301,6 +308,24 @@ class GlobalRebalanceRunner implements AutoCloseable {
       LOG.info("Schedule a new rebalance after the new baseline calculation has finished.");
       RebalanceUtil.scheduleOnDemandPipeline(clusterData.getClusterName(), 0L, false);
     }
+  }
+
+  private static Map<String, ResourceAssignment> calculateBaseline(
+      ResourceControllerDataProvider clusterData, Map<String, Resource> resourceMap,
+      Set<String> allAssignableInstances,
+      Map<HelixConstants.ChangeType, Set<String>> clusterChanges,
+      Map<String, ResourceAssignment> currentBaseline, RebalanceAlgorithm algorithm)
+      throws HelixRebalanceException {
+    ClusterModel clusterModel;
+    try {
+      clusterModel = ClusterModelProvider.generateClusterModelForBaseline(clusterData, resourceMap,
+          allAssignableInstances, clusterChanges, currentBaseline);
+    } catch (Exception ex) {
+      throw new HelixRebalanceException("Failed to generate cluster model for global rebalance.",
+          HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
+          HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
+    }
+    return WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, currentBaseline);
   }
 
   public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {
