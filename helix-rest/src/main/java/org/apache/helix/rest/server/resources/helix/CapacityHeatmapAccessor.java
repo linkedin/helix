@@ -58,6 +58,11 @@ import org.slf4j.LoggerFactory;
  *       [{@link #MIN_STALE_MS}, {@link #MAX_STALE_MS}]; the floor means a caller cannot force a
  *       rebuild on every request, and an entry is dropped {@link #CACHE_EXPIRE_MINUTES} minutes
  *       after it is built whatever was asked;</li>
+ *   <li>a sample's age is measured from when its collection started, so a slow build is never
+ *       reported younger than it is; separately, a cluster is rebuilt at most once per
+ *       {@link #REBUILD_COOLDOWN_MS} after the last build finished, and a caller whose freshness
+ *       requirement cannot be met inside that window gets the cached sample marked {@code STALE}
+ *       together with its real age;</li>
  *   <li>concurrent misses for one cluster share a single build;</li>
  *   <li>at most {@link #MAX_CONCURRENT_BUILDS} builds run at once; further cold requests get 503
  *       with {@code Retry-After} instead of piling large ExternalView reads onto the heap;</li>
@@ -73,6 +78,9 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
   static final long DEFAULT_MAX_STALE_MS = 30_000L;
   static final long MIN_STALE_MS = 5_000L;
   static final long MAX_STALE_MS = 300_000L;
+  // Minimum gap between the end of one build and the start of the next for a cluster, independent
+  // of how long the build took or how stale the caller will accept.
+  static final long REBUILD_COOLDOWN_MS = MIN_STALE_MS;
   static final long CACHE_EXPIRE_MINUTES = 5L;
   static final int MAX_CONCURRENT_BUILDS = 4;
   private static final long BUILD_AWAIT_TIMEOUT_MS = 120_000L;
@@ -133,8 +141,9 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
   private Result getOrBuild(CacheKey key, String clusterId, long maxStaleMs)
       throws InterruptedException, ExecutionException, TimeoutException {
     Built cached = CACHE.getIfPresent(key);
-    if (isFresh(cached, maxStaleMs)) {
-      return new Result(cached, "HIT");
+    String state = reusableState(cached, maxStaleMs);
+    if (state != null) {
+      return new Result(cached, state);
     }
     CompletableFuture<Built> mine = new CompletableFuture<>();
     CompletableFuture<Built> existing = IN_FLIGHT.putIfAbsent(key, mine);
@@ -145,9 +154,10 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
     try {
       // A build may have finished between the cache check and claiming the in-flight slot.
       cached = CACHE.getIfPresent(key);
-      if (isFresh(cached, maxStaleMs)) {
+      state = reusableState(cached, maxStaleMs);
+      if (state != null) {
         mine.complete(cached);
-        return new Result(cached, "HIT");
+        return new Result(cached, state);
       }
       if (!BUILD_PERMITS.tryAcquire()) {
         throw new BusyException(clusterId);
@@ -157,7 +167,7 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
       long startedAtMs = System.currentTimeMillis();
       WagedCapacitySnapshot snapshot =
           PROVIDER.computeSnapshot(clusterId, getDataAccssor(clusterId));
-      Built built = new Built(toJson(snapshot), startedAtMs);
+      Built built = new Built(toJson(snapshot), startedAtMs, System.currentTimeMillis());
       CACHE.put(key, built);
       mine.complete(built);
       return new Result(built, "MISS");
@@ -175,8 +185,17 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
     }
   }
 
-  private static boolean isFresh(Built built, long maxStaleMs) {
-    return built != null && System.currentTimeMillis() - built.startedAtMs <= maxStaleMs;
+  // HIT when the sample is young enough for the caller, STALE when it is not but the last build
+  // ended too recently to start another, null when a rebuild is due.
+  private static String reusableState(Built built, long maxStaleMs) {
+    if (built == null) {
+      return null;
+    }
+    long now = System.currentTimeMillis();
+    if (now - built.startedAtMs <= maxStaleMs) {
+      return "HIT";
+    }
+    return now - built.completedAtMs < REBUILD_COOLDOWN_MS ? "STALE" : null;
   }
 
   private CacheKey cacheKey(String clusterId) {
@@ -216,11 +235,13 @@ public class CapacityHeatmapAccessor extends AbstractHelixResource {
   private static final class Built {
     final String json;
     final long startedAtMs;
+    final long completedAtMs;
     final String etag;
 
-    Built(String json, long startedAtMs) {
+    Built(String json, long startedAtMs, long completedAtMs) {
       this.json = json;
       this.startedAtMs = startedAtMs;
+      this.completedAtMs = completedAtMs;
       this.etag = startedAtMs + "-" + json.hashCode();
     }
   }

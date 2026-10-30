@@ -19,9 +19,11 @@ package org.apache.helix.rest.server;
  * under the License.
  */
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +35,7 @@ import javax.ws.rs.core.Response;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.cache.Cache;
 import org.apache.helix.rest.server.resources.helix.CapacityHeatmapAccessor;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -156,5 +159,50 @@ public class TestCapacityHeatmapAccessor extends AbstractTestClass {
       permits.release(drained);
       _gSetupTool.deleteCluster(cluster);
     }
+  }
+
+  // Simulates a slow build: the sample was collected 10 s ago but the build only finished
+  // finishedAgoMs ago.
+  @SuppressWarnings("unchecked")
+  private void backdateCachedSample(String cluster, long finishedAgoMs) throws Exception {
+    Field cacheField = CapacityHeatmapAccessor.class.getDeclaredField("CACHE");
+    cacheField.setAccessible(true);
+    Cache<Object, Object> cache = (Cache<Object, Object>) cacheField.get(null);
+    Class<?> builtClass = Class.forName(CapacityHeatmapAccessor.class.getName() + "$Built");
+    Constructor<?> ctor = builtClass.getDeclaredConstructor(String.class, long.class, long.class);
+    ctor.setAccessible(true);
+    Field json = builtClass.getDeclaredField("json");
+    json.setAccessible(true);
+    long now = System.currentTimeMillis();
+    for (Map.Entry<Object, Object> entry : cache.asMap().entrySet()) {
+      Field clusterField = entry.getKey().getClass().getDeclaredField("_clusterId");
+      clusterField.setAccessible(true);
+      if (cluster.equals(clusterField.get(entry.getKey()))) {
+        cache.put(entry.getKey(), ctor.newInstance(json.get(entry.getValue()), now - 10_000L,
+            now - finishedAgoMs));
+        return;
+      }
+    }
+    throw new AssertionError("No cached heatmap for " + cluster);
+  }
+
+  @Test
+  public void testSlowBuildIsNotRescannedBackToBack() throws Exception {
+    String cluster = "TestCluster_3";
+    rawGet(cluster, 60000L).readEntity(String.class);
+
+    // The sample is 10 s old, so it is too old for a 5 s caller, but the build ended 1 s ago.
+    backdateCachedSample(cluster, 1_000L);
+    Response stale = rawGet(cluster, 5000L);
+    Assert.assertEquals(stale.getStatus(), Response.Status.OK.getStatusCode());
+    Assert.assertEquals(stale.getHeaderString(CACHE_HEADER), "STALE");
+    Assert.assertTrue(Long.parseLong(stale.getHeaderString("X-Helix-Snapshot-Age-Ms")) >= 10_000L);
+    stale.readEntity(String.class);
+
+    // Once the cooldown since the last build has passed, the same request rebuilds.
+    backdateCachedSample(cluster, 10_000L);
+    Response rebuilt = rawGet(cluster, 5000L);
+    Assert.assertEquals(rebuilt.getHeaderString(CACHE_HEADER), "MISS");
+    rebuilt.readEntity(String.class);
   }
 }
