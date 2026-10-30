@@ -25,18 +25,23 @@ package org.apache.helix.guardrail;
  * Instances are immutable and are surfaced to REST callers as JSON, so every field is exposed via a
  * public getter for serialization. {@code resourceName} and {@code partitionName} are optional and
  * may be {@code null} when a violation is not scoped to a specific resource / partition.
+ * {@code indeterminate} marks a rule that could not judge the mutation, as opposed to one that
+ * judged it unsafe.
  */
 public class Violation {
   private final String ruleId;
   private final String resourceName;
   private final String partitionName;
   private final String message;
+  private final boolean indeterminate;
 
-  private Violation(String ruleId, String resourceName, String partitionName, String message) {
+  private Violation(String ruleId, String resourceName, String partitionName, String message,
+      boolean indeterminate) {
     this.ruleId = ruleId;
     this.resourceName = resourceName;
     this.partitionName = partitionName;
     this.message = message;
+    this.indeterminate = indeterminate;
   }
 
   public String getRuleId() {
@@ -55,6 +60,11 @@ public class Violation {
     return message;
   }
 
+  /** Whether the rule could not judge the mutation, rather than judged it unsafe. */
+  public boolean isIndeterminate() {
+    return indeterminate;
+  }
+
   public static Builder newBuilder(String ruleId) {
     return new Builder(ruleId);
   }
@@ -62,7 +72,8 @@ public class Violation {
   @Override
   public String toString() {
     return "Violation{ruleId=" + ruleId + ", resource=" + resourceName + ", partition="
-        + partitionName + ", message=" + message + '}';
+        + partitionName + ", message=" + message
+        + (indeterminate ? ", indeterminate" : "") + '}';
   }
 
   public static final class Builder {
@@ -70,6 +81,7 @@ public class Violation {
     private String resourceName;
     private String partitionName;
     private String message;
+    private boolean indeterminate;
 
     private Builder(String ruleId) {
       this.ruleId = ruleId;
@@ -90,8 +102,14 @@ public class Violation {
       return this;
     }
 
+    /** Marks a rule that could not judge the mutation. */
+    public Builder indeterminate() {
+      this.indeterminate = true;
+      return this;
+    }
+
     public Violation build() {
-      return new Violation(ruleId, resourceName, partitionName, message);
+      return new Violation(ruleId, resourceName, partitionName, message, indeterminate);
     }
   }
 }

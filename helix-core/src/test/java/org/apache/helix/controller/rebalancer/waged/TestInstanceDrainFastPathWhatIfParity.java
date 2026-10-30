@@ -207,6 +207,48 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
     tearDownCluster(cluster);
   }
 
+  /**
+   * A pinned survivor that is already over its capacity must make the fast path DECLINE. Four nodes
+   * hold two weight-30 replicas each, then n0's capacity drops to 50 (60 pinned). Draining n3 fits
+   * its two replicas on n1 and n2, and the aggregate (250 vs 240) passes, so without the guard the
+   * probe certified it. The full what-if can only place 1 + 3 + 3 = 7 of 8 replicas and blocks.
+   */
+  @Test
+  public void testPinnedReplicaOverCapacityFastPathDeclinesAndAgreesWithFullWhatIf() {
+    String cluster = "TestDrainParityOverCapacityPin";
+    int numInstances = 4;
+    setupCluster(cluster, numInstances, 30);
+    createResourceWithWagedRebalance(cluster, "R", "MasterSlave", 8, 1, 1);
+    ResourceAssignment assignment = new ResourceAssignment("R");
+    for (int p = 0; p < 8; p++) {
+      assignment.addReplicaMap(new Partition("R_" + p),
+          Collections.singletonMap(instanceName(p % numInstances), "MASTER"));
+    }
+    AssignmentMetadataStore store = new AssignmentMetadataStore(ZK_ADDR, cluster);
+    try {
+      store.persistBaseline(Collections.singletonMap("R", assignment));
+      store.persistBestPossibleAssignment(Collections.singletonMap("R", assignment));
+    } finally {
+      store.close();
+    }
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    InstanceConfig shrunk = accessor.getProperty(accessor.keyBuilder().instanceConfig(instanceName(0)));
+    shrunk.setInstanceCapacityMap(Collections.singletonMap(CAPACITY_KEY, 50));
+    accessor.setProperty(accessor.keyBuilder().instanceConfig(instanceName(0)), shrunk);
+
+    String target = instanceName(3);
+    Outcome fastPath = evaluateRule(cluster, target, true);
+    Outcome fullOnly = evaluateRule(cluster, target, false);
+
+    Assert.assertFalse(fullOnly.feasible, "the full what-if must block this drain");
+    Assert.assertTrue(fastPath.probeCalls > 0, "the fast path must have been attempted");
+    Assert.assertEquals(fastPath.probeHits, 0,
+        "the fast path must NOT certify a drain around a pinned replica that is over capacity");
+    Assert.assertFalse(fastPath.feasible, "the rule must fall back to the full what-if and block");
+
+    tearDownCluster(cluster);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------

@@ -290,6 +290,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
     Assert.assertTrue(result.getViolations().get(0).getMessage().contains("baseline"),
         "should fail closed citing the missing baseline: "
             + result.getViolations().get(0).getMessage());
+    Assert.assertTrue(result.getViolations().get(0).isIndeterminate());
   }
 
   @Test
@@ -315,6 +316,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
         result.getViolations().get(0).getMessage().contains("unable to compute an assignment"),
         "should fail closed citing the uncomputable assignment: "
             + result.getViolations().get(0).getMessage());
+    Assert.assertFalse(result.getViolations().get(0).isIndeterminate());
   }
 
   @Test
