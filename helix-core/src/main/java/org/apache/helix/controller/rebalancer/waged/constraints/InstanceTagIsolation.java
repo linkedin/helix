@@ -388,6 +388,7 @@ class InstanceTagIsolation {
     private final Map<Integer, Map<String, Long>> _demand = new HashMap<>();
     // The part of each block's demand parked on nodes outside this scope's model.
     private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
+    private final Map<String, Map<String, PartitionShare>> _shares;
 
     private BlockTotals() {
       for (int i = 0; i < _blocks.size(); i++) {
@@ -404,9 +405,9 @@ class InstanceTagIsolation {
           untaggedBlock = block;
         }
       }
-      Map<String, Map<String, PartitionShare>> shares = chargeOwners(_blockOfGroup);
-      chargeNodes(_blockOfGroup, untaggedBlock, shares);
-      chargeParked(shares);
+      _shares = chargeOwners(_blockOfGroup);
+      chargeNodes(_blockOfGroup, untaggedBlock, _shares);
+      chargeParked(_shares);
     }
 
     /** Charges every replica the check counts to the block that owns it. */
@@ -420,6 +421,9 @@ class InstanceTagIsolation {
                 .computeIfAbsent(replica.getPartitionName(),
                     key -> new PartitionShare(owner, replica.getCapacity()));
         share._owned++;
+        if (replica.isReplicaTopState()) {
+          share._topStates++;
+        }
         charge(_demand, owner, replica.getCapacity(), 1);
       }
       for (Set<AssignableReplica> replicas : _clusterModel.getAssignableReplicaMap().values()) {
@@ -616,19 +620,50 @@ class InstanceTagIsolation {
 
     /** Scores the rest as the default mode would score a cluster made of the rest alone. */
     private void scopeEstimates(Set<Integer> skipped) {
-      List<AssignableReplica> replicas = new ArrayList<>();
-      for (AssignableReplica replica : _clusterModel.getContext().getManagedReplicas()) {
-        if (!skipped.contains(_blockOfGroup.get(groupKey(replica)))) {
-          replicas.add(replica);
+      boolean[] skip = new boolean[_blocks.size()];
+      skipped.forEach(block -> skip[block] = true);
+      // Each key sums {usage, top state usage} as primitives, since this visits every partition.
+      Map<String, long[]> sums = new HashMap<>();
+      Map<String, Integer> replicasByResource = new HashMap<>();
+      int topStateReplicas = 0;
+      for (Map.Entry<String, Map<String, PartitionShare>> byResource : _shares.entrySet()) {
+        int replicas = 0;
+        boolean scoped = false;
+        for (PartitionShare share : byResource.getValue().values()) {
+          if (skip[share._owner]) {
+            continue;
+          }
+          scoped = true;
+          replicas += share._owned;
+          topStateReplicas += share._topStates;
+          for (Map.Entry<String, Integer> weight : share._weight.entrySet()) {
+            long[] sum = sums.computeIfAbsent(weight.getKey(), key -> new long[2]);
+            sum[0] += (long) share._owned * weight.getValue();
+            sum[1] += (long) share._topStates * weight.getValue();
+          }
+        }
+        if (scoped) {
+          replicasByResource.put(byResource.getKey(), replicas);
         }
       }
-      List<AssignableNode> nodes = new ArrayList<>();
-      _nodesByBlock.forEach((block, blockNodes) -> {
-        if (!skipped.contains(block)) {
-          nodes.addAll(blockNodes);
-        }
+      Map<String, Long> usage = new HashMap<>();
+      Map<String, Long> topStateUsage = new HashMap<>();
+      sums.forEach((key, sum) -> {
+        usage.put(key, sum[0]);
+        topStateUsage.put(key, sum[1]);
       });
-      _clusterModel.getContext().scopeEstimates(replicas, nodes);
+      Map<String, Long> capacity = new HashMap<>();
+      int nodes = 0;
+      for (Map.Entry<Integer, List<AssignableNode>> byBlock : _nodesByBlock.entrySet()) {
+        if (!skipped.contains(byBlock.getKey())) {
+          nodes += byBlock.getValue().size();
+          _capacity.get(byBlock.getKey())
+              .forEach((key, value) -> capacity.merge(key, value, Long::sum));
+        }
+      }
+      _clusterModel.getContext()
+          .scopeEstimates(usage, topStateUsage, capacity, replicasByResource, topStateReplicas,
+              nodes);
     }
 
     private PartitionShare shareOf(Map<String, Map<String, PartitionShare>> shares,
@@ -653,6 +688,7 @@ class InstanceTagIsolation {
     private final int _owner;
     private final Map<String, Integer> _weight;
     private int _owned;
+    private int _topStates;
     private int _placed;
     private int _toAssign;
 

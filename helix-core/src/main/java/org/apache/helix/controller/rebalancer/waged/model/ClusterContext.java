@@ -19,7 +19,6 @@ package org.apache.helix.controller.rebalancer.waged.model;
  * under the License.
  */
 
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -199,36 +198,26 @@ public class ClusterContext {
 
   /**
    * Resets the scoring estimations to what the constructor computes for a cluster made of the
-   * given replicas and nodes alone. Instance tag isolation calls it before anything is placed, once
-   * it skips the groups behind a capacity deficit, so they do not change how the rest is scored.
+   * given replica and node totals alone. Instance tag isolation calls it before anything is placed,
+   * once it skips the groups behind a capacity deficit, so they do not change how the rest is
+   * scored.
    */
-  public void scopeEstimates(Collection<AssignableReplica> replicas,
-      Collection<AssignableNode> nodes) {
-    Map<String, Long> usage = new HashMap<>();
-    Map<String, Long> topStateUsage = new HashMap<>();
-    Map<String, Long> capacity = new HashMap<>();
-    Map<String, Integer> replicasByResource = new HashMap<>();
-    int topStateReplicas = 0;
-    for (AssignableReplica replica : replicas) {
-      replicasByResource.merge(replica.getResourceName(), 1, Integer::sum);
-      replica.getCapacity().forEach((key, value) -> usage.merge(key, (long) value, Long::sum));
-      if (replica.isReplicaTopState()) {
-        topStateReplicas++;
-        replica.getCapacity()
-            .forEach((key, value) -> topStateUsage.merge(key, (long) value, Long::sum));
-      }
+  public void scopeEstimates(Map<String, Long> usage, Map<String, Long> topStateUsage,
+      Map<String, Long> capacity, Map<String, Integer> replicasByResource, int topStateReplicas,
+      int nodes) {
+    int replicas = 0;
+    for (Map.Entry<String, Integer> entry : replicasByResource.entrySet()) {
+      replicas += entry.getValue();
+      _estimatedMaxPartitionByResource.put(entry.getKey(),
+          Math.max(1, estimateAvgReplicaCount(entry.getValue(), nodes)));
     }
-    nodes.forEach(node -> node.getMaxCapacity()
-        .forEach((key, value) -> capacity.merge(key, (long) value, Long::sum)));
-    replicasByResource.forEach((resource, count) -> _estimatedMaxPartitionByResource
-        .put(resource, Math.max(1, estimateAvgReplicaCount(count, nodes.size()))));
     if (!capacity.isEmpty()) {
       _estimatedMaxUtilization = estimateMaxUtilization(capacity, usage, _preferredScoringKeys);
       _estimatedTopStateMaxUtilization =
           estimateMaxUtilization(capacity, topStateUsage, _preferredScoringKeys);
     }
-    _estimatedMaxPartitionCount = estimateAvgReplicaCount(replicas.size(), nodes.size());
-    _estimatedMaxTopStateCount = estimateAvgReplicaCount(topStateReplicas, nodes.size());
+    _estimatedMaxPartitionCount = estimateAvgReplicaCount(replicas, nodes);
+    _estimatedMaxTopStateCount = estimateAvgReplicaCount(topStateReplicas, nodes);
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {
