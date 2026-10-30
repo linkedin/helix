@@ -514,6 +514,42 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
         "Clique 1 must be placed heaviest first, by its DISK weight");
   }
 
+  /**
+   * Clique 0 holds 200 and is asked for 120, one replica at 60 and six at 10. Clique 1 holds 100
+   * and is asked for 300. Once clique 1 is skipped, clique 0 must be placed as in a cluster of its
+   * own, not scored against the 420 asked of the cluster's 300.
+   */
+  @Test
+  public void testCliquesLeftAfterADeficitAreScoredAsAClusterOfTheirOwn()
+      throws HelixRebalanceException, IOException {
+    OptimalAssignment withDeficit = createAlgorithm().calculate(survivorScoring(true, true));
+    Assert.assertEquals(withDeficit.getSkippedResources(), Collections.singleton("RF"));
+    Map<String, Map<String, Map<String, String>>> placed =
+        normalize(withDeficit.getOptimalResourceAssignment());
+    placed.remove("RF");
+    Assert.assertEquals(placed, normalize(
+        createAlgorithm().calculate(survivorScoring(false, false)).getOptimalResourceAssignment()));
+  }
+
+  private ClusterModel survivorScoring(boolean enabled, boolean withDeficit) throws IOException {
+    ClusterConfig clusterConfig = createClusterConfig(enabled);
+    Set<AssignableNode> nodes = new HashSet<>();
+    nodes.add(taggedNode(clusterConfig, instanceName(0, 0), cliqueTag(0)));
+    nodes.add(taggedNode(clusterConfig, instanceName(0, 1), cliqueTag(0)));
+    Set<AssignableReplica> replicas = new HashSet<>();
+    addReplicas(replicas, clusterConfig, taggedResource("RS_big", cliqueTag(0), 60), 1);
+    addReplicas(replicas, clusterConfig,
+        taggedResource("RS_small", cliqueTag(0), HEALTHY_PARTITION_WEIGHT), 6);
+    if (withDeficit) {
+      nodes.add(taggedNode(clusterConfig, instanceName(1, 0), cliqueTag(1)));
+      addReplicas(replicas, clusterConfig, taggedResource("RF", cliqueTag(1), NODE_CAPACITY), 3);
+    }
+    ClusterContext context = new ClusterContext(replicas, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), clusterConfig);
+    return new ClusterModel(context, replicas, nodes,
+        ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
+  }
+
   private static AssignableNode twoKeyNode(ClusterConfig clusterConfig, String instance,
       String tag, int secondKeyCapacity) {
     InstanceConfig instanceConfig = new InstanceConfig(instance);
