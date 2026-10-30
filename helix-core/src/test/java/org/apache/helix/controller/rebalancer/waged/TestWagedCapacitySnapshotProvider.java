@@ -37,6 +37,7 @@ import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
+import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -169,6 +170,48 @@ public class TestWagedCapacitySnapshotProvider extends ZkTestBase {
     Assert.assertFalse(n1.enabled);
     Assert.assertEquals(n1.operation, InstanceConstants.InstanceOperation.EVACUATE.name());
     Assert.assertEquals(snapshot.summary.enabledInstances, 0);
+    deleteCluster(cluster);
+  }
+
+  @Test
+  public void testOperationFollowsLegacyEnableOverride() {
+    String cluster = newCluster("legacyEnable");
+    HelixDataAccessor acc = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    InstanceConfig config = new InstanceConfig("n1");
+    config.setInstanceOperation(InstanceConstants.InstanceOperation.DISABLE);
+    // Re-enabled through the legacy flag, which overrides the stored operation list.
+    config.getRecord().setBooleanField(InstanceConfig.InstanceConfigProperty.HELIX_ENABLED.name(),
+        true);
+    acc.setProperty(acc.keyBuilder().instanceConfig("n1"), config);
+    addLive(cluster, "n1");
+
+    WagedCapacitySnapshot.InstanceCapacity n1 = instance(snapshotOf(cluster), "n1");
+    Assert.assertTrue(n1.enabled);
+    Assert.assertEquals(n1.operation, InstanceConstants.InstanceOperation.ENABLE.name());
+    deleteCluster(cluster);
+  }
+
+  @Test
+  public void testUnreadableResourceWeightsStayUnknown() {
+    String cluster = newCluster("badWeights");
+    setCapacity(cluster, Collections.singletonList(CAP), Collections.singletonMap(CAP, 100),
+        Collections.singletonMap(CAP, 1));
+    addInstance(cluster, "n0", null);
+    addLive(cluster, "n0");
+    writeIdealState(cluster, "DB", BuiltInStateModelDefinitions.MasterSlave.name(), true);
+    writeExternalView(cluster, "DB", stateMap("n0", "MASTER"));
+    // The cluster defaults are valid, but the resource's own weights cannot be parsed. The
+    // controller rejects that resource instead of falling back, so usage must stay unknown.
+    HelixDataAccessor acc = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    ResourceConfig resourceConfig = new ResourceConfig("DB");
+    resourceConfig.getRecord().setMapField(
+        ResourceConfig.ResourceConfigProperty.PARTITION_CAPACITY_MAP.name(),
+        Collections.singletonMap("DEFAULT", "{not json"));
+    acc.setProperty(acc.keyBuilder().resourceConfig("DB"), resourceConfig);
+
+    WagedCapacitySnapshot.InstanceCapacity n0 = instance(snapshotOf(cluster), "n0");
+    Assert.assertNull(n0.used);
+    Assert.assertNull(n0.resources.get(0).used);
     deleteCluster(cluster);
   }
 

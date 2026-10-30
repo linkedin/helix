@@ -210,7 +210,7 @@ public class WagedCapacitySnapshotProvider {
     row.registered = config != null;
     row.live = live;
     row.enabled = config != null && config.getInstanceEnabled();
-    row.operation = config == null ? null : config.getInstanceOperationState();
+    row.operation = config == null ? null : config.getInstanceOperation().getOperation().name();
     row.zone = resolveZone(config, clusterConfig);
 
     if (accum != null) {
@@ -364,6 +364,9 @@ public class WagedCapacitySnapshotProvider {
     private final ResourceConfig resourceConfig;
     private final ClusterConfig clusterConfig;
     private final Map<String, Map<String, Integer>> partitionCapacityMap;
+    // Unreadable resource weights stay unknown. The controller rejects them rather than falling
+    // back to the cluster defaults, so the snapshot must not report a usage it cannot stand behind.
+    private final boolean partitionCapacityUnreadable;
     private final Map<String, Map<String, Long>> cache = new HashMap<>();
 
     WeightContext(String resourceName, ResourceConfig resourceConfig, ClusterConfig clusterConfig) {
@@ -371,15 +374,21 @@ public class WagedCapacitySnapshotProvider {
           resourceConfig == null ? new ResourceConfig(resourceName) : resourceConfig;
       this.clusterConfig = clusterConfig;
       Map<String, Map<String, Integer>> map;
+      boolean unreadable = false;
       try {
         map = this.resourceConfig.getPartitionCapacityMap();
       } catch (IOException e) {
         map = new HashMap<>();
+        unreadable = true;
       }
       this.partitionCapacityMap = map;
+      this.partitionCapacityUnreadable = unreadable;
     }
 
     Map<String, Long> weightFor(String partition) {
+      if (partitionCapacityUnreadable) {
+        return null;
+      }
       Map<String, Long> cached = cache.get(partition);
       if (cached != null || clusterConfig == null) {
         return cached;
