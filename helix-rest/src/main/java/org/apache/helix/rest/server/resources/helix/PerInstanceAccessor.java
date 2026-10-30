@@ -55,6 +55,7 @@ import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.MinActiveReplicaChecker;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
@@ -576,23 +577,26 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           break;
         case setInstanceOperation: {
           // Guard rail: block (or simulate) a setInstanceOperation that would reduce availability.
-          // Two operation-specific rules apply, mutually exclusive by the proposed operation:
-          //   - DISABLE and UNKNOWN both drain this instance's replicas *in place* with no
-          //     replacement bootstrapped first, so every partition it hosts transiently loses one
-          //     active replica before the controller can recover it elsewhere. DISABLE sets those
-          //     replicas OFFLINE (the same end state as command=disable:
-          //     InstanceConfig.getInstanceEnabled() becomes false either way); UNKNOWN drops them
-          //     immediately. Both therefore run the always-on min-active-replica guard rail. This
-          //     closes the gap for callers that drain via setInstanceOperation (e.g. the helix-front
-          //     UI) instead of command=disable; the WAGED feasibility rule intentionally no-ops for
-          //     them.
-          //   - EVACUATE also moves this instance out of the WAGED assignable pool, but only drops a
-          //     replica *after* its (N+1) replacement has been bootstrapped elsewhere, so it never
-          //     dips below min-active on its own. Its only failure mode is that replacement being
-          //     unplaceable, so (when the cluster opts in) it runs the WAGED rebalance-feasibility
-          //     rule. That rule self-selects the capacity-reducing operations from isAssignable();
-          //     ENABLE/SWAP_IN are no-ops for it. For EVACUATE the full-placement feasibility check
-          //     already subsumes the min-active-replica check.
+          // A proposed operation can carry up to two independent hazards, so the pipeline runs the
+          // matching subset of rules (GuardrailPipeline evaluates every rule and combines their
+          // violations):
+          //   - Drain-in-place (min-active): DISABLE and UNKNOWN both reduce this instance's
+          //     replicas with no replacement bootstrapped first, so every partition it hosts
+          //     transiently loses one active replica before the controller can recover it
+          //     elsewhere. DISABLE sets those replicas OFFLINE (the same end state as
+          //     command=disable: InstanceConfig.getInstanceEnabled() becomes false either way);
+          //     UNKNOWN drops them immediately. Both therefore run the always-on min-active-replica
+          //     guard rail, closing the gap for callers that drain via setInstanceOperation (e.g.
+          //     the helix-front UI) instead of command=disable.
+          //   - Capacity/placement feasibility: any operation except DISABLE can move this instance
+          //     *out* of the WAGED assignable pool (UNKNOWN and EVACUATE do), forcing its replicas
+          //     elsewhere, so -- when the cluster opts in -- it runs the WAGED rebalance-feasibility
+          //     rule. That rule self-selects the capacity-reducing transitions from isAssignable(),
+          //     so ENABLE/SWAP_IN are no-ops for it; DISABLE keeps the instance assignable and never
+          //     triggers it.
+          //   - Net: UNKNOWN carries BOTH hazards and runs BOTH rules; DISABLE runs min-active only;
+          //     EVACUATE runs feasibility only (its (N+1) build-before-drop never dips below
+          //     min-active on its own, so the full-placement feasibility check subsumes it).
           // force=true overrides the verdict (draining a failing node is often mandatory);
           // dryRun=true reports the verdict without writing.
           //
@@ -600,30 +604,31 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           // any verdict anyway, so an operator force-draining a failing node must not be blocked on --
           // or delayed by -- a simulation whose result would be discarded. A dryRun still computes the
           // verdict (even together with force) so it can be previewed.
-          // DISABLE and UNKNOWN both drain this instance's replicas in place (see above), so both
-          // run the always-on min-active-replica rule rather than the WAGED feasibility rule.
           boolean drainsInPlace =
               instanceOperation == InstanceConstants.InstanceOperation.DISABLE
                   || instanceOperation == InstanceConstants.InstanceOperation.UNKNOWN;
+          // Every operation except DISABLE can take the instance out of the assignable pool and so
+          // runs the WAGED feasibility rule (a no-op for ENABLE/SWAP_IN). DISABLE stays assignable.
+          boolean runsFeasibilityRule =
+              instanceOperation != InstanceConstants.InstanceOperation.DISABLE;
           if (dryRun || !force) {
-            GuardrailContext setInstanceOperationContext;
-            GuardrailPipeline setInstanceOperationPipeline;
+            HelixDataAccessor setInstanceOperationDataAccessor = getDataAccssor(clusterId);
+            GuardrailContext.Builder setInstanceOperationContextBuilder =
+                GuardrailContext.newBuilder(clusterId)
+                    .dataAccessor(setInstanceOperationDataAccessor)
+                    .instanceName(instanceName);
+            List<GuardrailRule> setInstanceOperationRules = new ArrayList<>();
             if (drainsInPlace) {
               // Same read-only ExternalView min-active-replica what-if as command=disable; DISABLE
               // and UNKNOWN share it because both drain this instance's replicas in place.
-              HelixDataAccessor disableDataAccessor = getDataAccssor(clusterId);
               MinActiveReplicaChecker minActiveReplicaChecker =
                   (targetInstance, toBeStoppedInstances) -> InstanceValidationUtil
-                      .siblingNodesActiveReplicaCheckWithDetails(disableDataAccessor, targetInstance,
-                          toBeStoppedInstances, true);
-              setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
-                  .dataAccessor(disableDataAccessor)
-                  .instanceName(instanceName)
-                  .minActiveReplicaChecker(minActiveReplicaChecker)
-                  .build();
-              setInstanceOperationPipeline =
-                  new GuardrailPipeline(new InstanceDisableMinActiveReplicaGuardrailRule());
-            } else {
+                      .siblingNodesActiveReplicaCheckWithDetails(setInstanceOperationDataAccessor,
+                          targetInstance, toBeStoppedInstances, true);
+              setInstanceOperationContextBuilder.minActiveReplicaChecker(minActiveReplicaChecker);
+              setInstanceOperationRules.add(new InstanceDisableMinActiveReplicaGuardrailRule());
+            }
+            if (runsFeasibilityRule) {
               // The provider keeps the ZK-accessor plumbing for the read-only WAGED what-if here in
               // the REST layer. An accept-only partial-rebalance fast path short-circuits the full
               // double what-if when it can constructively prove the drain is feasible.
@@ -648,29 +653,34 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                       ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
                 }
               };
-              setInstanceOperationContext = GuardrailContext.newBuilder(clusterId)
-                  .dataAccessor(getDataAccssor(clusterId))
-                  .instanceName(instanceName)
-                  .proposedInstanceOperation(instanceOperation)
-                  .wagedAssignmentProvider(wagedAssignmentProvider)
-                  .build();
-              setInstanceOperationPipeline =
-                  new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+              setInstanceOperationContextBuilder.proposedInstanceOperation(instanceOperation)
+                  .wagedAssignmentProvider(wagedAssignmentProvider);
+              setInstanceOperationRules.add(
+                  new InstanceOperationRebalanceFeasibilityGuardrailRule());
             }
             Optional<Response> setInstanceOperationPreflight =
-                preflight(setInstanceOperationPipeline, setInstanceOperationContext, force, dryRun);
+                preflight(new GuardrailPipeline(setInstanceOperationRules),
+                    setInstanceOperationContextBuilder.build(), force, dryRun);
             if (setInstanceOperationPreflight.isPresent()) {
               return setInstanceOperationPreflight.get();
             }
           } else {
-            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail is
-            // auditable (an operator can still see the override happened without a dryRun preflight).
+            // Bypass path: a real force write skips the what-if. Log it so the skipped guard rail(s)
+            // are auditable (an operator can still see the override happened without a dryRun
+            // preflight).
+            List<String> bypassedGuardRails = new ArrayList<>();
+            if (drainsInPlace) {
+              bypassedGuardRails.add("instance drain-in-place min-active-replica");
+            }
+            if (runsFeasibilityRule) {
+              bypassedGuardRails.add("instance-operation rebalance-feasibility");
+            }
             LOG.info(
-                "Bypassing the {} guard rail for a force setInstanceOperation {} on instance {} in "
-                    + "cluster {} (reason: {}); force overrides the verdict, so the what-if is skipped.",
-                drainsInPlace ? "instance drain-in-place min-active-replica"
-                    : "instance-operation rebalance-feasibility",
-                instanceOperation, instanceName, clusterId, reason);
+                "Bypassing the {} guard rail(s) for a force setInstanceOperation {} on instance {} "
+                    + "in cluster {} (reason: {}); force overrides the verdict, so the what-if is "
+                    + "skipped.",
+                String.join(" and ", bypassedGuardRails), instanceOperation, instanceName, clusterId,
+                reason);
           }
           InstanceUtil.setInstanceOperation(new ConfigAccessor(getRealmAwareZkClient()),
               new ZkBaseDataAccessor<>(getRealmAwareZkClient()), clusterId, instanceName,

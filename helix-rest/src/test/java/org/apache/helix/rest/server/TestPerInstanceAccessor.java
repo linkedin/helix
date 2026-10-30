@@ -986,9 +986,11 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   /**
    * Verifies the opt-in instance-operation rebalance-feasibility guard rail on
    * {@code setInstanceOperation}. Uses a self-contained WAGED cluster whose replica count equals
-   * the assignable-instance count, so moving any one instance out of the assignable pool (EVACUATE)
-   * leaves too few instances to place every replica -> a deterministic placement deficit the guard
-   * rail must catch before writing to ZooKeeper.
+   * the assignable-instance count, so moving any one instance out of the assignable pool (EVACUATE
+   * or UNKNOWN) leaves too few instances to place every replica -> a deterministic placement deficit
+   * the guard rail must catch before writing to ZooKeeper. UNKNOWN takes the instance out of the
+   * pool just like EVACUATE, so it must run this feasibility rule too (on top of the drain-in-place
+   * min-active rule); the dry-run UNKNOWN step locks that in.
    */
   @Test(dependsOnMethods = "updateInstance")
   public void setInstanceOperationRebalanceFeasibilityGuardrail() throws Exception {
@@ -1071,7 +1073,21 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
         "dryRun must not write");
 
-    // 3. force: an operator override bypasses the verdict and writes EVACUATE.
+    // 3. dryRun UNKNOWN: UNKNOWN also leaves the assignable pool, so it carries the same capacity
+    //    hazard as EVACUATE (on top of the drain-in-place min-active hazard). The feasibility rule
+    //    must still fire -- its RULE_ID appears in the verdict -- and nothing is written.
+    Response unknownDryRunResponse = new JerseyUriRequestBuilder(
+        "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=UNKNOWN&dryRun=true")
+        .format(cluster, target).post(this, entity);
+    String unknownVerdictBody = unknownDryRunResponse.readEntity(String.class);
+    Assert.assertTrue(
+        unknownVerdictBody.contains(InstanceOperationRebalanceFeasibilityGuardrailRule.RULE_ID),
+        "dry-run UNKNOWN verdict should carry the feasibility rule id, but was: "
+            + unknownVerdictBody);
+    Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, target).isAssignable(),
+        "dryRun UNKNOWN must not write");
+
+    // 4. force: an operator override bypasses the verdict and writes EVACUATE.
     new JerseyUriRequestBuilder(
         "clusters/{}/instances/{}?command=setInstanceOperation&instanceOperation=EVACUATE&force=true")
         .format(cluster, target).post(this, entity);
@@ -1079,7 +1095,7 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
         _configAccessor.getInstanceConfig(cluster, target).getInstanceOperation().getOperation(),
         InstanceConstants.InstanceOperation.EVACUATE, "force=true should write EVACUATE");
 
-    // 4. Disabled flag: the same otherwise-blocked operation is allowed (guard rail short-circuits).
+    // 5. Disabled flag: the same otherwise-blocked operation is allowed (guard rail short-circuits).
     clusterConfig = _configAccessor.getClusterConfig(cluster);
     clusterConfig.setInstanceOperationRebalanceGuardrailEnabled(false);
     _configAccessor.setClusterConfig(cluster, clusterConfig);
