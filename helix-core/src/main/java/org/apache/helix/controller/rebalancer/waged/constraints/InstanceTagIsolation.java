@@ -293,9 +293,10 @@ class InstanceTagIsolation {
    * push it below zero while every other clique fits on its own nodes. This splits the check's
    * totals by block and skips the blocks that do not fit on their own nodes. Replicas parked on
    * nodes outside the model, such as a node still inside its delay window, are not placed in this
-   * scope, so they count first on no key, then only on the short keys, then on every key. The rest
-   * is always held to the full totals, as the default check would hold a cluster made of the rest
-   * alone. Only called where the default mode throws.
+   * scope, so they count first on no key, then only on the short keys, then on every key. A block
+   * only the parked replicas push over is skipped only while the rest still does not fit, largest
+   * overflow first. The rest is always held to the full totals, as the default check would hold a
+   * cluster made of the rest alone. Only called where the default mode throws.
    *
    * @param deficit the failure the default mode would throw.
    * @param divGuard the share of each key's capacity added to the scoring denominators, also their
@@ -313,16 +314,29 @@ class InstanceTagIsolation {
     }
     BlockTotals totals = new BlockTotals();
     Map<String, Long> left = _clusterModel.getContext().getEstimateUtilizationMap();
-    // Each pass skips at least the blocks the one before it did.
+    // Every pass skips the blocks over without their parked replicas.
     List<Predicate<String>> countParked =
         Arrays.asList(key -> false, key -> left.getOrDefault(key, 0L) < 0, key -> true);
-    Set<Integer> atFault = Collections.emptySet();
-    Map<String, Float> residualScoringCap = null;
-    for (Predicate<String> counted : countParked) {
-      atFault = totals.blocksOverCapacity(counted);
-      residualScoringCap = totals.residualScoringCapacity(atFault, divGuard);
+    Set<Integer> atFault = totals.blocksOverCapacity(countParked.get(0));
+    Map<String, Float> residualScoringCap = totals.residualScoringCapacity(atFault, divGuard);
+    for (Predicate<String> counted : countParked.subList(1, countParked.size())) {
       if (residualScoringCap != null) {
         break;
+      }
+      // A block only over once its parked replicas count still places what this scope gives it, so
+      // these are skipped one at a time, largest overflow first, until the rest fits.
+      List<Integer> candidates = new ArrayList<>(totals.blocksOverCapacity(counted));
+      candidates.removeAll(atFault);
+      candidates.sort(Comparator.comparingLong((Integer block) -> -totals.overflow(block, counted))
+          .thenComparing(block -> block));
+      Set<Integer> blamed = new TreeSet<>(atFault);
+      for (int block : candidates) {
+        blamed.add(block);
+        residualScoringCap = totals.residualScoringCapacity(blamed, divGuard);
+        if (residualScoringCap != null) {
+          atFault = blamed;
+          break;
+        }
       }
     }
     if (residualScoringCap == null) {
@@ -533,21 +547,26 @@ class InstanceTagIsolation {
      */
     private Set<Integer> blocksOverCapacity(Predicate<String> countParked) {
       Set<Integer> atFault = new TreeSet<>();
-      for (Map.Entry<Integer, Map<String, Long>> entry : _demand.entrySet()) {
-        Map<String, Long> capacity =
-            _capacity.getOrDefault(entry.getKey(), Collections.emptyMap());
-        Map<String, Long> parked = _parked.getOrDefault(entry.getKey(), Collections.emptyMap());
-        for (Map.Entry<String, Long> demand : entry.getValue().entrySet()) {
-          String key = demand.getKey();
-          long need =
-              demand.getValue() - (countParked.test(key) ? 0L : parked.getOrDefault(key, 0L));
-          if (need > capacity.getOrDefault(key, 0L)) {
-            atFault.add(entry.getKey());
-            break;
-          }
+      for (Integer block : _demand.keySet()) {
+        if (overflow(block, countParked) > 0) {
+          atFault.add(block);
         }
       }
       return atFault;
+    }
+
+    /** The most the block needs beyond its own nodes on any key, counting parked as given. */
+    private long overflow(int block, Predicate<String> countParked) {
+      Map<String, Long> capacity = _capacity.getOrDefault(block, Collections.emptyMap());
+      Map<String, Long> parked = _parked.getOrDefault(block, Collections.emptyMap());
+      long overflow = Long.MIN_VALUE;
+      for (Map.Entry<String, Long> demand : _demand.get(block).entrySet()) {
+        String key = demand.getKey();
+        long need =
+            demand.getValue() - (countParked.test(key) ? 0L : parked.getOrDefault(key, 0L));
+        overflow = Math.max(overflow, need - capacity.getOrDefault(key, 0L));
+      }
+      return overflow;
     }
 
     /**
@@ -575,8 +594,8 @@ class InstanceTagIsolation {
       for (Map.Entry<String, Long> entry : residualCapacity.entrySet()) {
         long remaining = entry.getValue() - residualDemand.getOrDefault(entry.getKey(), 0L);
         if (remaining < 0) {
-          // The rest does not fit. Only the first two passes get here: in the last, every block
-          // left fits on its own nodes.
+          // The rest does not fit. Once the last pass skips all it finds, every block left fits on
+          // its own nodes.
           return null;
         }
         // Floored so the denominator stays above zero when the skipped blocks hold all of a key.

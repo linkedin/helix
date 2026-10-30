@@ -99,12 +99,26 @@ public class TestWagedInstanceTagIsolationParkedDemand
         set("b1", "b2"));
   }
 
+  /**
+   * Clique Y needs 240 of its 100 and clique H 210 of its 200, both only once their parked
+   * replicas count. Skipping Y alone leaves 310 on 400, so only Y is carried and H still gets its
+   * top up.
+   */
+  @Test
+  public void testOnlyTheCliquesTheDeficitNeedsAreSkipped() throws Exception {
+    OptimalAssignment result = createAlgorithm().calculate(twoParkedOverflows(true));
+    Assert.assertEquals(result.getSkippedResources(), set(BROKEN));
+    Assert.assertEquals(replicasOn(result.getOptimalResourceAssignment().get("RH2"), 0),
+        set("h1", "h2"));
+  }
+
   /** The default mode fails every cluster here on the cluster wide deficit. */
   @Test
   public void testFlagOffStillThrows() throws Exception {
     assertCapacityDeficit(aboveLiveShare(false));
     assertCapacityDeficit(parkedDeficit(false));
     assertCapacityDeficit(twoKeys(false));
+    assertCapacityDeficit(twoParkedOverflows(false));
   }
 
   /** RH_0 is topped up to min active on h3, and every RH partition stays on H's live nodes. */
@@ -199,6 +213,42 @@ public class TestWagedInstanceTagIsolationParkedDemand
     cluster.current(HEALTHY, 0, "h1", "h3");
     for (int p = 1; p < 9; p++) {
       cluster.current(HEALTHY, p, "h1", "h2");
+    }
+    return cluster.build();
+  }
+
+  /**
+   * Clique Y: live y1 of 100, y2 and y3 offline inside the window. RY has four partitions of three
+   * replicas at 20, one of each on y1: 80 placed and 160 parked.
+   *
+   * Clique H: live h1 and h2 of 100, h3 offline inside the window. RH has three partitions of three
+   * replicas at 10 on h1, h2 and h3. RH2 has six partitions of two replicas at 10 and min active 2:
+   * RH2_0 on h1 and h3 gets a top up, the rest sit on h1 and h2. H owns 210, 30 of it parked.
+   *
+   * Clique G: g1 and g2 of 100 hold RG, ten single replicas at 10. The cluster holds 500 and is
+   * asked for 550.
+   */
+  private ClusterModel twoParkedOverflows(boolean enabled) throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(createClusterConfig(enabled))
+        .liveNode("y1", 100, "Y")
+        .liveNode("h1", 100, "H").liveNode("h2", 100, "H")
+        .liveNode("g1", 100, "G").liveNode("g2", 100, "G")
+        .resource(taggedResource(BROKEN, "Y", 20), 4, 3, 1)
+        .resource(taggedResource(HEALTHY, "H", 10), 3, 3, 2)
+        .resource(taggedResource("RH2", "H", 10), 6, 2, 2)
+        .resource(taggedResource(REBALANCED, "G", 10), 10, 1, 1);
+    for (int p = 0; p < 4; p++) {
+      cluster.current(BROKEN, p, "y1", "y2", "y3");
+    }
+    for (int p = 0; p < 3; p++) {
+      cluster.current(HEALTHY, p, "h1", "h2", "h3");
+    }
+    cluster.current("RH2", 0, "h1", "h3");
+    for (int p = 1; p < 6; p++) {
+      cluster.current("RH2", p, "h1", "h2");
+    }
+    for (int p = 0; p < 10; p++) {
+      cluster.current(REBALANCED, p, p % 2 == 0 ? "g1" : "g2");
     }
     return cluster.build();
   }
