@@ -133,27 +133,8 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
     InstanceTagIsolation isolation = new InstanceTagIsolation(clusterModel, nodes);
 
-    // create a always >0 capacity map to avoid divide by 0.
-    Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
-    for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
-        .getEstimateUtilizationMap().entrySet()) {
-      String capacityKey = clusterRemainingCap.getKey();
-      if (clusterRemainingCap.getValue() < 0) {
-        // all replicas' assignment will fail if there is one dimension's remain capacity <0.
-        long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
-        long remainingCapacity = clusterRemainingCap.getValue();
-        long totalUsage = totalCapacity - remainingCapacity;
-        throw new HelixRebalanceException(String
-            .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
-                clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
-            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
-      }
-      // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
-      positiveEstimateClusterRemainCap.put(capacityKey,
-           (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
-          (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
-    }
+    Map<String, Float> positiveEstimateClusterRemainCap =
+        computeScoringCapacities(clusterModel, isolation);
 
     // Create a wrapper for each AssignableReplica.
     List<AssignableReplicaWithScore> toBeAssignedReplicas =
@@ -203,6 +184,47 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     isolation.finish(optimalAssignment);
     optimalAssignment.updateAssignments(clusterModel);
     return optimalAssignment;
+  }
+
+  /**
+   * Estimated free capacity per key once every replica is placed, plus 1% of the total to avoid a
+   * divide by zero. Used to score replicas.
+   *
+   * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
+   *         With instance tag isolation on, the blocks that do not fit on their own nodes are
+   *         skipped instead, and it throws only when that is every block with resources or all
+   *         resources share one block.
+   */
+  private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
+      InstanceTagIsolation isolation) throws HelixRebalanceException {
+    Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
+    for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
+        .getEstimateUtilizationMap().entrySet()) {
+      String capacityKey = clusterRemainingCap.getKey();
+      if (clusterRemainingCap.getValue() < 0) {
+        // A short key fails the run, unless isolation can skip the blocks that are over.
+        long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
+        long remainingCapacity = clusterRemainingCap.getValue();
+        long totalUsage = totalCapacity - remainingCapacity;
+        HelixRebalanceException capacityDeficit = new HelixRebalanceException(String
+            .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
+                clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+        // This sum ignores tags, so one clique far over capacity can push it below zero.
+        Map<String, Float> residual =
+            isolation.absorbCapacityDeficit(capacityDeficit, DIV_GUARD);
+        if (residual == null) {
+          throw capacityDeficit;
+        }
+        return residual;
+      }
+      // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
+      positiveEstimateClusterRemainCap.put(capacityKey,
+           (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
+          (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
+    }
+    return positiveEstimateClusterRemainCap;
   }
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,
