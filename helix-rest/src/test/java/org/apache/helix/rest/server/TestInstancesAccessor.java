@@ -37,6 +37,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.helix.AccessOption;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
@@ -47,6 +48,7 @@ import org.apache.helix.model.RESTConfig;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
 import org.apache.helix.rest.server.util.JerseyUriRequestBuilder;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -1068,6 +1070,81 @@ public class TestInstancesAccessor extends AbstractTestClass {
         "clusters/{}/instances?command=getInstancesUnderInstanceOperationMaintenance")
         .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
         .format("TestMarkerListingClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstanceSummaries() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String clusterName = "TestInstanceSummariesCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    for (String instance : Arrays.asList("isInstance1", "isInstance0")) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+    startInstances(clusterName, new TreeSet<>(Collections.singletonList("isInstance0")), 1);
+    setInstanceOperation(clusterName, "isInstance1", InstanceConstants.InstanceOperation.DISABLE);
+    long markerExpiresAtMillis = System.currentTimeMillis() + 600_000L;
+    InstanceConfig config = _configAccessor.getInstanceConfig(clusterName, "isInstance0");
+    config.setDomain("zone=z1,host=isInstance0");
+    config.addTag("tagA");
+    config.setInstanceCapacityMap(ImmutableMap.of("CPU", 100, "DISK", 500));
+    config.setInstanceOperationMaintenanceUntilMs(markerExpiresAtMillis);
+    // Two sources hold an operation on the same instance.
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.ENABLE)
+        .setSource(InstanceConstants.InstanceOperationSource.USER).build());
+    config.setInstanceOperation(new InstanceConfig.InstanceOperation.Builder()
+        .setOperation(InstanceConstants.InstanceOperation.EVACUATE).setReason("moving off")
+        .setSource(InstanceConstants.InstanceOperationSource.AUTOMATION).build());
+    _configAccessor.setInstanceConfig(clusterName, "isInstance0", config);
+    // An expired marker is omitted.
+    setInstanceOperationMaintenanceUntilMs(clusterName, "isInstance1",
+        System.currentTimeMillis() - 1L);
+    // A config znode with no record id must not break the listing.
+    _baseAccessor.create("/" + clusterName + "/CONFIGS/PARTICIPANT/orphan",
+        new ZNRecord((String) null), AccessOption.PERSISTENT);
+
+    JsonNode summaries = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
+            .isBodyReturnExpected(true).format(clusterName).get(this))
+        .get(InstancesAccessor.InstancesProperties.instance_summaries.name());
+
+    List<String> listed = new ArrayList<>();
+    summaries.fieldNames().forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("isInstance0", "isInstance1"));
+
+    JsonNode live = summaries.get("isInstance0");
+    Assert.assertTrue(live.get("live").asBoolean());
+    Assert.assertEquals(live.get("instanceOperation").asText(), "EVACUATE");
+    JsonNode operations = live.get("instanceOperations");
+    Assert.assertEquals(operations.size(), 2);
+    Assert.assertEquals(operations.get(0).get("operation").asText(), "ENABLE");
+    Assert.assertEquals(operations.get(0).get("source").asText(), "USER");
+    Assert.assertEquals(operations.get(1).get("operation").asText(), "EVACUATE");
+    Assert.assertEquals(operations.get(1).get("source").asText(), "AUTOMATION");
+    Assert.assertEquals(operations.get(1).get("reason").asText(), "moving off");
+    Assert.assertTrue(operations.get(1).get("timestamp").asLong() > 0);
+    Assert.assertEquals(live.get("domain").asText(), "zone=z1,host=isInstance0");
+    Assert.assertEquals(live.get("tags").get(0).asText(), "tagA");
+    Assert.assertEquals(live.get("capacity").get("CPU").asInt(), 100);
+    Assert.assertEquals(live.get("capacity").get("DISK").asInt(), 500);
+    Assert.assertEquals(live.get("maintenanceMarkerExpiresAtMillis").asLong(),
+        markerExpiresAtMillis);
+
+    JsonNode disabled = summaries.get("isInstance1");
+    Assert.assertFalse(disabled.get("live").asBoolean());
+    Assert.assertEquals(disabled.get("instanceOperation").asText(), "DISABLE");
+    Assert.assertEquals(disabled.get("instanceOperations").get(0).get("operation").asText(),
+        "DISABLE");
+    Assert.assertEquals(disabled.get("capacity").size(), 0);
+    Assert.assertFalse(disabled.has("maintenanceMarkerExpiresAtMillis"));
+
+    new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceSummaries")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestInstanceSummariesClusterDoesNotExist").get(this);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
