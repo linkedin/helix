@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -35,6 +36,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 import com.codahale.metrics.MetricRegistry;
@@ -90,6 +92,17 @@ import org.slf4j.LoggerFactory;
  * operation in the same request, since each one's transition is validated against the other's
  * current operation.
  *
+ * <p>The rebalance-feasibility guardrail judges the instances whose operation changes all
+ * together. When they do not all fit, dry checks search for the longest run from the start of the
+ * request that fits, plus the instances after the first misfit if those fit with it, in at most
+ * {@link ClusterConfig#getInstanceOperationMaintenanceFitSearchMaxChecks()} more checks per
+ * attempt; with 0, the request is judged as a whole. Only a set a check on this attempt's read
+ * showed fits is written; the rest are GUARDRAIL_REJECTED. A request that runs out of time before
+ * that run is found writes none of them and returns FITS and NOT_CHECKED; the instances after the
+ * misfit are checked only if time allows. A resend with the FITS ones in fitInstances, an empty
+ * list if none, resumes the search: it first checks them with the next instance, so while the
+ * cluster does not change every resend makes progress, and no state is kept.
+ *
  * <p>Every {@link Status} maps to one action for the caller, and every outcome carries a
  * one-line message that says what happened and what to do, written to be shown to an operator as
  * is. Messages never carry Java exception text; the server log has it.
@@ -115,10 +128,13 @@ public class InstanceOperationMaintenanceHandler {
   /** Histogram of the instance-config bytes each commit writes. */
   static final String COMMIT_BYTES_METRIC =
       "org.apache.helix.rest.instanceOperationMaintenance.commitBytes";
+  /** How long into a request a guardrail call may still end, so it answers inside 60 s. */
+  static final long GUARDRAIL_BUDGET_MS = 45_000L;
   /** Expiry that takes the cluster's default marker duration. */
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
   public static final long CLEAR_MARKER = -1L;
+  private static final String RESEND_AFTER_FIT = " Resend it once the instances that fit are done.";
   private static final Set<InstanceConstants.InstanceOperation> OPERATIONS = EnumSet.of(
       InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE,
       InstanceConstants.InstanceOperation.EVACUATE);
@@ -140,8 +156,10 @@ public class InstanceOperationMaintenanceHandler {
      */
     DUPLICATE_LOGICAL_ID,
     /**
-     * The rebalance-feasibility guardrail judged the instances this request changes unsafe
-     * together. Change fewer instances at once, or add assignable capacity.
+     * The guardrail did not admit this instance with the instances of this request that fit: it
+     * does not fit with them, or the search did not show it does. Resend it once they are done.
+     * The message says when it needs an operator instead (it does not fit alone), or fewer
+     * instances per request (the search is off).
      */
     GUARDRAIL_REJECTED,
     /**
@@ -150,13 +168,26 @@ public class InstanceOperationMaintenanceHandler {
      */
     GUARDRAIL_INDETERMINATE,
     /**
+     * Shown to fit together with the other FITS instances, by this request or the one it resends,
+     * but not written: the request ran out of time before the search for the instances that fit
+     * ended. Resend it in fitInstances, together with the NOT_CHECKED instances, to resume the
+     * search, which checks it again before any write.
+     */
+    FITS,
+    /**
+     * Not checked, so not written: the request ran out of time before the search for the
+     * instances that fit reached it. Resend it, with the FITS instances in fitInstances, an empty
+     * list if there are none.
+     */
+    NOT_CHECKED,
+    /**
      * The marker cap has no room for this instance. Retry once markers are cleared or expire. A
      * cap of 0 admits none, and the message says it must be raised.
      */
     BUDGET_EXHAUSTED,
     /**
-     * Not judged in this request, so not written: the marker cap had room for it only after
-     * instances ahead of it were not written. Resend it.
+     * Not judged, so not written: the marker cap had room for it only after instances ahead of it
+     * in this request were not written. Resend it.
      */
     NOT_APPLIED,
     /** Lost the race to concurrent writers on every attempt. Resend. */
@@ -257,23 +288,66 @@ public class InstanceOperationMaintenanceHandler {
     }
   }
 
+  /** The guardrail time one request has left, measured on the handler's clock. */
+  private final class Budget {
+    private final long _start = _clock.getAsLong();
+    private long _lastCost = -1L;
+
+    /** Whether a call costing what the last one did would end in time. True before any call. */
+    boolean allows() {
+      return _lastCost < 0L || elapsed() + _lastCost < GUARDRAIL_BUDGET_MS;
+    }
+
+    long elapsed() {
+      return _clock.getAsLong() - _start;
+    }
+
+    ValidationResult judge(Function<Collection<String>, ValidationResult> guardrail,
+        Collection<String> instances) {
+      long start = _clock.getAsLong();
+      ValidationResult verdict = guardrail.apply(instances);
+      _lastCost = _clock.getAsLong() - start;
+      return verdict;
+    }
+  }
+
   private final RealmAwareZkClient _zkClient;
   private final BaseDataAccessor<ZNRecord> _accessor;
   private final Function<Collection<String>, ValidationResult> _guardrail;
   private final MetricRegistry _metrics;
+  private final Function<Collection<String>, ValidationResult> _probe;
+  private final LongSupplier _clock;
 
   /**
-   * @param guardrail given the instances whose operation changes, judges whether the requested
-   *     operation is safe on them together. Runs once per attempt, on the instances that passed
-   *     every other check.
+   * @param guardrail given instances whose operation changes, judges whether the requested
+   *     operation is safe on them together. Makes the first check of each attempt.
+   * @param probe the same judgment, for the later checks of the search for the instances that
+   *     fit. A rejection there counts as a dry run, not a blocked write.
    * @param metrics where to record batch and commit sizes, or null to record none.
    */
   public InstanceOperationMaintenanceHandler(RealmAwareZkClient zkClient,
-      Function<Collection<String>, ValidationResult> guardrail, MetricRegistry metrics) {
+      Function<Collection<String>, ValidationResult> guardrail,
+      Function<Collection<String>, ValidationResult> probe, MetricRegistry metrics) {
+    this(zkClient, guardrail, probe, metrics, System::currentTimeMillis);
+  }
+
+  /** @param clock the milliseconds the guardrail budget is measured in */
+  InstanceOperationMaintenanceHandler(RealmAwareZkClient zkClient,
+      Function<Collection<String>, ValidationResult> guardrail,
+      Function<Collection<String>, ValidationResult> probe, MetricRegistry metrics,
+      LongSupplier clock) {
     _zkClient = Objects.requireNonNull(zkClient, "zkClient");
     _accessor = new ZkBaseDataAccessor<>(zkClient);
     _guardrail = Objects.requireNonNull(guardrail, "guardrail");
     _metrics = metrics;
+    _probe = Objects.requireNonNull(probe, "probe");
+    _clock = Objects.requireNonNull(clock, "clock");
+  }
+
+  /** Applies the request with no fitInstances hint. */
+  public Map<String, Outcome> apply(String clusterId, List<String> instances,
+      InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
+    return apply(clusterId, instances, operation, expiresAtMillis, null);
   }
 
   /**
@@ -283,13 +357,16 @@ public class InstanceOperationMaintenanceHandler {
    * @param operation the operation to set, or null to write only the marker.
    * @param expiresAtMillis marker expiry: a future epoch time, {@link #DEFAULT_EXPIRY}, or with no
    *     operation {@link #CLEAR_MARKER}. Ignored for ENABLE.
+   * @param fitInstances the FITS instances of an earlier request that ran out of time, to resume
+   *     its search, or null to start one. Empty resumes a search that showed none fit yet.
    * @throws BadRequestException if the operation or source is not supported, the instance list
-   *     is empty or has a name that is not a valid znode name, the cluster does not exist, the
-   *     expiry is in the past or the default with no positive cluster default, or the configs to
-   *     write exceed {@link #MAX_COMMIT_BYTES}.
+   *     is empty or has a name that is not a valid znode name, fitInstances names an instance not
+   *     in it, the cluster does not exist, the expiry is in the past or the default with no
+   *     positive cluster default, or the configs to write exceed {@link #MAX_COMMIT_BYTES}.
    */
   public Map<String, Outcome> apply(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
+      InstanceConfig.InstanceOperation operation, long expiresAtMillis,
+      List<String> fitInstances) {
     if (operation != null && (!OPERATIONS.contains(operation.getOperation())
         || !SOURCES.contains(operation.getSource()))) {
       throw new BadRequestException(
@@ -305,6 +382,12 @@ public class InstanceOperationMaintenanceHandler {
             + (name == null ? "null" : "\"" + clip(name, MAX_QUOTED_LENGTH) + "\"")
             + ", which is not an instance name.");
       }
+    }
+    Set<String> hint = fitInstances == null ? null : new HashSet<>(fitInstances);
+    if (hint != null && !instances.containsAll(hint)) {
+      hint.removeAll(instances);
+      throw new BadRequestException("fitInstances names " + clip(String.valueOf(hint),
+          MAX_QUOTED_LENGTH) + ", not in instances. It may only name instances of this request.");
     }
     ZNRecord clusterRecord = _accessor.get(PropertyPathBuilder.clusterConfig(clusterId), null,
         AccessOption.PERSISTENT);
@@ -343,7 +426,8 @@ public class InstanceOperationMaintenanceHandler {
     String requestId = UUID.randomUUID().toString();
     Map<String, Outcome> outcomes;
     try {
-      outcomes = commit(clusterId, names, operation, expiresAt, defaultDurationMs, requestId);
+      outcomes = commit(clusterId, names, operation, expiresAt, defaultDurationMs, hint,
+          requestId);
     } catch (BadRequestException e) {
       throw e;
     } catch (RuntimeException e) {
@@ -391,11 +475,13 @@ public class InstanceOperationMaintenanceHandler {
 
   private Map<String, Outcome> commit(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs,
-      String requestId) {
+      Set<String> hint, String requestId) {
+    Budget budget = new Budget();
     for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       Map<String, Outcome> outcomes;
       try {
-        outcomes = tryCommit(clusterId, instances, operation, expiresAt, defaultDurationMs);
+        outcomes = tryCommit(clusterId, instances, operation, expiresAt, defaultDurationMs, hint,
+            budget);
       } catch (BadRequestException | UnknownCommitException e) {
         throw e;
       } catch (RuntimeException e) {
@@ -414,7 +500,8 @@ public class InstanceOperationMaintenanceHandler {
 
   /** Reads, judges and commits the request once. Returns null when the commit lost a race. */
   private Map<String, Outcome> tryCommit(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs) {
+      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs,
+      Set<String> hint, Budget budget) {
     List<String> paths = instances.stream()
         .map(instance -> PropertyPathBuilder.instanceConfig(clusterId, instance))
         .collect(Collectors.toList());
@@ -434,7 +521,7 @@ public class InstanceOperationMaintenanceHandler {
     MarkerCap cap = null;
     int newMarkers = 0;
     Set<String> tookMarker = new HashSet<>();
-    Map<String, String> changingByLogicalId = new HashMap<>();
+    Map<String, String> changingByLogicalId = new LinkedHashMap<>();
     Map<String, Outcome> outcomes = new LinkedHashMap<>();
     // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
     Map<String, Op> staged = new LinkedHashMap<>();
@@ -517,32 +604,23 @@ public class InstanceOperationMaintenanceHandler {
           writeBytes.size(), bytes, MAX_COMMIT_BYTES));
     }
     if (!changingByLogicalId.isEmpty()) {
-      Collection<String> changing = changingByLogicalId.values();
-      ValidationResult verdict = _guardrail.apply(changing);
-      List<Violation> judged = verdict.isFeasible() ? new ArrayList<>()
-          : verdict.getViolations().stream()
-              .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
-      if (!verdict.isFeasible() && judged.isEmpty()) {
-        LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}",
-            operation.getOperation(), changing, clusterId, verdict.getViolations());
-        Outcome outcome = new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
-            + "rebalance-feasibility guardrail could not judge " + operation.getOperation()
-            + " on the " + plural(changing.size(), "instance") + " this request changes. Resend "
-            + "it once; if it comes back, the cluster's WAGED rebalance must be fixed.");
-        changing.forEach(instance -> outcomes.put(instance, outcome));
-      } else if (!judged.isEmpty()) {
-        LOG.warn("The guardrail rejected {} on {} in cluster {}: {}", operation.getOperation(),
-            changing, clusterId, verdict.getViolations());
-        Outcome outcome = new Outcome(Status.GUARDRAIL_REJECTED,
-            guardrailMessage(judged, operation.getOperation(), changing.size()));
-        changing.forEach(instance -> outcomes.put(instance, outcome));
+      if (!budget.allows()) {
+        // Only an attempt after a lost race gets here.
+        return all(instances, new Outcome(Status.CONFLICT, "Concurrent writes to this cluster won "
+            + "the race, and too little time was left to run the guardrail again. Resend the "
+            + "request."));
       }
+      outcomes.putAll(judge(clusterId, new ArrayList<>(changingByLogicalId.values()), hint,
+          operation.getOperation(),
+          clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(), budget));
     }
     if (cap != null) {
-      // Instances not written give back the cap room they took, so as many instances the cap
-      // turned away could have taken it. They were never judged.
+      // Instances rejected in this request give back the cap room they took, so as many
+      // instances the cap turned away could have taken it. Those were never judged. A FITS or
+      // NOT_CHECKED instance keeps its room for the request that resumes its search.
+      Set<Status> keepRoom = EnumSet.of(Status.APPLIED, Status.FITS, Status.NOT_CHECKED);
       long room = cap.room() - tookMarker.stream()
-          .filter(instance -> outcomes.get(instance).getStatus() == Status.APPLIED).count();
+          .filter(instance -> keepRoom.contains(outcomes.get(instance).getStatus())).count();
       for (Map.Entry<String, Outcome> entry : outcomes.entrySet()) {
         if (room > 0L && entry.getValue().getStatus() == Status.BUDGET_EXHAUSTED) {
           entry.setValue(new Outcome(Status.NOT_APPLIED, "Not judged: the marker cap had no room "
@@ -594,6 +672,154 @@ public class InstanceOperationMaintenanceHandler {
     if (_metrics != null) {
       _metrics.histogram(histogram).update(value);
     }
+  }
+
+  /**
+   * Judges the changing instances as the class doc describes, all on this attempt's read, and
+   * returns the outcome of each one not to be applied.
+   */
+  private Map<String, Outcome> judge(String clusterId, List<String> changing, Set<String> hint,
+      InstanceConstants.InstanceOperation operation, int maxChecks, Budget budget) {
+    int n = changing.size();
+    boolean resumed = hint != null && maxChecks > 0;
+    List<String> order = new ArrayList<>(changing);
+    if (resumed) {
+      order.sort(Comparator.comparing(instance -> !hint.contains(instance)));
+    }
+    // The first lo fit together, shown by a check unless taken from the hint. The first hi do
+    // not, where n + 1 means not known.
+    int lo = resumed ? (int) order.stream().filter(hint::contains).count() : 0;
+    boolean shown = lo == 0;
+    int hi = n + 1;
+    int checks = 0;
+    List<Violation> rejection = null;
+    while (hi - lo > 1 || !shown) {
+      if (checks > maxChecks) {
+        break;
+      }
+      if (!budget.allows()) {
+        return cutShort(clusterId, order, lo, hi == lo + 1 ? rejection : null, operation, checks,
+            budget);
+      }
+      // A new search checks them all first. A resumed one checks the hinted run with the next
+      // instance, so every resend makes progress, and the hinted run alone if that fails. The
+      // last check goes to the first instance alone while none are shown to fit.
+      int size = checks == 0 ? (resumed ? Math.min(lo + 1, n) : n)
+          : !shown ? lo : checks == maxChecks && lo == 0 ? 1 : (lo + hi) / 2;
+      ValidationResult verdict =
+          budget.judge(checks++ == 0 ? _guardrail : _probe, order.subList(0, size));
+      if (verdict.isFeasible()) {
+        lo = size;
+        shown = true;
+        continue;
+      }
+      rejection = judged(verdict);
+      if (rejection == null) {
+        return cannotJudge(clusterId, changing, operation, verdict);
+      }
+      if (maxChecks == 0 && n > 1) {
+        return all(changing, new Outcome(Status.GUARDRAIL_REJECTED,
+            guardrailMessage(rejection, changes(operation, n), " Change fewer instances at once, "
+                + "or add assignable capacity.")));
+      }
+      hi = size;
+      if (size == lo) {
+        // The hinted run no longer fits, so the search starts over below it.
+        lo = 0;
+        shown = true;
+      }
+    }
+    // Each instance shown not to fit with the first lo, with the violations that showed it.
+    Map<String, List<Violation>> misfits = new HashMap<>();
+    List<String> kept = new ArrayList<>(order.subList(0, lo));
+    if (hi - lo == 1 && lo < n) {
+      misfits.put(order.get(lo), rejection);
+      if (hi < n && checks <= maxChecks && budget.allows()) {
+        List<String> tried = new ArrayList<>(kept);
+        tried.addAll(order.subList(hi, n));
+        checks++;
+        ValidationResult verdict = budget.judge(_probe, tried);
+        List<Violation> tail = verdict.isFeasible() ? null : judged(verdict);
+        if (verdict.isFeasible()) {
+          kept = tried;
+        } else if (tail == null) {
+          return cannotJudge(clusterId, changing, operation, verdict);
+        } else if (n - hi == 1) {
+          misfits.put(order.get(hi), tail);
+        }
+      }
+    }
+    Map<String, Outcome> outcomes = new HashMap<>();
+    if (kept.size() == n) {
+      return outcomes;
+    }
+    LOG.info("In cluster {}, {} of the {} instances changing to {} fit together, found in {} "
+            + "checks, {} ms into the request.", clusterId, kept.size(), n, operation, checks,
+        budget.elapsed());
+    Set<String> fit = new HashSet<>(kept);
+    Outcome notShown = new Outcome(Status.GUARDRAIL_REJECTED, kept.isEmpty()
+        ? "Not admitted: the search for the instances of this request that fit together found "
+            + "none in its checks. Resend it."
+        : "Not admitted: the search did not show it fits together with the " + fitting(kept.size())
+            + "." + RESEND_AFTER_FIT);
+    for (String instance : order) {
+      if (misfits.containsKey(instance)) {
+        outcomes.put(instance, new Outcome(Status.GUARDRAIL_REJECTED,
+            guardrailMessage(misfits.get(instance), operation, lo)));
+      } else if (!fit.contains(instance)) {
+        outcomes.put(instance, notShown);
+      }
+    }
+    return outcomes;
+  }
+
+  /**
+   * The verdict's violations that judge the change unsafe, or null when it holds none: every
+   * violation is indeterminate.
+   */
+  private static List<Violation> judged(ValidationResult verdict) {
+    List<Violation> judged = verdict.getViolations().stream()
+        .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
+    return judged.isEmpty() ? null : judged;
+  }
+
+  /** Outcomes for a check that cannot judge: every changing instance fails alike. */
+  private static Map<String, Outcome> cannotJudge(String clusterId, List<String> changing,
+      InstanceConstants.InstanceOperation operation, ValidationResult verdict) {
+    LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}", operation, changing,
+        clusterId, verdict.getViolations());
+    return all(changing, new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
+        + "rebalance-feasibility guardrail could not judge " + changes(operation, changing.size())
+        + ". Resend it once; if it comes back, the cluster's WAGED rebalance must be fixed."));
+  }
+
+  /**
+   * Outcomes for a search the request ran out of time for: nothing it judges is written. The
+   * instance after the FITS ones is GUARDRAIL_REJECTED when misfit holds the violations that
+   * showed it does not fit with them, so the resend checks the one after it.
+   */
+  private static Map<String, Outcome> cutShort(String clusterId, List<String> order, int fit,
+      List<Violation> misfit, InstanceConstants.InstanceOperation operation, int checks,
+      Budget budget) {
+    LOG.info("In cluster {}, the search ran out of time after {} checks, {} ms into the request, "
+        + "with {} of {} instances shown to fit.", clusterId, checks, budget.elapsed(), fit,
+        order.size());
+    Map<String, Outcome> outcomes = new HashMap<>();
+    for (int i = 0; i < order.size(); i++) {
+      outcomes.put(order.get(i), i < fit
+          ? new Outcome(Status.FITS, "Shown to fit together with the other FITS instances, but "
+              + "not written: the request ran out of time before the search for the instances "
+              + "that fit ended. Resend it in fitInstances, with the NOT_CHECKED instances.")
+          : i == fit && misfit != null
+              ? new Outcome(Status.GUARDRAIL_REJECTED, guardrailMessage(misfit, operation
+                  + " on this instance together with the " + plural(fit, "FITS instance"),
+                  RESEND_AFTER_FIT))
+              : new Outcome(Status.NOT_CHECKED, "Not checked, so not written: the request ran "
+                  + "out of time before the search for the instances that fit reached it. Resend "
+                  + "it, with the FITS instances in fitInstances, an empty list if there are "
+                  + "none."));
+    }
+    return outcomes;
   }
 
   /** One line for the whole request, to show next to the per-instance outcomes. */
@@ -712,31 +938,38 @@ public class InstanceOperationMaintenanceHandler {
   }
 
   /**
-   * Says why the guardrail rejected the batch, from its structured violations. The violations' own
-   * text is written for endpoints that accept force=true, which this one does not, so only an
+   * Says why the guardrail rejected the instance, from its structured violations. The violations'
+   * own text is written for endpoints that accept force=true, which this one does not, so only an
    * unrecognized violation is quoted.
+   *
+   * @param fit how many instances of the request it was checked with, all of which fit together
    */
   private static String guardrailMessage(List<Violation> violations,
-      InstanceConstants.InstanceOperation operation, int changing) {
+      InstanceConstants.InstanceOperation operation, int fit) {
+    return guardrailMessage(violations, operation + " on this instance "
+        + (fit == 0 ? "alone" : "together with " + fitting(fit)),
+        fit == 0 ? " Add assignable capacity before resending it." : RESEND_AFTER_FIT);
+  }
+
+  private static String guardrailMessage(List<Violation> violations, String subject,
+      String advice) {
     Violation first = violations.get(0);
     String head = "Rejected by guardrail " + first.getRuleId() + ": ";
-    String subject = operation + " on the " + plural(changing, "instance")
-        + " this request changes";
     List<String> partitions = violations.stream().map(Violation::getPartitionName)
         .filter(Objects::nonNull).collect(Collectors.toList());
     if (!partitions.isEmpty()) {
       boolean more = partitions.size() > 3 || partitions.size() < violations.size();
       return head + subject + " would leave partitions unable to place all their replicas, "
           + "including " + listed(partitions.subList(0, Math.min(3, partitions.size())), more)
-          + ". Change fewer instances at once, or add assignable capacity.";
+          + "." + advice;
     }
     String text = String.valueOf(first.getMessage());
     if (text.startsWith("Applying ")
         && text.contains("makes the WAGED rebalancer unable to compute")) {
       return head + subject + " would leave WAGED unable to compute any assignment for the "
-          + "cluster. Change fewer instances at once, or add assignable capacity.";
+          + "cluster." + advice;
     }
-    return head + clip(oneLine(text), 500);
+    return head + clip(oneLine(text), 500) + advice;
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
@@ -752,6 +985,14 @@ public class InstanceOperationMaintenanceHandler {
 
   private static String plural(long count, String noun) {
     return count + " " + noun + (count == 1 ? "" : "s");
+  }
+
+  private static String fitting(int fit) {
+    return plural(fit, "instance") + " of this request that " + (fit == 1 ? "fits" : "fit");
+  }
+
+  private static String changes(InstanceConstants.InstanceOperation operation, int changing) {
+    return operation + " on the " + plural(changing, "instance") + " this request changes";
   }
 
   /** The marker cap and its live markers; unlimited when no cap is set. */
