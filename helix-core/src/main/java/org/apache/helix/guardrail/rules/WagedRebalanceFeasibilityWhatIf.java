@@ -215,9 +215,8 @@ final class WagedRebalanceFeasibilityWhatIf {
           liveInstances, wagedIdealStates, wagedResourceConfigs);
     } catch (Exception e) {
       // No baseline to compare against: the cluster may already be unable to compute a WAGED
-      // assignment. We cannot attribute a deficit to this mutation, so fail closed (block) with a
-      // forceable message rather than certify a write we could not validate.
-      return ValidationResult.infeasible(Violation.newBuilder(ruleId)
+      // assignment. The mutation cannot be judged either way, so block it as indeterminate.
+      return ValidationResult.infeasible(Violation.newBuilder(ruleId).indeterminate()
           .message(String.format(
               "Could not compute a baseline WAGED assignment for cluster %s to validate %s on "
                   + "instance %s against (%s). The cluster may already be unable to compute a WAGED "

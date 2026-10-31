@@ -327,7 +327,8 @@ public final class HelixUtil {
       RebalanceUtil.runStage(event, new CurrentStateComputationStage());
       RebalanceUtil.runStage(event, new BestPossibleStateCalcStage());
     } catch (Exception e) {
-      LOG.error("getIdealAssignmentForWagedFullAuto(): Failed to compute ResourceAssignments!", e);
+      throw new HelixException(
+          "getIdealAssignmentForWagedFullAuto(): Failed to compute ResourceAssignments!", e);
     } finally {
       // Close all ZK connections
       readOnlyWagedRebalancer.close();
@@ -336,10 +337,17 @@ public final class HelixUtil {
     // Convert the resulting BestPossibleStateOutput to Map<String, ResourceAssignment>
     Map<String, ResourceAssignment> result = new HashMap<>();
     BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
-    if (output == null || (output.getPreferenceLists() == null && output.getResourceStatesMap()
-        .isEmpty())) {
+    if (output == null) {
       throw new HelixException(
           "getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed to compute BestPossibleState!");
+    }
+    // The stage leaves out a resource it failed to compute, which would read as no replicas.
+    List<String> failed = idealStates.stream().map(IdealState::getResourceName)
+        .filter(resource -> output.getPreferenceLists(resource) == null)
+        .collect(Collectors.toList());
+    if (!failed.isEmpty()) {
+      throw new HelixException("getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed "
+          + "to compute BestPossibleState for " + failed);
     }
     for (IdealState idealState : idealStates) {
       String resourceName = idealState.getResourceName();

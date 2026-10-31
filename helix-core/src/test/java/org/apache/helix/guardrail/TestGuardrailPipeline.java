@@ -84,6 +84,13 @@ public class TestGuardrailPipeline {
   }
 
   @Test
+  public void testJudgedViolationIsNotIndeterminate() {
+    Assert.assertFalse(Violation.newBuilder("r").message("m").build().isIndeterminate());
+    Assert.assertTrue(Violation.newBuilder("r").indeterminate().build().toString()
+        .endsWith(", indeterminate}"));
+  }
+
+  @Test
   public void testSingleFailingIsInfeasible() {
     ValidationResult result = new GuardrailPipeline(failingRule("a")).validate(context());
     Assert.assertFalse(result.isFeasible());
@@ -122,6 +129,7 @@ public class TestGuardrailPipeline {
     Violation violation = result.getViolations().get(0);
     Assert.assertEquals(violation.getRuleId(), "boom");
     Assert.assertTrue(violation.getMessage().contains("kaboom"));
+    Assert.assertTrue(violation.isIndeterminate());
   }
 
   @Test
@@ -142,6 +150,7 @@ public class TestGuardrailPipeline {
     Assert.assertFalse(result.isFeasible());
     Assert.assertEquals(result.getViolations().size(), 1);
     Assert.assertEquals(result.getViolations().get(0).getRuleId(), "null-rule");
+    Assert.assertTrue(result.getViolations().get(0).isIndeterminate());
   }
 
   @Test
