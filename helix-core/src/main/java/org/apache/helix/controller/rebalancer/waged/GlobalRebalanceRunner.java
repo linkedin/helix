@@ -285,22 +285,23 @@ class GlobalRebalanceRunner implements AutoCloseable {
         // block it.
         Set<String> settledRetries = new HashSet<>(retriedResources);
         settledRetries.removeAll(failedRetries);
-        ClusterModel narrowerModel = generateBaselineModel(clusterData, resourceMap,
-            allAssignableInstances, withRetries(requestedChanges, settledRetries), currentBaseline);
-        if (countReplicas(narrowerModel) < evaluatedReplicas && !Collections.disjoint(
-            narrowerModel.getAssignableReplicaMap().keySet(), nextRetries)) {
-          Set<String> skipped = new HashSet<>(nextRetries);
-          nextRetries.clear();
-          try {
+        Set<String> skipped = new HashSet<>(nextRetries);
+        try {
+          ClusterModel narrowerModel = generateBaselineModel(clusterData, resourceMap,
+              allAssignableInstances, withRetries(requestedChanges, settledRetries),
+              currentBaseline);
+          if (countReplicas(narrowerModel) < evaluatedReplicas && !Collections.disjoint(
+              narrowerModel.getAssignableReplicaMap().keySet(), nextRetries)) {
+            nextRetries.clear();
             newBaseline = WagedRebalanceUtil.calculateAssignment(narrowerModel,
                 calculationAlgorithm, currentBaseline);
             nextRetries.addAll(failedRetries);
-          } catch (HelixRebalanceException retryEx) {
-            LOG.warn("Baseline calculation without {} failing retried resources failed, keeping "
-                + "the result with them.", failedRetries.size(), retryEx);
-            nextRetries.clear();
-            nextRetries.addAll(skipped);
           }
+        } catch (HelixRebalanceException retryEx) {
+          LOG.warn("Baseline calculation without {} failing retried resources failed, keeping "
+              + "the result with them.", failedRetries.size(), retryEx);
+          nextRetries.clear();
+          nextRetries.addAll(skipped);
         }
       }
     } catch (HelixRebalanceException ex) {
