@@ -295,9 +295,10 @@ class InstanceTagIsolation {
    * nodes outside the model, such as a node still inside its delay window, are not placed in this
    * scope, so they count first on no key, then only on the short keys, then on every key. A block
    * only the parked replicas push over is skipped only while the rest still does not fit, largest
-   * overflow first. The rest is always held to the full totals, as the default check would hold a
-   * cluster made of the rest alone, and is scored as that cluster. Only called where the default
-   * mode throws.
+   * overflow first or, if that never fits with several keys, in the order skipUntilFit picks
+   * them. Any such block the rest then fits without is not skipped. The rest is always held
+   * to the full totals, as the default check would hold a cluster made of the rest alone, and is
+   * scored as that cluster. Only called where the default mode throws.
    *
    * A block over on any key is skipped, even when only a node already above its capacity, such as
    * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
@@ -330,19 +331,15 @@ class InstanceTagIsolation {
         break;
       }
       // A block only over once its parked replicas count still places what this scope gives it, so
-      // these are skipped one at a time, largest overflow first, until the rest fits.
+      // only as many of these as the rest needs are skipped.
       List<Integer> candidates = new ArrayList<>(totals.blocksOverCapacity(counted));
       candidates.removeAll(atFault);
       candidates.sort(Comparator.comparingLong((Integer block) -> -totals.overflow(block, counted))
           .thenComparing(block -> block));
-      Set<Integer> blamed = new TreeSet<>(atFault);
-      for (int block : candidates) {
-        blamed.add(block);
+      Set<Integer> blamed = totals.skipUntilFit(atFault, candidates);
+      if (blamed != null) {
+        atFault = blamed;
         residualScoringCap = totals.residualScoringCapacity(blamed, divGuard);
-        if (residualScoringCap != null) {
-          atFault = blamed;
-          break;
-        }
       }
     }
     if (residualScoringCap == null) {
@@ -386,6 +383,10 @@ class InstanceTagIsolation {
     private final Set<Integer> _resourceBlocks = new HashSet<>();
     private final Map<Integer, Map<String, Long>> _capacity = new HashMap<>();
     private final Map<Integer, Map<String, Long>> _demand = new HashMap<>();
+    // The capacity keys in a fixed order, and the room skipping each block frees on them.
+    private final List<String> _keys =
+        new ArrayList<>(new TreeSet<>(_clusterModel.getContext().getClusterCapacityMap().keySet()));
+    private final Map<Integer, long[]> _gain = new HashMap<>();
     // The part of each block's demand parked on nodes outside this scope's model.
     private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
     private final Map<String, Map<String, PartitionShare>> _shares;
@@ -580,6 +581,135 @@ class InstanceTagIsolation {
         overflow = Math.max(overflow, need - capacity.getOrDefault(key, 0L));
       }
       return overflow;
+    }
+
+    /**
+     * Skips the candidates, in the order given, until the rest fits. With one key each candidate,
+     * a block with resources, adds its overflow to the room, so the first prefix that fits is a
+     * smallest fitting set, and if none fits no set does. With several keys that order can skip a
+     * block the rest fits without, or never fit while another set does, and finding a smallest
+     * fitting set is as hard as subset sum. So if the order never fits, this adds one candidate at
+     * a time: one the rest then fits with, else one that frees room at no cost on any key, else
+     * the one leaving the rest least short. Then each added block the rest still fits without is
+     * un-skipped, last added first. Each step is one pass over the keys.
+     *
+     * @return the blocks to skip, or null when none of these fits.
+     */
+    private Set<Integer> skipUntilFit(Set<Integer> atFault, List<Integer> candidates) {
+      Room room = new Room(atFault);
+      List<Integer> added = new ArrayList<>();
+      for (int i = 0; i < candidates.size() && room.shortfall() > 0; i++) {
+        added.add(candidates.get(i));
+        room.skip(candidates.get(i), 1);
+      }
+      if (room.shortfall() > 0) {
+        room = new Room(atFault);
+        added.clear();
+        List<Integer> pool = new ArrayList<>(candidates);
+        for (double shortfall = room.shortfall(); shortfall > 0; ) {
+          int best = -1;
+          int bestRank = Integer.MAX_VALUE;
+          double bestShortfall = Double.POSITIVE_INFINITY;
+          for (int i = 0; i < pool.size(); i++) {
+            int block = pool.get(i);
+            room.skip(block, 1);
+            double next = room.shortfall();
+            room.skip(block, -1);
+            int rank = next == 0 ? 0 : next < shortfall && costsNoRoom(block) ? 1 : 2;
+            if (next < Double.POSITIVE_INFINITY
+                && (rank < bestRank || (rank == bestRank && next < bestShortfall))) {
+              best = i;
+              bestRank = rank;
+              bestShortfall = next;
+            }
+          }
+          if (best < 0) {
+            return null;
+          }
+          int block = pool.remove(best);
+          added.add(block);
+          room.skip(block, 1);
+          shortfall = bestShortfall;
+        }
+      }
+      for (boolean pruned = true; pruned; ) {
+        pruned = false;
+        for (int i = added.size() - 1; i >= 0; i--) {
+          room.skip(added.get(i), -1);
+          if (room.shortfall() == 0) {
+            added.remove(i);
+            pruned = true;
+          } else {
+            room.skip(added.get(i), 1);
+          }
+        }
+      }
+      return room._skipped;
+    }
+
+    /** Whether skipping the block leaves no key with less room. */
+    private boolean costsNoRoom(int block) {
+      return Arrays.stream(gain(block)).allMatch(gain -> gain >= 0);
+    }
+
+    /** Per key, in key order, the room skipping the block frees: its demand less its capacity. */
+    private long[] gain(int block) {
+      return _gain.computeIfAbsent(block, id -> {
+        Map<String, Long> demand = _demand.getOrDefault(id, Collections.emptyMap());
+        Map<String, Long> capacity = _capacity.getOrDefault(id, Collections.emptyMap());
+        long[] gain = new long[_keys.size()];
+        for (int k = 0; k < gain.length; k++) {
+          gain[k] = demand.getOrDefault(_keys.get(k), 0L) - capacity.getOrDefault(_keys.get(k), 0L);
+        }
+        return gain;
+      });
+    }
+
+    /** The room left on each key once a set of blocks is skipped, kept as blocks come and go. */
+    private final class Room {
+      private final Set<Integer> _skipped = new TreeSet<>();
+      private final long[] _capacityOfKey = new long[_keys.size()];
+      private final long[] _left = new long[_keys.size()];
+      private int _skippedResourceBlocks;
+
+      private Room(Set<Integer> skipped) {
+        Map<String, Long> capacity = _clusterModel.getContext().getClusterCapacityMap();
+        Map<String, Long> left = _clusterModel.getContext().getEstimateUtilizationMap();
+        for (int k = 0; k < _keys.size(); k++) {
+          _capacityOfKey[k] = capacity.get(_keys.get(k));
+          _left[k] = left.getOrDefault(_keys.get(k), _capacityOfKey[k]);
+        }
+        skipped.forEach(block -> skip(block, 1));
+      }
+
+      /** Skips the block, or un-skips it when the sign is negative. */
+      private void skip(int block, int sign) {
+        if (sign > 0 ? _skipped.add(block) : _skipped.remove(block)) {
+          long[] gain = gain(block);
+          for (int k = 0; k < gain.length; k++) {
+            _left[k] += sign * gain[k];
+          }
+          if (_resourceBlocks.contains(block)) {
+            _skippedResourceBlocks += sign;
+          }
+        }
+      }
+
+      /**
+       * How short the rest is, summed over the keys as shares of the cluster's capacity, or
+       * infinite where residualScoringCapacity has nothing to compare. Zero exactly when that is
+       * not null for the same blocks.
+       */
+      private double shortfall() {
+        if (_skipped.isEmpty() || _skippedResourceBlocks == _resourceBlocks.size()) {
+          return Double.POSITIVE_INFINITY;
+        }
+        double shortfall = 0;
+        for (int k = 0; k < _left.length; k++) {
+          shortfall += Math.max(0L, -_left[k]) / (double) Math.max(1L, _capacityOfKey[k]);
+        }
+        return shortfall;
+      }
     }
 
     /**
