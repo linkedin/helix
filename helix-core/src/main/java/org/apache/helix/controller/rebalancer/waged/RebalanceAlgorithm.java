@@ -19,6 +19,7 @@ package org.apache.helix.controller.rebalancer.waged;
  * under the License.
  */
 
+import java.util.Set;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
@@ -40,4 +41,20 @@ public interface RebalanceAlgorithm {
    * @return An instance of {@link OptimalAssignment}
    */
   OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException;
+
+  /**
+   * Name used in the calculation logs. A wrapper should return the name of the algorithm it wraps.
+   */
+  default String getName() {
+    return getClass().getSimpleName();
+  }
+
+  /**
+   * Called after a successful calculation, once skipped resources are carried forward.
+   * evaluatedResources are the resources this run recalculated. skippedResources are the ones
+   * isolation skipped, plus the ones carried forward after a collision.
+   */
+  default void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+      Set<String> evaluatedResources, Set<String> skippedResources) {
+  }
 }

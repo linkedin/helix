@@ -191,9 +191,13 @@ public class ClusterConfig extends HelixProperty {
      * the default mode does, so the new resource merges the groups there only once the baseline
      * places it. The mode is therefore never worse than the default one.
      *
-     * Isolation only acts once the default mode would already have failed, so a rebalance in which
-     * nothing fails produces exactly the same assignment as when this is disabled. That parity
-     * holds for any topology, not only for cleanly partitioned ones.
+     * Isolation only acts once the default mode would already have failed, so as long as nothing
+     * has failed the assignment is exactly the same as when this is disabled, for any topology,
+     * not only for cleanly partitioned ones. After a baseline fails or skips a group, the next
+     * baseline also recalculates the resources it could not settle, which the default mode leaves
+     * as they were, so from then on the two modes can differ even in a rebalance in which nothing
+     * fails. If such a resource fails again and takes with it a change the default mode would
+     * apply, the baseline is recalculated without it, so a retry never blocks that change.
      *
      * The cluster wide capacity check that runs before any placement is tag blind, so one wildly
      * oversubscribed clique can drag it negative while every other clique still fits on its own
