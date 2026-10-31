@@ -96,7 +96,8 @@ public class InstancesAccessor extends AbstractHelixResource {
     instance_not_stoppable_with_reasons,
     instances_unable_to_accept_online_replicas,
     instances_under_instance_operation_maintenance,
-    instance_summaries
+    instance_summaries,
+    instance_error_summaries
   }
 
   public enum InstanceHealthSelectionBase {
@@ -199,6 +200,8 @@ public class InstancesAccessor extends AbstractHelixResource {
       return getInstancesUnderInstanceOperationMaintenance(clusterId, accessor);
     case getInstanceSummaries:
       return getInstanceSummaries(clusterId, accessor);
+    case getInstanceErrorSummaries:
+      return getInstanceErrorSummaries(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
@@ -470,6 +473,72 @@ public class InstancesAccessor extends AbstractHelixResource {
       return JSONRepresentation(root);
     } catch (Exception e) {
       _logger.error("Failed to list instance summaries for {}", clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  /**
+   * Lists the instances that have state transition errors, with the number of distinct errored
+   * partitions per resource, so a client does not have to read {@code instances/{i}/errors} for
+   * every instance.
+   *
+   * <p>Response (HTTP 200), keyed by instance name in sorted order, instances without errors
+   * omitted:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instance_error_summaries": {
+   *     "h1_12918": { "errorCount": 3, "resources": { "db0": 2, "db1": 1 } } } }
+   * }</pre>
+   *
+   * <p>A partition that has an error under more than one session is counted once. The cost is
+   * one ZooKeeper listing per instance, session and resource under {@code /INSTANCES/*}{@code /ERRORS},
+   * which is why this is a separate command and not part of {@code getInstanceSummaries}.
+   */
+  private Response getInstanceErrorSummaries(String clusterId, HelixDataAccessor accessor) {
+    try {
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
+        return notFound();
+      }
+      PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+      List<String> instanceNames = accessor.getChildNames(keyBuilder.instanceConfigs());
+
+      ObjectNode root = JsonNodeFactory.instance.objectNode();
+      root.put(Properties.id.name(), clusterId);
+      ObjectNode summariesNode =
+          root.putObject(InstancesProperties.instance_error_summaries.name());
+      for (String instanceName : new TreeSet<>(
+          instanceNames == null ? Collections.<String> emptyList() : instanceNames)) {
+        Map<String, Set<String>> partitionsByResource = new TreeMap<>();
+        List<String> sessionIds = accessor.getChildNames(keyBuilder.errors(instanceName));
+        for (String sessionId : sessionIds == null ? Collections.<String> emptyList()
+            : sessionIds) {
+          List<String> resources =
+              accessor.getChildNames(keyBuilder.errors(instanceName, sessionId));
+          for (String resourceName : resources == null ? Collections.<String> emptyList()
+              : resources) {
+            List<String> partitions =
+                accessor.getChildNames(keyBuilder.errors(instanceName, sessionId, resourceName));
+            if (partitions != null && !partitions.isEmpty()) {
+              partitionsByResource.computeIfAbsent(resourceName, r -> new HashSet<>())
+                  .addAll(partitions);
+            }
+          }
+        }
+        if (partitionsByResource.isEmpty()) {
+          continue;
+        }
+        ObjectNode instanceNode = summariesNode.putObject(instanceName);
+        ObjectNode resourcesNode = instanceNode.putObject("resources");
+        int total = 0;
+        for (Map.Entry<String, Set<String>> entry : partitionsByResource.entrySet()) {
+          resourcesNode.put(entry.getKey(), entry.getValue().size());
+          total += entry.getValue().size();
+        }
+        instanceNode.put("errorCount", total);
+      }
+      return JSONRepresentation(root);
+    } catch (Exception e) {
+      _logger.error("Failed to list instance error summaries for {}", clusterId, e);
       return serverError(e);
     }
   }

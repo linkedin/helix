@@ -41,6 +41,7 @@ import org.apache.helix.AccessOption;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
@@ -1147,6 +1148,52 @@ public class TestInstancesAccessor extends AbstractTestClass {
         .format("TestInstanceSummariesClusterDoesNotExist").get(this);
 
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testGetInstanceErrorSummaries() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+
+    String clusterName = "TestInstanceErrorSummariesCluster";
+    _gSetupTool.addCluster(clusterName, true);
+    _clusters.add(clusterName);
+    for (String instance : Arrays.asList("esInstance0", "esInstance1", "esInstance2")) {
+      _gSetupTool.addInstanceToCluster(clusterName, instance);
+    }
+
+    // esInstance1 has the same partition errored under two sessions, which counts once.
+    ZKHelixDataAccessor dataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
+    addError(dataAccessor, "esInstance1", "session1", "db0", "db0_0");
+    addError(dataAccessor, "esInstance1", "session2", "db0", "db0_0");
+    addError(dataAccessor, "esInstance1", "session2", "db0", "db0_1");
+    addError(dataAccessor, "esInstance1", "session2", "db1", "db1_0");
+    addError(dataAccessor, "esInstance0", "session1", "db1", "db1_3");
+
+    JsonNode summaries = OBJECT_MAPPER.readTree(
+        new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceErrorSummaries")
+            .isBodyReturnExpected(true).format(clusterName).get(this))
+        .get(InstancesAccessor.InstancesProperties.instance_error_summaries.name());
+
+    List<String> listed = new ArrayList<>();
+    summaries.fieldNames().forEachRemaining(listed::add);
+    Assert.assertEquals(listed, Arrays.asList("esInstance0", "esInstance1"));
+    Assert.assertEquals(summaries.get("esInstance0").get("errorCount").asInt(), 1);
+    Assert.assertEquals(summaries.get("esInstance1").get("errorCount").asInt(), 3);
+    Assert.assertEquals(summaries.get("esInstance1").get("resources").get("db0").asInt(), 2);
+    Assert.assertEquals(summaries.get("esInstance1").get("resources").get("db1").asInt(), 1);
+
+    new JerseyUriRequestBuilder("clusters/{}/instances?command=getInstanceErrorSummaries")
+        .expectedReturnStatusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .format("TestInstanceErrorSummariesClusterDoesNotExist").get(this);
+
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private static void addError(ZKHelixDataAccessor dataAccessor, String instance, String session,
+      String resource, String partition) {
+    dataAccessor.setProperty(
+        dataAccessor.keyBuilder().stateTransitionError(instance, session, resource, partition),
+        new org.apache.helix.model.Error(new ZNRecord(partition)));
   }
 
   private JsonNode fetchInstancesUnderInstanceOperationMaintenance(String clusterName)
