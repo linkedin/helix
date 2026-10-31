@@ -121,6 +121,92 @@ public class TestWagedInstanceTagIsolationParkedDemand
     assertCapacityDeficit(twoParkedOverflows(false));
   }
 
+  /**
+   * DISK is 10 short and CPU is not. A is over by 20 DISK and 100 CPU with its parked replica, B
+   * by 40 DISK. Counting parked only on DISK skips B, which leaves room on both keys. Counting it
+   * on CPU too would skip A first, for CPU the cluster has room for.
+   */
+  @Test
+  public void testParkedReplicasCountOnlyOnTheShortKeyFirst() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 200, 60, 150}, new int[] {100, 100, 70, 0},
+                new int[] {100, 250, 25, 50})).getSkippedResources(), set("RB"));
+  }
+
+  /**
+   * DISK is 10 short and CPU is not. A is over by 30 DISK and B by 20 with their parked replicas.
+   * Skipping A, the larger, leaves CPU short, so B is skipped too. The rest then fits without A,
+   * so only B is skipped.
+   */
+  @Test
+  public void testCliqueTheRestFitsWithoutIsNotSkipped() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 200, 65, 50}, new int[] {100, 100, 60, 80},
+                new int[] {100, 100, 30, 45})).getSkippedResources(), set("RB"));
+  }
+
+  /**
+   * As above, but C is 40 CPU over with its parked replica, so skipping A, then A and B, never
+   * fits, and counting parked on every key leaves nothing to rebalance. Skipping B alone fits.
+   */
+  @Test
+  public void testSmallerOverflowIsSkippedWhenTheLargestNeverFits() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 200, 65, 50}, new int[] {100, 100, 60, 45},
+                new int[] {100, 100, 30, 70})).getSkippedResources(), set("RB"));
+  }
+
+  /**
+   * DISK is 10 short and CPU has 10 spare. A, B and C are over by 10, 5 and 5 DISK with their
+   * parked replicas. Skipping A frees DISK but leaves CPU 30 short, and no set with A fits. B and
+   * C each free 5 DISK and 5 CPU, so they are skipped instead.
+   */
+  @Test
+  public void testCliquesThatCostNoRoomAreSkippedFirst() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 2000, 55, 980}, new int[] {95, 1001, 50, 503},
+                new int[] {95, 1001, 50, 503}, new int[] {100, 100, 45, 60}))
+        .getSkippedResources(), set("RB", "RC"));
+  }
+
+  /**
+   * DISK is 15 short and CPU 20. C is over on CPU with its live replica alone, and skipping it
+   * leaves 20 CPU spare. A, first by its 50 CPU overflow, frees 5 DISK and 50 CPU at no cost, and
+   * B frees 20 DISK for 10 CPU. Skipping A leaves DISK 10 short with only B left to skip, which
+   * would leave nothing to rebalance. Skipping B alone fits, with z1's room.
+   */
+  @Test
+  public void testCliqueTheRestFitsWithIsSkippedBeforeOneThatCostsNoRoom() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliqueCluster(true, new int[] {95, 50, 50, 50}, new int[] {80, 110, 50, 50},
+                new int[] {20, 20, 10, 30}).liveNode("z1", diskAndCpu(10, 60), "Z").build())
+        .getSkippedResources(), set("RB", "RC"));
+  }
+
+  /**
+   * DISK and CPU are both 10 short. A frees 60 DISK for 60 CPU, B the reverse, and C and D free 5
+   * of each. Skipping all four leaves room but nothing to rebalance, and the rest is short without
+   * any one of them. Skipping C and D fits.
+   */
+  @Test
+  public void testSkippingEveryCliqueIsNotAFit() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 100, 80, 20}, new int[] {100, 100, 20, 80},
+                new int[] {95, 95, 50, 50}, new int[] {95, 95, 50, 50})).getSkippedResources(),
+        set("RC", "RD"));
+  }
+
+  /**
+   * DISK is 10 short and CPU is not. Only A is over on DISK, and skipping it leaves CPU short, so
+   * the parked replicas count on every key: B is over by 40 CPU and both are skipped.
+   */
+  @Test
+  public void testParkedReplicasCountOnEveryKeyLast() throws Exception {
+    Assert.assertEquals(createAlgorithm().calculate(
+            parkedCliques(true, new int[] {100, 200, 65, 75}, new int[] {100, 100, 45, 70},
+                new int[] {100, 100, 45, 45})).getSkippedResources(), set("RA", "RB"));
+  }
+
   /** RH_0 is topped up to min active on h3, and every RH partition stays on H's live nodes. */
   private static void assertToppedUpWithinH(ResourceAssignment healthy) {
     // h1 already holds RH_0 and h2 is full, so the top up can only land on h3.
@@ -261,10 +347,7 @@ public class TestWagedInstanceTagIsolationParkedDemand
    * and b3. Clique D: d1 holds four partitions of RD at DISK 25.
    */
   private ClusterModel twoKeys(boolean enabled) throws Exception {
-    ClusterConfig config = createClusterConfig(enabled);
-    config.setInstanceCapacityKeys(Arrays.asList(CAPACITY_KEY, CPU));
-    config.setDefaultPartitionWeightMap(diskAndCpu(0, 0));
-    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(config)
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(twoKeyConfig(enabled))
         .liveNode("a1", diskAndCpu(100, 100), "A")
         .liveNode("b1", diskAndCpu(50, 100), "B").liveNode("b2", diskAndCpu(50, 100), "B")
         .liveNode("d1", diskAndCpu(100, 100), "D")
@@ -281,6 +364,35 @@ public class TestWagedInstanceTagIsolationParkedDemand
       }
     }
     return cluster.build();
+  }
+
+  /**
+   * One clique per row of {node DISK, node CPU, replica DISK, replica CPU}, tagged A, B, C and on
+   * in order. Each has one live node and one partition of two replicas, min active 1, with the
+   * second replica parked on a node offline inside the window.
+   */
+  private ClusterModel parkedCliques(boolean enabled, int[]... rows) throws Exception {
+    return parkedCliqueCluster(enabled, rows).build();
+  }
+
+  private DelayedOverwriteCluster parkedCliqueCluster(boolean enabled, int[]... rows)
+      throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(twoKeyConfig(enabled));
+    for (int i = 0; i < rows.length; i++) {
+      String tag = String.valueOf((char) ('A' + i));
+      String node = tag.toLowerCase();
+      cluster.liveNode(node + "1", diskAndCpu(rows[i][0], rows[i][1]), tag)
+          .resource(twoKeyResource("R" + tag, tag, rows[i][2], rows[i][3]), 1, 2, 1)
+          .current("R" + tag, 0, node + "1", node + "2");
+    }
+    return cluster;
+  }
+
+  private ClusterConfig twoKeyConfig(boolean enabled) {
+    ClusterConfig config = createClusterConfig(enabled);
+    config.setInstanceCapacityKeys(Arrays.asList(CAPACITY_KEY, CPU));
+    config.setDefaultPartitionWeightMap(diskAndCpu(0, 0));
+    return config;
   }
 
   private ResourceConfig twoKeyResource(String name, String tag, int disk, int cpu)
