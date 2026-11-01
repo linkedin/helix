@@ -34,5 +34,6 @@ public enum AsyncWorkerType {
   MaintenanceRecoveryWorker,
   TaskJobPurgeWorker,
   CustomizedStateViewComputeWorker,
-  ParticipantDeregistrationWorker
+  ParticipantDeregistrationWorker,
+  ConvergenceStatusPersistWorker
 }
