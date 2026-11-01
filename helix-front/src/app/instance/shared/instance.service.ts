@@ -2,7 +2,12 @@ import { map } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
 import { HttpParams } from '@angular/common/http';
 
-import { Instance, InstanceOperationState } from './instance.model';
+import {
+  Instance,
+  InstanceErrorSummary,
+  InstanceOperationState,
+  InstanceSummary,
+} from './instance.model';
 import { HelixService } from '../../core/helix.service';
 import { Node } from '../../shared/models/node.model';
 
@@ -45,6 +50,54 @@ export class InstanceService extends HelixService {
             );
           });
       })
+    );
+  }
+
+  public getSummaries(clusterName: string) {
+    return this.request(
+      `/clusters/${clusterName}/instances?command=getInstanceSummaries`,
+    ).pipe(
+      map((data) =>
+        Object.entries<any>(data.instance_summaries || {}).map(
+          ([name, summary]) => {
+            const operation: InstanceOperationState =
+              summary.instanceOperation || 'ENABLE';
+            return new Instance(
+              name,
+              clusterName,
+              operation === 'ENABLE',
+              !!summary.live,
+              undefined,
+              undefined,
+              operation,
+              <InstanceSummary>{
+                host: summary.host,
+                port: summary.port,
+                domain: summary.domain || '',
+                tags: summary.tags || [],
+                capacity: summary.capacity || {},
+                instanceOperations: summary.instanceOperations || [],
+                maintenanceMarkerExpiresAtMillis:
+                  summary.maintenanceMarkerExpiresAtMillis,
+              },
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  public getErrorSummaries(clusterName: string) {
+    return this.request(
+      `/clusters/${clusterName}/instances?command=getInstanceErrorSummaries`,
+    ).pipe(
+      map(
+        (data) =>
+          (data.instance_error_summaries || {}) as Record<
+            string,
+            InstanceErrorSummary
+          >,
+      ),
     );
   }
 

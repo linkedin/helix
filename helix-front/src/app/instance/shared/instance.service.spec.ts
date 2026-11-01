@@ -399,4 +399,42 @@ describe('InstanceService', () => {
       req.flush(null);
     });
   });
+
+  it('maps the bulk summaries and error summaries', () => {
+    let rows: Instance[] = [];
+    let errors: any;
+    service.getSummaries('TestCluster').subscribe((r) => (rows = r));
+    httpMock
+      .expectOne((r) => r.url.endsWith('/instances?command=getInstanceSummaries'))
+      .flush({
+        instance_summaries: {
+          h1_1: {
+            live: true,
+            host: 'h1',
+            port: '1',
+            instanceOperation: 'EVACUATE',
+            instanceOperations: [
+              { operation: 'EVACUATE', source: 'USER', reason: '', timestamp: 5 },
+            ],
+            domain: 'zone=z1',
+            tags: ['t'],
+            capacity: { CU: 10 },
+            maintenanceMarkerExpiresAtMillis: 9,
+          },
+        },
+      });
+    service.getErrorSummaries('TestCluster').subscribe((e) => (errors = e));
+    httpMock
+      .expectOne((r) =>
+        r.url.endsWith('/instances?command=getInstanceErrorSummaries'),
+      )
+      .flush({ instance_error_summaries: { h1_1: { errorCount: 1, resources: {} } } });
+
+    expect(rows.length).toBe(1);
+    expect(rows[0].online).toBe(true);
+    expect(rows[0].operationState).toBe('EVACUATE');
+    expect(rows[0].summary.domain).toBe('zone=z1');
+    expect(rows[0].summary.maintenanceMarkerExpiresAtMillis).toBe(9);
+    expect(errors.h1_1.errorCount).toBe(1);
+  });
 });
