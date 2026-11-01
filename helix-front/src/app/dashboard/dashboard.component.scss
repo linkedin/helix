@@ -11,8 +11,8 @@
 .info {
   font-size: 12px;
   height: 36px;
-  background-color: #fff;
-  border-bottom: 1px solid #ccc;
+  background-color: var(--hi-surface, #fff);
+  border-bottom: 1px solid var(--hi-divider, #ccc);
   text-align: center;
   vertical-align: middle;
   line-height: 24px;
@@ -39,5 +39,5 @@
 }
 
 .hint {
-  color: gray;
+  color: var(--hi-text-secondary, gray);
 }

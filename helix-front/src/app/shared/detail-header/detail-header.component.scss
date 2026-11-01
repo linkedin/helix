@@ -11,7 +11,7 @@ h4 {
 }
 
 .secondary {
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.54));
 }
 
 .tag {

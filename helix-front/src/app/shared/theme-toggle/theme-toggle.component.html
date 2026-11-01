@@ -1,0 +1,22 @@
+<button
+  mat-icon-button
+  [matMenuTriggerFor]="themeMenu"
+  [attr.aria-label]="'Color theme: ' + current.label"
+  [matTooltip]="'Theme: ' + current.label"
+>
+  <mat-icon>{{ current.icon }}</mat-icon>
+</button>
+<mat-menu #themeMenu="matMenu">
+  <button
+    *ngFor="let option of options"
+    mat-menu-item
+    role="menuitemradio"
+    [attr.aria-checked]="option.mode === theme.mode"
+    (click)="theme.setMode(option.mode)"
+  >
+    <mat-icon>{{
+      option.mode === theme.mode ? 'check' : option.icon
+    }}</mat-icon>
+    <span>{{ option.label }}</span>
+  </button>
+</mat-menu>

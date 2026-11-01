@@ -25,6 +25,7 @@ import { DataTableComponent } from './data-table/data-table.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
 import { DisabledLabelComponent } from './disabled-label/disabled-label.component';
 import { ListStatusComponent } from './list-status/list-status.component';
+import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
 
 @NgModule({
   imports: [
@@ -51,6 +52,7 @@ import { ListStatusComponent } from './list-status/list-status.component';
     ConfirmDialogComponent,
     DisabledLabelComponent,
     ListStatusComponent,
+    ThemeToggleComponent,
   ],
   exports: [
     RouterModule,
@@ -66,6 +68,7 @@ import { ListStatusComponent } from './list-status/list-status.component';
     NodeViewerComponent,
     DisabledLabelComponent,
     ListStatusComponent,
+    ThemeToggleComponent,
   ],
   providers: [HelperService],
 })

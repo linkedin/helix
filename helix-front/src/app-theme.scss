@@ -1,0 +1,153 @@
+@use '@angular/material' as mat;
+@import 'theme';
+
+@include mat.core();
+@include mat.all-component-themes($hi-theme);
+
+// Additional adjusts by vivo
+.mat-toolbar {
+  background-color: #fff;
+
+  .mat-icon.secondary {
+    vertical-align: bottom;
+  }
+
+  .mat-toolbar-row.information {
+    height: 24px;
+    margin-bottom: 24px;
+  }
+}
+
+// Dark mode: ThemeService (and the inline script in index.html) puts this
+// class on <body>, so overlays such as dialogs and menus inherit it too.
+// App styles read the tokens below as var(--hi-token, <light value>), which
+// keeps light mode unchanged; only the dark values are defined here.
+.dark-theme {
+  @include mat.all-component-colors($hi-dark-theme);
+
+  --hi-background: #303030;
+  --hi-surface: #424242;
+  --hi-surface-muted: #383838;
+  --hi-text: rgba(255, 255, 255, 0.87);
+  --hi-text-secondary: rgba(255, 255, 255, 0.7);
+  --hi-divider: rgba(255, 255, 255, 0.16);
+  --hi-hover: rgba(255, 255, 255, 0.06);
+  --hi-selected: rgba(77, 160, 203, 0.24);
+  --hi-primary-text: #80bbda;
+  --hi-error: #ef9a9a;
+  --hi-warning: #ffcc80;
+  --hi-success: #a5d6a7;
+  --hi-info: #90caf9;
+  --hi-error-bg: rgba(239, 154, 154, 0.16);
+  --hi-warning-bg: rgba(255, 204, 128, 0.16);
+  --hi-success-bg: rgba(165, 214, 167, 0.16);
+  --hi-info-bg: rgba(144, 202, 249, 0.16);
+
+  color-scheme: dark;
+  background: var(--hi-background);
+  color: var(--hi-text);
+
+  a:not([class]) {
+    color: var(--hi-primary-text);
+  }
+
+  .mat-toolbar {
+    background-color: var(--hi-surface-muted);
+  }
+
+  .mat-toolbar.mat-primary {
+    background-color: map-get($hi-nuage, 800);
+    color: #fff;
+  }
+
+  .ngx-datatable.material {
+    background: var(--hi-surface);
+
+    &.striped .datatable-row-odd,
+    .datatable-body .datatable-row-detail,
+    .datatable-body .datatable-group-header,
+    .datatable-summary-row .datatable-body-row {
+      background: var(--hi-surface-muted);
+    }
+
+    &:not(.cell-selection) .datatable-body-row:hover,
+    &:not(.cell-selection) .datatable-body-row:hover .datatable-row-group,
+    &.cell-selection .datatable-body-cell:hover {
+      background-color: var(--hi-hover);
+    }
+
+    &:not(.cell-selection) .datatable-body-row:focus,
+    &:not(.cell-selection) .datatable-body-row:focus .datatable-row-group,
+    &.cell-selection .datatable-body-cell:focus {
+      background-color: var(--hi-selected);
+    }
+
+    .datatable-header,
+    .datatable-footer,
+    .datatable-header .resize-handle {
+      border-color: var(--hi-divider);
+    }
+
+    .datatable-header .datatable-header-cell,
+    .datatable-header .datatable-row-left,
+    .datatable-header .datatable-row-right,
+    .datatable-body .datatable-row-left,
+    .datatable-body .datatable-row-right {
+      background-color: var(--hi-surface);
+      color: var(--hi-text-secondary);
+    }
+
+    .datatable-body .datatable-body-row .datatable-body-cell,
+    .datatable-body .datatable-body-row .datatable-body-group-cell {
+      color: var(--hi-text);
+    }
+
+    .datatable-footer,
+    .datatable-footer .datatable-pager a {
+      color: var(--hi-text-secondary);
+    }
+
+    .datatable-footer .datatable-pager a:hover {
+      color: var(--hi-text);
+    }
+
+    .datatable-footer .datatable-pager li.disabled a {
+      color: rgba(255, 255, 255, 0.3) !important;
+    }
+  }
+
+  // ngx-json-viewer ships emulated styles that outrank any global selector
+  .ngx-json-viewer {
+    .segment-main .segment-key {
+      color: #ce93d8 !important;
+    }
+
+    .segment-main .segment-value {
+      color: var(--hi-text) !important;
+    }
+
+    .segment-type-string > .segment-main > .segment-value {
+      color: #ff8a80 !important;
+    }
+
+    .segment-type-number > .segment-main > .segment-value {
+      color: #80cbc4 !important;
+    }
+
+    .segment-type-boolean > .segment-main > .segment-value {
+      color: #f48fb1 !important;
+    }
+
+    .segment-type-date > .segment-main > .segment-value {
+      color: #81d4fa !important;
+    }
+
+    .segment-type-null > .segment-main > .segment-value {
+      color: #fff !important;
+    }
+  }
+
+  pre {
+    color: var(--hi-text);
+  }
+}

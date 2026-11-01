@@ -6,7 +6,7 @@
 }
 
 .primary {
-  color: mat.get-color-from-palette($hi-primary);
+  color: var(--hi-primary-text, mat.get-color-from-palette($hi-primary));
 }
 
 .search-form-field {

@@ -1,7 +1,7 @@
 @use '@angular/material' as mat;
 
-// Include the common styles for Angular Material
-@include mat.core();
+// Palettes, themes and mixins only. This file emits no CSS so components can
+// import it; the global theme styles live in app-theme.scss.
 
 @mixin md-icon-size($size: 24px) {
   font-size: $size;
@@ -40,19 +40,24 @@ $hi-warn: mat.define-palette(mat.$red-palette);
 // Create the theme object (a Sass map containing all of the palettes).
 $hi-theme: mat.define-light-theme($hi-primary, $hi-accent, $hi-warn);
 
-// Include theme styles for core and each component used in the app
-@include mat.all-component-themes($hi-theme);
-
-// Additional adjusts by vivo
-.mat-toolbar {
-  background-color: #fff;
-
-  .mat-icon.secondary {
-    vertical-align: bottom;
-  }
-
-  .mat-toolbar-row.information {
-    height: 24px;
-    margin-bottom: 24px;
-  }
-}
+// Dark mode uses lighter hues so text and icons keep contrast on dark surfaces
+$hi-nuage-dark: map-merge(
+  $hi-nuage,
+  (
+    contrast: map-merge(
+        map-get($hi-nuage, contrast),
+        (
+          300: rgba(black, 0.87),
+        )
+      ),
+  )
+);
+$hi-dark-theme: mat.define-dark-theme(
+  (
+    color: (
+      primary: mat.define-palette($hi-nuage-dark, 300, 100, 500),
+      accent: mat.define-palette(mat.$pink-palette, A100, 100, A200),
+      warn: mat.define-palette(mat.$red-palette, 300, 100, 500),
+    ),
+  )
+);

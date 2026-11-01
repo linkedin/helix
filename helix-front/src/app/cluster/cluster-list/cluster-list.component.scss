@@ -26,7 +26,7 @@
 
 .cluster-list-item-selected h4 {
   font-weight: 500;
-  color: mat.get-color-from-palette($hi-primary);
+  color: var(--hi-primary-text, mat.get-color-from-palette($hi-primary));
 }
 
 .error-message {

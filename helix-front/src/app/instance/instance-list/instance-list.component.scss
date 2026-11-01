@@ -9,8 +9,11 @@
 }
 
 .status-offline {
-  color: mat.get-color-from-palette(
-    mat.define-palette(mat.$grey-palette, 900, 900, 900)
+  color: var(
+    --hi-text-secondary,
+    mat.get-color-from-palette(
+      mat.define-palette(mat.$grey-palette, 900, 900, 900)
+    )
   );
 }
 
@@ -56,13 +59,13 @@
 }
 
 .filter-chip {
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: #fff;
+  border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.18));
+  background: var(--hi-surface, #fff);
   border-radius: 14px;
   padding: 3px 12px;
   font-size: 12px;
   cursor: pointer;
-  color: rgba(0, 0, 0, 0.7);
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
   &.active {
     background: #1565c0;
@@ -73,7 +76,7 @@
 
 .filter-note {
   font-size: 11px;
-  color: rgba(0, 0, 0, 0.5);
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.5));
   margin-left: 4px;
 }
 

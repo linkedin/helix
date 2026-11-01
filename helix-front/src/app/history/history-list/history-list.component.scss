@@ -7,11 +7,11 @@ hi-history-list {
   // the material table theme sets a cell color, so match its specificity
   .ngx-datatable.material .datatable-body .datatable-body-row {
     .datatable-body-cell.current {
-      color: mat.get-color-from-palette($hi-primary);
+      color: var(--hi-primary-text, mat.get-color-from-palette($hi-primary));
     }
 
     .datatable-body-cell.offline {
-      color: #c62828;
+      color: var(--hi-error, #c62828);
     }
   }
 

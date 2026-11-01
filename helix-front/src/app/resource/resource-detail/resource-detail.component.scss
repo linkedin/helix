@@ -4,7 +4,7 @@
 .offline {
   font-size: 14px;
   padding-left: 24px;
-  color: mat.get-color-from-palette($hi-warn);
+  color: var(--hi-error, mat.get-color-from-palette($hi-warn));
 }
 
 .information {
