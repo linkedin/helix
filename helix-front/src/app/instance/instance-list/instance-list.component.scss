@@ -82,6 +82,24 @@
   font-size: 12px;
 }
 
+.op-entry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 2px 0;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.op-detail {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.op-entry.active .op-detail {
+  color: rgba(0, 0, 0, 0.87);
+}
+
 .op-chip {
   display: inline-block;
   margin-right: 6px;

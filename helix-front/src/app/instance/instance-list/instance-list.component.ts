@@ -8,10 +8,15 @@ import { Settings } from '../../core/settings';
 import {
   Instance,
   InstanceErrorSummary,
-  InstanceOperationEntry,
   InstanceOperationState,
 } from '../shared/instance.model';
 import { InstanceService } from '../shared/instance.service';
+import {
+  OperationRow,
+  formatUtc,
+  operationDetail,
+  operationRows,
+} from '../shared/instance-operations';
 import { HelperService } from '../../shared/helper.service';
 
 type InstanceFilter =
@@ -126,20 +131,21 @@ export class InstanceListComponent implements OnInit, OnDestroy {
       .join(', ');
   }
 
-  operations(instance: Instance): InstanceOperationEntry[] {
-    return instance.summary?.instanceOperations || [];
+  operations(instance: Instance): OperationRow[] {
+    return operationRows(instance.summary, instance.operationState);
   }
 
-  operationTitle(entry: InstanceOperationEntry): string {
-    const since = new Date(entry.timestamp).toISOString().slice(0, 19);
-    return `${entry.operation} from ${entry.source || 'unknown source'} since ${since.replace('T', ' ')} UTC${entry.reason ? ': ' + entry.reason : ''}`;
+  operationDetail(row: OperationRow): string {
+    return operationDetail(row);
+  }
+
+  operationTitle(row: OperationRow): string {
+    return `${row.entry.operation} from ${row.entry.source || 'unknown source'}${row.active ? ' (active)' : ''}: ${operationDetail(row)}`;
   }
 
   markerUntil(instance: Instance): string {
     const until = instance.summary?.maintenanceMarkerExpiresAtMillis;
-    return until
-      ? new Date(until).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
-      : '';
+    return until ? formatUtc(until) : '';
   }
 
   capacityText(instance: Instance): string {

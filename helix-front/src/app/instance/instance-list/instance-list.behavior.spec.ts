@@ -152,7 +152,7 @@ describe('InstanceListComponent summaries', () => {
         tags: [],
         capacity: { CU: 1000, DISK: 2000 },
         instanceOperations: [
-          { operation: 'DISABLE', source: 'USER', reason: '', timestamp: 0 },
+          { operation: 'DISABLE', source: 'USER', reason: '', timestamp: -1 },
           {
             operation: 'EVACUATE',
             source: 'AUTOMATION',
@@ -160,6 +160,7 @@ describe('InstanceListComponent summaries', () => {
             timestamp: 60000,
           },
         ],
+        createdAtMillis: 1800000,
         maintenanceMarkerExpiresAtMillis: 3600000,
       },
     );
@@ -167,7 +168,11 @@ describe('InstanceListComponent summaries', () => {
 
     expect(component.operations(instance).length).toBe(2);
     expect(component.operationTitle(component.operations(instance)[1])).toBe(
-      'EVACUATE from AUTOMATION since 1970-01-01 00:01:00 UTC: drain',
+      'EVACUATE from AUTOMATION (active): 1970-01-01 00:01 UTC · drain',
+    );
+    // -1 is dated by the config creation time
+    expect(component.operationDetail(component.operations(instance)[0])).toBe(
+      '1970-01-01 00:30 UTC (instance config created)',
     );
     expect(component.markerUntil(instance)).toBe('1970-01-01 01:00 UTC');
     expect(component.capacityText(instance)).toBe('CU 1000, DISK 2000');

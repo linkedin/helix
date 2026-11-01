@@ -87,7 +87,7 @@
     #instancesTable
     class="material"
     [headerHeight]="headerHeight"
-    [rowHeight]="rowHeight"
+    [rowHeight]="'auto'"
     columnMode="standard"
     [scrollbarH]="true"
     [footerHeight]="rowHeight"
@@ -156,15 +156,21 @@
         {{ value ? value.join(', ') : '' }}
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Operations" [width]="300" [sortable]="false">
+    <ngx-datatable-column name="Operations" [width]="460" [sortable]="false">
       <ng-template let-row="row" ngx-datatable-cell-template>
-        <span
-          *ngFor="let entry of operations(row)"
-          class="op-chip"
-          [attr.data-operation]="entry.operation"
-          [title]="operationTitle(entry)"
-          >{{ entry.operation }} · {{ entry.source || 'unknown' }}</span
+        <div
+          *ngFor="let op of operations(row)"
+          class="op-entry"
+          [class.active]="op.active"
+          [title]="operationTitle(op)"
         >
+          <span class="op-chip" [attr.data-operation]="op.entry.operation"
+            >{{ op.entry.operation }} · {{ op.entry.source || 'unknown' }}</span
+          >
+          <span class="op-detail"
+            ><b *ngIf="op.active">active · </b>{{ operationDetail(op) }}</span
+          >
+        </div>
         <span
           *ngIf="markerUntil(row)"
           class="op-chip marker"
@@ -173,7 +179,7 @@
         >
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Capacity" [width]="150" [sortable]="false">
+    <ngx-datatable-column name="Capacity" [width]="200" [sortable]="false">
       <ng-template let-row="row" ngx-datatable-cell-template>
         <span class="mono">{{ capacityText(row) }}</span>
       </ng-template>

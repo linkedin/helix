@@ -419,6 +419,7 @@ describe('InstanceService', () => {
             domain: 'zone=z1',
             tags: ['t'],
             capacity: { CU: 10 },
+            createdAtMillis: 7,
             maintenanceMarkerExpiresAtMillis: 9,
           },
         },
@@ -434,6 +435,7 @@ describe('InstanceService', () => {
     expect(rows[0].online).toBe(true);
     expect(rows[0].operationState).toBe('EVACUATE');
     expect(rows[0].summary.domain).toBe('zone=z1');
+    expect(rows[0].summary.createdAtMillis).toBe(7);
     expect(rows[0].summary.maintenanceMarkerExpiresAtMillis).toBe(9);
     expect(errors.h1_1.errorCount).toBe(1);
   });

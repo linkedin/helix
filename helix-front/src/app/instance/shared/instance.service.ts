@@ -77,6 +77,7 @@ export class InstanceService extends HelixService {
                 tags: summary.tags || [],
                 capacity: summary.capacity || {},
                 instanceOperations: summary.instanceOperations || [],
+                createdAtMillis: summary.createdAtMillis,
                 maintenanceMarkerExpiresAtMillis:
                   summary.maintenanceMarkerExpiresAtMillis,
               },

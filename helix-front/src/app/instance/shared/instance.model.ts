@@ -20,6 +20,8 @@ export interface InstanceSummary {
   tags: string[];
   capacity: Record<string, number>;
   instanceOperations: InstanceOperationEntry[];
+  // creation time of the instance config, dates operations stored with timestamp -1
+  createdAtMillis?: number;
   maintenanceMarkerExpiresAtMillis?: number;
 }
 
