@@ -29,6 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.fasterxml.jackson.core.JsonFactory;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -162,5 +163,19 @@ public class TestZNRecordSerializer {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  /*
+   * Pins the configuration: field-name canonicalization must stay disabled on
+   * the serializer's shared Jackson factory. The round-trip tests above pass
+   * with canonicalization either on or off, so without this assertion nothing
+   * would fail if it were re-enabled and the allocation regression returned.
+   */
+  @Test
+  public void testCanonicalizationDisabledOnSharedFactory() {
+    Assert.assertFalse(ZNRecordSerializer.mapper.getFactory()
+            .isEnabled(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES),
+        "ZNRecordSerializer must keep Jackson field-name canonicalization disabled;"
+            + " re-enabling it reintroduces ByteQuadsCanonicalizer allocation churn.");
   }
 }
