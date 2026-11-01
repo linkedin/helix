@@ -95,6 +95,9 @@ public class ClusterConfig extends HelixProperty {
     DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS,
 
     TARGET_EXTERNALVIEW_ENABLED,
+
+    // Compute and publish convergence reports off the controller pipeline thread
+    CONVERGENCE_MONITORING_ENABLED,
     // Restrict load balance to downward transitions when the number of error partitions exceeds
     // this threshold. Recovery partitions are not counted.
     ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
@@ -882,6 +885,19 @@ public class ClusterConfig extends HelixProperty {
    */
   public void enableTargetExternalView(boolean enabled) {
     _record.setBooleanField(ClusterConfigProperty.TARGET_EXTERNALVIEW_ENABLED.name(), enabled);
+  }
+
+  /**
+   * Enable or disable convergence reporting. On by default.
+   * @param enabled true to enable
+   */
+  public void setConvergenceMonitoringEnabled(boolean enabled) {
+    _record.setBooleanField(ClusterConfigProperty.CONVERGENCE_MONITORING_ENABLED.name(), enabled);
+  }
+
+  public boolean isConvergenceMonitoringEnabled() {
+    return _record
+        .getBooleanField(ClusterConfigProperty.CONVERGENCE_MONITORING_ENABLED.name(), true);
   }
 
   /**
