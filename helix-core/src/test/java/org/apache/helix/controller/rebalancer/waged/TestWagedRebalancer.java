@@ -1079,18 +1079,24 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
       started.countDown();
       Uninterruptibles.awaitUninterruptibly(release);
     };
+    AtomicReference<Throwable> pipelineFailure = new AtomicReference<>();
     Thread pipeline = new Thread(() -> {
       try {
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
-      } catch (HelixRebalanceException e) {
-        throw new IllegalStateException(e);
+      } catch (Throwable t) {
+        pipelineFailure.set(t);
       }
     });
     pipeline.start();
-    Assert.assertTrue(started.await(30, TimeUnit.SECONDS));
-    rebalancer.reset();
-    release.countDown();
-    pipeline.join();
+    try {
+      Assert.assertTrue(started.await(30, TimeUnit.SECONDS));
+      rebalancer.reset();
+    } finally {
+      release.countDown();
+    }
+    pipeline.join(TimeUnit.SECONDS.toMillis(30));
+    Assert.assertFalse(pipeline.isAlive(), "The pipeline did not finish");
+    Assert.assertNull(pipelineFailure.get());
     Assert.assertEquals(
         ((AtomicReference<?>) field(globalRebalanceRunner(rebalancer),
             "_isolationResourcesToRetry")).get(), Collections.emptySet());
