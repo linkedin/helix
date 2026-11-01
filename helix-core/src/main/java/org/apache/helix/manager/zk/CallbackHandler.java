@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -140,6 +141,12 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
 
   // indicated whether this CallbackHandler is ready to serve event callback from ZkClient.
   private boolean _ready = false;
+
+  // Caches the bucket size of each watched child path so repeated child-change callbacks do not
+  // re-read and deserialize every child ZNRecord just to decide bucketization. A node's bucket
+  // size is fixed for its lifetime (changing it requires delete+recreate, which triggers eviction
+  // in subscribeForChanges), so a cached value matches a fresh HelixProperty#getBucketSize read.
+  private final Map<String, Integer> _childPathBucketSize = new ConcurrentHashMap<>();
 
   /**
    * maintain the expected notification types
@@ -582,29 +589,58 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
             case EXTERNAL_VIEW:
             case CUSTOMIZED_VIEW:
             case TARGET_EXTERNAL_VIEW: {
-              // check if bucketized
-              BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
-              List<ZNRecord> records = baseAccessor.getChildren(path, null, 0, 0, 0);
-              for (ZNRecord record : records) {
-                HelixProperty property = new HelixProperty(record);
-                String childPath = path + "/" + record.getId();
+              // A child node may be "bucketized": its ZNRecord carries a BUCKET_SIZE and the real
+              // payload is split across grandchild (bucket) znodes. A bucketized child needs both a
+              // child-change and a data-change watch plus a data-change watch on every bucket; any
+              // other child needs only a data-change watch. Deciding this requires only each
+              // child's getBucketSize(), which is fixed for the node's lifetime, so cache it per
+              // child path and deserialize a child at most once instead of re-reading and parsing
+              // every child ZNRecord on every callback (the dominant allocation source here).
+              if (children != null) {
+                // Evict cache entries for children that no longer exist.
+                Set<String> childPaths = new HashSet<>();
+                for (String child : children) {
+                  childPaths.add(path + "/" + child);
+                }
+                _childPathBucketSize.keySet().retainAll(childPaths);
 
-                int bucketSize = property.getBucketSize();
-                if (bucketSize > 0) {
-                  // subscribe both data-change and child-change on bucketized parent node
-                  // data-change gives a delete-callback which is used to remove watch
-                  List<String> bucketizedChildNames = subscribeChildChange(childPath, callbackType);
-                  subscribeDataChange(childPath, callbackType);
-
-                  // subscribe data-change on bucketized child
-                  if (bucketizedChildNames != null) {
-                    for (String bucketizedChildName : bucketizedChildNames) {
-                      String bucketizedChildPath = childPath + "/" + bucketizedChildName;
-                      subscribeDataChange(bucketizedChildPath, callbackType);
-                    }
+                // Read and cache the bucket size only for children not seen before.
+                List<String> uncachedChildPaths = new ArrayList<>();
+                for (String childPath : childPaths) {
+                  if (!_childPathBucketSize.containsKey(childPath)) {
+                    uncachedChildPaths.add(childPath);
                   }
-                } else {
-                  subscribeDataChange(childPath, callbackType);
+                }
+                if (!uncachedChildPaths.isEmpty()) {
+                  BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
+                  List<ZNRecord> records = baseAccessor.get(uncachedChildPaths, null, 0, false);
+                  for (int i = 0; i < uncachedChildPaths.size(); i++) {
+                    ZNRecord record = records.get(i);
+                    int bucketSize = record == null ? 0 : new HelixProperty(record).getBucketSize();
+                    _childPathBucketSize.put(uncachedChildPaths.get(i), bucketSize);
+                  }
+                }
+
+                for (String child : children) {
+                  String childPath = path + "/" + child;
+                  int bucketSize = _childPathBucketSize.getOrDefault(childPath, 0);
+                  if (bucketSize > 0) {
+                    // subscribe both data-change and child-change on bucketized parent node
+                    // data-change gives a delete-callback which is used to remove watch
+                    List<String> bucketizedChildNames =
+                        subscribeChildChange(childPath, callbackType);
+                    subscribeDataChange(childPath, callbackType);
+
+                    // subscribe data-change on bucketized child
+                    if (bucketizedChildNames != null) {
+                      for (String bucketizedChildName : bucketizedChildNames) {
+                        String bucketizedChildPath = childPath + "/" + bucketizedChildName;
+                        subscribeDataChange(bucketizedChildPath, callbackType);
+                      }
+                    }
+                  } else {
+                    subscribeDataChange(childPath, callbackType);
+                  }
                 }
               }
               break;
