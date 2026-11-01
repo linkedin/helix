@@ -248,6 +248,16 @@ public class CurrentStateOutput {
     return Collections.emptyMap();
   }
 
+  /** Partition to instance to cancellation message, for one resource. */
+  public Map<Partition, Map<String, Message>> getCancellationMessageMap(String resourceName) {
+    return _cancellationMessageMap.getOrDefault(resourceName, Collections.emptyMap());
+  }
+
+  /** Partition to instance to pending relay message, for one resource. */
+  public Map<Partition, Map<String, Message>> getPendingRelayMessageMap(String resourceName) {
+    return _pendingRelayMessageMap.getOrDefault(resourceName, Collections.emptyMap());
+  }
+
   /**
    * Fetch cancellation message per resource, partition, instance
    * @param resourceName
