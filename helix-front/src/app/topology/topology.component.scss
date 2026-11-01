@@ -1,0 +1,66 @@
+// Shares the capacity overview stylesheet; only the explorer parts live here.
+.search {
+  width: 260px;
+  padding: 4px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 14px;
+  font-size: 13px;
+}
+
+.capacity-table tr.group td {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-right: 4px;
+  vertical-align: middle;
+  cursor: pointer;
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+  }
+}
+
+.key {
+  margin-right: 6px;
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.instance-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 4px;
+  color: #006fa6;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 0.12s;
+
+  mat-icon {
+    width: 16px;
+    height: 16px;
+    font-size: 16px;
+    color: rgba(0, 0, 0, 0.45);
+  }
+  &:hover {
+    background: rgba(0, 111, 166, 0.1);
+    mat-icon {
+      color: #006fa6;
+    }
+  }
+  &:focus-visible {
+    outline: 2px solid #0075ac;
+    outline-offset: 1px;
+  }
+}
