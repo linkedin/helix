@@ -20,6 +20,7 @@ import { WorkflowModule } from './workflow/workflow.module';
 import { ChooserModule } from './chooser/chooser.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { CapacityModule } from './capacity/capacity.module';
+import { DiagnosticsModule } from './diagnostics/diagnostics.module';
 
 @NgModule({
   declarations: [AppComponent],
@@ -41,6 +42,7 @@ import { CapacityModule } from './capacity/capacity.module';
     ChooserModule,
     DashboardModule,
     CapacityModule,
+    DiagnosticsModule,
   ],
   providers: [
     { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptor, multi: true },

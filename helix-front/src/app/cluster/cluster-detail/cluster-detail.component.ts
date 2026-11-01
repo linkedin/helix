@@ -23,6 +23,7 @@ export class ClusterDetailComponent implements OnInit {
     { label: 'Workflows', link: 'workflows' },
     { label: 'Instances', link: 'instances' },
     { label: 'Capacity', link: 'capacity' },
+    { label: 'Diagnostics', link: 'diagnostics' },
     { label: 'Configuration', link: 'configs' },
   ];
 

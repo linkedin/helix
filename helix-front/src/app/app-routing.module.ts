@@ -19,6 +19,7 @@ import { HelixListComponent } from './chooser/helix-list/helix-list.component';
 import { DashboardComponent } from './dashboard/dashboard.component';
 import { CapacityOverviewComponent } from './capacity/capacity-overview/capacity-overview.component';
 import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
+import { ClusterDiagnosticsComponent } from './diagnostics/cluster-diagnostics/cluster-diagnostics.component';
 
 const HELIX_ROUTES: Routes = [
   {
@@ -66,6 +67,10 @@ const HELIX_ROUTES: Routes = [
           {
             path: 'capacity',
             component: CapacityOverviewComponent,
+          },
+          {
+            path: 'diagnostics',
+            component: ClusterDiagnosticsComponent,
           },
         ],
       },
