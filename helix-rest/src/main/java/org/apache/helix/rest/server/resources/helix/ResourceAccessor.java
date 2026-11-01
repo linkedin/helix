@@ -65,6 +65,8 @@ import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
 import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -240,6 +242,34 @@ public class ResourceAccessor extends AbstractHelixResource {
     }
 
     return JSONRepresentation(resourceHealthResult);
+  }
+
+  /**
+   * Returns the convergence report of one resource, with a {@code reportState} saying whether it
+   * can be trusted. 404 when the resource does not exist; a resource the controller has not
+   * reported on yet answers {@code REPORT_MISSING}.
+   */
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{resourceName}/convergence")
+  public Response getResourceConvergence(@PathParam("clusterId") String clusterId,
+      @PathParam("resourceName") String resourceName) {
+    HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    ConvergenceStatus report =
+        dataAccessor.getProperty(keyBuilder.convergenceStatus(resourceName));
+    if (report == null && !getRealmAwareZkClient()
+        .exists(keyBuilder.idealStates(resourceName).getPath())) {
+      return notFound("Resource " + resourceName + " does not exist in cluster " + clusterId);
+    }
+    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
+        dataAccessor.getProperty(keyBuilder.convergenceStatus()),
+        dataAccessor.getProperty(keyBuilder.controllerLeader()),
+        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
+        ConvergenceStatusResponseMapper.isManagementMode(
+            getHelixAdmin().getClusterManagementMode(clusterId))));
   }
 
   /**
