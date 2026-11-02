@@ -43,6 +43,8 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
+import org.apache.helix.zookeeper.api.client.HelixZkClient;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -213,16 +215,7 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     String sessionId = addLiveInstance();
     setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "OFFLINE"));
     // A message on its way can still bring a replica up.
-    Message message = new Message(Message.MessageType.STATE_TRANSITION, "message_0");
-    message.setTgtName(INSTANCE_NAME);
-    message.setTgtSessionId(sessionId);
-    message.setResourceName("db");
-    message.setPartitionName("db_0");
-    message.setStateModelDef(MASTER_SLAVE);
-    message.setFromState("OFFLINE");
-    message.setToState("SLAVE");
-    PropertyKey messageKey = _accessor.keyBuilder().message(INSTANCE_NAME, message.getId());
-    _accessor.setProperty(messageKey, message);
+    PropertyKey messageKey = addMessage(sessionId, "OFFLINE", "SLAVE");
     InstanceReplicaStatus replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
     Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
     Assert.assertFalse(replicaStatus.isAllReplicasOffline());
@@ -230,6 +223,27 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
 
     _accessor.removeProperty(messageKey);
     Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.REPLICAS_OFFLINE);
+  }
+
+  @Test
+  public void testTransitionFinishingBetweenReads() {
+    String sessionId = addLiveInstance();
+    setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "OFFLINE"));
+    PropertyKey messageKey = addMessage(sessionId, "OFFLINE", "SLAVE");
+    // The participant finishes the transition just before the messages are read: it writes the new
+    // current state, then deletes the message. Either one must keep the replica from reading as
+    // offline.
+    HelixZkClient zkClient = Mockito.spy(_gZkClient);
+    Mockito.doAnswer(invocation -> {
+      setCurrentState(sessionId, "db", MASTER_SLAVE, Map.of("db_0", "SLAVE"));
+      _accessor.removeProperty(messageKey);
+      return invocation.callRealMethod();
+    }).when(zkClient).getChildren(_accessor.keyBuilder().messages(INSTANCE_NAME).getPath());
+    InstanceReplicaStatus replicaStatus = new ZKHelixAdmin(zkClient)
+        .getInstanceReplicaStatus(CLUSTER_NAME, INSTANCE_NAME, ERROR_AS_OFFLINE);
+    Assert.assertEquals(replicaStatus.getState(), State.IN_PROGRESS);
+    Assert.assertFalse(replicaStatus.isAllReplicasOffline());
+    Assert.assertEquals(replicaStatus.getOfflineReplicaCount(), Integer.valueOf(0));
   }
 
   @Test
@@ -299,6 +313,20 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
 
   private InstanceReplicaStatus getReplicaStatus(Set<InstanceDrainExclusionType> exclusionTypes) {
     return _admin.getInstanceReplicaStatus(CLUSTER_NAME, INSTANCE_NAME, exclusionTypes);
+  }
+
+  private PropertyKey addMessage(String sessionId, String fromState, String toState) {
+    Message message = new Message(Message.MessageType.STATE_TRANSITION, "message_0");
+    message.setTgtName(INSTANCE_NAME);
+    message.setTgtSessionId(sessionId);
+    message.setResourceName("db");
+    message.setPartitionName("db_0");
+    message.setStateModelDef(MASTER_SLAVE);
+    message.setFromState(fromState);
+    message.setToState(toState);
+    PropertyKey messageKey = _accessor.keyBuilder().message(INSTANCE_NAME, message.getId());
+    _accessor.setProperty(messageKey, message);
+    return messageKey;
   }
 
   private String addLiveInstance() {

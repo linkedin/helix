@@ -569,6 +569,10 @@ public class ZKHelixAdmin implements HelixAdmin {
       return replicaStatus;
     }
 
+    // Read the messages before the current states. A participant writes the new current state
+    // before it deletes the message, so a transition that finishes between the two reads still
+    // shows up in one of them.
+    int pendingMessageCount = accessor.getChildNames(keyBuilder.messages(instanceName)).size();
     List<CurrentState> currentStates =
         accessor.getChildValues(keyBuilder.currentStates(instanceName, sessionId), true);
     Map<String, StateModelDefinition> stateModelDefs = new HashMap<>();
@@ -610,7 +614,6 @@ public class ZKHelixAdmin implements HelixAdmin {
 
     // The resources are already in name order; list the partitions of each in name order too.
     errorPartitionsByResource.values().forEach(Collections::sort);
-    int pendingMessageCount = accessor.getChildNames(keyBuilder.messages(instanceName)).size();
 
     InstanceReplicaStatus.State state;
     if (pendingMessageCount > 0 || offlineReplicaCount + errorReplicaCount < replicaCount) {
