@@ -84,6 +84,7 @@ import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.rest.server.service.VirtualTopologyGroupService;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.tools.ClusterVerifiers.StrictMatchExternalViewVerifier;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.zookeeper.data.ACL;
@@ -111,8 +112,13 @@ public class ClusterAccessor extends AbstractHelixResource {
     clusters,
     maintenanceSignal,
     maintenanceHistory,
-    clusterName
+    clusterName,
+    converged,
+    unconvergedResources
   }
+
+  private static final String MATCH_MODE_STRICT = "STRICT";
+  private static final String MATCH_MODE_LENIENT = "LENIENT";
 
   @NamespaceAuth
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
@@ -1195,6 +1201,33 @@ public class ClusterAccessor extends AbstractHelixResource {
   public Response getClusterMaintenanceMode(@PathParam("clusterId") String clusterId) {
     return JSONRepresentation(ImmutableMap
         .of(ClusterProperties.maintenance.name(), getHelixAdmin().isInMaintenanceMode(clusterId)));
+  }
+
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{clusterId}/convergence")
+  public Response getClusterConvergence(@PathParam("clusterId") String clusterId,
+      @DefaultValue(MATCH_MODE_STRICT) @QueryParam("matchMode") String matchMode) {
+    if (!MATCH_MODE_STRICT.equals(matchMode) && !MATCH_MODE_LENIENT.equals(matchMode)) {
+      return badRequest(String.format("Invalid matchMode %s, expected %s or %s", matchMode,
+          MATCH_MODE_STRICT, MATCH_MODE_LENIENT));
+    }
+    if (!doesClusterExist(clusterId)) {
+      return notFound();
+    }
+    List<String> unconvergedResources;
+    try {
+      unconvergedResources = StrictMatchExternalViewVerifier.getUnconvergedResources(
+          getDataAccssor(clusterId), MATCH_MODE_LENIENT.equals(matchMode));
+    } catch (HelixException e) {
+      LOG.error("Failed to check whether cluster {} has converged", clusterId, e);
+      return serverError(e);
+    }
+    return JSONRepresentation(ImmutableMap.<String, Object>of(
+        ClusterProperties.converged.name(), unconvergedResources.isEmpty(),
+        ClusterProperties.unconvergedResources.name(), unconvergedResources));
   }
 
   private boolean doesClusterExist(String cluster) {
