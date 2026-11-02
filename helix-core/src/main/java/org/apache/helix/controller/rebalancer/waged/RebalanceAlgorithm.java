@@ -52,7 +52,7 @@ public interface RebalanceAlgorithm {
   /**
    * Called after a successful calculation, once skipped resources are carried forward.
    * evaluatedResources are the resources this run recalculated. skippedResources are the ones
-   * isolation skipped, plus the ones carried forward after a collision.
+   * isolation skipped, plus the ones carried forward after a collision. Both sets are read-only.
    */
   default void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
       Set<String> evaluatedResources, Set<String> skippedResources) {
