@@ -96,6 +96,7 @@ public class AbstractResource {
     onDemandRebalance,
     isEvacuateFinished,
     isInstanceDrained,
+    areReplicasOffline,
     setPartitionsToError,
     forceKillInstance
   }
