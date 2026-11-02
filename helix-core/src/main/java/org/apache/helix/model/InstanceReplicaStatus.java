@@ -143,14 +143,6 @@ public class InstanceReplicaStatus {
     this.errorPartitions = errorPartitions;
   }
 
-  /**
-   * Returns whether every replica is in ERROR. True when there are no replicas, false when the
-   * counts are missing.
-   */
-  public boolean areAllReplicasInError() {
-    return replicaCount != null && replicaCount.equals(errorReplicaCount);
-  }
-
   @Override
   public String toString() {
     return "InstanceReplicaStatus{" +

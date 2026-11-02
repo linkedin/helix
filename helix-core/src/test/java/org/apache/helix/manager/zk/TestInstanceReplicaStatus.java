@@ -100,7 +100,6 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     // The task resource is left out, so the last activity is the change to the db resource.
     Assert.assertEquals(replicaStatus.getLastActivityTimestamp(),
         Long.valueOf(_accessor.getPropertyStat(currentStateKey).getModifiedTime()));
-    Assert.assertFalse(replicaStatus.areAllReplicasInError());
     Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.IN_PROGRESS);
   }
 
@@ -111,7 +110,8 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
     Assert.assertEquals(replicaStatus.getState(), State.BLOCKED_BY_ERROR);
     Assert.assertFalse(replicaStatus.isAllReplicasOffline());
-    Assert.assertFalse(replicaStatus.areAllReplicasInError());
+    Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(2));
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(1));
     replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
     Assert.assertEquals(replicaStatus.getState(), State.REPLICAS_OFFLINE);
     Assert.assertTrue(replicaStatus.isAllReplicasOffline());
@@ -125,7 +125,7 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(3));
     Assert.assertEquals(replicaStatus.getErrorPartitions(),
         Map.of("db", List.of("db_0", "db_1"), "other", List.of("db_0")));
-    Assert.assertTrue(replicaStatus.areAllReplicasInError());
+    Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(3));
     Assert.assertEquals(getReplicaStatus(ERROR_AS_OFFLINE).getState(), State.REPLICAS_OFFLINE);
   }
 
@@ -138,7 +138,7 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     setCurrentState(sessionId, "a", MASTER_SLAVE, errorStatesOfA);
     InstanceReplicaStatus replicaStatus = getReplicaStatus(Collections.emptySet());
     Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(120));
-    Assert.assertTrue(replicaStatus.areAllReplicasInError());
+    Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(120));
     // Resources and their partitions are listed in name order.
     Assert.assertEquals(new ArrayList<>(replicaStatus.getErrorPartitions().keySet()),
         List.of("a", "b"));
@@ -177,10 +177,10 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     Assert.assertEquals(replicaStatus.getState(), State.NOT_LIVE);
     Assert.assertTrue(replicaStatus.isAllReplicasOffline());
     Assert.assertEquals(replicaStatus.getReplicaCount(), Integer.valueOf(0));
+    Assert.assertEquals(replicaStatus.getErrorReplicaCount(), Integer.valueOf(0));
     Assert.assertEquals(replicaStatus.getPendingMessageCount(), Integer.valueOf(0));
     Assert.assertEquals(replicaStatus.getErrorPartitions(), Collections.emptyMap());
     Assert.assertNull(replicaStatus.getLastActivityTimestamp());
-    Assert.assertTrue(replicaStatus.areAllReplicasInError());
   }
 
   @Test
@@ -199,7 +199,6 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     InstanceReplicaStatus replicaStatus = getReplicaStatus(ERROR_AS_OFFLINE);
     Assert.assertEquals(replicaStatus.getState(), State.MULTIPLE_SESSIONS);
     Assert.assertFalse(replicaStatus.isAllReplicasOffline());
-    Assert.assertFalse(replicaStatus.areAllReplicasInError());
     Assert.assertEquals(ImmutableSet.copyOf(OBJECT_MAPPER.valueToTree(replicaStatus).fieldNames()),
         Set.of("state", "allReplicasOffline"));
 
@@ -300,10 +299,9 @@ public class TestInstanceReplicaStatus extends ZkUnitTestBase {
     Assert.assertEquals(OBJECT_MAPPER.treeToValue(json, InstanceReplicaStatus.class).toString(),
         replicaStatus.toString());
 
-    // Without the state and the counts, nothing counts as offline or in ERROR.
+    // Without the state, nothing counts as offline.
     InstanceReplicaStatus empty = OBJECT_MAPPER.readValue("{}", InstanceReplicaStatus.class);
     Assert.assertFalse(empty.isAllReplicasOffline());
-    Assert.assertFalse(empty.areAllReplicasInError());
   }
 
   private static Map<String, String> errorStates(String resource, int partitionCount) {
