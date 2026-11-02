@@ -99,12 +99,14 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // dedups by event type); climbs when the controller still holds leadership but stops draining
   // events, surfacing the "zombie leader" failure mode.
   private AtomicLong _controllerEventQueueSizeGauge = new AtomicLong(0L);
-  // Wall-clock time (ms) of the last completed DEFAULT controller pipeline run, reported by
-  // GenericHelixController. Paired with the queue-size gauge to derive
-  // ControllerPipelineStalledGauge. 0 until the first pipeline completes (treated as "no data").
-  private AtomicLong _lastPipelineEndTimestamp = new AtomicLong(0L);
-  // Stall threshold (ms): a non-empty event queue whose pipeline has not completed within this many
-  // ms is treated as a wedged ("zombie leader") controller. Sourced from ClusterConfig
+  // Wall-clock time (ms) the DEFAULT pipeline thread took the event it is processing now, or 0 while
+  // it waits for the next event. Reported by GenericHelixController and paired with the queue-size
+  // gauge to derive ControllerPipelineStalledGauge. It describes the pipeline thread, not a
+  // leadership period, so reset() leaves it alone: a run wedged across a leadership flap stays
+  // visible to the re-registered bean.
+  private final AtomicLong _pipelineRunStartTimestamp = new AtomicLong(0L);
+  // Stall threshold (ms): a DEFAULT pipeline run that lasts longer than this while events wait
+  // behind it is treated as a wedged ("zombie leader") controller. Sourced from ClusterConfig
   // (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS) and pushed by GenericHelixController each pipeline run;
   // uses the default until first reported. Deliberately larger than the worst-case single pipeline
   // run so a long-but-healthy rebalance (which can legitimately take minutes) is not mis-flagged;
@@ -1202,9 +1204,6 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       // re-registered bean after re-election (it would otherwise persist until the next
       // enqueue/dequeue refreshes it).
       _controllerEventQueueSizeGauge.set(0L);
-      // Reset the pipeline-progress timestamp for the same reason: a stale value from a prior
-      // leadership period must not make the re-registered bean report a spurious stall.
-      _lastPipelineEndTimestamp.set(0L);
     } catch (Exception e) {
       LOG.error("Fail to reset ClusterStatusMonitor, cluster: " + _clusterName, e);
     }
@@ -1765,12 +1764,12 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Report the wall-clock time (ms) of the most recent completed DEFAULT controller pipeline run.
-   * Consumed by {@link #getControllerPipelineStalledGauge()} to tell a wedged controller (queue
-   * not draining) apart from a healthy idle or busy-but-progressing one.
+   * Report when the DEFAULT controller pipeline thread took the event it is processing now, or 0
+   * while it waits for the next event. Consumed by {@link #getControllerPipelineStalledGauge()} to
+   * tell a run that is not finishing apart from a healthy idle or busy-but-progressing pipeline.
    */
-  public void setLastPipelineEndTimestamp(long timestampMs) {
-    _lastPipelineEndTimestamp.set(timestampMs);
+  public void setPipelineRunStartTimestamp(long timestampMs) {
+    _pipelineRunStartTimestamp.set(timestampMs);
   }
 
   /**
@@ -1821,21 +1820,22 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
     if (_controllerEventQueueSizeGauge.get() <= 0) {
       return 0L;
     }
-    // Definitive zombie: the controller still holds queued events (and, since this MBean is only
-    // registered while it is the leader, still holds leadership) but the DEFAULT pipeline thread is
-    // dead. This is caught immediately, with no dependence on the stall threshold, and does not
+    // Definitive zombie: the controller still holds queued events (the controller registers this
+    // MBean only while it is the leader and has not been shut down) but the DEFAULT pipeline thread
+    // is dead. This is caught immediately, with no dependence on the stall threshold, and does not
     // false-positive on a busy controller (whose thread is always alive).
     BooleanSupplier liveness = _pipelineLivenessSupplier;
     if (liveness != null && !liveness.getAsBoolean()) {
       return 1L;
     }
-    // Best-effort fallback for a thread that is alive but not making progress (e.g. hung or looping
-    // inside a run, or not picking the next event off the queue): no pipeline run has completed
-    // within the stall threshold. The threshold is set above the worst-case healthy run so a long
-    // legitimate rebalance is not mis-flagged; a truly stuck-but-alive thread is caught once the
-    // threshold elapses. Computed lazily on read so it stays correct even without any setter firing.
-    long lastEnd = _lastPipelineEndTimestamp.get();
-    if (lastEnd > 0 && (System.currentTimeMillis() - lastEnd) > _pipelineStallThresholdMs.get()) {
+    // A thread that is alive but stuck (hung or looping inside a run): the run in progress has
+    // lasted longer than the stall threshold while events wait behind it. The threshold is set
+    // above the worst-case healthy run so a long legitimate rebalance is not mis-flagged. A thread
+    // waiting for its next event (0) is never stalled, however long the controller was idle before,
+    // so the first event after a quiet period cannot read as a stall. Computed lazily on read.
+    long runStart = _pipelineRunStartTimestamp.get();
+    if (runStart > 0
+        && (System.currentTimeMillis() - runStart) > _pipelineStallThresholdMs.get()) {
       return 1L;
     }
     return 0L;

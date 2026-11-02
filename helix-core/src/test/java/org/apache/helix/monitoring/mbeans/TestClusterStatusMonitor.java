@@ -1134,55 +1134,57 @@ public class TestClusterStatusMonitor {
   @Test
   public void testControllerPipelineStalledGaugeStartsAtZero() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledStartCluster");
-    // No queue backlog and no pipeline completion reported yet: no baseline, so not stalled.
+    // No queue backlog and no pipeline run reported yet: not stalled.
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
 
   @Test
   public void testControllerPipelineStalledGaugeZeroWhenQueueEmpty() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledIdleCluster");
-    // Empty queue but a stale last-completion timestamp: an idle controller is healthy, not wedged.
+    // Empty queue, even behind an old run: nothing is waiting, so nothing to flag.
     monitor.setControllerEventQueueSizeGauge(0L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 60000L);
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis() - 600000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
 
   @Test
   public void testControllerPipelineStalledGaugeZeroWhenProgressing() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledBusyCluster");
-    // Non-empty queue but a pipeline completed just now: busy-but-progressing, not wedged.
+    // Non-empty queue behind a run that just started: busy-but-progressing, not wedged.
     monitor.setControllerEventQueueSizeGauge(5L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis());
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
 
   @Test
-  public void testControllerPipelineStalledGaugeZeroWithoutBaseline() {
-    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledNoBaselineCluster");
-    // Non-empty queue but no pipeline completion ever reported (timestamp 0): treated as no data.
-    monitor.setControllerEventQueueSizeGauge(5L);
+  public void testControllerPipelineStalledGaugeZeroWhenWaitingForNextEvent() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledNoRunCluster");
+    // The first event after a long idle period: the thread is about to take it (run start 0), so
+    // however long ago the last run ended, this must not read as a stall.
+    monitor.setPipelineStallThresholdMs(5000L);
+    monitor.setPipelineLivenessSupplier(() -> true);
+    monitor.setControllerEventQueueSizeGauge(1L);
+    monitor.setPipelineRunStartTimestamp(0L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
 
   @Test
   public void testControllerPipelineStalledGaugeOneWhenWedged() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledWedgedCluster");
-    // Non-empty queue whose pipeline last completed longer ago than the (explicitly set) stall
-    // threshold: the controller holds events but is not draining them, i.e. wedged.
+    // Events wait behind a run that has lasted longer than the (explicitly set) stall threshold.
     monitor.setPipelineStallThresholdMs(5000L);
     monitor.setControllerEventQueueSizeGauge(3L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis() - 6000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
   }
 
   @Test
   public void testControllerPipelineStalledGaugeOneWhenPipelineThreadDead() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadThreadCluster");
-    // Queue has pending work and a pipeline completed just now (well within the threshold), but the
-    // DEFAULT pipeline thread is dead: the definitive zombie is flagged immediately, no threshold
-    // wait, and independent of how recent the last completion was.
+    // Queue has pending work and the DEFAULT pipeline thread is dead: flagged immediately, no
+    // threshold wait, whatever the run-start timestamp says.
     monitor.setControllerEventQueueSizeGauge(1L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
+    monitor.setPipelineRunStartTimestamp(0L);
     monitor.setPipelineLivenessSupplier(() -> false);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
   }
@@ -1190,11 +1192,10 @@ public class TestClusterStatusMonitor {
   @Test
   public void testControllerPipelineStalledGaugeZeroDuringLongHealthyRun() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledLongRunCluster");
-    // A long-but-healthy rebalance: the thread is alive, the queue has events piled up behind the
-    // in-progress run, and the last completion is 2 minutes ago. With the default threshold (5 min)
-    // above the worst-case run, this must NOT be flagged (the reviewer's false-positive scenario).
+    // A long-but-healthy rebalance: the thread is alive, events pile up behind a run that started
+    // 2 minutes ago. With the default threshold (5 min) above the worst-case run, not flagged.
     monitor.setControllerEventQueueSizeGauge(4L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 120000L);
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis() - 120000L);
     monitor.setPipelineLivenessSupplier(() -> true);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
@@ -1204,32 +1205,35 @@ public class TestClusterStatusMonitor {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledDeadIdleCluster");
     // Even a dead thread is not "wedged" when there is no pending work to process.
     monitor.setControllerEventQueueSizeGauge(0L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 600000L);
     monitor.setPipelineLivenessSupplier(() -> false);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
   }
 
   @Test
-  public void testControllerPipelineStalledGaugeResetsToZeroOnLeadershipChange() {
+  public void testControllerPipelineStalledGaugeAcrossLeadershipChange() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledResetCluster");
     monitor.setPipelineStallThresholdMs(5000L);
     monitor.setControllerEventQueueSizeGauge(3L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L);
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis() - 6000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
-    // reset() zeroes the progress timestamp so a re-registered bean does not report a stale stall.
+    // reset() zeroes the backlog, so the re-registered bean starts at 0.
     monitor.reset();
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
+    // It keeps the run start: once the new leader's backlog is published, a run that is still
+    // wedged from before the flap is reported again instead of being forgotten.
+    monitor.setControllerEventQueueSizeGauge(1L);
+    Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
   }
 
   @Test
   public void testControllerPipelineStalledGaugeHonorsConfiguredThreshold() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestPipelineStalledThresholdCluster");
     monitor.setControllerEventQueueSizeGauge(2L);
-    monitor.setLastPipelineEndTimestamp(System.currentTimeMillis() - 6000L); // 6s since last run
-    // With a 10s threshold, a 6s gap is not yet stalled.
+    monitor.setPipelineRunStartTimestamp(System.currentTimeMillis() - 6000L); // 6s into the run
+    // With a 10s threshold, a 6s run is not yet stalled.
     monitor.setPipelineStallThresholdMs(10000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 0L);
-    // Tightening the threshold to 3s makes the same 6s gap count as stalled.
+    // Tightening the threshold to 3s makes the same 6s run count as stalled.
     monitor.setPipelineStallThresholdMs(3000L);
     Assert.assertEquals(monitor.getControllerPipelineStalledGauge(), 1L);
     // A non-positive threshold is ignored (keeps the last valid value), so it stays stalled.
