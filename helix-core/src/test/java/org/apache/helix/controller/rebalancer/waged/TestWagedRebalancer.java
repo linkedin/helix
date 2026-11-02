@@ -1163,8 +1163,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
    * skipped.
    */
   @Test
-  public void testIsolationRetryNeverFailsABaselineTheDefaultModeCompletes()
-      throws IOException, HelixRebalanceException {
+  public void testIsolationRetryNeverFailsABaselineTheDefaultModeCompletes() throws Exception {
     String grown = _resourceNames.get(1);
     String added = "PartitionAdded";
     List<Map<String, ResourceAssignment>> off =
@@ -1179,8 +1178,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
 
   /** The baseline and best possible assignment once the added partition has been rebalanced. */
   private List<Map<String, ResourceAssignment>> placePartitionAfterUnplaceableOne(
-      boolean isolation, String grown, String added)
-      throws IOException, HelixRebalanceException {
+      boolean isolation, String grown, String added) throws Exception {
     MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore();
     WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
         ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
@@ -1204,6 +1202,9 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
         .thenReturn(Collections.singleton(HelixConstants.ChangeType.IDEAL_STATE));
     rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
         new CurrentStateOutput());
+    if (isolation) {
+      assertQueuedForRetry(rebalancer, _resourceNames.get(0));
+    }
     return Arrays.asList(metadataStore.getBaseline(), metadataStore.getBestPossibleAssignment());
   }
 
@@ -1216,8 +1217,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
    * retries it too.
    */
   @Test
-  public void testIsolationRetryNeverBlocksAChangeInItsClique()
-      throws IOException, HelixRebalanceException {
+  public void testIsolationRetryNeverBlocksAChangeInItsClique() throws Exception {
     List<Map<String, ResourceAssignment>> off = changeCliqueOfUnplaceableResource(false);
     List<Map<String, ResourceAssignment>> on = changeCliqueOfUnplaceableResource(true);
 
@@ -1234,7 +1234,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
    * unplaceable one, and again once a partition has been added to it.
    */
   private List<Map<String, ResourceAssignment>> changeCliqueOfUnplaceableResource(
-      boolean isolation) throws IOException, HelixRebalanceException {
+      boolean isolation) throws Exception {
     MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore();
     WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
         ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
@@ -1292,7 +1292,18 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
         new CurrentStateOutput());
     assignments.add(new HashMap<>(metadataStore.getBaseline()));
     assignments.add(new HashMap<>(metadataStore.getBestPossibleAssignment()));
+    if (isolation) {
+      assertQueuedForRetry(rebalancer, _resourceNames.get(0));
+    }
     return assignments;
+  }
+
+  /** The default mode never retries, so comparing it with isolation cannot show a lost retry. */
+  private static void assertQueuedForRetry(WagedRebalancer rebalancer, String resource)
+      throws Exception {
+    Set<?> queue = (Set<?>) ((AtomicReference<?>) field(globalRebalanceRunner(rebalancer),
+        "_isolationResourcesToRetry")).get();
+    Assert.assertTrue(queue.contains(resource), "queue=" + queue);
   }
 
   /** Makes the first partition of the resource too heavy for any instance. */

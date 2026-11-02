@@ -122,7 +122,7 @@ public class WagedRebalanceUtil {
       }
     }
     algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
-        clusterModel.getAssignableReplicaMap().keySet(),
+        Collections.unmodifiableSet(new HashSet<>(clusterModel.getAssignableReplicaMap().keySet())),
         Collections.unmodifiableSet(skippedResources));
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getName(), System.currentTimeMillis() - startTime);
