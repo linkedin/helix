@@ -771,8 +771,8 @@ public class TestInstanceOperationMaintenanceHandler {
     assertStatuses(outcomes, Status.GUARDRAIL_REJECTED, Status.GUARDRAIL_REJECTED);
     Assert.assertEquals(outcomes.get(instance(2)).getMessage(), "Rejected by guardrail " + rule
         + ": DISABLE on the 2 instances this request changes would leave partition db_0 of "
-        + "resource db below its minActiveReplicas. Change fewer instances at once, or wait for "
-        + "its other replicas to recover.");
+        + "resource db below its minActiveReplicas. Wait for its other replicas to recover, or "
+        + "change fewer instances at once.");
 
     outcomes = apply(instances -> ValidationResult.infeasible(
         Violation.newBuilder(rule).indeterminate().message("boom").build()),

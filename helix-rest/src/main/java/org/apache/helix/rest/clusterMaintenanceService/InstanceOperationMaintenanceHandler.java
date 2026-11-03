@@ -746,8 +746,7 @@ public class InstanceOperationMaintenanceHandler {
       }
       if (maxChecks == 0 && n > 1) {
         return all(changing, new Outcome(Status.GUARDRAIL_REJECTED,
-            guardrailMessage(rejection, changes(operation, n), " Change fewer instances at once, "
-                + "or " + remedy(rejection) + ".")));
+            guardrailMessage(rejection, changes(operation, n), advice(rejection))));
       }
       hi = size;
       if (size == lo) {
@@ -976,19 +975,22 @@ public class InstanceOperationMaintenanceHandler {
   }
 
   /**
-   * Says why the guardrail rejected the instance, from its structured violations. The violations'
-   * own text is written for endpoints that accept force=true, which this one does not, so only an
-   * unrecognized violation is quoted.
-   *
-   * @param fit how many instances of the request it was checked with, all of which fit together
+   * Says why the guardrail rejected the instance, checked with the {@code fit} instances of the
+   * request that fit together.
    */
   private static String guardrailMessage(List<Violation> violations,
       InstanceConstants.InstanceOperation operation, int fit) {
     return guardrailMessage(violations, operation + " on this instance "
         + (fit == 0 ? "alone" : "together with " + fitting(fit)), fit > 0 ? RESEND_AFTER_FIT
-        : " " + capitalized(remedy(violations)) + " before resending it.");
+        : isMinActive(violations.get(0)) ? " Wait for its other replicas to recover before "
+            + "resending it." : " Add assignable capacity before resending it.");
   }
 
+  /**
+   * Says why the guardrail rejected the change, from its structured violations. The violations'
+   * own text is written for endpoints that accept force=true, which this one does not, so only an
+   * unrecognized violation is quoted.
+   */
   private static String guardrailMessage(List<Violation> violations, String subject,
       String advice) {
     Violation first = violations.get(0);
@@ -1018,14 +1020,11 @@ public class InstanceOperationMaintenanceHandler {
     return InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID.equals(violation.getRuleId());
   }
 
-  /** What makes room for a change the violations reject, other than changing fewer instances. */
-  private static String remedy(List<Violation> violations) {
-    return isMinActive(violations.get(0)) ? "wait for its other replicas to recover"
-        : "add assignable capacity";
-  }
-
-  private static String capitalized(String text) {
-    return Character.toUpperCase(text.charAt(0)) + text.substring(1);
+  /** What to do about a change the violations reject. */
+  private static String advice(List<Violation> violations) {
+    return isMinActive(violations.get(0))
+        ? " Wait for its other replicas to recover, or change fewer instances at once."
+        : " Change fewer instances at once, or add assignable capacity.";
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
