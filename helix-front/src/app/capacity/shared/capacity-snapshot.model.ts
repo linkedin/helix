@@ -31,6 +31,18 @@ export interface InstanceCapacity {
   resources: InstanceResourceUsage[];
 }
 
+// Used / max for one key, above 1 when over capacity. Null when used or max is
+// unknown or max is not positive, so unknown is never shown as zero.
+export function capacityRatio(
+  instance: InstanceCapacity,
+  key: string,
+  topStateOnly: boolean,
+): number | null {
+  const used = (topStateOnly ? instance.topStateUsed : instance.used)?.[key];
+  const max = instance.max?.[key];
+  return used == null || !max || max <= 0 ? null : used / max;
+}
+
 export interface CapacitySummary {
   totalInstances: number;
   liveInstances: number;

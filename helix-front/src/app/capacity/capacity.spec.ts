@@ -12,7 +12,10 @@ import { ActivatedRoute, Router } from '@angular/router';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { of, throwError } from 'rxjs';
 
-import { CapacityService, SNAPSHOT_TIMEOUT_MS } from './shared/capacity.service';
+import {
+  CapacityService,
+  SNAPSHOT_TIMEOUT_MS,
+} from './shared/capacity.service';
 import { CapacityOverviewComponent } from './capacity-overview/capacity-overview.component';
 import { HelperService } from '../shared/helper.service';
 import { snapshotFixture } from './testing/snapshot.fixture';
@@ -124,6 +127,26 @@ describe('CapacityOverviewComponent', () => {
     expect(component.ratioText(component.rows[0])).toBe('60%');
     component.setKey('DISK');
     expect(component.usedText(component.rows[0])).toBe('1200 / 2000');
+  });
+
+  it('shows the table by default and switches to the heat map', () => {
+    getSnapshot.mockReturnValue(of(snapshotFixture()));
+    const fixture = create();
+    const html: HTMLElement = fixture.nativeElement;
+    const chip = (label: string) =>
+      Array.from(html.querySelectorAll<HTMLElement>('.chip')).find(
+        (c) => c.textContent.trim() === label,
+      );
+
+    expect(html.querySelector('.capacity-table')).not.toBeNull();
+    expect(html.querySelector('hi-capacity-heatmap')).toBeNull();
+    chip('Heat map').click();
+    fixture.detectChanges();
+    expect(html.querySelector('.capacity-table')).toBeNull();
+    expect(html.querySelector('hi-capacity-heatmap')).not.toBeNull();
+    chip('Table').click();
+    fixture.detectChanges();
+    expect(html.querySelector('.capacity-table')).not.toBeNull();
   });
 
   it('shows paused and maintenance banners and reports a load failure', () => {

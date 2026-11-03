@@ -5,6 +5,7 @@ import { Subscription } from 'rxjs';
 import { HelperService } from '../../shared/helper.service';
 import { CapacityService } from '../shared/capacity.service';
 import {
+  capacityRatio,
   CapacitySnapshot,
   InstanceCapacity,
 } from '../shared/capacity-snapshot.model';
@@ -26,6 +27,7 @@ export class CapacityOverviewComponent implements OnInit, OnDestroy {
   rows: CapacityRow[] = [];
   key = '';
   topStateOnly = false;
+  view: 'table' | 'heatmap' = 'table';
   isLoading = true;
   error = '';
   updated: number | null = null;
@@ -101,14 +103,10 @@ export class CapacityOverviewComponent implements OnInit, OnDestroy {
   }
 
   private buildRows() {
-    const rows = (this.snapshot?.instances || []).map((instance) => {
-      const used = this.usedMap(instance)?.[this.key];
-      const max = instance.max?.[this.key];
-      return <CapacityRow>{
-        instance,
-        ratio: used == null || !max || max <= 0 ? null : used / max,
-      };
-    });
+    const rows = (this.snapshot?.instances || []).map((instance) => ({
+      instance,
+      ratio: capacityRatio(instance, this.key, this.topStateOnly),
+    }));
     // hottest first, unknown last
     this.rows = rows.sort(
       (a, b) =>

@@ -1,0 +1,108 @@
+$bands: (
+  unknown: #cfd8dc,
+  low: #c8e6c9,
+  mid: #e6ee9c,
+  high: #ffe082,
+  hot: #ffab91,
+  over: #e53935,
+);
+
+@each $band, $color in $bands {
+  .band-#{$band} {
+    background-color: $color;
+  }
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+
+.map {
+  position: relative;
+  overflow: hidden;
+}
+
+.zone {
+  position: absolute;
+  overflow: hidden;
+  background: #eceff1;
+}
+
+.zone-head,
+.tile span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.zone-head {
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 18px;
+  color: rgba(0, 0, 0, 0.7);
+}
+
+.tile {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 2px 4px;
+  border: 1px solid #eceff1;
+  font: inherit;
+  font-size: 11px;
+  line-height: 14px;
+  text-align: left;
+  color: #1b2a33;
+  cursor: pointer;
+
+  &.band-over {
+    color: #fff;
+  }
+  &.offline {
+    background-image: repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.65) 0 3px,
+      transparent 3px 7px
+    );
+  }
+  &.op {
+    box-shadow: inset 0 0 0 2px #37474f;
+  }
+  &:hover,
+  &:focus-visible {
+    outline: 2px solid #0d47a1;
+    outline-offset: -2px;
+    z-index: 1;
+  }
+  span {
+    max-width: 100%;
+  }
+  .value {
+    font-weight: 600;
+  }
+  .err-mark {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    padding: 0 3px;
+    border-radius: 6px;
+    background: #fff;
+    color: #b71c1c;
+    font-weight: 700;
+  }
+}
