@@ -265,6 +265,66 @@ public class TestWagedInstanceTagIsolationParkedDemand
         set(BROKEN));
   }
 
+  /**
+   * Clique A needs top ups the overwrite exists for, and clique H has nothing to assign but holds
+   * 240 against its 200 live once its replicas parked on h3 count, so no set of cliques leaves a
+   * rest that fits. Either A is over on what it places, or only once its own parked replicas
+   * count. Skipping A leaves H, which the run places nothing for, so H keeps what it holds instead
+   * of the whole run failing for top ups only A needs.
+   */
+  @Test
+  public void testCliqueWithNothingToAssignIsNotFailedForTopUpsOnlyASkippedCliqueNeeds()
+      throws Exception {
+    for (boolean overOnWhatItPlaces : new boolean[] {true, false}) {
+      assertCapacityDeficit(topUpsOnlyACliqueNeeds(false, overOnWhatItPlaces, false));
+      OptimalAssignment result =
+          createAlgorithm().calculate(topUpsOnlyACliqueNeeds(true, overOnWhatItPlaces, false));
+      Assert.assertEquals(result.getSkippedResources(), set("RA"), "over=" + overOnWhatItPlaces);
+      ResourceAssignment healthy = result.getOptimalResourceAssignment().get(HEALTHY);
+      for (int p = 0; p < 6; p++) {
+        Assert.assertEquals(replicasOn(healthy, p), set(p % 2 == 0 ? "h1" : "h2"), "RH_" + p);
+      }
+    }
+  }
+
+  /** As above, but no clique has a replica to assign, so there is nothing to skip. */
+  @Test
+  public void testDeficitWithNothingToAssignStillThrows() throws Exception {
+    assertCapacityDeficit(topUpsOnlyACliqueNeeds(true, false, true));
+  }
+
+  /**
+   * Clique H: live h1 and h2 of 100, h3 offline inside the window. RH has six partitions of two
+   * replicas at 20 and min active 1, one on h1 or h2 and one on h3: 120 placed and 120 parked.
+   * Clique A: live a1 of 100, the rest offline inside the window. Over on what it places, RA has
+   * three partitions of two replicas at 30 and min active 2, one on a1 and one on a2, so it asks
+   * for 90 of top ups on top of the 90 on a1. Otherwise RA has two partitions of three replicas
+   * at 20 and min active 2, one on a1, so it asks for 40 of top ups and 40 more stay parked. With
+   * nothing to assign, RA's min active is 1, so it asks for no top up.
+   */
+  private ClusterModel topUpsOnlyACliqueNeeds(boolean enabled, boolean overOnWhatItPlaces,
+      boolean nothingToAssign) throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(createClusterConfig(enabled))
+        .liveNode("h1", 100, "H").liveNode("h2", 100, "H").liveNode("a1", 100, "A")
+        .resource(taggedResource(HEALTHY, "H", 20), 6, 2, 1);
+    for (int p = 0; p < 6; p++) {
+      cluster.current(HEALTHY, p, p % 2 == 0 ? "h1" : "h2", "h3");
+    }
+    int minActive = nothingToAssign ? 1 : 2;
+    if (overOnWhatItPlaces) {
+      cluster.resource(taggedResource("RA", "A", 30), 3, 2, minActive);
+      for (int p = 0; p < 3; p++) {
+        cluster.current("RA", p, "a1", "a2");
+      }
+    } else {
+      cluster.resource(taggedResource("RA", "A", 20), 2, 3, minActive);
+      for (int p = 0; p < 2; p++) {
+        cluster.current("RA", p, "a1", "a2", "a3");
+      }
+    }
+    return cluster.build();
+  }
+
   /** RH_0 is topped up to min active on h3, and every RH partition stays on H's live nodes. */
   private static void assertToppedUpWithinH(ResourceAssignment healthy) {
     // h1 already holds RH_0 and h2 is full, so the top up can only land on h3.

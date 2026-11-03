@@ -295,9 +295,12 @@ class InstanceTagIsolation {
    * only on the short keys, then on every key. A block only the parked replicas push over is
    * skipped only while the rest still does not fit, largest overflow first or, if that never fits
    * with several keys, in the order skipUntilFit picks them. Any such block the rest then fits
-   * without is not skipped. The rest is always held to the full totals, as the default check
-   * would hold a cluster made of the rest alone, and is scored as that cluster. Only called where
-   * the default mode throws.
+   * without is not skipped. A rest with a replica to assign is always held to the full totals, as
+   * the default check would hold a cluster made of the rest alone, and is scored as that cluster.
+   * If no set fits, every block with resources is over, and every block with a replica to assign
+   * in this scope is skipped as well, as long as a block with resources is left: the run then
+   * places nothing for the rest, which keeps what it holds, as it would if the run failed. Only
+   * called where the default mode throws.
    *
    * A block over on any key is skipped, even when only a node already above its capacity, such as
    * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
@@ -342,7 +345,15 @@ class InstanceTagIsolation {
       }
     }
     if (residualScoringCap == null) {
-      return null;
+      // No set leaves a rest that fits, so every block with resources is over. Skipping the ones
+      // with a replica to assign leaves a rest this run places nothing for: it keeps what it holds,
+      // as it would if the run failed, and is not failed for what only the skipped blocks need.
+      atFault = totals.withBlocksToAssign(atFault);
+      if (atFault == null || Collections.disjoint(atFault, totals._resourceBlocks)
+          || atFault.containsAll(totals._resourceBlocks)) {
+        return null;
+      }
+      residualScoringCap = totals.idleScoringCapacity(divGuard);
     }
     totals.scopeEstimates(atFault);
 
@@ -758,6 +769,33 @@ class InstanceTagIsolation {
             Math.max((float) remaining + (entry.getValue() * divGuard), divGuard));
       }
       return residualScoringCap;
+    }
+
+    /**
+     * The given blocks plus the block of every replica to assign in this scope, or null when such a
+     * replica belongs to no block.
+     */
+    private Set<Integer> withBlocksToAssign(Set<Integer> skipped) {
+      Set<Integer> blocks = new TreeSet<>(skipped);
+      for (Set<AssignableReplica> replicas : _clusterModel.getAssignableReplicaMap().values()) {
+        for (AssignableReplica replica : replicas) {
+          Integer block = _blockOfGroup.get(groupKey(replica));
+          if (block == null) {
+            return null;
+          }
+          blocks.add(block);
+        }
+      }
+      return blocks;
+    }
+
+    /** The scoring capacity of a rest this run places nothing for, so it is never compared. */
+    private Map<String, Float> idleScoringCapacity(float divGuard) {
+      Map<String, Float> scoringCap = new HashMap<>();
+      for (String key : _keys) {
+        scoringCap.put(key, divGuard);
+      }
+      return scoringCap;
     }
 
     /** Scores the rest as the default mode would score a cluster made of the rest alone. */

@@ -192,8 +192,8 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
    *
    * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
    *         With instance tag isolation on, the blocks that do not fit on their own nodes are
-   *         skipped instead, and it throws only when that is every block with resources or all
-   *         resources share one block.
+   *         skipped instead, and it throws when that would skip no block with resources or every
+   *         one of them, or when all resources share one block.
    */
   private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
       InstanceTagIsolation isolation) throws HelixRebalanceException {
