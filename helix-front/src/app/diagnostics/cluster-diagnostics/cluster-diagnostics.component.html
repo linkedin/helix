@@ -1,0 +1,102 @@
+<section class="diagnostics">
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="issues ? issues.length : null"
+    [updated]="updated"
+    label="issues"
+    loadingText="Reading the cluster. A cold read can take a minute or two."
+    emptyText="Helix reports nothing to act on in this cluster."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <p class="footnote" *ngIf="listsReadAt" data-testid="read-times">
+    Capacity, live state and ERROR counts are from the sample taken at
+    {{ utc(updated) }}, which can come from the server cache. Instances and
+    resources were read at {{ utc(listsReadAt) }}. If something changed between
+    the two, an issue can describe a different moment than its neighbours.
+  </p>
+
+  <ng-container *ngIf="issues?.length">
+    <div class="filters">
+      <button
+        type="button"
+        class="chip"
+        [class.active]="!severity"
+        (click)="severity = null"
+      >
+        All severities {{ issues.length }}
+      </button>
+      <button
+        *ngFor="let s of severities"
+        type="button"
+        class="chip"
+        [class.active]="severity === s"
+        [attr.aria-pressed]="severity === s"
+        (click)="severity = s"
+      >
+        {{ s | titlecase }} {{ count(s, null) }}
+      </button>
+      <span class="gap"></span>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="!category"
+        (click)="category = null"
+      >
+        All categories
+      </button>
+      <button
+        *ngFor="let c of categories"
+        type="button"
+        class="chip"
+        [class.active]="category === c.value"
+        [attr.aria-pressed]="category === c.value"
+        (click)="category = c.value"
+      >
+        {{ c.label }} {{ count(null, c.value) }}
+      </button>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Affected</th>
+            <th>Issue</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let issue of visible" data-testid="issue">
+            <td>
+              <span class="badge" [ngClass]="issue.severity">
+                {{ issue.severity }}
+              </span>
+            </td>
+            <td>
+              <div class="name">{{ issue.subject }}</div>
+              <div class="sub">{{ categoryLabel(issue.category) }}</div>
+            </td>
+            <td>
+              <div class="name">{{ issue.title }}</div>
+              <div class="sub">{{ issue.detail }}</div>
+            </td>
+            <td>
+              <a [routerLink]="link(issue)">{{ issue.linkLabel }}</a>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="empty" *ngIf="!visible.length" data-testid="filtered-empty">
+        No issues match these filters.
+      </div>
+    </div>
+  </ng-container>
+
+  <p class="muted footnote">
+    Built from the published Helix state: capacity snapshot, instance and
+    resource summaries. It does not check application health.
+  </p>
+</section>

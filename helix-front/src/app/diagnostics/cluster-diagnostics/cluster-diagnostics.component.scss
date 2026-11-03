@@ -1,0 +1,28 @@
+@use '../../shared/diagnostics';
+
+.diagnostics .filters {
+  gap: 8px;
+}
+
+.gap {
+  width: 12px;
+}
+
+.chip {
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  background: #fff;
+  border-radius: 14px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.7);
+
+  &.active {
+    background: #1565c0;
+    border-color: #1565c0;
+    color: #fff;
+  }
+}
+
+.footnote {
+  font-size: 12px;
+}
