@@ -1,13 +1,12 @@
 import 'zone.js';
 import 'zone.js/dist/zone-testing';
 
-import { Component } from '@angular/core';
+import { Component, NO_ERRORS_SCHEMA } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { ActivatedRoute, Router } from '@angular/router';
 import { describe, expect, it, jest } from '@jest/globals';
 
-import { snapshotFixture } from '../testing/snapshot.fixture';
+import { snapshotFixture, withResources } from '../testing/snapshot.fixture';
 import { CapacityHeatmapComponent } from './capacity-heatmap.component';
 
 @Component({
@@ -24,16 +23,10 @@ class HostComponent {
 }
 
 describe('CapacityHeatmapComponent', () => {
-  const navigate = jest.fn();
-  const route = {};
-
   function create(snapshot = snapshotFixture()) {
     TestBed.configureTestingModule({
       declarations: [HostComponent, CapacityHeatmapComponent],
-      providers: [
-        { provide: Router, useValue: { navigate } },
-        { provide: ActivatedRoute, useValue: route },
-      ],
+      schemas: [NO_ERRORS_SCHEMA],
     });
     const fixture = TestBed.createComponent(HostComponent);
     fixture.componentInstance.snapshot = snapshot;
@@ -95,11 +88,51 @@ describe('CapacityHeatmapComponent', () => {
     expect(legend(html)[2]).toEqual(['mid', '1']);
   });
 
-  it('opens the instance page from a tile', () => {
-    tile(create().nativeElement, 'n3').click();
-    expect(navigate).toHaveBeenCalledWith(['../instances', 'n3'], {
-      relativeTo: route,
-    });
+  it('pins the detail of a clicked tile and keeps it in step with the toggles', () => {
+    const fixture = create(withResources());
+    const html: HTMLElement = fixture.nativeElement;
+    const detail = html.querySelector('.detail');
+    const rows = (selector: string) =>
+      Array.from(detail.querySelectorAll(selector)).map((row) =>
+        Array.from(row.querySelectorAll('span, .muted'))
+          .map((cell) => cell.textContent.trim())
+          .filter(Boolean)
+          .join(' '),
+      );
+    expect(detail.textContent).toContain('Click a tile');
+
+    const n3 = tile(html, 'n3');
+    expect(n3.tagName).toBe('BUTTON');
+    n3.click();
+    fixture.detectChanges();
+    expect(n3.classList.contains('selected')).toBe(true);
+    expect(detail.querySelector('h3').textContent).toBe('n3');
+    expect((detail.querySelector('a.open') as any).routerLink).toEqual([
+      '../instances',
+      'n3',
+    ]);
+    expect(rows('.key')).toEqual([
+      'CU 1200 / 1000 (120%)',
+      'DISK 2400 / 2000 (120%)',
+    ]);
+    expect(
+      Array.from(detail.querySelectorAll('dd')).map((d) =>
+        d.textContent.trim(),
+      ),
+    ).toEqual(['10 (4 top state)', '2 (1 top state)', '2']);
+    expect(rows('.resource')).toEqual([
+      'db 800 CU (80%) 4 replicas, 1 top state',
+      'idx 400 CU (40%) 2 replicas, 1 top state, 2 ERROR',
+      'legacy not WAGED 6 replicas, 1 top state',
+    ]);
+
+    fixture.componentInstance.top = true;
+    fixture.detectChanges();
+    expect(rows('.key')[0]).toBe('CU 600 / 1000 (60%)');
+    (detail.querySelector('.close') as HTMLElement).click();
+    fixture.detectChanges();
+    expect(detail.textContent).toContain('Click a tile');
+    expect(n3.classList.contains('selected')).toBe(false);
   });
 
   it('lays out again when the map is resized and stops watching on destroy', () => {

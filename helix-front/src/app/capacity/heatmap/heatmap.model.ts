@@ -2,6 +2,7 @@ import {
   capacityRatio,
   CapacitySnapshot,
   InstanceCapacity,
+  InstanceResourceUsage,
 } from '../shared/capacity-snapshot.model';
 import { Rect, squarify, Tile } from './treemap';
 
@@ -152,3 +153,49 @@ export function layoutHeatmap(
     };
   });
 }
+
+// Usage for every key and the resources using the most of the selected key.
+// Resources carry no top state weights, so their usage is for all replicas.
+export function instanceDetail(
+  instance: InstanceCapacity,
+  keys: string[],
+  key: string,
+  topStateOnly: boolean,
+) {
+  const max = instance.max?.[key];
+  const usedOf = (r: InstanceResourceUsage) => r.used?.[key] ?? null;
+  return {
+    keys: keys.map((k) => {
+      const ratio = capacityRatio(instance, k, topStateOnly);
+      const text = usageText(instance, k, topStateOnly);
+      return { key: k, ratio, band: bandOf(ratio), text };
+    }),
+    resources: [...instance.resources]
+      .sort(
+        (a, b) =>
+          (usedOf(b) ?? -1) - (usedOf(a) ?? -1) ||
+          b.replicas - a.replicas ||
+          names.compare(a.resourceName, b.resourceName),
+      )
+      .slice(0, 8)
+      .map((r) => {
+        const used = usedOf(r);
+        const share =
+          max > 0 && used !== null ? ` (${percent(used / max)})` : '';
+        return {
+          name: r.resourceName,
+          used:
+            used !== null
+              ? `${used} ${key}${share}`
+              : r.waged
+                ? 'unknown'
+                : 'not WAGED',
+          replicas: `${r.replicas} replicas, ${r.topStateReplicas} top state${
+            r.errorReplicas ? `, ${r.errorReplicas} ERROR` : ''
+          }`,
+        };
+      }),
+  };
+}
+
+export type InstanceDetail = ReturnType<typeof instanceDetail>;

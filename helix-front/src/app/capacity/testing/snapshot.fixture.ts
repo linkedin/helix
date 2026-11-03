@@ -70,3 +70,26 @@ export function snapshotFixture(): CapacitySnapshot {
     },
   };
 }
+
+// The fixture with WAGED and not WAGED resources on n3, the hottest instance.
+export function withResources() {
+  const snapshot = snapshotFixture();
+  const resource = (
+    resourceName: string,
+    waged: boolean,
+    replicas: number,
+  ) => ({
+    resourceName,
+    waged,
+    replicas,
+    topStateReplicas: 1,
+    errorReplicas: resourceName === 'idx' ? 2 : 0,
+    used: waged ? { CU: replicas * 200, DISK: replicas * 400 } : null,
+  });
+  snapshot.instances[2].resources = [
+    resource('legacy', false, 6),
+    resource('idx', true, 2),
+    resource('db', true, 4),
+  ];
+  return snapshot;
+}
