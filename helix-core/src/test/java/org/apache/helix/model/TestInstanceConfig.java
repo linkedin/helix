@@ -210,6 +210,48 @@ public class TestInstanceConfig {
   }
 
   @Test
+  public void testGetParsedDomainCaching() {
+    InstanceConfig instanceConfig = new InstanceConfig(new ZNRecord("id"));
+    instanceConfig.setDomain("zone=myZone1,rack=myRack");
+
+    // The returned map must stay mutable, and mutating it must not corrupt the cache that backs
+    // subsequent calls (getDomainAsMap returns a fresh copy each time).
+    Map<String, String> firstRead = instanceConfig.getDomainAsMap();
+    Assert.assertEquals(firstRead.get("zone"), "myZone1");
+    firstRead.put("zone", "tampered");
+    firstRead.remove("rack");
+    Map<String, String> secondRead = instanceConfig.getDomainAsMap();
+    Assert.assertEquals(secondRead.get("zone"), "myZone1");
+    Assert.assertEquals(secondRead.get("rack"), "myRack");
+    Assert.assertEquals(secondRead.size(), 2);
+
+    // Changing the domain via setDomain must invalidate the cache.
+    instanceConfig.setDomain("zone=myZone2,rack=myRack,host=host1");
+    Map<String, String> afterSetDomain = instanceConfig.getDomainAsMap();
+    Assert.assertEquals(afterSetDomain.get("zone"), "myZone2");
+    Assert.assertEquals(afterSetDomain.size(), 3);
+
+    // Changing the DOMAIN field directly on the record (bypassing setDomain) must also be
+    // reflected, since the cache is keyed by the raw domain string.
+    instanceConfig.getRecord()
+        .setSimpleField(InstanceConfig.InstanceConfigProperty.DOMAIN.name(), "zone=myZone3");
+    Map<String, String> afterRecordMutation = instanceConfig.getDomainAsMap();
+    Assert.assertEquals(afterRecordMutation.size(), 1);
+    Assert.assertEquals(afterRecordMutation.get("zone"), "myZone3");
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testGetParsedDomainMalformedAfterCaching() {
+    InstanceConfig instanceConfig = new InstanceConfig(new ZNRecord("id"));
+    instanceConfig.setDomain("zone=myZone1");
+    // Prime the cache with a valid parse.
+    Assert.assertEquals(instanceConfig.getDomainAsMap().get("zone"), "myZone1");
+    // A subsequent malformed domain must still throw rather than return the previously cached map.
+    instanceConfig.setDomain("not_a_valid_pair");
+    instanceConfig.getDomainAsMap();
+  }
+
+  @Test
   public void testGetInstanceCapacityMap() {
     Map<String, Integer> capacityDataMap = ImmutableMap.of("item1", 1,
         "item2", 2,
