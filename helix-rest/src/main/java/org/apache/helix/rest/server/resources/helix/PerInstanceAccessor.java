@@ -55,12 +55,10 @@ import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
-import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.MinActiveReplicaChecker;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
-import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -537,30 +535,13 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           boolean runsFeasibilityRule =
               instanceOperation != InstanceConstants.InstanceOperation.DISABLE;
           if (dryRun || !force) {
-            // The WAGED what-if context is shared with the batch instanceOperationMaintenance path;
-            // the min-active rule reads the single instanceName, so set it too.
+            // The batch instanceOperationMaintenance path runs the same guardrails.
             GuardrailContext.Builder setInstanceOperationContextBuilder = instanceOperationContext(
                 clusterId, Collections.singletonList(instanceName), instanceOperation)
                 .instanceName(instanceName);
-            List<GuardrailRule> setInstanceOperationRules = new ArrayList<>();
-            if (drainsInPlace) {
-              // Same read-only ExternalView min-active-replica what-if as command=disable; DISABLE
-              // and UNKNOWN share it because both drain this instance's replicas in place.
-              HelixDataAccessor setInstanceOperationDataAccessor = getDataAccssor(clusterId);
-              MinActiveReplicaChecker minActiveReplicaChecker =
-                  (targetInstance, toBeStoppedInstances) -> InstanceValidationUtil
-                      .siblingNodesActiveReplicaCheckWithDetails(setInstanceOperationDataAccessor,
-                          targetInstance, toBeStoppedInstances, true);
-              setInstanceOperationContextBuilder.minActiveReplicaChecker(minActiveReplicaChecker);
-              setInstanceOperationRules.add(new InstanceDisableMinActiveReplicaGuardrailRule());
-            }
-            if (runsFeasibilityRule) {
-              setInstanceOperationRules.add(
-                  new InstanceOperationRebalanceFeasibilityGuardrailRule());
-            }
-            Optional<Response> setInstanceOperationPreflight =
-                preflight(new GuardrailPipeline(setInstanceOperationRules),
-                    setInstanceOperationContextBuilder.build(), force, dryRun);
+            Optional<Response> setInstanceOperationPreflight = preflight(
+                instanceOperationGuardrails(clusterId, setInstanceOperationContextBuilder,
+                    instanceOperation), setInstanceOperationContextBuilder.build(), force, dryRun);
             if (setInstanceOperationPreflight.isPresent()) {
               return setInstanceOperationPreflight.get();
             }

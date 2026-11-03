@@ -47,6 +47,7 @@ import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
@@ -100,7 +101,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>An operation its source already holds is not set again, so repeating a request never
  * reorders the operation stack, and a request that changes nothing writes nothing. Repeating a
- * request is always safe, and is how a caller settles an unknown outcome.
+ * request is always safe, and is how a caller settles an unknown outcome. A held operation still
+ * goes through the transition and topology checks of {@link InstanceUtil#setInstanceOperation}, so
+ * both paths accept exactly the same requests.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -147,13 +150,14 @@ public class InstanceOperationMaintenanceHandler {
      */
     DUPLICATE_LOGICAL_ID,
     /**
-     * The rebalance-feasibility guardrail judged the instances this request changes unsafe
-     * together. Change fewer instances at once, or add assignable capacity.
+     * A guardrail judged the instances this request changes unsafe together: they leave
+     * partitions unable to place all their replicas, or, for DISABLE, below their minimum active
+     * replicas. Change fewer instances at once; the message says what else to do.
      */
     GUARDRAIL_REJECTED,
     /**
      * The guardrail could not judge the instances this request changes, so nothing was written.
-     * Resend once; if it comes back, an operator must fix the cluster's WAGED rebalance.
+     * Resend once; if it comes back, the message says what an operator must fix.
      */
     GUARDRAIL_INDETERMINATE,
     /**
@@ -465,7 +469,9 @@ public class InstanceOperationMaintenanceHandler {
           && held.getOperation() == operation.getOperation()
           && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
               && config.getInstanceEnabled()));
-      if (!holds) {
+      // The same checks as the legacy setInstanceOperation path, which runs them on every call,
+      // so a held operation is checked too.
+      if (operation != null) {
         InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
         try {
           InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config, current,
@@ -477,7 +483,6 @@ public class InstanceOperationMaintenanceHandler {
               invalidTransition(config, operation.getOperation(), e.getMessage())));
           continue;
         }
-        // The same topology check as the legacy setInstanceOperation path.
         if (InstanceUtil.requiresTopologyValidation(current, operation.getOperation())) {
           try {
             config.validateTopologySettingInInstanceConfig(clusterConfig, instance);
@@ -487,6 +492,8 @@ public class InstanceOperationMaintenanceHandler {
             continue;
           }
         }
+      }
+      if (!holds) {
         String logicalId = config.getLogicalId(logicalIdKey);
         String sibling = changingByLogicalId.get(logicalId);
         if (sibling != null) {
@@ -543,10 +550,13 @@ public class InstanceOperationMaintenanceHandler {
       if (!verdict.isFeasible() && judged.isEmpty()) {
         LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}",
             operation.getOperation(), changing, clusterId, verdict.getViolations());
+        boolean minActive = isMinActive(verdict.getViolations().get(0));
         Outcome outcome = new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
-            + "rebalance-feasibility guardrail could not judge " + operation.getOperation()
-            + " on the " + plural(changing.size(), "instance") + " this request changes. Resend "
-            + "it once; if it comes back, the cluster's WAGED rebalance must be fixed.");
+            + (minActive ? "min-active-replica" : "rebalance-feasibility")
+            + " guardrail could not judge " + operation.getOperation() + " on the "
+            + plural(changing.size(), "instance") + " this request changes. Resend it once; if it "
+            + "comes back, " + (minActive ? "the server log says why it could not read the "
+            + "cluster's ExternalViews." : "the cluster's WAGED rebalance must be fixed."));
         changing.forEach(instance -> outcomes.put(instance, outcome));
       } else if (!judged.isEmpty()) {
         LOG.warn("The guardrail rejected {} on {} in cluster {}: {}", operation.getOperation(),
@@ -748,6 +758,11 @@ public class InstanceOperationMaintenanceHandler {
     String head = "Rejected by guardrail " + first.getRuleId() + ": ";
     String subject = operation + " on the " + plural(changing, "instance")
         + " this request changes";
+    if (isMinActive(first)) {
+      return head + subject + " would leave partition " + first.getPartitionName() + " of "
+          + "resource " + first.getResourceName() + " below its minActiveReplicas. Wait for its "
+          + "other replicas to recover, or change fewer instances at once.";
+    }
     List<String> partitions = violations.stream().map(Violation::getPartitionName)
         .filter(Objects::nonNull).collect(Collectors.toList());
     if (!partitions.isEmpty()) {
@@ -763,6 +778,10 @@ public class InstanceOperationMaintenanceHandler {
           + "cluster. Change fewer instances at once, or add assignable capacity.";
     }
     return head + clip(oneLine(text), 500);
+  }
+
+  private static boolean isMinActive(Violation violation) {
+    return InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID.equals(violation.getRuleId());
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
