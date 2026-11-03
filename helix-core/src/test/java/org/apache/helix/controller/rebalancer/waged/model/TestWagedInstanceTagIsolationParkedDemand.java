@@ -119,6 +119,27 @@ public class TestWagedInstanceTagIsolationParkedDemand
     assertCapacityDeficit(parkedDeficit(false));
     assertCapacityDeficit(twoKeys(false));
     assertCapacityDeficit(twoParkedOverflows(false));
+    assertCapacityDeficit(unassignedReplicas(false, true));
+  }
+
+  /**
+   * RA_new was added to clique A since the last assignment, so this scope places none of it, and
+   * only with it does A need more than its live capacity. Clique B alone explains the deficit, so
+   * only B is skipped, and A is topped up exactly as the default mode tops it up in a cluster
+   * without B.
+   */
+  @Test
+  public void testReplicasNoAssignmentListsYetCountLikeParkedOnes() throws Exception {
+    OptimalAssignment result = createAlgorithm().calculate(unassignedReplicas(true, true));
+    Assert.assertEquals(result.getSkippedResources(), set("RB"));
+    Map<String, ResourceAssignment> healthy = new HashMap<>(result.getOptimalResourceAssignment());
+    healthy.remove("RB");
+    for (int p = 0; p < 3; p++) {
+      Assert.assertEquals(replicasOn(healthy.get("RA"), p).size(), 2, "RA_" + p + " topped up");
+    }
+    Assert.assertEquals(normalize(healthy), normalize(
+        createAlgorithm().calculate(unassignedReplicas(false, false))
+            .getOptimalResourceAssignment()));
   }
 
   /**
@@ -335,6 +356,35 @@ public class TestWagedInstanceTagIsolationParkedDemand
     }
     for (int p = 0; p < 10; p++) {
       cluster.current(REBALANCED, p, p % 2 == 0 ? "g1" : "g2");
+    }
+    return cluster.build();
+  }
+
+  /**
+   * Clique A: live a1, a2 and a3 of 100 each, a4 offline inside the window. RA has six partitions
+   * of two replicas at 20 and min active 2, and RA_0, RA_1 and RA_2 each get a top up: 240 to
+   * place. RA_new, four partitions of two replicas at 30, is in no assignment yet. Clique C: c1 to
+   * c4 of 100 hold RC, ten replicas at 10. With B, b1 of 100 holding RB, ten replicas at 50, the
+   * cluster holds 800 and is asked for 1080. Without B there is no deficit.
+   */
+  private ClusterModel unassignedReplicas(boolean enabled, boolean withB) throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(createClusterConfig(enabled))
+        .liveNode("a1", 100, "A").liveNode("a2", 100, "A").liveNode("a3", 100, "A")
+        .liveNode("c1", 100, "C").liveNode("c2", 100, "C").liveNode("c3", 100, "C")
+        .liveNode("c4", 100, "C")
+        .resource(taggedResource("RA", "A", 20), 6, 2, 2)
+        .resource(taggedResource("RA_new", "A", 30), 4, 2, 1)
+        .resource(taggedResource("RC", "C", 10), 10, 1, 1)
+        .current("RA", 0, "a1", "a4").current("RA", 1, "a2", "a4").current("RA", 2, "a3", "a4")
+        .current("RA", 3, "a1", "a2").current("RA", 4, "a2", "a3").current("RA", 5, "a1", "a3");
+    for (int p = 0; p < 10; p++) {
+      cluster.current("RC", p, "c" + (1 + p % 4));
+    }
+    if (withB) {
+      cluster.liveNode("b1", 100, "B").resource(taggedResource("RB", "B", 50), 10, 1, 1);
+      for (int p = 0; p < 10; p++) {
+        cluster.current("RB", p, "b1");
+      }
     }
     return cluster.build();
   }

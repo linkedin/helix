@@ -38,8 +38,6 @@ import org.apache.helix.controller.rebalancer.waged.model.AssignableNode;
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
-import org.apache.helix.model.Partition;
-import org.apache.helix.model.ResourceAssignment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -291,14 +289,15 @@ class InstanceTagIsolation {
    *
    * The check is a sum over every replica that ignores tags, so one clique far over capacity can
    * push it below zero while every other clique fits on its own nodes. This splits the check's
-   * totals by block and skips the blocks that do not fit on their own nodes. Replicas parked on
-   * nodes outside the model, such as a node still inside its delay window, are not placed in this
-   * scope, so they count first on no key, then only on the short keys, then on every key. A block
-   * only the parked replicas push over is skipped only while the rest still does not fit, largest
-   * overflow first or, if that never fits with several keys, in the order skipUntilFit picks
-   * them. Any such block the rest then fits without is not skipped. The rest is always held
-   * to the full totals, as the default check would hold a cluster made of the rest alone, and is
-   * scored as that cluster. Only called where the default mode throws.
+   * totals by block and skips the blocks that do not fit on their own nodes. Replicas this scope
+   * neither places nor assigns are parked, such as those on a node still inside its delay window
+   * or those of a resource added since the last assignment, so they count first on no key, then
+   * only on the short keys, then on every key. A block only the parked replicas push over is
+   * skipped only while the rest still does not fit, largest overflow first or, if that never fits
+   * with several keys, in the order skipUntilFit picks them. Any such block the rest then fits
+   * without is not skipped. The rest is always held to the full totals, as the default check
+   * would hold a cluster made of the rest alone, and is scored as that cluster. Only called where
+   * the default mode throws.
    *
    * A block over on any key is skipped, even when only a node already above its capacity, such as
    * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
@@ -387,7 +386,7 @@ class InstanceTagIsolation {
     private final List<String> _keys =
         new ArrayList<>(new TreeSet<>(_clusterModel.getContext().getClusterCapacityMap().keySet()));
     private final Map<Integer, long[]> _gain = new HashMap<>();
-    // The part of each block's demand parked on nodes outside this scope's model.
+    // The part of each block's demand this scope neither places nor assigns.
     private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
     private final Map<String, Map<String, PartitionShare>> _shares;
 
@@ -457,8 +456,9 @@ class InstanceTagIsolation {
         Map<String, Long> nodeRoom = new HashMap<>();
         node.getMaxCapacity().forEach((key, value) -> nodeRoom.put(key, (long) value));
         room.add(nodeRoom);
-        // A block's own replicas are counted first, so a replica beyond what its partition owns is
-        // always one left on another block's node.
+        // A block's own replicas are counted first. Once a partition has as many as it owns, any
+        // further replica of it, such as a copy left after its replica count was lowered, adds no
+        // demand and takes no room.
         List<AssignableReplica> away = new ArrayList<>();
         for (AssignableReplica replica : node.getAssignedReplicas()) {
           PartitionShare share = shareOf(shares, replica);
@@ -500,35 +500,20 @@ class InstanceTagIsolation {
       return _blocks.size() - 1;
     }
 
-    /** Charges each block for its replicas parked on nodes outside this scope's model. */
+    /**
+     * Charges each block for the replicas it owns that this scope neither places nor assigns, such
+     * as those on a node still inside its delay window, or those of a resource added since the
+     * last assignment.
+     */
     private void chargeParked(Map<String, Map<String, PartitionShare>> shares) {
-      Set<String> modelled = _clusterModel.getAssignableLogicalIds();
-      Map<String, ResourceAssignment> current =
-          _clusterModel.getContext().getBestPossibleAssignment();
-      shares.forEach((resource, byPartition) -> {
-        ResourceAssignment assignment = current.get(resource);
-        if (assignment == null) {
-          return;
-        }
-        byPartition.forEach((partition, share) -> {
-          int unaccounted = share._owned - share._placed - share._toAssign;
-          if (unaccounted <= 0) {
-            return;
-          }
-          // A replica to assign takes the place of one that sits on a node outside the model, so
-          // only what is left over is parked.
-          int outside = -share._toAssign;
-          for (String logicalId : assignment.getReplicaMap(new Partition(partition)).keySet()) {
-            if (!modelled.contains(logicalId)) {
-              outside++;
-            }
-          }
-          int parked = Math.min(unaccounted, outside);
+      for (Map<String, PartitionShare> byPartition : shares.values()) {
+        for (PartitionShare share : byPartition.values()) {
+          int parked = share._owned - share._placed - share._toAssign;
           if (parked > 0) {
             charge(_parked, share._owner, share._weight, parked);
           }
-        });
-      });
+        }
+      }
     }
 
     /**
