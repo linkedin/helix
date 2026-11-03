@@ -129,7 +129,10 @@ public class InstanceOperationMaintenanceHandler {
     APPLIED,
     /** No such instance in the cluster. Drop it from the request. */
     INSTANCE_NOT_FOUND,
-    /** The instance's current operation does not allow the requested one. Needs an operator. */
+    /**
+     * The instance's current operation does not allow the requested one, or its topology settings
+     * do not fit the cluster's. Needs an operator.
+     */
     INVALID_TRANSITION,
     /**
      * Shares its logical ID with another instance this request changes. Send it in a separate
@@ -453,15 +456,26 @@ public class InstanceOperationMaintenanceHandler {
           && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
               && config.getInstanceEnabled()));
       if (!holds) {
+        InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
         try {
-          InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config,
-              config.getInstanceOperation().getOperation(), operation.getOperation());
+          InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config, current,
+              operation.getOperation());
         } catch (HelixMetaDataAccessException e) {
           throw e;
         } catch (HelixException e) {
           outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
               invalidTransition(config, operation.getOperation(), e.getMessage())));
           continue;
+        }
+        // The same topology check as the legacy setInstanceOperation path.
+        if (InstanceUtil.requiresTopologyValidation(current, operation.getOperation())) {
+          try {
+            config.validateTopologySettingInInstanceConfig(clusterConfig, instance);
+          } catch (IllegalArgumentException e) {
+            outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
+                invalidTopology(operation.getOperation(), e.getMessage())));
+            continue;
+          }
         }
         String logicalId = config.getLogicalId(logicalIdKey);
         String sibling = changingByLogicalId.get(logicalId);
@@ -635,6 +649,14 @@ public class InstanceOperationMaintenanceHandler {
         + current.getOperation() + ", " + setBy(current) + ". " + detail
         + (detail.endsWith(".") ? "" : ".")
         + " An operator must resolve this before the instance is resent.";
+  }
+
+  private static String invalidTopology(InstanceConstants.InstanceOperation requested,
+      String helixMessage) {
+    String detail = clip(oneLine(String.valueOf(helixMessage)), 500).replaceAll("[.!]+$", "");
+    return "Cannot change to " + requested + ", since its topology settings do not fit the "
+        + "cluster's. " + detail + ". An operator must fix the instance's DOMAIN or the cluster's "
+        + "TOPOLOGY before the instance is resent.";
   }
 
   /**
