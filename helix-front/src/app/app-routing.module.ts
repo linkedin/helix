@@ -21,6 +21,7 @@ import { TopologyComponent } from './topology/topology.component';
 import { CapacityOverviewComponent } from './capacity/capacity-overview/capacity-overview.component';
 import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
 import { ClusterDiagnosticsComponent } from './diagnostics/cluster-diagnostics/cluster-diagnostics.component';
+import { ClusterOverviewComponent } from './overview/cluster-overview/cluster-overview.component';
 
 const HELIX_ROUTES: Routes = [
   {
@@ -45,6 +46,7 @@ const HELIX_ROUTES: Routes = [
             redirectTo: 'resources',
             pathMatch: 'full',
           },
+          { path: 'overview', component: ClusterOverviewComponent },
           {
             path: 'configs',
             component: ConfigDetailComponent,
