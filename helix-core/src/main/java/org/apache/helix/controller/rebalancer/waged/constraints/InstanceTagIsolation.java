@@ -385,7 +385,7 @@ class InstanceTagIsolation {
     // The capacity keys in a fixed order, and the room skipping each block frees on them.
     private final List<String> _keys =
         new ArrayList<>(new TreeSet<>(_clusterModel.getContext().getClusterCapacityMap().keySet()));
-    private final Map<Integer, long[]> _gain = new HashMap<>();
+    private final long[][] _gain;
     // The part of each block's demand this scope neither places nor assigns.
     private final Map<Integer, Map<String, Long>> _parked = new HashMap<>();
     private final Map<String, Map<String, PartitionShare>> _shares;
@@ -408,6 +408,8 @@ class InstanceTagIsolation {
       _shares = chargeOwners(_blockOfGroup);
       chargeNodes(_blockOfGroup, untaggedBlock, _shares);
       chargeParked(_shares);
+      // Sized only now, since charging the nodes adds a block for each node no group reaches.
+      _gain = new long[_blocks.size()][];
     }
 
     /** Charges every replica the check counts to the block that owns it. */
@@ -571,12 +573,12 @@ class InstanceTagIsolation {
     /**
      * Skips the candidates, in the order given, until the rest fits. With one key each candidate,
      * a block with resources, adds its overflow to the room, so the first prefix that fits is a
-     * smallest fitting set, and if none fits no set does. With several keys that order can skip a
-     * block the rest fits without, or never fit while another set does, and finding a smallest
-     * fitting set is as hard as subset sum. So if the order never fits, this adds one candidate at
-     * a time: one the rest then fits with, else one that frees room at no cost on any key, else
-     * the one leaving the rest least short. Then each added block the rest still fits without is
-     * un-skipped, last added first. Each step is one pass over the keys.
+     * smallest fitting set, and if none fits no set does, so this stops there. With several keys
+     * that order can skip a block the rest fits without, or never fit while another set does, and
+     * finding a smallest fitting set is as hard as subset sum. So if the order never fits, this
+     * adds one candidate at a time: one the rest then fits with, else one that frees room at no
+     * cost on any key, else the one leaving the rest least short. Then each added block the rest
+     * still fits without is un-skipped, last added first. Each step is one pass over the keys.
      *
      * @return the blocks to skip, or null when none of these fits.
      */
@@ -588,6 +590,9 @@ class InstanceTagIsolation {
         room.skip(candidates.get(i), 1);
       }
       if (room.shortfall() > 0) {
+        if (_keys.size() == 1) {
+          return null;
+        }
         room = new Room(atFault);
         added.clear();
         List<Integer> pool = new ArrayList<>(candidates);
@@ -596,10 +601,8 @@ class InstanceTagIsolation {
           int bestRank = Integer.MAX_VALUE;
           double bestShortfall = Double.POSITIVE_INFINITY;
           for (int i = 0; i < pool.size(); i++) {
-            int block = pool.get(i);
-            room.skip(block, 1);
-            double next = room.shortfall();
-            room.skip(block, -1);
+            Integer block = pool.get(i);
+            double next = room.shortfallWith(block);
             int rank = next == 0 ? 0 : next < shortfall && costsNoRoom(block) ? 1 : 2;
             if (next < Double.POSITIVE_INFINITY
                 && (rank < bestRank || (rank == bestRank && next < bestShortfall))) {
@@ -634,20 +637,26 @@ class InstanceTagIsolation {
 
     /** Whether skipping the block leaves no key with less room. */
     private boolean costsNoRoom(int block) {
-      return Arrays.stream(gain(block)).allMatch(gain -> gain >= 0);
+      for (long gain : gain(block)) {
+        if (gain < 0) {
+          return false;
+        }
+      }
+      return true;
     }
 
     /** Per key, in key order, the room skipping the block frees: its demand less its capacity. */
     private long[] gain(int block) {
-      return _gain.computeIfAbsent(block, id -> {
-        Map<String, Long> demand = _demand.getOrDefault(id, Collections.emptyMap());
-        Map<String, Long> capacity = _capacity.getOrDefault(id, Collections.emptyMap());
+      if (_gain[block] == null) {
+        Map<String, Long> demand = _demand.getOrDefault(block, Collections.emptyMap());
+        Map<String, Long> capacity = _capacity.getOrDefault(block, Collections.emptyMap());
         long[] gain = new long[_keys.size()];
         for (int k = 0; k < gain.length; k++) {
           gain[k] = demand.getOrDefault(_keys.get(k), 0L) - capacity.getOrDefault(_keys.get(k), 0L);
         }
-        return gain;
-      });
+        _gain[block] = gain;
+      }
+      return _gain[block];
     }
 
     /** The room left on each key once a set of blocks is skipped, kept as blocks come and go. */
@@ -692,6 +701,24 @@ class InstanceTagIsolation {
         double shortfall = 0;
         for (int k = 0; k < _left.length; k++) {
           shortfall += Math.max(0L, -_left[k]) / (double) Math.max(1L, _capacityOfKey[k]);
+        }
+        return shortfall;
+      }
+
+      /**
+       * The shortfall once a block that is not skipped yet is skipped too, without skipping it, so
+       * trying every candidate allocates nothing.
+       */
+      private double shortfallWith(Integer block) {
+        if (_skippedResourceBlocks + (_resourceBlocks.contains(block) ? 1 : 0)
+            == _resourceBlocks.size()) {
+          return Double.POSITIVE_INFINITY;
+        }
+        long[] gain = gain(block);
+        double shortfall = 0;
+        for (int k = 0; k < _left.length; k++) {
+          long left = _left[k] + gain[k];
+          shortfall += Math.max(0L, -left) / (double) Math.max(1L, _capacityOfKey[k]);
         }
         return shortfall;
       }
