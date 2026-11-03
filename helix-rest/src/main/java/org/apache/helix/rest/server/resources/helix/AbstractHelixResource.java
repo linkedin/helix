@@ -20,6 +20,7 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,8 +39,10 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
@@ -56,6 +59,7 @@ import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.task.TaskDriver;
 import org.apache.helix.tools.ClusterSetup;
 import org.apache.helix.util.HelixUtil;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
@@ -174,8 +178,8 @@ public class AbstractHelixResource extends AbstractResource {
   }
 
   /**
-   * Whether setting {@code operation} on every instance at once would leave WAGED partitions unable
-   * to place all their replicas, for callers that report the verdict in their own response.
+   * Whether setting {@code operation} on every instance at once passes the guardrails
+   * setInstanceOperation runs, for callers that report the verdict in their own response.
    *
    * @param dryRun whether the verdict only probes which instances fit, so a failure counts as a
    *     dry run rather than a blocked write
@@ -184,10 +188,32 @@ public class AbstractHelixResource extends AbstractResource {
   protected ValidationResult validateInstanceOperation(String clusterId,
       Collection<String> instanceNames, InstanceConstants.InstanceOperation operation,
       boolean dryRun, WagedAssignmentProvider assignments) {
-    return validateAndRecord(
-        new GuardrailPipeline(new InstanceOperationRebalanceFeasibilityGuardrailRule()),
-        instanceOperationContext(clusterId, instanceNames, operation, assignments).build(), false,
-        dryRun);
+    GuardrailContext.Builder context =
+        instanceOperationContext(clusterId, instanceNames, operation, assignments);
+    return validateAndRecord(instanceOperationGuardrails(clusterId, context, operation),
+        context.build(), false, dryRun);
+  }
+
+  /**
+   * The guardrails for setting {@code operation}, shared by the single and batch paths. DISABLE and
+   * UNKNOWN drain replicas in place, so they must keep every partition at its minimum active
+   * replicas; wires that check into {@code context}. Every operation but DISABLE must leave WAGED
+   * partitions able to place all their replicas.
+   */
+  protected GuardrailPipeline instanceOperationGuardrails(String clusterId,
+      GuardrailContext.Builder context, InstanceConstants.InstanceOperation operation) {
+    List<GuardrailRule> rules = new ArrayList<>();
+    if (operation == InstanceConstants.InstanceOperation.DISABLE
+        || operation == InstanceConstants.InstanceOperation.UNKNOWN) {
+      HelixDataAccessor accessor = getDataAccssor(clusterId);
+      context.minActiveReplicaChecker((instance, stopped) -> InstanceValidationUtil
+          .siblingNodesActiveReplicaCheckWithDetails(accessor, instance, stopped, true));
+      rules.add(new InstanceDisableMinActiveReplicaGuardrailRule());
+    }
+    if (operation != InstanceConstants.InstanceOperation.DISABLE) {
+      rules.add(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+    }
+    return new GuardrailPipeline(rules);
   }
 
   private ValidationResult validateAndRecord(GuardrailPipeline pipeline, GuardrailContext context,

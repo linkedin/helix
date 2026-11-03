@@ -42,6 +42,7 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.TestHelper;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.model.ClusterConfig;
@@ -1283,6 +1284,62 @@ public class TestInstancesAccessor extends AbstractTestClass {
       Assert.assertTrue(blocked.isAssignable());
       Assert.assertEquals(blocked.getInstanceOperationMaintenanceUntilMs(),
           InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  /**
+   * DISABLE drains replicas in place, so the batch runs the min-active-replica guard rail that
+   * setInstanceOperation runs, on the instances together. Three instances host three replicas of
+   * every partition with a minimum of two: one can be disabled, two together cannot.
+   */
+  @Test
+  public void testInstanceOperationMaintenanceKeepsMinActiveReplicas() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestInstanceOperationMaintenanceMinActiveCluster";
+    try {
+      _gSetupTool.addCluster(cluster, true);
+      List<String> instances = new ArrayList<>();
+      for (int i = 0; i < 3; i++) {
+        String instance = cluster + "_localhost_" + (13210 + i);
+        _gSetupTool.addInstanceToCluster(cluster, instance);
+        instances.add(instance);
+        MockParticipantManager participant = new MockParticipantManager(ZK_ADDR, cluster, instance);
+        participant.syncStart();
+        _mockParticipantManagers.add(participant);
+      }
+      _clusterControllerManagers.add(startController(cluster));
+      String resource = "TestDB_MinActive";
+      _gSetupTool.addResourceToCluster(cluster, resource, 3, "MasterSlave");
+      IdealState idealState =
+          _gSetupTool.getClusterManagementTool().getResourceIdealState(cluster, resource);
+      idealState.setMinActiveReplicas(2);
+      _gSetupTool.getClusterManagementTool().setResourceIdealState(cluster, resource, idealState);
+      _gSetupTool.rebalanceStorageCluster(cluster, resource, 3);
+      try (BestPossibleExternalViewVerifier verifier =
+          new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
+        Assert.assertTrue(verifier.verifyByPolling());
+      }
+      String first = instances.get(0);
+      String disable = "\"],\"instanceOperation\":\"DISABLE\",\"instanceOperationSource\":"
+          + "\"AUTOMATION\",\"expiresAtMillis\":" + (System.currentTimeMillis() + 600_000L) + "}";
+
+      JsonNode response = postInstanceOperationMaintenanceResponse(cluster,
+          "{\"instances\":[\"" + first + "\",\"" + instances.get(1) + disable);
+      Assert.assertEquals(response.get("message").asText(),
+          "Applied to 0 of 2 instances (2 GUARDRAIL_REJECTED).");
+      String message = response.get("instances").get(first).get("message").asText();
+      Assert.assertTrue(message.startsWith("Rejected by guardrail "
+          + InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID + ": DISABLE on the 2 instances "
+          + "this request changes would leave partition " + resource + "_"), message);
+      Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, first).getInstanceEnabled());
+
+      JsonNode outcomes =
+          postInstanceOperationMaintenance(cluster, "{\"instances\":[\"" + first + disable);
+      Assert.assertEquals(outcomes.get(first).get("status").asText(), "APPLIED");
+      Assert.assertFalse(_configAccessor.getInstanceConfig(cluster, first).getInstanceEnabled());
     } finally {
       deleteTestCluster(cluster);
     }

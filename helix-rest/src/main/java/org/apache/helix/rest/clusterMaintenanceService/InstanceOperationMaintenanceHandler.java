@@ -49,6 +49,7 @@ import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
@@ -96,9 +97,11 @@ import org.slf4j.LoggerFactory;
  * is the only caller and sends one request at a time per cluster, so the cap and the guardrail hold
  * without a lock. A second caller would need a per-cluster lock first.
  *
- * <p>The rebalance-feasibility guardrail judges the instances whose operation changes all
- * together. When they do not all fit, dry checks search for the longest run from the start of the
- * request that fits, plus the instances after the first misfit if those fit with it, in at most
+ * <p>The guardrails of setInstanceOperation judge the instances whose operation changes all
+ * together: DISABLE must keep every partition at its minimum active replicas, and the other
+ * operations must leave every partition able to place all its replicas. When they do not all fit,
+ * dry checks search for the longest run from the start of the request that fits, plus the
+ * instances after the first misfit if those fit with it, in at most
  * {@link ClusterConfig#getInstanceOperationMaintenanceFitSearchMaxChecks()} more checks per
  * attempt; with 0, the request is judged as a whole. Only a set a check on this attempt's read
  * showed fits is written; the rest are GUARDRAIL_REJECTED. A request that runs out of time before
@@ -113,7 +116,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>An operation its source already holds is not set again, so repeating a request never
  * reorders the operation stack, and a request that changes nothing writes nothing. Repeating a
- * request is always safe, and is how a caller settles an unknown outcome.
+ * request is always safe, and is how a caller settles an unknown outcome. A held operation still
+ * goes through the transition and topology checks of {@link InstanceUtil#setInstanceOperation}, so
+ * both paths accept exactly the same requests.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -165,13 +170,14 @@ public class InstanceOperationMaintenanceHandler {
     /**
      * The guardrail did not admit this instance with the instances of this request that fit: it
      * does not fit with them, or the search did not show it does. Resend it once they are done.
-     * The message says when it needs an operator instead (it does not fit alone), or fewer
-     * instances per request (the search is off).
+     * To fit, every partition must still place all its replicas, and for DISABLE, keep its
+     * minimum active replicas. The message says what else to do when it does not fit alone, or
+     * to send fewer instances per request when the search is off.
      */
     GUARDRAIL_REJECTED,
     /**
      * The guardrail could not judge the instances this request changes, so nothing was written.
-     * Resend once; if it comes back, an operator must fix the cluster's WAGED rebalance.
+     * Resend once; if it comes back, the message says what an operator must fix.
      */
     GUARDRAIL_INDETERMINATE,
     /**
@@ -552,7 +558,9 @@ public class InstanceOperationMaintenanceHandler {
           && held.getOperation() == operation.getOperation()
           && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
               && config.getInstanceEnabled()));
-      if (!holds) {
+      // The same checks as the legacy setInstanceOperation path, which runs them on every call,
+      // so a held operation is checked too.
+      if (operation != null) {
         InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
         try {
           InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config, current,
@@ -564,7 +572,6 @@ public class InstanceOperationMaintenanceHandler {
               invalidTransition(config, operation.getOperation(), e.getMessage())));
           continue;
         }
-        // The same topology check as the legacy setInstanceOperation path.
         if (InstanceUtil.requiresTopologyValidation(current, operation.getOperation())) {
           try {
             config.validateTopologySettingInInstanceConfig(clusterConfig, instance);
@@ -574,6 +581,8 @@ public class InstanceOperationMaintenanceHandler {
             continue;
           }
         }
+      }
+      if (!holds) {
         String logicalId = config.getLogicalId(logicalIdKey);
         String sibling = changingByLogicalId.get(logicalId);
         if (sibling != null) {
@@ -738,7 +747,7 @@ public class InstanceOperationMaintenanceHandler {
       if (maxChecks == 0 && n > 1) {
         return all(changing, new Outcome(Status.GUARDRAIL_REJECTED,
             guardrailMessage(rejection, changes(operation, n), " Change fewer instances at once, "
-                + "or add assignable capacity.")));
+                + "or " + remedy(rejection) + ".")));
       }
       hi = size;
       if (size == lo) {
@@ -806,9 +815,12 @@ public class InstanceOperationMaintenanceHandler {
       InstanceConstants.InstanceOperation operation, ValidationResult verdict) {
     LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}", operation, changing,
         clusterId, verdict.getViolations());
+    boolean minActive = isMinActive(verdict.getViolations().get(0));
     return all(changing, new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
-        + "rebalance-feasibility guardrail could not judge " + changes(operation, changing.size())
-        + ". Resend it once; if it comes back, the cluster's WAGED rebalance must be fixed."));
+        + (minActive ? "min-active-replica" : "rebalance-feasibility") + " guardrail could not "
+        + "judge " + changes(operation, changing.size()) + ". Resend it once; if it comes back, "
+        + (minActive ? "the server log says why it could not read the cluster's ExternalViews."
+            : "the cluster's WAGED rebalance must be fixed.")));
   }
 
   /**
@@ -973,14 +985,18 @@ public class InstanceOperationMaintenanceHandler {
   private static String guardrailMessage(List<Violation> violations,
       InstanceConstants.InstanceOperation operation, int fit) {
     return guardrailMessage(violations, operation + " on this instance "
-        + (fit == 0 ? "alone" : "together with " + fitting(fit)),
-        fit == 0 ? " Add assignable capacity before resending it." : RESEND_AFTER_FIT);
+        + (fit == 0 ? "alone" : "together with " + fitting(fit)), fit > 0 ? RESEND_AFTER_FIT
+        : " " + capitalized(remedy(violations)) + " before resending it.");
   }
 
   private static String guardrailMessage(List<Violation> violations, String subject,
       String advice) {
     Violation first = violations.get(0);
     String head = "Rejected by guardrail " + first.getRuleId() + ": ";
+    if (isMinActive(first)) {
+      return head + subject + " would leave partition " + first.getPartitionName() + " of "
+          + "resource " + first.getResourceName() + " below its minActiveReplicas." + advice;
+    }
     List<String> partitions = violations.stream().map(Violation::getPartitionName)
         .filter(Objects::nonNull).collect(Collectors.toList());
     if (!partitions.isEmpty()) {
@@ -996,6 +1012,20 @@ public class InstanceOperationMaintenanceHandler {
           + "cluster." + advice;
     }
     return head + clip(oneLine(text), 500) + advice;
+  }
+
+  private static boolean isMinActive(Violation violation) {
+    return InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID.equals(violation.getRuleId());
+  }
+
+  /** What makes room for a change the violations reject, other than changing fewer instances. */
+  private static String remedy(List<Violation> violations) {
+    return isMinActive(violations.get(0)) ? "wait for its other replicas to recover"
+        : "add assignable capacity";
+  }
+
+  private static String capitalized(String text) {
+    return Character.toUpperCase(text.charAt(0)) + text.substring(1);
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
