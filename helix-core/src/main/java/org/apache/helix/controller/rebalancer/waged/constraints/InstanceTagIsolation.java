@@ -908,7 +908,7 @@ class InstanceTagIsolation {
     // Operational labels on reachable nodes must not connect otherwise independent cliques.
     Set<String> spanningTags = new HashSet<>();
     for (AssignableNode node : _nodes) {
-      if (!Collections.disjoint(node.getInstanceTags(), resourceTags)) {
+      if (!Collections.disjoint(resourceTags, node.getInstanceTags())) {
         spanningTags.addAll(node.getInstanceTags());
       }
     }
