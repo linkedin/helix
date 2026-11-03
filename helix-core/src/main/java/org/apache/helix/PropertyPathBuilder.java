@@ -19,8 +19,10 @@ package org.apache.helix;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,6 +53,12 @@ public class PropertyPathBuilder {
 
   static final Map<PropertyType, Map<Integer, String>> templateMap =
       new HashMap<PropertyType, Map<Integer, String>>();
+  // Precompiled form of templateMap used by getPath: each template is split once into its literal
+  // segments and the ordered value indices to interleave, so getPath joins them with a single
+  // StringBuilder instead of running a regex Matcher and a chain of String.replace calls per call.
+  static final Map<PropertyType, Map<Integer, CompiledTemplate>> compiledTemplateMap =
+      new HashMap<PropertyType, Map<Integer, CompiledTemplate>>();
+  static final Pattern pattern = Pattern.compile("(\\{.+?\\})");
   @Deprecated // typeToClassMapping is not being used anywhere
   static final Map<PropertyType, Class<? extends HelixProperty>> typeToClassMapping =
       new HashMap<PropertyType, Class<? extends HelixProperty>>();
@@ -180,8 +188,6 @@ public class PropertyPathBuilder {
     addEntry(PropertyType.JOB_CONTEXT, 3, "/{clusterName}/PROPERTYSTORE"
         + TaskConstants.REBALANCER_CONTEXT_ROOT + "/{workflowName}" + "_" + "{jobName}/Context");
   }
-  static Pattern pattern = Pattern.compile("(\\{.+?\\})");
-
   private static void addEntry(PropertyType type, int numKeys, String template) {
     if (!templateMap.containsKey(type)) {
       templateMap.put(type, new HashMap<Integer, String>());
@@ -189,6 +195,62 @@ public class PropertyPathBuilder {
     logger.trace("Adding template for type:" + type.getType() + " arguments:" + numKeys
         + " template:" + template);
     templateMap.get(type).put(numKeys, template);
+    compiledTemplateMap.computeIfAbsent(type, k -> new HashMap<>())
+        .put(numKeys, new CompiledTemplate(template));
+  }
+
+  /**
+   * A path template parsed once into its literal segments and the ordered value indices to
+   * interleave between them. Value index 0 is the clusterName; index k (k &gt; 0) is keys[k - 1].
+   * A repeated placeholder reuses the value index of its first occurrence, which preserves the
+   * behavior of the previous Matcher + String.replace implementation where replacing a repeated
+   * token substituted every occurrence with the first value and discarded the later ones.
+   */
+  static class CompiledTemplate {
+    private final String _template;
+    // _literals.length == _valueIndices.length + 1
+    private final String[] _literals;
+    private final int[] _valueIndices;
+
+    CompiledTemplate(String template) {
+      _template = template;
+      List<String> literals = new ArrayList<>();
+      List<Integer> valueIndices = new ArrayList<>();
+      Map<String, Integer> firstIndexByToken = new HashMap<>();
+      Matcher matcher = pattern.matcher(template);
+      int lastEnd = 0;
+      int index = 0;
+      while (matcher.find()) {
+        literals.add(template.substring(lastEnd, matcher.start()));
+        String token = matcher.group();
+        Integer firstIndex = firstIndexByToken.get(token);
+        if (firstIndex == null) {
+          firstIndexByToken.put(token, index);
+          valueIndices.add(index);
+        } else {
+          valueIndices.add(firstIndex);
+        }
+        lastEnd = matcher.end();
+        index++;
+      }
+      literals.add(template.substring(lastEnd));
+      _literals = literals.toArray(new String[0]);
+      _valueIndices = new int[valueIndices.size()];
+      for (int i = 0; i < _valueIndices.length; i++) {
+        _valueIndices[i] = valueIndices.get(i);
+      }
+    }
+
+    String instantiate(String clusterName, String[] keys) {
+      StringBuilder sb = new StringBuilder();
+      sb.append(_literals[0]);
+      for (int i = 0; i < _valueIndices.length; i++) {
+        int valueIndex = _valueIndices[i];
+        sb.append(valueIndex == 0 ? clusterName : keys[valueIndex - 1]);
+        sb.append(_literals[i + 1]);
+      }
+      return sb.toString();
+    }
   }
 
   /**
@@ -206,31 +268,24 @@ public class PropertyPathBuilder {
     if (keys == null) {
       keys = new String[] {};
     }
-    String template = null;
-    if (templateMap.containsKey(type)) {
+
+    CompiledTemplate template = null;
+    Map<Integer, CompiledTemplate> templatesByKeyCount = compiledTemplateMap.get(type);
+    if (templatesByKeyCount != null) {
       // keys.length+1 since we add clusterName
-      template = templateMap.get(type).get(keys.length + 1);
+      template = templatesByKeyCount.get(keys.length + 1);
     }
 
-    String result = null;
-
-    if (template != null) {
-      result = template;
-      Matcher matcher = pattern.matcher(template);
-      int count = 0;
-      while (matcher.find()) {
-        count = count + 1;
-        String var = matcher.group();
-        if (count == 1) {
-          result = result.replace(var, clusterName);
-        } else {
-          result = result.replace(var, keys[count - 2]);
-        }
-      }
+    if (template == null) {
+      logger.warn("Unable to instantiate template: no entry for type:" + type + " using clusterName:"
+          + clusterName + " and keys:" + Arrays.toString(keys));
+      return null;
     }
-    if (result == null || result.indexOf('{') > -1 || result.indexOf('}') > -1) {
-      logger.warn("Unable to instantiate template:" + template + " using clusterName:" + clusterName
-          + " and keys:" + Arrays.toString(keys));
+
+    String result = template.instantiate(clusterName, keys);
+    if (result.indexOf('{') > -1 || result.indexOf('}') > -1) {
+      logger.warn("Unable to instantiate template:" + template._template + " using clusterName:"
+          + clusterName + " and keys:" + Arrays.toString(keys));
     }
     return result;
   }
