@@ -532,28 +532,16 @@ public class InstanceOperationMaintenanceHandler {
           writes, bytes, MAX_COMMIT_BYTES));
     }
     if (!changingByLogicalId.isEmpty()) {
-      Collection<String> changing = changingByLogicalId.values();
+      List<String> changing = new ArrayList<>(changingByLogicalId.values());
       ValidationResult verdict = _guardrail.apply(changing);
-      List<Violation> judged = verdict.isFeasible() ? new ArrayList<>()
-          : verdict.getViolations().stream()
-              .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
-      if (!verdict.isFeasible() && judged.isEmpty()) {
-        LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}",
-            operation.getOperation(), changing, clusterId, verdict.getViolations());
-        boolean minActive = isMinActive(verdict.getViolations().get(0));
-        Outcome outcome = new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
-            + (minActive ? "min-active-replica" : "rebalance-feasibility")
-            + " guardrail could not judge " + operation.getOperation() + " on the "
-            + plural(changing.size(), "instance") + " this request changes. Resend it once; if it "
-            + "comes back, " + (minActive ? "the server log says why it could not read the "
-            + "cluster's ExternalViews." : "the cluster's WAGED rebalance must be fixed."));
-        changing.forEach(instance -> outcomes.put(instance, outcome));
-      } else if (!judged.isEmpty()) {
+      List<Violation> rejection = verdict.isFeasible() ? null : judged(verdict);
+      if (!verdict.isFeasible() && rejection == null) {
+        outcomes.putAll(cannotJudge(clusterId, changing, operation.getOperation(), verdict));
+      } else if (rejection != null) {
         LOG.warn("The guardrail rejected {} on {} in cluster {}: {}", operation.getOperation(),
             changing, clusterId, verdict.getViolations());
-        Outcome outcome = new Outcome(Status.GUARDRAIL_REJECTED,
-            guardrailMessage(judged, operation.getOperation(), changing.size()));
-        changing.forEach(instance -> outcomes.put(instance, outcome));
+        outcomes.putAll(all(changing, new Outcome(Status.GUARDRAIL_REJECTED, guardrailMessage(
+            rejection, changes(operation.getOperation(), changing.size()), advice(rejection)))));
       }
     }
     if (cap != null) {
@@ -603,6 +591,29 @@ public class InstanceOperationMaintenanceHandler {
     } catch (RuntimeException e) {
       throw new UnknownCommitException(e);
     }
+  }
+
+  /**
+   * The verdict's violations that judge the change unsafe, or null when it holds none: every
+   * violation is indeterminate.
+   */
+  private static List<Violation> judged(ValidationResult verdict) {
+    List<Violation> judged = verdict.getViolations().stream()
+        .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
+    return judged.isEmpty() ? null : judged;
+  }
+
+  /** Outcomes for a check that cannot judge: every changing instance fails alike. */
+  private static Map<String, Outcome> cannotJudge(String clusterId, List<String> changing,
+      InstanceConstants.InstanceOperation operation, ValidationResult verdict) {
+    LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}", operation, changing,
+        clusterId, verdict.getViolations());
+    boolean minActive = isMinActive(verdict.getViolations().get(0));
+    return all(changing, new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
+        + (minActive ? "min-active-replica" : "rebalance-feasibility") + " guardrail could not "
+        + "judge " + changes(operation, changing.size()) + ". Resend it once; if it comes back, "
+        + (minActive ? "the server log says why it could not read the cluster's ExternalViews."
+            : "the cluster's WAGED rebalance must be fixed.")));
   }
 
   /** One line for the whole request, to show next to the per-instance outcomes. */
@@ -729,20 +740,17 @@ public class InstanceOperationMaintenanceHandler {
   }
 
   /**
-   * Says why the guardrail rejected the batch, from its structured violations. The violations' own
-   * text is written for endpoints that accept force=true, which this one does not, so only an
+   * Says why the guardrail rejected the change, from its structured violations. The violations'
+   * own text is written for endpoints that accept force=true, which this one does not, so only an
    * unrecognized violation is quoted.
    */
-  private static String guardrailMessage(List<Violation> violations,
-      InstanceConstants.InstanceOperation operation, int changing) {
+  private static String guardrailMessage(List<Violation> violations, String subject,
+      String advice) {
     Violation first = violations.get(0);
     String head = "Rejected by guardrail " + first.getRuleId() + ": ";
-    String subject = operation + " on the " + plural(changing, "instance")
-        + " this request changes";
     if (isMinActive(first)) {
       return head + subject + " would leave partition " + first.getPartitionName() + " of "
-          + "resource " + first.getResourceName() + " below its minActiveReplicas. Wait for its "
-          + "other replicas to recover, or change fewer instances at once.";
+          + "resource " + first.getResourceName() + " below its minActiveReplicas." + advice;
     }
     List<String> partitions = violations.stream().map(Violation::getPartitionName)
         .filter(Objects::nonNull).collect(Collectors.toList());
@@ -750,19 +758,26 @@ public class InstanceOperationMaintenanceHandler {
       boolean more = partitions.size() > 3 || partitions.size() < violations.size();
       return head + subject + " would leave partitions unable to place all their replicas, "
           + "including " + listed(partitions.subList(0, Math.min(3, partitions.size())), more)
-          + ". Change fewer instances at once, or add assignable capacity.";
+          + "." + advice;
     }
     String text = String.valueOf(first.getMessage());
     if (text.startsWith("Applying ")
         && text.contains("makes the WAGED rebalancer unable to compute")) {
       return head + subject + " would leave WAGED unable to compute any assignment for the "
-          + "cluster. Change fewer instances at once, or add assignable capacity.";
+          + "cluster." + advice;
     }
-    return head + clip(oneLine(text), 500);
+    return head + clip(oneLine(text), 500) + advice;
   }
 
   private static boolean isMinActive(Violation violation) {
     return InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID.equals(violation.getRuleId());
+  }
+
+  /** What to do about a change the violations reject. */
+  private static String advice(List<Violation> violations) {
+    return isMinActive(violations.get(0))
+        ? " Wait for its other replicas to recover, or change fewer instances at once."
+        : " Change fewer instances at once, or add assignable capacity.";
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
@@ -778,6 +793,10 @@ public class InstanceOperationMaintenanceHandler {
 
   private static String plural(long count, String noun) {
     return count + " " + noun + (count == 1 ? "" : "s");
+  }
+
+  private static String changes(InstanceConstants.InstanceOperation operation, int changing) {
+    return operation + " on the " + plural(changing, "instance") + " this request changes";
   }
 
   /** The marker cap and its live markers; unlimited when no cap is set. */

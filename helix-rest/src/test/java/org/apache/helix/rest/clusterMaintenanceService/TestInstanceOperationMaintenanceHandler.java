@@ -694,20 +694,19 @@ public class TestInstanceOperationMaintenanceHandler {
 
     // Failures name no partition, and their own text points at force=true, which this endpoint
     // does not take.
-    String subject = "EVACUATE on the 1 instance this request changes";
+    String advice = " Change fewer instances at once, or add assignable capacity.";
     Assert.assertEquals(guardrailMessage("Applying EVACUATE to [h] makes the WAGED rebalancer "
         + "unable to compute an assignment for cluster c (boom). ... retry with force=true ..."),
-        "Rejected by guardrail RULE: " + subject + " would leave WAGED unable to compute any "
-            + "assignment for the cluster. Change fewer instances at once, or add assignable "
-            + "capacity.");
+        "Rejected by guardrail RULE: EVACUATE on the 1 instance this request changes would leave "
+            + "WAGED unable to compute any assignment for the cluster." + advice);
     // Text it does not know is quoted, never guessed at, on one bounded line.
     Assert.assertEquals(guardrailMessage("Some\n new   verdict."),
-        "Rejected by guardrail RULE: Some new verdict.");
+        "Rejected by guardrail RULE: Some new verdict." + advice);
     char[] longText = new char[600];
     Arrays.fill(longText, 'v');
     String clipped = guardrailMessage(new String(longText));
     Assert.assertEquals(clipped, "Rejected by guardrail RULE: " + new String(longText, 0, 497)
-        + "...");
+        + "..." + advice);
   }
 
   @Test
