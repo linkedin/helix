@@ -1128,6 +1128,8 @@ public class TestInstancesAccessor extends AbstractTestClass {
     Assert.assertEquals(operations.get(1).get("source").asText(), "AUTOMATION");
     Assert.assertEquals(operations.get(1).get("reason").asText(), "moving off");
     Assert.assertTrue(operations.get(1).get("timestamp").asLong() > 0);
+    long createdAtMillis = live.get("createdAtMillis").asLong();
+    Assert.assertTrue(createdAtMillis > 0 && createdAtMillis <= System.currentTimeMillis());
     Assert.assertEquals(live.get("domain").asText(), "zone=z1,host=isInstance0");
     Assert.assertEquals(live.get("tags").get(0).asText(), "tagA");
     Assert.assertEquals(live.get("capacity").get("CPU").asInt(), 100);

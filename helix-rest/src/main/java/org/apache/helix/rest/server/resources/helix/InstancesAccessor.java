@@ -44,6 +44,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.helix.AccessOption;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
@@ -68,6 +69,7 @@ import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -403,6 +405,7 @@ public class InstancesAccessor extends AbstractHelixResource {
    *                       "reason": "bad disk", "timestamp": 1776385000000 } ],
    *                   "domain": "zone=z1,host=h1",
    *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 },
+   *                   "createdAtMillis": 1776380000000,
    *                   "maintenanceMarkerExpiresAtMillis": 1776385800000 } } }
    * }</pre>
    *
@@ -416,6 +419,10 @@ public class InstancesAccessor extends AbstractHelixResource {
    * {@code capacity} is the WAGED instance capacity map, empty when unset or unparsable.
    * {@code instanceOperations} lists every stored operation, one per source, oldest first, so a
    * client can see which sources hold the instance and since when; the last one is the active one.
+   * An operation timestamp of -1 means it was set when the instance config was created (the INIT
+   * operation or the default ENABLE), so {@code createdAtMillis}, the creation time of the
+   * instance config znode, is the time to show for it. It is omitted when ZooKeeper did not
+   * report one.
    */
   private Response getInstanceSummaries(String clusterId, HelixDataAccessor accessor) {
     try {
@@ -444,6 +451,20 @@ public class InstancesAccessor extends AbstractHelixResource {
         }
       }
 
+      // The config znode's creation time is not part of the bulk config read above.
+      List<String> instanceNames = new ArrayList<>(sortedConfigs.keySet());
+      Map<String, Stat> configStats = new HashMap<>();
+      if (!instanceNames.isEmpty()) {
+        Stat[] stats = accessor.getBaseDataAccessor().getStats(instanceNames.stream()
+            .map(name -> keyBuilder.instanceConfig(name).getPath()).collect(Collectors.toList()),
+            AccessOption.PERSISTENT);
+        for (int i = 0; i < stats.length; i++) {
+          if (stats[i] != null) {
+            configStats.put(instanceNames.get(i), stats[i]);
+          }
+        }
+      }
+
       ObjectNode root = JsonNodeFactory.instance.objectNode();
       root.put(Properties.id.name(), clusterId);
       ObjectNode summariesNode = root.putObject(InstancesProperties.instance_summaries.name());
@@ -456,6 +477,10 @@ public class InstancesAccessor extends AbstractHelixResource {
         instanceNode.put("instanceOperation",
             instanceConfig.getInstanceOperation().getOperation().name());
         putInstanceOperations(instanceNode.putArray("instanceOperations"), instanceConfig);
+        Stat configStat = configStats.get(entry.getKey());
+        if (configStat != null) {
+          instanceNode.put("createdAtMillis", configStat.getCtime());
+        }
         instanceNode.put("domain", instanceConfig.getDomainAsString());
         ArrayNode tagsNode = instanceNode.putArray("tags");
         instanceConfig.getTags().forEach(tagsNode::add);
