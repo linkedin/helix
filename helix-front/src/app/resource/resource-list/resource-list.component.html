@@ -18,12 +18,37 @@
   -->
 
 <section>
+  <ng-container *ngIf="!isForInstance">
+    <hi-list-status
+      [loading]="isLoading"
+      [error]="error"
+      [count]="resources ? resources.length : null"
+      [updated]="updated"
+      label="resources"
+      emptyText="No resources match this filter."
+      (refresh)="reload()"
+    ></hi-list-status>
+    <div class="filter-bar">
+      <button
+        *ngFor="let f of filters"
+        type="button"
+        class="filter-chip"
+        [attr.data-filter]="f.filter"
+        [class.active]="filter === f.filter"
+        [attr.aria-pressed]="filter === f.filter"
+        (click)="setFilter(f.filter)"
+      >
+        {{ f.label }} ({{ count(f.filter) }})
+      </button>
+    </div>
+  </ng-container>
   <ngx-datatable
     #resourcesTable
     class="material"
     [headerHeight]="headerHeight"
     [rowHeight]="rowHeight"
-    columnMode="force"
+    [columnMode]="isForInstance ? 'force' : 'standard'"
+    [scrollbarH]="!isForInstance"
     [footerHeight]="rowHeight"
     [rows]="resources"
     selectionType="single"
@@ -45,7 +70,7 @@
         <mat-icon
           *ngIf="!value"
           color="warn"
-          matTooltip="The resource is offline."
+          matTooltip="No external view is published for this resource yet."
           >panorama_fish_eye</mat-icon
         >
       </ng-template>
@@ -62,7 +87,59 @@
         <mat-icon>{{ expanded ? 'expand_more' : 'chevron_right' }}</mat-icon>
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Name"></ngx-datatable-column>
+    <ngx-datatable-column name="Name" [width]="300">
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <section fxLayout="row" fxLayoutAlign="start center">
+          {{ row.name }}
+          <hi-disabled-label
+            *ngIf="!isForInstance && row.enabled === false"
+            text="DISABLED"
+          ></hi-disabled-label>
+        </section>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="Type"
+      prop="waged"
+      [width]="110"
+    >
+      <ng-template let-value="value" ngx-datatable-cell-template>
+        <span class="type-chip" [class.waged]="value">{{
+          value ? 'WAGED' : 'Not WAGED'
+        }}</span>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="Rebalance mode"
+      prop="rebalanceMode"
+      [width]="140"
+    ></ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="State model"
+      prop="stateModelDef"
+      [width]="150"
+    ></ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="Partitions"
+      prop="numPartitions"
+      [width]="100"
+    ></ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="Replicas"
+      prop="replicas"
+      [width]="100"
+    ></ngx-datatable-column>
+    <ngx-datatable-column
+      *ngIf="!isForInstance"
+      name="Tag"
+      prop="instanceGroupTag"
+      [width]="120"
+    ></ngx-datatable-column>
     <ngx-datatable-row-detail rowHeight="auto">
       <ng-template let-row="row" ngx-datatable-row-detail-template>
         <hi-resource-detail-for-instance
