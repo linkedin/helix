@@ -1,0 +1,177 @@
+<section class="capacity">
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="snapshot ? snapshot.instances.length : null"
+    [updated]="updated"
+    label="instances"
+    loadingText="Reading the cluster. A cold read can take a minute or two."
+    emptyText="This cluster has no instances."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <ng-container *ngIf="snapshot">
+    <div class="controls">
+      <input
+        class="search"
+        type="search"
+        placeholder="Search domains or instances"
+        aria-label="Search domains or instances"
+        [ngModel]="query"
+        (ngModelChange)="setQuery($event)"
+      />
+      <button type="button" class="chip" (click)="expandAll(true)">
+        Expand all
+      </button>
+      <button type="button" class="chip" (click)="expandAll(false)">
+        Collapse all
+      </button>
+      <ng-container *ngIf="snapshot.capacityKeys.length">
+        <span class="controls-label">Capacity key</span>
+        <button
+          *ngFor="let k of snapshot.capacityKeys"
+          type="button"
+          class="chip"
+          [class.active]="key === k"
+          [attr.aria-pressed]="key === k"
+          (click)="key = k"
+        >
+          {{ k }}
+        </button>
+      </ng-container>
+    </div>
+
+    <p class="footnote" data-testid="read-times">
+      Domains were read at {{ utc(domainsReadAt) }}. Capacity, live state and
+      ERROR counts are from the sample taken at {{ utc(updated) }}, so an
+      instance moved to another domain after that sample shows its old numbers
+      under the new group.
+    </p>
+
+    <p class="empty" *ngIf="!snapshot.capacityKeys.length">
+      This cluster does not define WAGED capacity keys, so no capacity usage is
+      shown.
+    </p>
+    <p class="empty" *ngIf="query.trim() && !rows.length">
+      No domain or instance matches "{{ query.trim() }}".
+    </p>
+
+    <table class="capacity-table">
+      <thead>
+        <tr>
+          <th>Domain / instance</th>
+          <th>Instances</th>
+          <th>Live</th>
+          <th>Operation</th>
+          <th class="util-col" *ngIf="key">Worst {{ key }} used / max</th>
+          <th *ngIf="key">Average {{ key }}</th>
+          <th>ERROR replicas</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr
+          *ngFor="let row of rows; trackBy: trackRow"
+          [attr.data-node]="row.node.id"
+          [class.group]="!row.node.instance"
+        >
+          <td [style.padding-left.px]="8 + row.depth * 20">
+            <ng-container *ngIf="row.node.instance as instance; else group">
+              <a
+                class="instance-link"
+                [routerLink]="['../instances', instance.name]"
+                [attr.title]="'Open ' + instance.name"
+                ><mat-icon>dns</mat-icon>{{ instance.name }}</a
+              >
+              <span
+                *ngIf="!instance.registered"
+                class="tag"
+                title="Appears in an external view but has no instance config."
+                >unregistered</span
+              >
+            </ng-container>
+            <ng-template #group>
+              <button
+                type="button"
+                class="toggle"
+                [disabled]="!!query.trim()"
+                [attr.aria-expanded]="row.open"
+                (click)="toggle(row.node)"
+              >
+                <mat-icon>{{
+                  row.open ? 'expand_more' : 'chevron_right'
+                }}</mat-icon>
+              </button>
+              <span class="key" *ngIf="row.node.key">{{ row.node.key }}</span>
+              {{ row.node.label }}
+            </ng-template>
+          </td>
+          <td>{{ row.node.instance ? '' : row.node.stats.instances }}</td>
+          <td>
+            <span
+              *ngIf="row.node.instance as instance; else liveCount"
+              class="tag"
+              [class.off]="!instance.live"
+              >{{ instance.live ? 'live' : 'offline' }}</span
+            >
+            <ng-template #liveCount>
+              {{ row.node.stats.live }} / {{ row.node.stats.instances }}
+            </ng-template>
+          </td>
+          <td>
+            <span
+              *ngIf="row.node.instance as instance; else operations"
+              class="tag"
+              [class.off]="instance.operation !== 'ENABLE'"
+              >{{ instance.operation || 'no config' }}</span
+            >
+            <ng-template #operations>
+              {{ row.node.stats.enabled }} enabled
+              <span class="tag off" *ngIf="row.node.stats.disabled"
+                >{{ row.node.stats.disabled }} disabled</span
+              >
+              <span class="tag off" *ngIf="row.node.stats.evacuating"
+                >{{ row.node.stats.evacuating }} evacuating</span
+              >
+            </ng-template>
+          </td>
+          <td class="util-col" *ngIf="key">
+            <ng-container *ngIf="usage(row.node) as u">
+              <div class="bar" *ngIf="u.worst !== null">
+                <div
+                  class="fill"
+                  [class.over]="u.worst > 1"
+                  [class.hot]="u.worst > 0.85 && u.worst <= 1"
+                  [style.width.%]="min(u.worst * 100, 100)"
+                ></div>
+              </div>
+              <span class="ratio" [class.over]="u.worst > 1">{{
+                pct(u.worst)
+              }}</span>
+              <span class="sub" *ngIf="row.node.instance && u.worst !== null"
+                >{{ u.used }} / {{ u.max }}</span
+              >
+              <span class="sub" *ngIf="!row.node.instance && u.unknown"
+                >{{ u.unknown }} unknown</span
+              >
+            </ng-container>
+          </td>
+          <td *ngIf="key">
+            {{ row.node.instance ? '' : averageText(row.node) }}
+          </td>
+          <td [class.err]="row.node.stats.errorReplicas">
+            {{ row.node.stats.errorReplicas || '' }}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="footnote">
+      Groups follow the key=value pairs of each instance DOMAIN, in the order
+      they are written. Worst is the highest used / max of one instance and
+      average is the group total used over total max. Both skip instances whose
+      usage or capacity is unknown and count them as unknown, never as zero.
+      Used is the sum of WAGED partition weights over the last published
+      external view.
+    </p>
+  </ng-container>
+</section>

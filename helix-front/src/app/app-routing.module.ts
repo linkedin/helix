@@ -17,6 +17,7 @@ import { WorkflowListComponent } from './workflow/workflow-list/workflow-list.co
 import { WorkflowDetailComponent } from './workflow/workflow-detail/workflow-detail.component';
 import { HelixListComponent } from './chooser/helix-list/helix-list.component';
 import { DashboardComponent } from './dashboard/dashboard.component';
+import { TopologyComponent } from './topology/topology.component';
 import { CapacityOverviewComponent } from './capacity/capacity-overview/capacity-overview.component';
 import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
 import { ClusterDiagnosticsComponent } from './diagnostics/cluster-diagnostics/cluster-diagnostics.component';
@@ -64,6 +65,7 @@ const HELIX_ROUTES: Routes = [
             path: 'dashboard',
             component: DashboardComponent,
           },
+          { path: 'topology', component: TopologyComponent },
           {
             path: 'capacity',
             component: CapacityOverviewComponent,
