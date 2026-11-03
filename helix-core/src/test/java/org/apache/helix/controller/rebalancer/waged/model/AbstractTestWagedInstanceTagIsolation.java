@@ -20,6 +20,7 @@ package org.apache.helix.controller.rebalancer.waged.model;
  */
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -62,6 +63,8 @@ abstract class AbstractTestWagedInstanceTagIsolation {
   protected static final int NODES_PER_CLIQUE = 10;
   protected static final int PARTITIONS_PER_RESOURCE = 10;
   protected static final String CAPACITY_KEY = "DISK";
+  // The second capacity key of the two key fixtures.
+  protected static final String CPU = "CPU";
   protected static final int NODE_CAPACITY = 100;
   protected static final int HEALTHY_PARTITION_WEIGHT = 10;
   // Larger than a single node's capacity, so NodeCapacityConstraint rejects every node in the
@@ -235,6 +238,33 @@ abstract class AbstractTestWagedInstanceTagIsolation {
       replicas.add(new AssignableReplica(clusterConfig, resourceConfig,
           resourceConfig.getResourceName() + "_" + p, "ONLINE", 0));
     }
+  }
+
+  /** A cluster config with DISK and CPU as its capacity keys. */
+  protected ClusterConfig twoKeyConfig(boolean tagIsolationEnabled) {
+    ClusterConfig config = createClusterConfig(tagIsolationEnabled);
+    config.setInstanceCapacityKeys(Arrays.asList(CAPACITY_KEY, CPU));
+    config.setDefaultPartitionWeightMap(diskAndCpu(0, 0));
+    return config;
+  }
+
+  protected ResourceConfig twoKeyResource(String name, String tag, int disk, int cpu)
+      throws IOException {
+    ResourceConfig resource = taggedResource(name, tag, disk);
+    resource.setPartitionCapacityMap(
+        Collections.singletonMap(ResourceConfig.DEFAULT_PARTITION_KEY, diskAndCpu(disk, cpu)));
+    return resource;
+  }
+
+  protected static Map<String, Integer> diskAndCpu(int disk, int cpu) {
+    Map<String, Integer> capacity = new HashMap<>();
+    capacity.put(CAPACITY_KEY, disk);
+    capacity.put(CPU, cpu);
+    return capacity;
+  }
+
+  protected static Set<String> set(String... values) {
+    return new HashSet<>(Arrays.asList(values));
   }
 
   protected static AssignableNode taggedNode(ClusterConfig clusterConfig, String instance,

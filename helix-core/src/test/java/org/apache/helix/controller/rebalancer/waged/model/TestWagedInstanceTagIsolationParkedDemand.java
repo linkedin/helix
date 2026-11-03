@@ -19,29 +19,24 @@ package org.apache.helix.controller.rebalancer.waged.model;
  * under the License.
  */
 
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.model.ResourceConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 /**
  * Capacity deficits in the delayed overwrite scope, whose model leaves out nodes still offline
- * inside their delay window. Replicas parked on those nodes count toward the totals but are not
- * placed here, so each clique is first judged without them. See
- * {@link AbstractTestWagedInstanceTagIsolation} for the shared fixture.
+ * inside their delay window. Replicas parked on those nodes, like those no assignment lists yet,
+ * count toward the totals but are not placed here, so each clique is first judged without them.
+ * See {@link AbstractTestWagedInstanceTagIsolation} for the shared fixture.
  */
 public class TestWagedInstanceTagIsolationParkedDemand
     extends AbstractTestWagedInstanceTagIsolation {
-  private static final String CPU = "CPU";
   private static final String HEALTHY = "RH";
   private static final String REBALANCED = "RG";
   private static final String BROKEN = "RY";
@@ -226,6 +221,48 @@ public class TestWagedInstanceTagIsolationParkedDemand
     Assert.assertEquals(createAlgorithm().calculate(
             parkedCliques(true, new int[] {100, 200, 65, 75}, new int[] {100, 100, 45, 70},
                 new int[] {100, 100, 45, 45})).getSkippedResources(), set("RA", "RB"));
+  }
+
+  /**
+   * x1 carries no tag and holds three RA replicas of 30, 90 on 50, so its block is over without
+   * any parked replica. Clique Y needs 80 of its 100 here and 240 with its parked replicas.
+   * Skipping x1's block alone leaves the cluster 30 short, so Y is skipped too, and x1's block,
+   * which holds no group, skips no resource.
+   */
+  @Test
+  public void testNodeNoGroupReachesIsSkippedWithAParkedClique() throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(createClusterConfig(true))
+        .liveNode("a1", 100, "A").liveNode("a2", 100, "A").liveNode("x1", 50)
+        .liveNode("y1", 100, "Y")
+        .resource(taggedResource("RA", "A", 30), 3, 2, 1)
+        .current("RA", 0, "a1", "x1").current("RA", 1, "a2", "x1").current("RA", 2, "a1", "x1")
+        .resource(taggedResource(BROKEN, "Y", 40), 3, 2, 1)
+        .current(BROKEN, 0, "y1", "y2").current(BROKEN, 1, "y2", "y3");
+    Assert.assertEquals(createAlgorithm().calculate(cluster.build()).getSkippedResources(),
+        set(BROKEN));
+  }
+
+  /**
+   * h1 still holds RH_9, a partition RH no longer has, and h2 a replica of RZ, which has no
+   * partition left. The delayed overwrite model keeps every replica the current assignment names,
+   * but the totals count neither, so neither is charged to a clique.
+   */
+  @Test
+  public void testReplicasNoLongerManagedAreIgnored() throws Exception {
+    DelayedOverwriteCluster cluster = new DelayedOverwriteCluster(createClusterConfig(true))
+        .liveNode("h1", 100, "H").liveNode("h2", 100, "H").liveNode("y1", 100, "Y")
+        .resource(taggedResource(HEALTHY, "H", 10), 4, 1, 1)
+        .resource(taggedResource("RZ", "H", 10), 0, 1, 1)
+        .resource(taggedResource(BROKEN, "Y", 100), 3, 1, 1)
+        .current(HEALTHY, 9, "h1").current("RZ", 0, "h2");
+    for (int p = 0; p < 4; p++) {
+      cluster.current(HEALTHY, p, p % 2 == 0 ? "h1" : "h2");
+    }
+    for (int p = 0; p < 3; p++) {
+      cluster.current(BROKEN, p, "y1");
+    }
+    Assert.assertEquals(createAlgorithm().calculate(cluster.build()).getSkippedResources(),
+        set(BROKEN));
   }
 
   /** RH_0 is topped up to min active on h3, and every RH partition stays on H's live nodes. */
@@ -438,34 +475,8 @@ public class TestWagedInstanceTagIsolationParkedDemand
     return cluster;
   }
 
-  private ClusterConfig twoKeyConfig(boolean enabled) {
-    ClusterConfig config = createClusterConfig(enabled);
-    config.setInstanceCapacityKeys(Arrays.asList(CAPACITY_KEY, CPU));
-    config.setDefaultPartitionWeightMap(diskAndCpu(0, 0));
-    return config;
-  }
-
-  private ResourceConfig twoKeyResource(String name, String tag, int disk, int cpu)
-      throws Exception {
-    ResourceConfig resource = taggedResource(name, tag, disk);
-    resource.setPartitionCapacityMap(
-        Collections.singletonMap(ResourceConfig.DEFAULT_PARTITION_KEY, diskAndCpu(disk, cpu)));
-    return resource;
-  }
-
-  private static Map<String, Integer> diskAndCpu(int disk, int cpu) {
-    Map<String, Integer> capacity = new HashMap<>();
-    capacity.put(CAPACITY_KEY, disk);
-    capacity.put(CPU, cpu);
-    return capacity;
-  }
-
   private static Set<String> replicasOn(ResourceAssignment assignment, int partition) {
     return assignment.getReplicaMap(
         new Partition(assignment.getResourceName() + "_" + partition)).keySet();
-  }
-
-  private static Set<String> set(String... values) {
-    return new HashSet<>(Arrays.asList(values));
   }
 }

@@ -177,6 +177,27 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     }
   }
 
+  /** A cluster asked for exactly what it holds is not short, with the flag off or on. */
+  @Test
+  public void testExactlyFullClusterIsNotADeficit() throws HelixRebalanceException, IOException {
+    for (boolean enabled : new boolean[] {false, true}) {
+      ClusterConfig config = createClusterConfig(enabled);
+      Set<AssignableNode> nodes = new HashSet<>(
+          Arrays.asList(taggedNode(config, "n0", cliqueTag(0)), taggedNode(config, "n1",
+              cliqueTag(0))));
+      Set<AssignableReplica> replicas = new HashSet<>();
+      addReplicas(replicas, config, taggedResource("RA", cliqueTag(0), 20), 10);
+      ClusterContext context = new ClusterContext(replicas, nodes, Collections.emptyMap(),
+          Collections.emptyMap(), config);
+      Assert.assertEquals(context.getEstimateUtilizationMap().get(CAPACITY_KEY).longValue(), 0L);
+      OptimalAssignment result = createAlgorithm().calculate(new ClusterModel(context, replicas,
+          nodes, ClusterModel.RebalanceScopeType.GLOBAL_BASELINE));
+      Assert.assertEquals(
+          result.getOptimalResourceAssignment().get("RA").getMappedPartitions().size(), 10,
+          "enabled=" + enabled);
+    }
+  }
+
   /**
    * When every clique is oversubscribed there is nothing left to rebalance, so the original cluster
    * wide capacity deficit is reported unchanged instead of an empty assignment being returned.
@@ -335,6 +356,46 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     Assert.assertTrue(context.getEstimateUtilizationMap().get(CAPACITY_KEY) < 0,
         "Precondition: the tag blind cluster wide capacity check must be in deficit");
     return new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL);
+  }
+
+  /**
+   * n0 and n0b of clique 0 each hold an R0 replica of 40, so each has 60 left. R1_0 (60) on n0
+   * fits exactly and moves to clique 0. R1_1 (70) on n0b does not, so clique 1 holds 120 on its
+   * 120. Clique 2 is far over and is the only one skipped.
+   */
+  @Test
+  public void testReplicasLeftOnAnotherCliquesNodeMoveOnlyAsFarAsTheRoomLeft()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig config = createClusterConfig(true);
+    AssignableNode n0 = taggedNode(config, "n0", cliqueTag(0));
+    AssignableNode n0b = taggedNode(config, "n0b", cliqueTag(0));
+    Set<AssignableNode> nodes = new HashSet<>(Arrays.asList(n0, n0b,
+        sizedNode(config, "m0", 120, cliqueTag(1)), taggedNode(config, "k0", cliqueTag(2))));
+    ResourceConfig r0 = taggedResource("R0", cliqueTag(0), 40);
+    ResourceConfig r1 = taggedResource("R1", cliqueTag(1), 50);
+    Map<String, Map<String, Integer>> r1Weights = new HashMap<>();
+    r1Weights.put(ResourceConfig.DEFAULT_PARTITION_KEY, Collections.singletonMap(CAPACITY_KEY, 50));
+    r1Weights.put("R1_0", Collections.singletonMap(CAPACITY_KEY, 60));
+    r1Weights.put("R1_1", Collections.singletonMap(CAPACITY_KEY, 70));
+    r1.setPartitionCapacityMap(r1Weights);
+    AssignableReplica r00 = new AssignableReplica(config, r0, "R0_0", "ONLINE", 0);
+    AssignableReplica r01 = new AssignableReplica(config, r0, "R0_1", "ONLINE", 0);
+    AssignableReplica r10 = new AssignableReplica(config, r1, "R1_0", "ONLINE", 0);
+    AssignableReplica r11 = new AssignableReplica(config, r1, "R1_1", "ONLINE", 0);
+    n0.assignInitBatch(Arrays.asList(r00, r10));
+    n0b.assignInitBatch(Arrays.asList(r01, r11));
+    Set<AssignableReplica> toBeAssigned = new HashSet<>();
+    toBeAssigned.add(new AssignableReplica(config, r1, "R1_2", "ONLINE", 0));
+    addReplicas(toBeAssigned, config, taggedResource("R2", cliqueTag(2), NODE_CAPACITY), 3);
+    Set<AssignableReplica> everything = new HashSet<>(toBeAssigned);
+    everything.addAll(Arrays.asList(r00, r01, r10, r11));
+    ClusterContext context = new ClusterContext(everything, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), config);
+
+    OptimalAssignment result = createAlgorithm().calculate(
+        new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL));
+
+    Assert.assertEquals(result.getSkippedResources(), Collections.singleton("R2"));
   }
 
   /**
@@ -548,6 +609,81 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
         Collections.emptyMap(), clusterConfig);
     return new ClusterModel(context, replicas, nodes,
         ClusterModel.RebalanceScopeType.GLOBAL_BASELINE);
+  }
+
+  /**
+   * Cliques S and T fit, with top states and three resources of different sizes. RX of clique S
+   * sits on spare_0 of a two node spare pool, more than spare_0 holds but less than the pool.
+   * Clique B is far over, and clique A over by exactly 1 DISK with nothing parked, which the rest
+   * does not need skipped. Both are skipped, and every scoring estimate is then that of a cluster
+   * made of S, T and the pool alone.
+   */
+  @Test
+  public void testCliquesLeftAfterADeficitGetTheEstimatesOfAClusterOfTheirOwn()
+      throws HelixRebalanceException, IOException {
+    ClusterConfig config = twoKeyConfig(true);
+    Set<AssignableNode> restNodes = new HashSet<>();
+    for (int i = 0; i < 3; i++) {
+      restNodes.add(sizedNode(config, "s" + i, diskAndCpu(100, 100), "S"));
+    }
+    for (int i = 0; i < 2; i++) {
+      restNodes.add(sizedNode(config, "t" + i, diskAndCpu(50, 200), "T"));
+    }
+    AssignableNode spare = sizedNode(config, "spare_0", diskAndCpu(30, 30), "spare");
+    restNodes.add(spare);
+    restNodes.add(sizedNode(config, "spare_1", diskAndCpu(100, 100), "spare"));
+    Set<AssignableNode> nodes = new HashSet<>(restNodes);
+    nodes.add(sizedNode(config, "b0", diskAndCpu(100, 100), "B"));
+    nodes.add(sizedNode(config, "a0", diskAndCpu(50, 100), "A"));
+
+    Set<AssignableReplica> toBeAssigned = new HashSet<>();
+    addStateful(toBeAssigned, config, twoKeyResource("RM", "S", 7, 3), 6, "MASTER", "SLAVE",
+        "SLAVE");
+    addStateful(toBeAssigned, config, twoKeyResource("RT", "S", 4, 13), 5, "LEADER", "STANDBY");
+    addStateful(toBeAssigned, config, twoKeyResource("RQ", "T", 6, 20), 7, "MASTER", "SLAVE");
+    Set<AssignableReplica> stale = new HashSet<>();
+    addStateful(stale, config, twoKeyResource("RX", "S", 11, 9), 3, "ONLINE");
+    spare.assignInitBatch(stale);
+    Set<AssignableReplica> rest = new HashSet<>(toBeAssigned);
+    rest.addAll(stale);
+    addStateful(toBeAssigned, config, twoKeyResource("RB", "B", 20, 1), 40, "MASTER");
+    addStateful(toBeAssigned, config, twoKeyResource("RA", "A", 51, 1), 1, "MASTER");
+    Set<AssignableReplica> everything = new HashSet<>(toBeAssigned);
+    everything.addAll(stale);
+    ClusterContext context = new ClusterContext(everything, nodes, Collections.emptyMap(),
+        Collections.emptyMap(), config);
+    Assert.assertTrue(context.getEstimateUtilizationMap().get(CAPACITY_KEY) < 0,
+        "Precondition: the tag blind cluster wide capacity check must be in deficit");
+
+    OptimalAssignment result = createAlgorithm().calculate(
+        new ClusterModel(context, toBeAssigned, nodes, ClusterModel.RebalanceScopeType.PARTIAL));
+
+    Assert.assertEquals(result.getSkippedResources(), set("RA", "RB"));
+    ClusterContext alone = new ClusterContext(rest, restNodes, Collections.emptyMap(),
+        Collections.emptyMap(), twoKeyConfig(false));
+    Assert.assertEquals(context.getEstimatedMaxUtilization(), alone.getEstimatedMaxUtilization());
+    Assert.assertEquals(context.getEstimatedTopStateMaxUtilization(),
+        alone.getEstimatedTopStateMaxUtilization());
+    Assert.assertEquals(context.getEstimatedMaxPartitionCount(),
+        alone.getEstimatedMaxPartitionCount());
+    Assert.assertEquals(context.getEstimatedMaxTopStateCount(),
+        alone.getEstimatedMaxTopStateCount());
+    for (String resource : Arrays.asList("RM", "RT", "RQ", "RX")) {
+      Assert.assertEquals(context.getEstimatedMaxPartitionByResource(resource),
+          alone.getEstimatedMaxPartitionByResource(resource), resource);
+    }
+  }
+
+  /** Adds one replica per state per partition. The first state is the top state, except ONLINE. */
+  private static void addStateful(Set<AssignableReplica> replicas, ClusterConfig config,
+      ResourceConfig resource, int partitions, String... states) {
+    for (int p = 0; p < partitions; p++) {
+      for (int s = 0; s < states.length; s++) {
+        int priority = s == 0 && !"ONLINE".equals(states[s]) ? 1 : 2;
+        replicas.add(new AssignableReplica(config, resource,
+            resource.getResourceName() + "_" + p, states[s], priority));
+      }
+    }
   }
 
   private static AssignableNode twoKeyNode(ClusterConfig clusterConfig, String instance,
