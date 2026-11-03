@@ -19,7 +19,9 @@
 
 package org.apache.helix.guardrail.rules;
 
-import java.util.Collections;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
@@ -54,6 +56,9 @@ import org.apache.helix.util.MinActiveReplicaCheckResult;
  * underlying check: with no placement they are not hosted on the instance and cannot be driven below
  * their minimum by disabling it.
  * <p>
+ * A batch ({@link GuardrailContext#getInstanceNames()}) drains every instance at once, so each one
+ * is checked with the others presumed stopped.
+ * <p>
  * This is a pure, read-only function of its {@link GuardrailContext}: it performs no ZooKeeper writes
  * and, being always-on, needs no cluster-config opt-in. If the injected checker throws, the
  * {@code GuardrailPipeline} treats it as a (force-able) violation, so the guard fails closed.
@@ -68,8 +73,8 @@ public class InstanceDisableMinActiveReplicaGuardrailRule implements GuardrailRu
 
   @Override
   public ValidationResult validate(GuardrailContext context) {
-    String instanceName = context.getInstanceName();
-    if (instanceName == null) {
+    Collection<String> instanceNames = context.getInstanceNames();
+    if (instanceNames.isEmpty()) {
       // No target instance to evaluate; nothing for this rule to certify.
       return ValidationResult.feasible();
     }
@@ -82,14 +87,22 @@ public class InstanceDisableMinActiveReplicaGuardrailRule implements GuardrailRu
       return ValidationResult.feasible();
     }
 
-    // Single-instance disable: only this instance's replicas stop serving, so no other instance is
-    // presumed stopped.
-    MinActiveReplicaCheckResult result = checker.check(instanceName, Collections.emptySet());
-    if (result.isPassed()) {
-      return ValidationResult.feasible();
+    for (String instanceName : instanceNames) {
+      Set<String> others = new HashSet<>(instanceNames);
+      others.remove(instanceName);
+      MinActiveReplicaCheckResult result = checker.check(instanceName, others);
+      if (!result.isPassed()) {
+        return ValidationResult.infeasible(violation(instanceName, others, result));
+      }
     }
+    return ValidationResult.feasible();
+  }
 
-    Violation violation = Violation.newBuilder(RULE_ID)
+  private static Violation violation(String instanceName, Set<String> others,
+      MinActiveReplicaCheckResult result) {
+    String draining = others.isEmpty() ? instanceName
+        : instanceName + " together with " + others;
+    return Violation.newBuilder(RULE_ID)
         .resource(result.getResourceName())
         .partition(result.getPartitionName())
         .message(String.format(
@@ -99,9 +112,8 @@ public class InstanceDisableMinActiveReplicaGuardrailRule implements GuardrailRu
                 + "minActiveReplicas until the controller can recover it elsewhere, risking reduced "
                 + "availability or loss of its top state. Wait for the partition to recover or add "
                 + "capacity before retrying, or pass force=true to override.",
-            instanceName, result.getResourceName(), result.getPartitionName(),
+            draining, result.getResourceName(), result.getPartitionName(),
             result.getCurrentActiveReplicas(), result.getRequiredMinActiveReplicas()))
         .build();
-    return ValidationResult.infeasible(violation);
   }
 }
