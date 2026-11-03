@@ -515,183 +515,233 @@ public class InstanceOperationMaintenanceHandler {
   private Map<String, Outcome> tryCommit(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs,
       Set<String> hint, Budget budget) {
-    List<String> paths = instances.stream()
-        .map(instance -> PropertyPathBuilder.instanceConfig(clusterId, instance))
-        .collect(Collectors.toList());
-    String clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterId);
-    Stat clusterStat = new Stat();
-    ZNRecord clusterRecord = _accessor.get(clusterConfigPath, clusterStat,
-        AccessOption.PERSISTENT);
-    List<Stat> stats = new ArrayList<>();
-    List<ZNRecord> records = _accessor.get(paths, stats, AccessOption.PERSISTENT, true);
-    if (clusterRecord == null) {
-      throw new BadRequestException("Cluster " + clusterId + " does not exist.");
-    }
-    ClusterConfig clusterConfig = new ClusterConfig(clusterRecord);
-    String logicalIdKey = operation == null ? null
-        : ClusterTopologyConfig.createFromClusterConfig(clusterConfig).getEndNodeType();
-    long nowMs = System.currentTimeMillis();
-    MarkerCap cap = null;
-    int newMarkers = 0;
-    Set<String> tookMarker = new HashSet<>();
-    Map<String, String> changingByLogicalId = new LinkedHashMap<>();
-    Map<String, Outcome> outcomes = new LinkedHashMap<>();
-    // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
-    Map<String, Op> staged = new LinkedHashMap<>();
-    Map<String, Integer> writeBytes = new HashMap<>();
+    Attempt attempt = new Attempt(clusterId, instances, operation, expiresAt);
     for (int i = 0; i < instances.size(); i++) {
-      String instance = instances.get(i);
-      if (records.get(i) == null) {
-        outcomes.put(instance, new Outcome(Status.INSTANCE_NOT_FOUND,
-            "No such instance in cluster " + clusterId + ". Check the instance name, and whether "
-                + "it has been added to the cluster."));
-        continue;
-      }
-      InstanceConfig config = new InstanceConfig(records.get(i));
-      long before = config.getInstanceOperationMaintenanceUntilMs();
-      boolean wasLive = config.isUnderInstanceOperationMaintenance(nowMs);
-      InstanceConfig.InstanceOperation held =
-          operation == null ? null : config.getInstanceOperation(operation.getSource());
-      // A legacy enable can override a held DISABLE; setting it again restores it, as the
-      // legacy setInstanceOperation path does.
-      boolean holds = operation == null || (held != null
-          && held.getOperation() == operation.getOperation()
-          && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
-              && config.getInstanceEnabled()));
-      // The same checks as the legacy setInstanceOperation path, which runs them on every call,
-      // so a held operation is checked too.
-      if (operation != null) {
-        InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
-        try {
-          InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config, current,
-              operation.getOperation());
-        } catch (HelixMetaDataAccessException e) {
-          throw e;
-        } catch (HelixException e) {
-          outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
-              invalidTransition(config, operation.getOperation(), e.getMessage())));
-          continue;
-        }
-        if (InstanceUtil.requiresTopologyValidation(current, operation.getOperation())) {
-          try {
-            config.validateTopologySettingInInstanceConfig(clusterConfig, instance);
-          } catch (IllegalArgumentException e) {
-            outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
-                invalidTopology(operation.getOperation(), e.getMessage())));
-            continue;
-          }
-        }
-      }
-      if (!holds) {
-        String logicalId = config.getLogicalId(logicalIdKey);
-        String sibling = changingByLogicalId.get(logicalId);
-        if (sibling != null) {
-          outcomes.put(instance, new Outcome(Status.DUPLICATE_LOGICAL_ID, "Shares logical ID "
-              + logicalId + " with " + sibling + ", which this request also changes. Send it in "
-              + "a separate request."));
-          continue;
-        }
-      }
-      if (expiresAt > 0L && !wasLive) {
-        if (cap == null) {
-          cap = markerCap(clusterId, clusterConfig, nowMs);
-        }
-        if (newMarkers == cap.room()) {
-          outcomes.put(instance, new Outcome(Status.BUDGET_EXHAUSTED, cap.exhausted()));
-          continue;
-        }
-        newMarkers++;
-        tookMarker.add(instance);
-      }
-      if (!holds) {
-        changingByLogicalId.put(config.getLogicalId(logicalIdKey), instance);
-        config.setInstanceOperation(operation);
-      }
-      if (expiresAt <= 0L || !wasLive) {
-        config.setInstanceOperationMaintenanceUntilMs(expiresAt);
-      }
-      long until = config.getInstanceOperationMaintenanceUntilMs();
-      outcomes.put(instance, new Outcome(Status.APPLIED,
-          applied(config, operation, holds, expiresAt, before, wasLive),
-          config.isUnderInstanceOperationMaintenance(nowMs) ? until : null));
-      if (!holds || until != before) {
-        byte[] data = _zkClient.serialize(config.getRecord(), paths.get(i));
-        writeBytes.put(instance, data.length);
-        staged.put(instance, Op.setData(paths.get(i), data, stats.get(i).getVersion()));
-      } else {
-        // Held as is, so the commit fails if it changed since it was judged.
-        staged.put(instance, Op.check(paths.get(i), stats.get(i).getVersion()));
-      }
+      attempt.stage(i);
     }
-
-    long bytes = writeBytes.values().stream().mapToLong(Integer::longValue).sum();
-    if (bytes > MAX_COMMIT_BYTES) {
-      throw new BadRequestException(String.format("The %d instance configs to write take %d "
-          + "bytes, over the %d byte limit of one commit. Send fewer instances per request.",
-          writeBytes.size(), bytes, MAX_COMMIT_BYTES));
-    }
-    if (!changingByLogicalId.isEmpty()) {
+    attempt.checkSize();
+    if (!attempt._changingByLogicalId.isEmpty()) {
       if (!budget.allows()) {
         // Only an attempt after a lost race gets here.
         return all(instances, new Outcome(Status.CONFLICT, "Concurrent writes to this cluster won "
             + "the race, and too little time was left to run the guardrail again. Resend the "
             + "request."));
       }
-      outcomes.putAll(judge(clusterId, new ArrayList<>(changingByLogicalId.values()), hint,
-          operation.getOperation(),
-          clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(), budget));
+      attempt._outcomes.putAll(judge(clusterId,
+          new ArrayList<>(attempt._changingByLogicalId.values()), hint, operation.getOperation(),
+          attempt._clusterConfig.getInstanceOperationMaintenanceFitSearchMaxChecks(), budget));
     }
-    if (cap != null) {
-      // Instances rejected in this request give back the cap room they took, so as many
-      // instances the cap turned away could have taken it. Those were never judged. A FITS or
-      // NOT_CHECKED instance keeps its room for the request that resumes its search.
+    attempt.giveBackCapRoom();
+    return attempt.send(defaultDurationMs);
+  }
+
+  /** One attempt's read of the request, and the outcome and staged write of each instance. */
+  private final class Attempt {
+    private final String _clusterId;
+    private final List<String> _instances;
+    private final InstanceConfig.InstanceOperation _operation;
+    private final long _expiresAt;
+    private final List<String> _paths;
+    private final String _clusterConfigPath;
+    private final Stat _clusterStat = new Stat();
+    private final List<Stat> _stats = new ArrayList<>();
+    private final List<ZNRecord> _records;
+    private final ClusterConfig _clusterConfig;
+    private final String _logicalIdKey;
+    private final long _nowMs;
+    private MarkerCap _cap;
+    private final Set<String> _tookMarker = new HashSet<>();
+    private final Map<String, String> _changingByLogicalId = new LinkedHashMap<>();
+    private final Map<String, Outcome> _outcomes = new LinkedHashMap<>();
+    // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
+    private final Map<String, Op> _staged = new LinkedHashMap<>();
+    private final Map<String, Integer> _writeBytes = new HashMap<>();
+
+    /** Reads the cluster config, then the instance configs, each with its version. */
+    private Attempt(String clusterId, List<String> instances,
+        InstanceConfig.InstanceOperation operation, long expiresAt) {
+      _clusterId = clusterId;
+      _instances = instances;
+      _operation = operation;
+      _expiresAt = expiresAt;
+      _paths = instances.stream()
+          .map(instance -> PropertyPathBuilder.instanceConfig(clusterId, instance))
+          .collect(Collectors.toList());
+      _clusterConfigPath = PropertyPathBuilder.clusterConfig(clusterId);
+      ZNRecord clusterRecord =
+          _accessor.get(_clusterConfigPath, _clusterStat, AccessOption.PERSISTENT);
+      _records = _accessor.get(_paths, _stats, AccessOption.PERSISTENT, true);
+      if (clusterRecord == null) {
+        throw new BadRequestException("Cluster " + clusterId + " does not exist.");
+      }
+      _clusterConfig = new ClusterConfig(clusterRecord);
+      _logicalIdKey = operation == null ? null
+          : ClusterTopologyConfig.createFromClusterConfig(_clusterConfig).getEndNodeType();
+      _nowMs = System.currentTimeMillis();
+    }
+
+    /**
+     * Judges instance i on its own, all but the guardrail, and stages its write, or a check of
+     * its version when it is held as is.
+     */
+    private void stage(int i) {
+      String instance = _instances.get(i);
+      if (_records.get(i) == null) {
+        _outcomes.put(instance, new Outcome(Status.INSTANCE_NOT_FOUND,
+            "No such instance in cluster " + _clusterId + ". Check the instance name, and "
+                + "whether it has been added to the cluster."));
+        return;
+      }
+      InstanceConfig config = new InstanceConfig(_records.get(i));
+      long before = config.getInstanceOperationMaintenanceUntilMs();
+      boolean wasLive = config.isUnderInstanceOperationMaintenance(_nowMs);
+      InstanceConfig.InstanceOperation held =
+          _operation == null ? null : config.getInstanceOperation(_operation.getSource());
+      // A legacy enable can override a held DISABLE; setting it again restores it, as the
+      // legacy setInstanceOperation path does.
+      boolean holds = _operation == null || (held != null
+          && held.getOperation() == _operation.getOperation()
+          && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
+              && config.getInstanceEnabled()));
+      // The same checks as the legacy setInstanceOperation path, which runs them on every call,
+      // so a held operation is checked too.
+      if (_operation != null) {
+        InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
+        try {
+          InstanceUtil.validateInstanceOperationTransition(_accessor, _clusterId, config, current,
+              _operation.getOperation());
+        } catch (HelixMetaDataAccessException e) {
+          throw e;
+        } catch (HelixException e) {
+          _outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
+              invalidTransition(config, _operation.getOperation(), e.getMessage())));
+          return;
+        }
+        if (InstanceUtil.requiresTopologyValidation(current, _operation.getOperation())) {
+          try {
+            config.validateTopologySettingInInstanceConfig(_clusterConfig, instance);
+          } catch (IllegalArgumentException e) {
+            _outcomes.put(instance, new Outcome(Status.INVALID_TRANSITION,
+                invalidTopology(_operation.getOperation(), e.getMessage())));
+            return;
+          }
+        }
+      }
+      if (!holds) {
+        String logicalId = config.getLogicalId(_logicalIdKey);
+        String sibling = _changingByLogicalId.get(logicalId);
+        if (sibling != null) {
+          _outcomes.put(instance, new Outcome(Status.DUPLICATE_LOGICAL_ID, "Shares logical ID "
+              + logicalId + " with " + sibling + ", which this request also changes. Send it "
+              + "in a separate request."));
+          return;
+        }
+      }
+      if (_expiresAt > 0L && !wasLive) {
+        if (_cap == null) {
+          _cap = markerCap(_clusterId, _clusterConfig, _nowMs);
+        }
+        if (_tookMarker.size() == _cap.room()) {
+          _outcomes.put(instance, new Outcome(Status.BUDGET_EXHAUSTED, _cap.exhausted()));
+          return;
+        }
+        _tookMarker.add(instance);
+      }
+      if (!holds) {
+        _changingByLogicalId.put(config.getLogicalId(_logicalIdKey), instance);
+        config.setInstanceOperation(_operation);
+      }
+      if (_expiresAt <= 0L || !wasLive) {
+        config.setInstanceOperationMaintenanceUntilMs(_expiresAt);
+      }
+      long until = config.getInstanceOperationMaintenanceUntilMs();
+      _outcomes.put(instance, new Outcome(Status.APPLIED,
+          applied(config, _operation, holds, _expiresAt, before, wasLive),
+          config.isUnderInstanceOperationMaintenance(_nowMs) ? until : null));
+      if (!holds || until != before) {
+        byte[] data = _zkClient.serialize(config.getRecord(), _paths.get(i));
+        _writeBytes.put(instance, data.length);
+        _staged.put(instance, Op.setData(_paths.get(i), data, _stats.get(i).getVersion()));
+      } else {
+        // Held as is, so the commit fails if it changed since it was judged.
+        _staged.put(instance, Op.check(_paths.get(i), _stats.get(i).getVersion()));
+      }
+    }
+
+    private void checkSize() {
+      long bytes = _writeBytes.values().stream().mapToLong(Integer::longValue).sum();
+      if (bytes > MAX_COMMIT_BYTES) {
+        throw new BadRequestException(String.format("The %d instance configs to write take %d "
+            + "bytes, over the %d byte limit of one commit. Send fewer instances per request.",
+            _writeBytes.size(), bytes, MAX_COMMIT_BYTES));
+      }
+    }
+
+    /**
+     * Instances rejected in this request give back the cap room they took, so as many instances
+     * the cap turned away could have taken it. Those were never judged. A FITS or NOT_CHECKED
+     * instance keeps its room for the request that resumes its search.
+     */
+    private void giveBackCapRoom() {
+      if (_cap == null) {
+        return;
+      }
       Set<Status> keepRoom = EnumSet.of(Status.APPLIED, Status.FITS, Status.NOT_CHECKED);
-      long room = cap.room() - tookMarker.stream()
-          .filter(instance -> keepRoom.contains(outcomes.get(instance).getStatus())).count();
-      for (Map.Entry<String, Outcome> entry : outcomes.entrySet()) {
+      long room = _cap.room() - _tookMarker.stream()
+          .filter(instance -> keepRoom.contains(_outcomes.get(instance).getStatus())).count();
+      for (Map.Entry<String, Outcome> entry : _outcomes.entrySet()) {
         if (room > 0L && entry.getValue().getStatus() == Status.BUDGET_EXHAUSTED) {
-          entry.setValue(new Outcome(Status.NOT_APPLIED, "Not judged: the marker cap had no room "
-              + "for it until instances ahead of it in this request were not written. Resend it."));
+          entry.setValue(new Outcome(Status.NOT_APPLIED, "Not judged: the marker cap had no "
+              + "room for it until instances ahead of it in this request were not written. "
+              + "Resend it."));
           room--;
         }
       }
     }
-    List<Op> ops = new ArrayList<>();
-    List<Op> checks = new ArrayList<>();
-    staged.forEach((instance, op) -> {
-      if (outcomes.get(instance).getStatus() == Status.APPLIED) {
-        (op instanceof Op.Check ? checks : ops).add(op);
-      }
-    });
-    if (ops.isEmpty()) {
-      return outcomes;
-    }
-    if (expiresAt > 0L && expiresAt <= System.currentTimeMillis()) {
-      Outcome error = new Outcome(Status.ERROR, defaultDurationMs > 0L
-          ? "Nothing was written: the cluster default marker duration of " + defaultDurationMs
-              + " ms ran out before the commit. Give an expiry, or raise "
-              + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS for cluster " + clusterId + "."
-          : "Nothing was written: the marker expiry " + Instant.ofEpochMilli(expiresAt)
-              + " passed before the commit. Resend with a later expiry.");
-      outcomes.replaceAll((instance, outcome) ->
-          outcome.getStatus() == Status.APPLIED ? error : outcome);
-      return outcomes;
-    }
 
-    record(COMMIT_BYTES_METRIC, writeBytes.entrySet().stream()
-        .filter(e -> outcomes.get(e.getKey()).getStatus() == Status.APPLIED)
-        .mapToLong(Map.Entry::getValue).sum());
-    ops.addAll(checks);
-    ops.add(Op.check(clusterConfigPath, clusterStat.getVersion()));
-    try {
-      _zkClient.multi(ops);
-      return outcomes;
-    } catch (ZkBadVersionException | ZkNoNodeException e) {
-      // Also covers a resend of a multi that already landed; the next attempt finds the request
-      // already applied, and says so.
-      return null;
-    } catch (RuntimeException e) {
-      throw new UnknownCommitException(e);
+    /**
+     * Writes the APPLIED instances in one multi, checked against the cluster config version.
+     * Returns null when the commit lost a race.
+     */
+    private Map<String, Outcome> send(long defaultDurationMs) {
+      List<Op> ops = new ArrayList<>();
+      List<Op> checks = new ArrayList<>();
+      _staged.forEach((instance, op) -> {
+        if (_outcomes.get(instance).getStatus() == Status.APPLIED) {
+          (op instanceof Op.Check ? checks : ops).add(op);
+        }
+      });
+      if (ops.isEmpty()) {
+        return _outcomes;
+      }
+      if (_expiresAt > 0L && _expiresAt <= System.currentTimeMillis()) {
+        Outcome error = new Outcome(Status.ERROR, defaultDurationMs > 0L
+            ? "Nothing was written: the cluster default marker duration of " + defaultDurationMs
+                + " ms ran out before the commit. Give an expiry, or raise "
+                + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS for cluster " + _clusterId
+                + "."
+            : "Nothing was written: the marker expiry " + Instant.ofEpochMilli(_expiresAt)
+                + " passed before the commit. Resend with a later expiry.");
+        _outcomes.replaceAll((instance, outcome) ->
+            outcome.getStatus() == Status.APPLIED ? error : outcome);
+        return _outcomes;
+      }
+
+      record(COMMIT_BYTES_METRIC, _writeBytes.entrySet().stream()
+          .filter(e -> _outcomes.get(e.getKey()).getStatus() == Status.APPLIED)
+          .mapToLong(Map.Entry::getValue).sum());
+      ops.addAll(checks);
+      ops.add(Op.check(_clusterConfigPath, _clusterStat.getVersion()));
+      try {
+        _zkClient.multi(ops);
+        return _outcomes;
+      } catch (ZkBadVersionException | ZkNoNodeException e) {
+        // Also covers a resend of a multi that already landed; the next attempt finds the
+        // request already applied, and says so.
+        return null;
+      } catch (RuntimeException e) {
+        throw new UnknownCommitException(e);
+      }
     }
   }
 
