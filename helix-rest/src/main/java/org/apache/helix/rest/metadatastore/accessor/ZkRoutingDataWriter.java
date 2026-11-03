@@ -54,6 +54,7 @@ import org.apache.http.util.EntityUtils;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -285,9 +286,10 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
         String realmPath = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + zkRealm;
         try {
           if (!_zkClient.exists(realmPath)) {
-            createPersistent(realmPath);
+            createPersistent(realmPath, znRecord);
+          } else {
+            writeData(realmPath, znRecord);
           }
-          writeData(realmPath, znRecord);
         } catch (Exception e) {
           LOG.error("Failed to write data in setRoutingData()! Namespace: {}, Realm: {}",
               _namespace, zkRealm, e);
@@ -336,15 +338,20 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
    * @return
    */
   protected boolean createZkRealm(String realm) {
-    if (_zkClient.exists(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + realm)) {
-      LOG.warn("createZkRealm() called for realm: {}, but this realm already exists! Namespace: {}",
-          realm, _namespace);
-      return true;
-    }
+    String realmPath = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + realm;
     try {
-      createPersistent(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + realm);
-      writeData(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + realm,
-          new ZNRecord(realm));
+      if (_zkClient.exists(realmPath)) {
+        Stat stat = new Stat();
+        if (_zkClient.readData(realmPath, stat) == null) {
+          // Older interrupted creates can leave a node without data.
+          guardedWrite(Op.setData(realmPath, _zkClient.serialize(new ZNRecord(realm), realmPath),
+              stat.getVersion()));
+        }
+        LOG.warn("createZkRealm() called for realm: {}, but this realm already exists! Namespace: {}",
+            realm, _namespace);
+        return true;
+      }
+      createPersistent(realmPath, new ZNRecord(realm));
     } catch (Exception e) {
       LOG.error("Failed to create ZkRealm: {}, Namespace: {}", realm, _namespace, e);
       return false;
@@ -453,8 +460,9 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
     _zkClient.multi(Arrays.asList(Op.check(_writeLeaderPath, -1), operation));
   }
 
-  private void createPersistent(String path) {
-    guardedWrite(Op.create(path, null, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+  private void createPersistent(String path, ZNRecord record) {
+    guardedWrite(Op.create(path, _zkClient.serialize(record, path),
+        ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
   }
 
   private void writeData(String path, ZNRecord record) {

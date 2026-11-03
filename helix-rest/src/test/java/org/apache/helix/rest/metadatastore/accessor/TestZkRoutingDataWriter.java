@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLContext;
 
 import com.google.common.collect.ImmutableMap;
@@ -32,13 +33,21 @@ import org.apache.helix.TestHelper;
 import org.apache.helix.ZkTestHelper;
 import org.apache.helix.msdcommon.constant.MetadataStoreRoutingConstants;
 import org.apache.helix.rest.common.HttpConstants;
+import org.apache.helix.rest.metadatastore.concurrency.ZkDistributedLeaderElection;
 import org.apache.helix.rest.server.AbstractTestClass;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.data.Stat;
+import org.mockito.AdditionalAnswers;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
@@ -127,6 +136,132 @@ public class TestZkRoutingDataWriter extends AbstractTestClass {
       } else {
         System.setProperty(MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY, originalHostname);
       }
+    }
+  }
+
+  @DataProvider(name = "realmCreationModes")
+  public Object[][] realmCreationModes() {
+    return new Object[][] {{false}, {true}};
+  }
+
+  @Test(dataProvider = "realmCreationModes", timeOut = 30000)
+  public void testExpiryAfterRealmCreateLeavesUsableRecord(boolean replaceRoutingData)
+      throws Exception {
+    String root = "/atomic-realm-" + java.util.UUID.randomUUID();
+    _gZkClientTestNS.createPersistent(root, true);
+    String hostnameKey = MetadataStoreRoutingConstants.MSDS_SERVER_HOSTNAME_KEY;
+    String originalHostname = System.getProperty(hostnameKey);
+    System.setProperty(hostnameKey, "localhost");
+    ZkRoutingDataWriter writer = null;
+    try {
+      writer = new ZkRoutingDataWriter(TEST_NAMESPACE, _zkAddrTestNS + root);
+      Field clientField = ZkRoutingDataWriter.class.getDeclaredField("_zkClient");
+      clientField.setAccessible(true);
+      HelixZkClient realClient = (HelixZkClient) clientField.get(writer);
+      Field electionField = ZkRoutingDataWriter.class.getDeclaredField("_leaderElection");
+      electionField.setAccessible(true);
+      ZkDistributedLeaderElection election =
+          (ZkDistributedLeaderElection) electionField.get(writer);
+      Assert.assertTrue(TestHelper.verify(election::isLeader, 5000));
+      String path = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + DUMMY_REALM;
+      AtomicBoolean expired = new AtomicBoolean();
+      HelixZkClient client =
+          Mockito.mock(HelixZkClient.class, AdditionalAnswers.delegatesTo(realClient));
+      Mockito.doAnswer(invocation -> {
+        Iterable<Op> operations = invocation.getArgument(0);
+        boolean createsRealm = false;
+        for (Op operation : operations) {
+          createsRealm |= operation.getType() == ZooDefs.OpCode.create
+              && path.equals(operation.getPath());
+        }
+        List<OpResult> result = realClient.multi(operations);
+        if (createsRealm && expired.compareAndSet(false, true)) {
+          ZkTestHelper.expireSession(realClient);
+          Assert.assertTrue(TestHelper.verify(election::isLeader, 10000));
+        }
+        return result;
+      }).when(client).multi(Mockito.any());
+      clientField.set(writer, client);
+
+      Map<String, List<String>> routing =
+          Collections.singletonMap(DUMMY_REALM, Collections.singletonList(DUMMY_SHARDING_KEY));
+      if (replaceRoutingData) {
+        writer.setRoutingData(routing);
+      } else {
+        writer.addMetadataStoreRealm(DUMMY_REALM);
+      }
+      Assert.assertTrue(expired.get(), "The realm create must commit before session expiry");
+      Assert.assertNotNull(realClient.readData(path, true),
+          "A committed realm create must include its initial record");
+      Assert.assertTrue(replaceRoutingData
+          ? writer.setRoutingData(routing) : writer.addMetadataStoreRealm(DUMMY_REALM));
+      String nextKey = "/AFTER_RETRY";
+      Assert.assertTrue(writer.addShardingKey(DUMMY_REALM, nextKey));
+      Assert.assertTrue(writer.addMetadataStoreRealm(DUMMY_REALM));
+      ZNRecord record = realClient.readData(path);
+      Assert.assertTrue(record.getListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY)
+          .contains(nextKey));
+      if (replaceRoutingData) {
+        Assert.assertTrue(record.getListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY)
+            .contains(DUMMY_SHARDING_KEY));
+      }
+    } finally {
+      if (writer != null) {
+        writer.close();
+      }
+      _gZkClientTestNS.deleteRecursively(root);
+      if (originalHostname == null) {
+        System.clearProperty(hostnameKey);
+      } else {
+        System.setProperty(hostnameKey, originalHostname);
+      }
+    }
+  }
+
+  @Test(dataProvider = "realmCreationModes", timeOut = 15000)
+  public void testRealmRetryInitializesAnExistingNullRecord(boolean concurrentInitializer)
+      throws Exception {
+    String root = "/uninitialized-realm-" + java.util.UUID.randomUUID();
+    _gZkClientTestNS.createPersistent(root, true);
+    ZkRoutingDataWriter writer = null;
+    try {
+      writer = new ZkRoutingDataWriter(TEST_NAMESPACE, _zkAddrTestNS + root);
+      String path = root + MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + DUMMY_REALM;
+      _gZkClientTestNS.createPersistent(path);
+      if (concurrentInitializer) {
+        Field clientField = ZkRoutingDataWriter.class.getDeclaredField("_zkClient");
+        clientField.setAccessible(true);
+        HelixZkClient realClient = (HelixZkClient) clientField.get(writer);
+        HelixZkClient client =
+            Mockito.mock(HelixZkClient.class, AdditionalAnswers.delegatesTo(realClient));
+        String realmPath = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + DUMMY_REALM;
+        Mockito.doAnswer(invocation -> {
+          ZNRecord record = realClient.readData(realmPath, (Stat) invocation.getArgument(1));
+          if (record == null) {
+            ZNRecord initialized = new ZNRecord(DUMMY_REALM);
+            initialized.setListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY,
+                Collections.singletonList("/CONCURRENT"));
+            realClient.writeData(realmPath, initialized);
+          }
+          return record;
+        }).when(client).readData(Mockito.eq(realmPath), Mockito.any(Stat.class));
+        clientField.set(writer, client);
+        Assert.assertFalse(writer.addMetadataStoreRealm(DUMMY_REALM),
+            "A concurrent initializer must not be overwritten");
+      }
+      Assert.assertTrue(writer.addMetadataStoreRealm(DUMMY_REALM));
+      ZNRecord record = _gZkClientTestNS.readData(path, true);
+      Assert.assertNotNull(record);
+      if (concurrentInitializer) {
+        Assert.assertEquals(record.getListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY),
+            Collections.singletonList("/CONCURRENT"));
+      }
+      Assert.assertTrue(writer.addShardingKey(DUMMY_REALM, DUMMY_SHARDING_KEY));
+    } finally {
+      if (writer != null) {
+        writer.close();
+      }
+      _gZkClientTestNS.deleteRecursively(root);
     }
   }
 
