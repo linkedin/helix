@@ -191,9 +191,9 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
    * divide by zero. Used to score replicas.
    *
    * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
-   *         With instance tag isolation on, the blocks that do not fit on their own nodes are
-   *         skipped instead, and it throws when that would skip no block with resources or every
-   *         one of them, or when all resources share one block.
+   *         With instance tag isolation on, the blocks behind the deficit are skipped instead
+   *         wherever {@link InstanceTagIsolation#absorbCapacityDeficit} can do so, and it throws
+   *         where it cannot.
    */
   private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
       InstanceTagIsolation isolation) throws HelixRebalanceException {

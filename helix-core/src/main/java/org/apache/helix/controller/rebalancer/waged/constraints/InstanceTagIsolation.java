@@ -299,8 +299,8 @@ class InstanceTagIsolation {
    * the default check would hold a cluster made of the rest alone, and is scored as that cluster.
    * If no set fits, every block with resources is over, and every block with a replica to assign
    * in this scope is skipped as well, as long as a block with resources is left: the run then
-   * places nothing for the rest, which keeps what it holds, as it would if the run failed. Only
-   * called where the default mode throws.
+   * places nothing for the rest, which keeps what it holds on this scope's nodes. Only called
+   * where the default mode throws.
    *
    * A block over on any key is skipped, even when only a node already above its capacity, such as
    * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
@@ -346,8 +346,8 @@ class InstanceTagIsolation {
     }
     if (residualScoringCap == null) {
       // No set leaves a rest that fits, so every block with resources is over. Skipping the ones
-      // with a replica to assign leaves a rest this run places nothing for: it keeps what it holds,
-      // as it would if the run failed, and is not failed for what only the skipped blocks need.
+      // with a replica to assign leaves a rest this run places nothing for: it keeps what it holds
+      // on this scope's nodes, and is not failed for what only the skipped blocks need.
       atFault = totals.withBlocksToAssign(atFault);
       if (atFault == null || Collections.disjoint(atFault, totals._resourceBlocks)
           || atFault.containsAll(totals._resourceBlocks)) {
@@ -773,13 +773,14 @@ class InstanceTagIsolation {
 
     /**
      * The given blocks plus the block of every replica to assign in this scope, or null when such a
-     * replica belongs to no block.
+     * replica belongs to no group the run can skip.
      */
     private Set<Integer> withBlocksToAssign(Set<Integer> skipped) {
       Set<Integer> blocks = new TreeSet<>(skipped);
       for (Set<AssignableReplica> replicas : _clusterModel.getAssignableReplicaMap().values()) {
         for (AssignableReplica replica : replicas) {
-          Integer block = _blockOfGroup.get(groupKey(replica));
+          String group = groupKey(replica);
+          Integer block = tagByGroup().containsKey(group) ? _blockOfGroup.get(group) : null;
           if (block == null) {
             return null;
           }

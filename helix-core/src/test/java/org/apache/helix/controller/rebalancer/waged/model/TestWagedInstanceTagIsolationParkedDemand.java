@@ -227,7 +227,7 @@ public class TestWagedInstanceTagIsolationParkedDemand
    * x1 carries no tag and holds three RA replicas of 30, 90 on 50, so its block is over without
    * any parked replica. Clique Y needs 80 of its 100 here and 240 with its parked replicas.
    * Skipping x1's block alone leaves the cluster 30 short, so Y is skipped too, and x1's block,
-   * which holds no group, skips no resource.
+   * which holds no group, skips no resource. The rest is A alone, which owns 180 on its 200.
    */
   @Test
   public void testNodeNoGroupReachesIsSkippedWithAParkedClique() throws Exception {
@@ -238,8 +238,10 @@ public class TestWagedInstanceTagIsolationParkedDemand
         .current("RA", 0, "a1", "x1").current("RA", 1, "a2", "x1").current("RA", 2, "a1", "x1")
         .resource(taggedResource(BROKEN, "Y", 40), 3, 2, 1)
         .current(BROKEN, 0, "y1", "y2").current(BROKEN, 1, "y2", "y3");
-    Assert.assertEquals(createAlgorithm().calculate(cluster.build()).getSkippedResources(),
-        set(BROKEN));
+    ClusterModel model = cluster.build();
+    Assert.assertEquals(createAlgorithm().calculate(model).getSkippedResources(), set(BROKEN));
+    Assert.assertEquals(model.getContext().getEstimatedMaxUtilization(), 180f / 200,
+        "Scored without x1, whose block is skipped");
   }
 
   /**
@@ -287,9 +289,12 @@ public class TestWagedInstanceTagIsolationParkedDemand
     }
   }
 
-  /** As above, but no clique has a replica to assign, so there is nothing to skip. */
+  /**
+   * As above, but no clique has a replica to assign and none is over on what it places, so there
+   * is nothing to skip and the run throws as the default mode does.
+   */
   @Test
-  public void testDeficitWithNothingToAssignStillThrows() throws Exception {
+  public void testDeficitWithNothingToSkipStillThrows() throws Exception {
     assertCapacityDeficit(topUpsOnlyACliqueNeeds(true, false, true));
   }
 
