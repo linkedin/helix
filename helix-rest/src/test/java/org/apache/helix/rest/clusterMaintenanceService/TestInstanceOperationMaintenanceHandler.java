@@ -44,6 +44,7 @@ import org.apache.helix.constants.InstanceConstants.InstanceOperation;
 import org.apache.helix.constants.InstanceConstants.InstanceOperationSource;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.manager.zk.ZNRecordSerializer;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ClusterConfig;
@@ -744,6 +745,29 @@ public class TestInstanceOperationMaintenanceHandler {
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), failed);
     Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.ENABLE);
     Assert.assertEquals(read(1).getInstanceOperationMaintenanceUntilMs(), _expiresAt);
+  }
+
+  @Test
+  public void testMinActiveReplicaVerdictSaysToWait() {
+    String rule = InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID;
+    Map<String, Outcome> outcomes = apply(instances -> ValidationResult.infeasible(
+        Violation.newBuilder(rule).resource("db").partition("db_0")
+            .message("... or pass force=true to override.").build()),
+        InstanceOperation.DISABLE, instance(0), instance(1));
+    assertStatuses(outcomes, Status.GUARDRAIL_REJECTED, Status.GUARDRAIL_REJECTED);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Rejected by guardrail " + rule
+        + ": DISABLE on the 2 instances this request changes would leave partition db_0 of "
+        + "resource db below its minActiveReplicas. Wait for its other replicas to recover, or "
+        + "change fewer instances at once.");
+
+    outcomes = apply(instances -> ValidationResult.infeasible(
+        Violation.newBuilder(rule).indeterminate().message("boom").build()),
+        InstanceOperation.DISABLE, instance(0));
+    assertStatuses(outcomes, Status.GUARDRAIL_INDETERMINATE);
+    Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Not written: the "
+        + "min-active-replica guardrail could not judge DISABLE on the 1 instance this request "
+        + "changes. Resend it once; if it comes back, the server log says why it could not read "
+        + "the cluster's ExternalViews.");
   }
 
   @Test
