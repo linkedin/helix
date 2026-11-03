@@ -51,6 +51,7 @@ import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintena
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceHandler.Outcome;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceHandler.Status;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -527,6 +528,57 @@ public class TestInstanceOperationMaintenanceHandler {
         + "current operation EVACUATE, set by AUTOMATION. All matching logical ID instances must "
         + "be in UNKNOWN state. Matching instances: " + instance(1) + " (operation=SWAP_IN). An "
         + "operator must resolve this before the instance is resent.");
+  }
+
+  @Test
+  public void testTopologyIsCheckedAsTheLegacyPathChecksIt() {
+    ClusterConfig config = _configAccessor.getClusterConfig(CLUSTER);
+    config.setTopologyAwareEnabled(true);
+    config.setTopology("/zone/host");
+    config.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER, config);
+    // The current operation, the requested one, and whether both paths accept it with no DOMAIN.
+    Object[][] cases = {
+        {InstanceOperation.DISABLE, InstanceOperation.ENABLE, false},
+        {InstanceOperation.EVACUATE, InstanceOperation.ENABLE, false},
+        {InstanceOperation.UNKNOWN, InstanceOperation.DISABLE, false},
+        {InstanceOperation.ENABLE, InstanceOperation.DISABLE, true},
+        {InstanceOperation.ENABLE, InstanceOperation.EVACUATE, true},
+        {InstanceOperation.DISABLE, InstanceOperation.EVACUATE, true}};
+    for (Object[] c : cases) {
+      assertBothPaths((InstanceOperation) c[0], (InstanceOperation) c[1], (boolean) c[2]);
+    }
+    writeOperation(1, InstanceOperation.DISABLE, InstanceOperationSource.AUTOMATION);
+    Assert.assertEquals(apply(SAFE, InstanceOperation.ENABLE, instance(1)).get(instance(1))
+        .getMessage(), "Cannot change to ENABLE, since its topology settings do not fit the "
+        + "cluster's. Domain for instance " + instance(1) + " is not set, fail the topology-aware "
+        + "placement. An operator must fix the instance's DOMAIN or the cluster's TOPOLOGY before "
+        + "the instance is resent.");
+
+    for (int i = 0; i < 2; i++) {
+      InstanceConfig instance = read(i);
+      instance.setDomain("zone=z0,host=h" + i);
+      _accessor.set(path(i), instance.getRecord(), AccessOption.PERSISTENT);
+    }
+    assertBothPaths(InstanceOperation.DISABLE, InstanceOperation.ENABLE, true);
+  }
+
+  /** Sets current on instances 0 and 1, then requests the change through each path. */
+  private void assertBothPaths(InstanceOperation current, InstanceOperation requested,
+      boolean accepted) {
+    writeOperation(0, current, InstanceOperationSource.AUTOMATION);
+    writeOperation(1, current, InstanceOperationSource.AUTOMATION);
+    boolean legacy = true;
+    try {
+      InstanceUtil.setInstanceOperation(_configAccessor, _accessor, CLUSTER, instance(0),
+          operation(requested));
+    } catch (RuntimeException e) {
+      legacy = false;
+    }
+    Status status = apply(SAFE, requested, instance(1)).get(instance(1)).getStatus();
+    String label = current + " to " + requested;
+    Assert.assertEquals(legacy, accepted, label);
+    Assert.assertEquals(status, accepted ? Status.APPLIED : Status.INVALID_TRANSITION, label);
   }
 
   @Test
