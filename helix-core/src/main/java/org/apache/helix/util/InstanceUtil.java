@@ -300,10 +300,8 @@ public class InstanceUtil {
 
     InstanceConstants.InstanceOperation targetOperation = instanceOperation == null
         ? InstanceConstants.InstanceOperation.ENABLE : instanceOperation.getOperation();
-    boolean requiresTopologyValidation = targetOperation != InstanceConstants.InstanceOperation.UNKNOWN
-        && (instanceConfig.getInstanceOperation().getOperation()
-            == InstanceConstants.InstanceOperation.UNKNOWN
-            || targetOperation == InstanceConstants.InstanceOperation.ENABLE);
+    boolean requiresTopologyValidation = requiresTopologyValidation(
+        instanceConfig.getInstanceOperation().getOperation(), targetOperation);
     ClusterConfig clusterConfig = requiresTopologyValidation
         ? configAccessor.getClusterConfig(clusterName) : null;
     if (requiresTopologyValidation) {
@@ -329,6 +327,18 @@ public class InstanceUtil {
               + (instanceOperation != null ? instanceOperation.getOperation() : "ENABLE")
               + "). The ZooKeeper update did not succeed.");
     }
+  }
+
+  /**
+   * Whether moving an instance from the current to the target operation must first check its
+   * topology settings against the cluster's: any move out of UNKNOWN and any move to ENABLE,
+   * except a move to UNKNOWN.
+   */
+  public static boolean requiresTopologyValidation(InstanceConstants.InstanceOperation current,
+      InstanceConstants.InstanceOperation target) {
+    return target != InstanceConstants.InstanceOperation.UNKNOWN
+        && (current == InstanceConstants.InstanceOperation.UNKNOWN
+            || target == InstanceConstants.InstanceOperation.ENABLE);
   }
 
   /**
