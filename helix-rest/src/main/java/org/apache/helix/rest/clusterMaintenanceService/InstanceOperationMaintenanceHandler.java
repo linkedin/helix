@@ -97,7 +97,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>An operation its source already holds is not set again, so repeating a request never
  * reorders the operation stack, and a request that changes nothing writes nothing. Repeating a
- * request is always safe.
+ * request is always safe. A held operation still goes through the transition and topology checks
+ * of {@link InstanceUtil#setInstanceOperation}, so both paths accept exactly the same requests.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -382,7 +383,9 @@ public class InstanceOperationMaintenanceHandler {
           && held.getOperation() == operation.getOperation()
           && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
               && config.getInstanceEnabled()));
-      if (!holds) {
+      // The same checks as the legacy setInstanceOperation path, which runs them on every call,
+      // so a held operation is checked too.
+      if (operation != null) {
         InstanceConstants.InstanceOperation current = config.getInstanceOperation().getOperation();
         try {
           InstanceUtil.validateInstanceOperationTransition(_accessor, clusterId, config, current,
@@ -394,7 +397,6 @@ public class InstanceOperationMaintenanceHandler {
               invalidTransition(config, operation.getOperation(), e.getMessage())));
           continue;
         }
-        // The same topology check as the legacy setInstanceOperation path.
         if (InstanceUtil.requiresTopologyValidation(current, operation.getOperation())) {
           try {
             config.validateTopologySettingInInstanceConfig(clusterConfig, instance);
@@ -404,6 +406,8 @@ public class InstanceOperationMaintenanceHandler {
             continue;
           }
         }
+      }
+      if (!holds) {
         String logicalId = config.getLogicalId(logicalIdKey);
         String sibling = changingByLogicalId.get(logicalId);
         if (sibling != null) {

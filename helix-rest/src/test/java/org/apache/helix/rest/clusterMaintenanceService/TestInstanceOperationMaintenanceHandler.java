@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -525,43 +526,68 @@ public class TestInstanceOperationMaintenanceHandler {
   }
 
   @Test
-  public void testTopologyIsCheckedAsTheLegacyPathChecksIt() {
+  public void testChecksMatchTheLegacyPath() {
     ClusterConfig config = _configAccessor.getClusterConfig(CLUSTER);
     config.setTopologyAwareEnabled(true);
     config.setTopology("/zone/host");
     config.setFaultZoneType("zone");
     _configAccessor.setClusterConfig(CLUSTER, config);
-    // The current operation, the requested one, and whether both paths accept it with no DOMAIN.
-    Object[][] cases = {
-        {InstanceOperation.DISABLE, InstanceOperation.ENABLE, false},
-        {InstanceOperation.EVACUATE, InstanceOperation.ENABLE, false},
-        {InstanceOperation.UNKNOWN, InstanceOperation.DISABLE, false},
-        {InstanceOperation.ENABLE, InstanceOperation.DISABLE, true},
-        {InstanceOperation.ENABLE, InstanceOperation.EVACUATE, true},
-        {InstanceOperation.DISABLE, InstanceOperation.EVACUATE, true}};
-    for (Object[] c : cases) {
-      assertBothPaths((InstanceOperation) c[0], (InstanceOperation) c[1], (boolean) c[2]);
+    // Every current operation and requested one, held by the request's own source (so the same
+    // operation is already held) or by another, with and without a DOMAIN.
+    Map<String, Boolean> accepted = new HashMap<>();
+    for (boolean domain : new boolean[] {false, true}) {
+      for (int i = 0; domain && i < 2; i++) {
+        InstanceConfig instance = read(i);
+        instance.setDomain("zone=z0,host=h" + i);
+        _accessor.set(path(i), instance.getRecord(), AccessOption.PERSISTENT);
+      }
+      for (InstanceOperationSource holder : new InstanceOperationSource[] {
+          InstanceOperationSource.AUTOMATION, InstanceOperationSource.USER}) {
+        for (InstanceOperation current : InstanceOperation.values()) {
+          for (InstanceOperation requested : new InstanceOperation[] {InstanceOperation.ENABLE,
+              InstanceOperation.DISABLE, InstanceOperation.EVACUATE}) {
+            String label = (domain ? "domain " : "") + holder + " " + current + " to " + requested;
+            accepted.put(label, assertBothPaths(holder, current, requested, label));
+          }
+        }
+      }
     }
+    Assert.assertFalse(accepted.get("AUTOMATION ENABLE to ENABLE"));
+    Assert.assertFalse(accepted.get("AUTOMATION DISABLE to ENABLE"));
+    Assert.assertFalse(accepted.get("AUTOMATION UNKNOWN to DISABLE"));
+    Assert.assertFalse(accepted.get("domain AUTOMATION SWAP_IN to ENABLE"));
+    Assert.assertTrue(accepted.get("AUTOMATION ENABLE to DISABLE"));
+    Assert.assertTrue(accepted.get("AUTOMATION DISABLE to DISABLE"));
+    Assert.assertTrue(accepted.get("domain AUTOMATION ENABLE to ENABLE"));
+    Assert.assertTrue(accepted.get("domain USER UNKNOWN to DISABLE"));
+  }
+
+  @Test
+  public void testTopologyRejectionSaysWhatToFix() {
+    ClusterConfig config = _configAccessor.getClusterConfig(CLUSTER);
+    config.setTopologyAwareEnabled(true);
+    config.setTopology("/zone/host");
+    config.setFaultZoneType("zone");
+    _configAccessor.setClusterConfig(CLUSTER, config);
     writeOperation(1, InstanceOperation.DISABLE, InstanceOperationSource.AUTOMATION);
     Assert.assertEquals(apply(SAFE, InstanceOperation.ENABLE, instance(1)).get(instance(1))
         .getMessage(), "Cannot change to ENABLE, since its topology settings do not fit the "
         + "cluster's. Domain for instance " + instance(1) + " is not set, fail the topology-aware "
         + "placement. An operator must fix the instance's DOMAIN or the cluster's TOPOLOGY before "
         + "the instance is resent.");
-
-    for (int i = 0; i < 2; i++) {
-      InstanceConfig instance = read(i);
-      instance.setDomain("zone=z0,host=h" + i);
-      _accessor.set(path(i), instance.getRecord(), AccessOption.PERSISTENT);
-    }
-    assertBothPaths(InstanceOperation.DISABLE, InstanceOperation.ENABLE, true);
   }
 
-  /** Sets current on instances 0 and 1, then requests the change through each path. */
-  private void assertBothPaths(InstanceOperation current, InstanceOperation requested,
-      boolean accepted) {
-    writeOperation(0, current, InstanceOperationSource.AUTOMATION);
-    writeOperation(1, current, InstanceOperationSource.AUTOMATION);
+  /**
+   * Puts the same starting operation on instances 0 and 1, requests the change on instance 0
+   * through the legacy path and on instance 1 through the handler, and checks both agree.
+   */
+  private boolean assertBothPaths(InstanceOperationSource holder, InstanceOperation current,
+      InstanceOperation requested, String label) {
+    for (int i = 0; i < 2; i++) {
+      // An ADMIN operation clears every other source's.
+      writeOperation(i, InstanceOperation.ENABLE, InstanceOperationSource.ADMIN);
+      writeOperation(i, current, holder);
+    }
     boolean legacy = true;
     try {
       InstanceUtil.setInstanceOperation(_configAccessor, _accessor, CLUSTER, instance(0),
@@ -570,9 +596,8 @@ public class TestInstanceOperationMaintenanceHandler {
       legacy = false;
     }
     Status status = apply(SAFE, requested, instance(1)).get(instance(1)).getStatus();
-    String label = current + " to " + requested;
-    Assert.assertEquals(legacy, accepted, label);
-    Assert.assertEquals(status, accepted ? Status.APPLIED : Status.INVALID_TRANSITION, label);
+    Assert.assertEquals(status, legacy ? Status.APPLIED : Status.INVALID_TRANSITION, label);
+    return legacy;
   }
 
   @Test
