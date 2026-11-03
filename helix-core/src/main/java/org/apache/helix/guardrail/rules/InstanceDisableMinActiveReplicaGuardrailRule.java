@@ -29,8 +29,10 @@ import org.apache.helix.guardrail.Violation;
 import org.apache.helix.util.MinActiveReplicaCheckResult;
 
 /**
- * Guard rail that blocks disabling an instance when doing so would push one or more of the partitions
- * it currently hosts below its {@code minActiveReplicas} on the remaining instances.
+ * Guard rail that blocks draining an instance in place -- a legacy {@code command=disable}, or a
+ * {@code setInstanceOperation=DISABLE}/{@code UNKNOWN} that reduces its replicas without first
+ * bootstrapping a replacement elsewhere -- when doing so would push one or more of the partitions it
+ * currently hosts below its {@code minActiveReplicas} on the remaining instances.
  * <p>
  * Disabling an instance (writing {@code HELIX_ENABLED=false}) is a controller-coordinated drain: the
  * instance keeps its ephemeral {@code LIVEINSTANCES} znode but is removed from the pool that hosts
@@ -91,12 +93,12 @@ public class InstanceDisableMinActiveReplicaGuardrailRule implements GuardrailRu
         .resource(result.getResourceName())
         .partition(result.getPartitionName())
         .message(String.format(
-            "Disabling instance %s would leave resource %s partition %s with %d active replica(s) on "
-                + "the remaining instances, below its required minimum of %d. Disabling drains this "
-                + "instance's replicas, so the partition would fall below minActiveReplicas until the "
-                + "controller can recover it elsewhere, risking reduced availability or loss of its top "
-                + "state. Wait for the partition to recover or add capacity before disabling, or pass "
-                + "force=true to override.",
+            "Draining instance %s would leave resource %s partition %s with %d active replica(s) on "
+                + "the remaining instances, below its required minimum of %d. This operation drains "
+                + "this instance's replicas in place, so the partition would fall below "
+                + "minActiveReplicas until the controller can recover it elsewhere, risking reduced "
+                + "availability or loss of its top state. Wait for the partition to recover or add "
+                + "capacity before retrying, or pass force=true to override.",
             instanceName, result.getResourceName(), result.getPartitionName(),
             result.getCurrentActiveReplicas(), result.getRequiredMinActiveReplicas()))
         .build();

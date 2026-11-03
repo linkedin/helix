@@ -56,6 +56,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -570,7 +571,7 @@ public class TestClusterSetup extends ZkUnitTestBase {
   @Test(dependsOnMethods = "testAddClusterPreservesCloudConfig")
   public void testAddClusterWithFailure() throws Exception {
     HelixAdmin admin = mock(HelixAdmin.class);
-    when(admin.addCluster(anyString(), anyBoolean())).thenReturn(Boolean.FALSE);
+    when(admin.addCluster(anyString(), anyBoolean(), any())).thenReturn(Boolean.FALSE);
     ClusterSetup clusterSetup = new ClusterSetup(_gZkClient, admin);
     String className = TestHelper.getTestClassName();
     String methodName = TestHelper.getTestMethodName();
@@ -590,7 +591,7 @@ public class TestClusterSetup extends ZkUnitTestBase {
     } catch (HelixException e) {
       Assert.assertEquals(e.getMessage(), "Cluster creation failed for " + clusterName);
     }
-    verify(admin).addCluster(clusterName, false);
+    verify(admin).addCluster(clusterName, false, null);
     verifyNoMoreInteractions(admin);
   }
 
