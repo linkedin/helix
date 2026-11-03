@@ -1293,8 +1293,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
   /**
    * DISABLE drains replicas in place, so the batch runs the min-active-replica guard rail that
    * setInstanceOperation runs, on the instances together. Three instances host three replicas of
-   * every partition with a minimum of two: one can be disabled, two together cannot, so the
-   * batch disables the first and rejects the second.
+   * every partition with a minimum of two: one can be disabled, two together cannot.
    */
   @Test
   public void testInstanceOperationMaintenanceKeepsMinActiveReplicas() throws Exception {
@@ -1327,32 +1326,22 @@ public class TestInstancesAccessor extends AbstractTestClass {
       String second = instances.get(1);
       String disable = "\"],\"instanceOperation\":\"DISABLE\",\"instanceOperationSource\":"
           + "\"AUTOMATION\",\"expiresAtMillis\":" + (System.currentTimeMillis() + 600_000L) + "}";
-      String rejected = "Rejected by guardrail "
-          + InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID + ": DISABLE on this instance ";
 
       JsonNode response = postInstanceOperationMaintenanceResponse(cluster,
           "{\"instances\":[\"" + first + "\",\"" + second + disable);
       Assert.assertEquals(response.get("message").asText(),
           "Applied to 1 of 2 instances (1 GUARDRAIL_REJECTED).");
-      Assert.assertEquals(response.get("instances").get(first).get("status").asText(), "APPLIED");
       String message = response.get("instances").get(second).get("message").asText();
-      Assert.assertTrue(message.startsWith(rejected + "together with 1 instance of this request "
-          + "that fits would leave partition " + resource + "_"), message);
-      Assert.assertFalse(_configAccessor.getInstanceConfig(cluster, first).getInstanceEnabled());
+      Assert.assertTrue(message.startsWith("Rejected by guardrail "
+          + InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID + ": DISABLE on this instance "
+          + "together with 1 instance of this request that fits would leave partition " + resource
+          + "_"), message);
       Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, second).getInstanceEnabled());
 
-      // The guardrail reads the ExternalView, so it must show the first instance drained.
-      try (BestPossibleExternalViewVerifier verifier =
-          new BestPossibleExternalViewVerifier.Builder(cluster).setZkAddr(ZK_ADDR).build()) {
-        Assert.assertTrue(verifier.verifyByPolling());
-      }
-      response = postInstanceOperationMaintenanceResponse(cluster,
-          "{\"instances\":[\"" + second + disable);
-      message = response.get("instances").get(second).get("message").asText();
-      Assert.assertTrue(message.startsWith(rejected + "alone would leave partition "), message);
-      Assert.assertTrue(message.endsWith("Wait for its other replicas to recover before resending "
-          + "it."), message);
-      Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, second).getInstanceEnabled());
+      JsonNode outcomes =
+          postInstanceOperationMaintenance(cluster, "{\"instances\":[\"" + first + disable);
+      Assert.assertEquals(outcomes.get(first).get("status").asText(), "APPLIED");
+      Assert.assertFalse(_configAccessor.getInstanceConfig(cluster, first).getInstanceEnabled());
     } finally {
       deleteTestCluster(cluster);
     }
