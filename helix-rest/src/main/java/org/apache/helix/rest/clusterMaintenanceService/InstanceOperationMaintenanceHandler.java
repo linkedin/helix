@@ -59,9 +59,13 @@ import org.slf4j.LoggerFactory;
  * write of each changed instance config, a version check of each instance left as is, and a
  * version check of the cluster config. A rejected instance is not written and does not hold back
  * the rest. If any of them changed since the read, the commit fails and the request is read and
- * judged again. The cap sees one request at a time, so it holds as long as every marker write
- * goes through this handler and each cluster has one caller that sends one request at a time, as
- * ACM does.
+ * judged again.
+ *
+ * <p>Concurrent requests are not serialized, on purpose. The commit checks only the instances in
+ * the request and the cluster config, so two requests sent at once can both count the same free
+ * room, and neither sees a marker written outside this handler after its read. Either can push live
+ * markers past the cap. ACM is the only caller and sends one request at a time per cluster, so the
+ * cap holds without a lock. A second caller would need a per-cluster lock first.
  *
  * <p>Every {@link Status} maps to one action for the caller, and every outcome carries a
  * one-line message that says what happened and what to do, written to be shown to an operator as

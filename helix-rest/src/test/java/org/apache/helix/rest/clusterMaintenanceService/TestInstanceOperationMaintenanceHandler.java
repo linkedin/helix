@@ -293,6 +293,26 @@ public class TestInstanceOperationMaintenanceHandler {
   }
 
   @Test
+  public void testInstanceRemovedMidRequestIsNotFound() {
+    _setupTool.getClusterManagementTool().enableInstance(CLUSTER, instance(1), false);
+    AtomicInteger commits = new AtomicInteger();
+    // The instance is dropped after this request has read it, before it commits.
+    RealmAwareZkClient dropping = withMulti(ops -> {
+      if (commits.getAndIncrement() == 0) {
+        _setupTool.dropInstanceFromCluster(CLUSTER, instance(1));
+      }
+      _zkClient.multi(ops);
+    });
+
+    Map<String, Outcome> outcomes = marker(dropping, _expiresAt, instance(0), instance(1));
+
+    assertStatuses(outcomes, Status.APPLIED, Status.INSTANCE_NOT_FOUND);
+    Assert.assertEquals(commits.get(), 2);
+    Assert.assertEquals(read(0).getInstanceOperationMaintenanceUntilMs(), _expiresAt);
+    Assert.assertFalse(_accessor.exists(path(1), AccessOption.PERSISTENT));
+  }
+
+  @Test
   public void testCapOfZeroAdmitsNoMarker() {
     setCap(0, -1);
     Map<String, Outcome> outcomes = marker(_expiresAt, instance(0), instance(1), instance(2),
