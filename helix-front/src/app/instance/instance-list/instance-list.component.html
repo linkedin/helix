@@ -87,8 +87,9 @@
     #instancesTable
     class="material"
     [headerHeight]="headerHeight"
-    [rowHeight]="rowHeight"
-    columnMode="force"
+    [rowHeight]="'auto'"
+    columnMode="standard"
+    [scrollbarH]="true"
     [footerHeight]="rowHeight"
     [rows]="instances"
     [loadingIndicator]="isLoading"
@@ -119,7 +120,7 @@
         >
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Name">
+    <ngx-datatable-column name="Name" [width]="260">
       <ng-template let-row="row" ngx-datatable-cell-template>
         <section fxLayout="row" fxLayoutAlign="start center">
           {{ row.name }}
@@ -143,6 +144,64 @@
             class="label-swap-in"
           ></hi-disabled-label>
         </section>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Domain" prop="summary.domain" [width]="300">
+      <ng-template let-value="value" ngx-datatable-cell-template>
+        <span class="mono">{{ value }}</span>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Tags" prop="summary.tags" [width]="120" [sortable]="false">
+      <ng-template let-value="value" ngx-datatable-cell-template>
+        {{ value ? value.join(', ') : '' }}
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Operations" [width]="460" [sortable]="false">
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <div
+          *ngFor="let op of operations(row)"
+          class="op-entry"
+          [class.active]="op.active"
+          [title]="operationTitle(op)"
+        >
+          <span class="op-chip" [attr.data-operation]="op.entry.operation"
+            >{{ op.entry.operation }} · {{ op.entry.source || 'unknown' }}</span
+          >
+          <span class="op-detail"
+            ><b *ngIf="op.active">active · </b>{{ operationDetail(op) }}</span
+          >
+        </div>
+        <span
+          *ngIf="markerUntil(row)"
+          class="op-chip marker"
+          title="Maintenance marker: ACM holds this instance's operation until it expires."
+          >marker until {{ markerUntil(row) }}</span
+        >
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Capacity" [width]="200" [sortable]="false">
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <span class="mono">{{ capacityText(row) }}</span>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Errors" [width]="90" [sortable]="false">
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <span
+          *ngIf="errorsPending"
+          title="Reading error counts."
+          >...</span
+        >
+        <span
+          *ngIf="!errorsPending && errorCount(row) === null"
+          title="Error counts could not be read."
+          >n/a</span
+        >
+        <span
+          *ngIf="!errorsPending && errorCount(row) > 0"
+          class="op-chip error"
+          [title]="errorTitle(row)"
+          >{{ errorCount(row) }}</span
+        >
       </ng-template>
     </ngx-datatable-column>
   </ngx-datatable>

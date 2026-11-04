@@ -1,0 +1,44 @@
+@use '../../shared/diagnostics';
+
+.diagnostics {
+  .verdict {
+    font-size: 15px;
+    font-weight: 500;
+  }
+  .notice.ok {
+    background: #e9f4ed;
+    border-color: #b7d8c2;
+    color: #25613a;
+  }
+  .summary-card {
+    strong {
+      overflow-wrap: anywhere;
+      // controller names are long words, keep them on one line where possible
+      &.long {
+        font-size: 16px;
+        font-weight: 500;
+        line-height: 1.5;
+      }
+    }
+    &:hover {
+      text-decoration: none;
+      border-color: #0075ac;
+    }
+    &.warn {
+      border-color: #e8cf98;
+    }
+    &.bad {
+      border-color: #e9baba;
+      strong {
+        color: #a32323;
+      }
+    }
+  }
+  .table-scroll {
+    border-top: 1px solid #dbe3e9;
+    margin-top: 10px;
+  }
+  .footnote {
+    font-size: 12px;
+  }
+}
