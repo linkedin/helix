@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { snapshotFixture } from '../testing/snapshot.fixture';
-import { bandOf, buildHeatmap } from './heatmap.model';
+import { snapshotFixture, withResources } from '../testing/snapshot.fixture';
+import { bandOf, buildHeatmap, instanceDetail } from './heatmap.model';
 
 describe('heat map model', () => {
   it('bands ratios and never puts unknown in a low band', () => {
@@ -65,6 +65,33 @@ describe('heat map model', () => {
       ['n1', 'unknown'],
       ['n2', 'unknown'],
       ['n4', 'unknown'],
+    ]);
+  });
+
+  it('details every key and the top resources for the selected key', () => {
+    const n3 = withResources().instances[2];
+    const detail = instanceDetail(n3, ['CU', 'DISK'], 'DISK', true);
+
+    expect(detail.keys).toEqual([
+      { key: 'CU', ratio: 0.6, band: 'mid', text: '600 / 1000 (60%)' },
+      { key: 'DISK', ratio: 0.6, band: 'mid', text: '1200 / 2000 (60%)' },
+    ]);
+    expect(detail.resources).toEqual([
+      {
+        name: 'db',
+        used: '1600 DISK (80%)',
+        replicas: '4 replicas, 1 top state',
+      },
+      {
+        name: 'idx',
+        used: '800 DISK (40%)',
+        replicas: '2 replicas, 1 top state, 2 ERROR',
+      },
+      {
+        name: 'legacy',
+        used: 'not WAGED',
+        replicas: '6 replicas, 1 top state',
+      },
     ]);
   });
 });

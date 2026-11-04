@@ -9,7 +9,6 @@ import {
   OnInit,
   ViewChild,
 } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
 
 import { CapacitySnapshot } from '../shared/capacity-snapshot.model';
 import {
@@ -17,6 +16,8 @@ import {
   buildHeatmap,
   HeatTile,
   HeatZone,
+  instanceDetail,
+  InstanceDetail,
   layoutHeatmap,
   ZoneBox,
 } from './heatmap.model';
@@ -39,14 +40,12 @@ export class CapacityHeatmapComponent implements OnInit, OnChanges, OnDestroy {
   boxes: ZoneBox[] = [];
   counts: Record<string, number> = {};
   height = 0;
+  selected: HeatTile | null = null;
+  detail: InstanceDetail | null = null;
   private width = 0;
   private observer: ResizeObserver | null = null;
 
-  constructor(
-    private changes: ChangeDetectorRef,
-    private router: Router,
-    private route: ActivatedRoute,
-  ) {}
+  constructor(private changes: ChangeDetectorRef) {}
 
   ngOnInit() {
     if (typeof ResizeObserver !== 'undefined') {
@@ -64,11 +63,15 @@ export class CapacityHeatmapComponent implements OnInit, OnChanges, OnDestroy {
   ngOnChanges() {
     this.zones = buildHeatmap(this.snapshot, this.key, this.topStateOnly);
     this.counts = {};
+    const name = this.selected?.instance.name;
+    let selected: HeatTile | null = null;
     this.zones.forEach((zone) =>
-      zone.tiles.forEach(
-        (tile) => (this.counts[tile.band] = (this.counts[tile.band] || 0) + 1),
-      ),
+      zone.tiles.forEach((tile) => {
+        this.counts[tile.band] = (this.counts[tile.band] || 0) + 1;
+        selected = tile.instance.name === name ? tile : selected;
+      }),
     );
+    this.select(selected);
     this.layout();
   }
 
@@ -76,10 +79,16 @@ export class CapacityHeatmapComponent implements OnInit, OnChanges, OnDestroy {
     this.observer?.disconnect();
   }
 
-  open(tile: HeatTile) {
-    this.router.navigate(['../instances', tile.instance.name], {
-      relativeTo: this.route,
-    });
+  select(tile: HeatTile | null) {
+    this.selected = tile;
+    this.detail =
+      tile &&
+      instanceDetail(
+        tile.instance,
+        this.snapshot.capacityKeys,
+        this.key,
+        this.topStateOnly,
+      );
   }
 
   byZone(_: number, box: ZoneBox) {

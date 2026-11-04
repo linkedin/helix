@@ -41,6 +41,8 @@
       class="tile band-{{ t.value.band }}"
       [class.offline]="!t.value.instance.live"
       [class.op]="!!t.value.operation"
+      [class.selected]="t.value === selected"
+      [attr.aria-pressed]="t.value === selected"
       [attr.data-instance]="t.value.instance.name"
       [attr.aria-label]="t.value.label"
       [title]="t.value.label"
@@ -48,7 +50,7 @@
       [style.top.px]="t.y"
       [style.width.px]="t.w"
       [style.height.px]="t.h"
-      (click)="open(t.value)"
+      (click)="select(t.value)"
     >
       <span class="name" *ngIf="t.w >= 44 && t.h >= 16">{{
         t.value.instance.name
@@ -60,3 +62,55 @@
     </button>
   </section>
 </div>
+
+<aside class="detail" aria-live="polite">
+  <p class="muted" *ngIf="!selected">
+    Click a tile to see its usage, partitions and top resources.
+  </p>
+  <ng-container *ngIf="selected?.instance as i">
+    <button type="button" class="close" (click)="select(null)">Close</button>
+    <h3>{{ i.name }}</h3>
+    <div class="muted">
+      {{ i.zone || 'No fault zone' }}, {{ i.live ? 'live' : 'not live' }},
+      operation {{ i.operation || 'none' }}
+    </div>
+    <a class="open" [routerLink]="['../instances', i.name]">Open instance</a>
+
+    <h4>{{ topStateOnly ? 'Top state used' : 'Used' }} / max</h4>
+    <div
+      class="row key"
+      *ngFor="let k of detail.keys"
+      [class.current]="k.key === key"
+    >
+      <span>{{ k.key }}</span>
+      <span class="mini"
+        ><i class="band-{{ k.band }}" [style.width.%]="k.ratio * 100"></i
+      ></span>
+      <span class="grow">{{ k.text }}</span>
+    </div>
+
+    <dl>
+      <dt>WAGED partitions</dt>
+      <dd>
+        {{ i.wagedPartitions }} ({{ i.wagedTopStatePartitions }} top state)
+      </dd>
+      <dt>Other partitions</dt>
+      <dd>
+        {{ i.nonWagedPartitions }} ({{ i.nonWagedTopStatePartitions }} top
+        state)
+      </dd>
+      <dt>ERROR replicas</dt>
+      <dd>{{ i.errorReplicas }}</dd>
+    </dl>
+
+    <h4>Top resources by {{ key }}, all replicas</h4>
+    <div class="resource" *ngFor="let r of detail.resources">
+      <div class="row">
+        <span class="grow" [title]="r.name">{{ r.name }}</span>
+        <span>{{ r.used }}</span>
+      </div>
+      <div class="muted">{{ r.replicas }}</div>
+    </div>
+    <p class="muted" *ngIf="!detail.resources.length">No replicas.</p>
+  </ng-container>
+</aside>
