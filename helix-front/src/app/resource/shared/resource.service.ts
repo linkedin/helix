@@ -1,9 +1,11 @@
+import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
 
 import * as _ from 'lodash';
 
 import { IdealState } from '../../shared/node-viewer/node-viewer.component';
+import { ZNRecord } from '../../shared/models/znrecord.model';
 import { HelixService } from '../../core/helix.service';
 import { Resource, ResourceSummary } from './resource.model';
 
@@ -87,6 +89,13 @@ export class ResourceService extends HelixService {
           )
       )
     );
+  }
+
+  public getStateModel(
+    clusterName: string,
+    name: string,
+  ): Observable<ZNRecord> {
+    return this.request(`/clusters/${clusterName}/statemodeldefs/${name}`);
   }
 
   public getOnInstance(
