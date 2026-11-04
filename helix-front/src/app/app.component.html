@@ -28,6 +28,7 @@
       <span class="helix-title">Helix</span>
     </a>
     <span fxFlex="1 1 auto"></span>
+    <hi-theme-toggle></hi-theme-toggle>
     <a mat-button (click)="login()" *ngIf="!isLoggedIn">
       <mat-icon>person</mat-icon>
       {{ currentUser | async }}

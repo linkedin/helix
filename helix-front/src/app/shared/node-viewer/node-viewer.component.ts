@@ -16,10 +16,12 @@ import 'ace-builds';
 import 'ace-builds/webpack-resolver';
 import 'ace-builds/src-noconflict/mode-json';
 import 'ace-builds/src-noconflict/theme-chrome';
+import 'ace-builds/src-noconflict/theme-tomorrow_night';
 import { config } from 'ace-builds';
 
 import { ResourceService } from '../../resource/shared/resource.service';
 import { HelperService } from '../../shared/helper.service';
+import { ThemeService } from '../../core/theme.service';
 import { Node } from '../models/node.model';
 import { Settings } from '../../core/settings';
 import { InputDialogComponent } from '../dialog/input-dialog/input-dialog.component';
@@ -181,7 +183,8 @@ export class NodeViewerComponent implements OnInit {
     protected dialog: MatDialog,
     protected route: ActivatedRoute,
     protected resourceService: ResourceService,
-    protected helper: HelperService
+    protected helper: HelperService,
+    public theme: ThemeService
   ) {}
 
   ngOnInit() {

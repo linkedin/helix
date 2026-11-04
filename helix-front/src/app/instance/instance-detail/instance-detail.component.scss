@@ -12,14 +12,14 @@
 
   .sampled {
     font-size: 12px;
-    color: rgba(0, 0, 0, 0.5);
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.5));
     margin-right: 12px;
   }
 
   .load-error {
     margin-left: 16px;
     font-size: 13px;
-    color: #c62828;
+    color: var(--hi-error, #c62828);
   }
 }
 

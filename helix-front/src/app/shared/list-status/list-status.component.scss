@@ -21,8 +21,8 @@
   padding: 4px 12px;
   min-height: 36px;
   font-size: 13px;
-  color: rgba(0, 0, 0, 0.6);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+  border-bottom: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.08));
 
   .status-message {
     display: inline-flex;
@@ -37,12 +37,12 @@
   }
 
   .status-error {
-    color: #c62828;
+    color: var(--hi-error, #c62828);
     font-weight: 500;
   }
 
   .status-empty {
-    color: rgba(0, 0, 0, 0.55);
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.55));
   }
 
   mat-spinner {
@@ -50,6 +50,6 @@
   }
 
   .refresh-button {
-    color: rgba(0, 0, 0, 0.54);
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.54));
   }
 }

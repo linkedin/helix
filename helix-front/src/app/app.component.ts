@@ -14,6 +14,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { tap } from 'rxjs/operators';
 
 import { UserService } from './core/user.service';
+import { ThemeService } from './core/theme.service';
 import { InputDialogComponent } from './shared/dialog/input-dialog/input-dialog.component';
 import { AlertDialogComponent } from './shared/dialog/alert-dialog/alert-dialog.component';
 import { HelperService } from './shared/helper.service';
@@ -38,7 +39,8 @@ export class AppComponent implements OnInit {
     protected router: Router,
     protected dialog: MatDialog,
     protected service: UserService,
-    protected helper: HelperService
+    protected helper: HelperService,
+    protected theme: ThemeService
   ) {
     router.events.subscribe((event) => {
       if (event instanceof NavigationStart) {

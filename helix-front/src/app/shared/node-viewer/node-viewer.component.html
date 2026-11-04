@@ -38,7 +38,7 @@
       *ngSwitchCase="'json'"
       [(text)]="objString"
       mode="json"
-      theme="chrome"
+      [theme]="(theme.isDark$ | async) ? 'tomorrow_night' : 'chrome'"
       [options]="{ useWorker: false }"
       style="min-height: 300px"
       #editor

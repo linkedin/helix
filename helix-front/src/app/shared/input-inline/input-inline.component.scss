@@ -7,11 +7,11 @@
 }
 
 .error {
-  color: #a94442;
+  color: var(--hi-error, #a94442);
 }
 
 .empty-value {
-  color: gray;
+  color: var(--hi-text-secondary, gray);
   font-style: italic;
 }
 

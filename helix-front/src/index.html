@@ -27,6 +27,18 @@
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
   </head>
   <body>
+    <script>
+      // Applies the saved theme before first paint; keep in sync with ThemeService.
+      (function () {
+        try {
+          var mode = localStorage.getItem('helix-theme');
+          var system = window.matchMedia('(prefers-color-scheme: dark)');
+          if (mode === 'dark' || (mode === 'system' && system.matches)) {
+            document.body.classList.add('dark-theme');
+          }
+        } catch (e) {}
+      })();
+    </script>
     <hi-root>Loading Helix UI ...</hi-root>
   </body>
 </html>

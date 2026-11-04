@@ -1,7 +1,7 @@
 @use '@angular/material' as mat;
 
-// Include the common styles for Angular Material
-@include mat.core();
+// Palettes, themes and mixins only. This file emits no CSS so components can
+// import it; the global theme styles live in app-theme.scss.
 
 @mixin md-icon-size($size: 24px) {
   font-size: $size;
@@ -40,19 +40,72 @@ $hi-warn: mat.define-palette(mat.$red-palette);
 // Create the theme object (a Sass map containing all of the palettes).
 $hi-theme: mat.define-light-theme($hi-primary, $hi-accent, $hi-warn);
 
-// Include theme styles for core and each component used in the app
-@include mat.all-component-themes($hi-theme);
+// Dark mode uses lighter hues so text and icons keep contrast on dark surfaces
+$hi-nuage-dark: map-merge(
+  $hi-nuage,
+  (
+    contrast: map-merge(
+        map-get($hi-nuage, contrast),
+        (
+          300: rgba(black, 0.87),
+        )
+      ),
+  )
+);
+$hi-dark-base-theme: mat.define-dark-theme(
+  (
+    color: (
+      primary: mat.define-palette($hi-nuage-dark, 300, 100, 500),
+      accent: mat.define-palette(mat.$pink-palette, 200, 100, 300),
+      warn: mat.define-palette(mat.$red-palette, 300, 100, 500),
+    ),
+  )
+);
 
-// Additional adjusts by vivo
-.mat-toolbar {
-  background-color: #fff;
-
-  .mat-icon.secondary {
-    vertical-align: bottom;
-  }
-
-  .mat-toolbar-row.information {
-    height: 24px;
-    margin-bottom: 24px;
-  }
-}
+// Darker, slightly cool surfaces in place of Material's #303030 greys, in the
+// spirit of GitHub and Grafana dark: a near-black page, with elevated layers
+// (cards, drawers, menus) a step lighter. Keep in sync with --hi-* in app-theme.scss.
+$hi-dark-background: map-merge(
+  map-get($hi-dark-base-theme, background),
+  (
+    status-bar: #0b0f13,
+    app-bar: #161c23,
+    background: #0f1419,
+    hover: rgba(201, 214, 227, 0.06),
+    card: #161c23,
+    dialog: #1c232b,
+    raised-button: #1c232b,
+    selected-button: #2a333d,
+    selected-disabled-button: #1c232b,
+    unselected-chip: #2a333d,
+    tooltip: #2f3842,
+  )
+);
+$hi-dark-foreground: map-merge(
+  map-get($hi-dark-base-theme, foreground),
+  (
+    text: #e1e7ed,
+    icon: #c9d3dc,
+    icons: #c9d3dc,
+    secondary-text: #97a3af,
+    divider: rgba(201, 214, 227, 0.12),
+    dividers: rgba(201, 214, 227, 0.12),
+  )
+);
+$hi-dark-color: map-merge(
+  map-get($hi-dark-base-theme, color),
+  (
+    background: $hi-dark-background,
+    foreground: $hi-dark-foreground,
+  )
+);
+// Material 13 reads the palettes from both `color` and the top-level map
+$hi-dark-theme: map-merge(
+  $hi-dark-base-theme,
+  map-merge(
+    $hi-dark-color,
+    (
+      color: $hi-dark-color,
+    )
+  )
+);

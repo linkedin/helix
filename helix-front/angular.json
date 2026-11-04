@@ -26,7 +26,7 @@
                 "output": "/"
               }
             ],
-            "styles": ["src/styles.scss", "src/theme.scss"],
+            "styles": ["src/styles.scss", "src/app-theme.scss"],
             "scripts": [
               "node_modules/ace-builds/src-min/ace.js",
               "node_modules/ace-builds/src-min/theme-eclipse.js",
@@ -106,7 +106,7 @@
               "node_modules/ace-builds/src-min/mode-css.js",
               "node_modules/ace-builds/src-min/mode-json.js"
             ],
-            "styles": ["src/styles.scss", "src/theme.scss"],
+            "styles": ["src/styles.scss", "src/app-theme.scss"],
             "assets": ["src/assets", "src/favicon.ico"]
           }
         },
