@@ -17,7 +17,11 @@ import { WorkflowListComponent } from './workflow/workflow-list/workflow-list.co
 import { WorkflowDetailComponent } from './workflow/workflow-detail/workflow-detail.component';
 import { HelixListComponent } from './chooser/helix-list/helix-list.component';
 import { DashboardComponent } from './dashboard/dashboard.component';
+import { TopologyComponent } from './topology/topology.component';
+import { CapacityOverviewComponent } from './capacity/capacity-overview/capacity-overview.component';
 import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
+import { ClusterDiagnosticsComponent } from './diagnostics/cluster-diagnostics/cluster-diagnostics.component';
+import { ClusterOverviewComponent } from './overview/cluster-overview/cluster-overview.component';
 
 const HELIX_ROUTES: Routes = [
   {
@@ -42,6 +46,7 @@ const HELIX_ROUTES: Routes = [
             redirectTo: 'resources',
             pathMatch: 'full',
           },
+          { path: 'overview', component: ClusterOverviewComponent },
           {
             path: 'configs',
             component: ConfigDetailComponent,
@@ -61,6 +66,15 @@ const HELIX_ROUTES: Routes = [
           {
             path: 'dashboard',
             component: DashboardComponent,
+          },
+          { path: 'topology', component: TopologyComponent },
+          {
+            path: 'capacity',
+            component: CapacityOverviewComponent,
+          },
+          {
+            path: 'diagnostics',
+            component: ClusterDiagnosticsComponent,
           },
         ],
       },

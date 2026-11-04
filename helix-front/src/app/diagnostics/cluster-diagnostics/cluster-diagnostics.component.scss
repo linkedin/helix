@@ -1,0 +1,13 @@
+@use '../../shared/diagnostics';
+
+.diagnostics .filters {
+  gap: 8px;
+}
+
+.gap {
+  width: 12px;
+}
+
+.footnote {
+  font-size: 12px;
+}

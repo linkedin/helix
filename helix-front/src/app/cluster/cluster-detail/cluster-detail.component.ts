@@ -18,10 +18,14 @@ import { InputDialogComponent } from '../../shared/dialog/input-dialog/input-dia
 })
 export class ClusterDetailComponent implements OnInit {
   readonly tabLinks = [
+    { label: 'Overview', link: 'overview' },
     { label: 'Dashboard (beta)', link: 'dashboard' },
     { label: 'Resources', link: 'resources' },
     { label: 'Workflows', link: 'workflows' },
     { label: 'Instances', link: 'instances' },
+    { label: 'Topology', link: 'topology' },
+    { label: 'Capacity', link: 'capacity' },
+    { label: 'Diagnostics', link: 'diagnostics' },
     { label: 'Configuration', link: 'configs' },
   ];
 

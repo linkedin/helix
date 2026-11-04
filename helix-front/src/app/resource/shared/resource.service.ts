@@ -1,11 +1,13 @@
+import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { Injectable } from '@angular/core';
 
 import * as _ from 'lodash';
 
 import { IdealState } from '../../shared/node-viewer/node-viewer.component';
+import { ZNRecord } from '../../shared/models/znrecord.model';
 import { HelixService } from '../../core/helix.service';
-import { Resource } from './resource.model';
+import { Resource, ResourceSummary } from './resource.model';
 
 @Injectable()
 export class ResourceService extends HelixService {
@@ -22,6 +24,35 @@ export class ResourceService extends HelixService {
         }
         return _.sortBy(res, 'name');
       })
+    );
+  }
+
+  public getSummaries(clusterName: string) {
+    return this.request(
+      `/clusters/${clusterName}/resources?command=getResourceSummaries`,
+    ).pipe(
+      map((data) => {
+        // an older REST server ignores the command and returns the plain list
+        // with HTTP 200, which must not read as a cluster with no resources
+        if (
+          !data?.resource_summaries ||
+          typeof data.resource_summaries !== 'object'
+        ) {
+          throw 'This REST server does not support resource summaries yet.';
+        }
+        return _.sortBy(
+          Object.entries<any>(data.resource_summaries).map(
+            ([name, summary]) =>
+              <ResourceSummary>{
+                ...summary,
+                cluster: clusterName,
+                name,
+                alive: summary.hasExternalView,
+              },
+          ),
+          'name',
+        );
+      }),
     );
   }
 
@@ -58,6 +89,13 @@ export class ResourceService extends HelixService {
           )
       )
     );
+  }
+
+  public getStateModel(
+    clusterName: string,
+    name: string,
+  ): Observable<ZNRecord> {
+    return this.request(`/clusters/${clusterName}/statemodeldefs/${name}`);
   }
 
   public getOnInstance(

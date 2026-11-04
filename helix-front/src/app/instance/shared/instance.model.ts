@@ -5,6 +5,32 @@ export type InstanceOperationState =
   | 'SWAP_IN'
   | 'UNKNOWN';
 
+export interface InstanceOperationEntry {
+  operation: InstanceOperationState;
+  source: string;
+  reason: string;
+  timestamp: number;
+}
+
+// One entry of GET /instances?command=getInstanceSummaries
+export interface InstanceSummary {
+  host: string;
+  port: string;
+  domain: string;
+  tags: string[];
+  capacity: Record<string, number>;
+  instanceOperations: InstanceOperationEntry[];
+  // creation time of the instance config, dates operations stored with timestamp -1
+  createdAtMillis?: number;
+  maintenanceMarkerExpiresAtMillis?: number;
+}
+
+// One entry of GET /instances?command=getInstanceErrorSummaries
+export interface InstanceErrorSummary {
+  errorCount: number;
+  resources: Record<string, number>;
+}
+
 export class Instance {
   readonly name: string;
   readonly clusterName: string;
@@ -13,6 +39,7 @@ export class Instance {
   readonly sessionId: string;
   readonly helixVersion: string;
   readonly operationState: InstanceOperationState;
+  readonly summary?: InstanceSummary;
 
   get healthy(): boolean {
     return this.liveInstance && this.operationState === 'ENABLE';
@@ -29,7 +56,8 @@ export class Instance {
     liveInstance: boolean | string,
     sessionId?: string,
     helixVersion?: string,
-    operationState?: InstanceOperationState
+    operationState?: InstanceOperationState,
+    summary?: InstanceSummary,
   ) {
     this.name = name;
     this.clusterName = clusterName;
@@ -38,5 +66,6 @@ export class Instance {
     this.sessionId = sessionId;
     this.helixVersion = helixVersion;
     this.operationState = operationState || (enabled ? 'ENABLE' : 'DISABLE');
+    this.summary = summary;
   }
 }
