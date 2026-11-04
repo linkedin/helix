@@ -37,6 +37,7 @@ import com.google.common.base.Joiner;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.PropertyType;
 import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -286,9 +287,18 @@ public final class HelixUtil {
         new ZKHelixDataAccessor(globalSyncClusterConfig.getClusterName(), baseDataAccessor);
 
     // Create an instance of read-only WAGED rebalancer
-    ReadOnlyWagedRebalancer readOnlyWagedRebalancer =
-        new ReadOnlyWagedRebalancer(zkBucketDataAccessor, globalSyncClusterConfig.getClusterName(),
-            globalSyncClusterConfig.getGlobalRebalancePreference());
+    String clusterName = globalSyncClusterConfig.getClusterName();
+    Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preference =
+        globalSyncClusterConfig.getGlobalRebalancePreference();
+    ReadOnlyWagedRebalancer readOnlyWagedRebalancer = !failOnUncomputed
+        ? new ReadOnlyWagedRebalancer(zkBucketDataAccessor, clusterName, preference)
+        : new ReadOnlyWagedRebalancer(zkBucketDataAccessor, clusterName, preference) {
+          // Never fall back to the persisted assignment, which would hide what cannot compute.
+          @Override
+          protected List<HelixRebalanceException.Type> failureTypesToPropagate() {
+            return Arrays.asList(HelixRebalanceException.Type.values());
+          }
+        };
 
     // Use a dummy event to run the required stages for BestPossibleState calculation
     // Attributes RESOURCES and RESOURCES_TO_REBALANCE are populated in ResourceComputationStage
