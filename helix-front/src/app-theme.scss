@@ -25,23 +25,64 @@
 .dark-theme {
   @include mat.all-component-colors($hi-dark-theme);
 
-  --hi-background: #303030;
-  --hi-surface: #424242;
-  --hi-surface-muted: #383838;
-  --hi-text: rgba(255, 255, 255, 0.87);
-  --hi-text-secondary: rgba(255, 255, 255, 0.7);
-  --hi-divider: rgba(255, 255, 255, 0.16);
-  --hi-hover: rgba(255, 255, 255, 0.06);
-  --hi-selected: rgba(77, 160, 203, 0.24);
-  --hi-primary-text: #80bbda;
-  --hi-error: #ef9a9a;
-  --hi-warning: #ffcc80;
-  --hi-success: #a5d6a7;
-  --hi-info: #90caf9;
-  --hi-error-bg: rgba(239, 154, 154, 0.16);
-  --hi-warning-bg: rgba(255, 204, 128, 0.16);
-  --hi-success-bg: rgba(165, 214, 167, 0.16);
-  --hi-info-bg: rgba(144, 202, 249, 0.16);
+  // Surfaces step lighter with elevation: page, then cards, then menus.
+  --hi-background: #0f1419;
+  --hi-surface: #161c23;
+  --hi-surface-muted: #1c232b;
+  --hi-zone: #1c232b;
+  --hi-text: #e1e7ed;
+  --hi-text-secondary: #97a3af;
+  --hi-text-disabled: #5d6873;
+  --hi-border: #323b45;
+  --hi-divider: rgba(201, 214, 227, 0.12);
+  --hi-track: rgba(201, 214, 227, 0.1);
+  --hi-hover: rgba(201, 214, 227, 0.06);
+  --hi-selected: rgba(121, 184, 227, 0.16);
+  --hi-primary-text: #79b8e3;
+  --hi-focus: #79b8e3;
+
+  // Status colors are desaturated and sit on low-alpha tints
+  --hi-error: #f28b82;
+  --hi-warning: #e8b85c;
+  --hi-success: #6fcf8f;
+  --hi-info: #79b8e3;
+  --hi-error-bg: rgba(242, 139, 130, 0.14);
+  --hi-warning-bg: rgba(232, 184, 92, 0.14);
+  --hi-success-bg: rgba(111, 207, 143, 0.12);
+  --hi-info-bg: rgba(121, 184, 227, 0.14);
+  --hi-error-border: rgba(242, 139, 130, 0.45);
+  --hi-warning-border: rgba(232, 184, 92, 0.45);
+  --hi-success-border: rgba(111, 207, 143, 0.4);
+
+  --hi-chip-bg: transparent;
+  --hi-chip-active-bg: rgba(121, 184, 227, 0.18);
+  --hi-chip-active-border: rgba(121, 184, 227, 0.6);
+  --hi-chip-active-text: #b4d9f2;
+  --hi-tag-off: #2a333d;
+
+  --hi-bar: #4f9fd6;
+  --hi-bar-hot: #d9952e;
+  --hi-bar-over: #e5534b;
+
+  // Heat map bands: same order as light, getting more salient as load rises,
+  // all readable with light text
+  --hi-band-unknown: #2a323b;
+  --hi-band-low: #1e4a33;
+  --hi-band-mid: #4a5520;
+  --hi-band-high: #6e5418;
+  --hi-band-hot: #96451f;
+  --hi-band-over: #b3352f;
+  --hi-band-text: #e6edf3;
+  --hi-band-over-text: #fff;
+  --hi-offline-stripe: rgba(11, 15, 19, 0.55);
+  --hi-op-ring: #c9d3dc;
+  --hi-err-mark-bg: #f28b82;
+  --hi-err-mark-text: #2b0f0e;
+
+  --hi-op-disable-bg: rgba(201, 214, 227, 0.12);
+  --hi-op-evacuate-bg: rgba(240, 150, 70, 0.2);
+  --hi-op-unknown-bg: rgba(232, 184, 92, 0.2);
+  --hi-op-swap-bg: rgba(190, 140, 240, 0.22);
 
   color-scheme: dark;
   background: var(--hi-background);
@@ -55,9 +96,16 @@
     background-color: var(--hi-surface-muted);
   }
 
+  // Header sits on the dark surface like GitHub and Grafana; a brand-blue
+  // band is the brightest thing on screen in a dark UI
   .mat-toolbar.mat-primary {
-    background-color: map-get($hi-nuage, 800);
-    color: #fff;
+    background-color: var(--hi-surface);
+    border-bottom: 1px solid var(--hi-divider);
+    color: var(--hi-text);
+  }
+
+  .mat-drawer {
+    background-color: var(--hi-surface);
   }
 
   .ngx-datatable.material {
@@ -74,6 +122,19 @@
     &:not(.cell-selection) .datatable-body-row:hover .datatable-row-group,
     &.cell-selection .datatable-body-cell:hover {
       background-color: var(--hi-hover);
+    }
+
+    &.single-selection,
+    &.multi-selection,
+    &.multi-click-selection {
+      .datatable-body-row.active,
+      .datatable-body-row.active .datatable-row-group {
+        background-color: var(--hi-selected) !important;
+
+        .datatable-body-cell {
+          color: var(--hi-text) !important;
+        }
+      }
     }
 
     &:not(.cell-selection) .datatable-body-row:focus,
@@ -112,14 +173,14 @@
     }
 
     .datatable-footer .datatable-pager li.disabled a {
-      color: rgba(255, 255, 255, 0.3) !important;
+      color: var(--hi-text-disabled) !important;
     }
   }
 
   // ngx-json-viewer ships emulated styles that outrank any global selector
   .ngx-json-viewer {
     .segment-main .segment-key {
-      color: #ce93d8 !important;
+      color: #c9a3f2 !important;
     }
 
     .segment-main .segment-value {
@@ -127,23 +188,23 @@
     }
 
     .segment-type-string > .segment-main > .segment-value {
-      color: #ff8a80 !important;
+      color: #f4a49b !important;
     }
 
     .segment-type-number > .segment-main > .segment-value {
-      color: #80cbc4 !important;
+      color: #7fd1c7 !important;
     }
 
     .segment-type-boolean > .segment-main > .segment-value {
-      color: #f48fb1 !important;
+      color: #f2a7c3 !important;
     }
 
     .segment-type-date > .segment-main > .segment-value {
-      color: #81d4fa !important;
+      color: #8cc8ee !important;
     }
 
     .segment-type-null > .segment-main > .segment-value {
-      color: #fff !important;
+      color: var(--hi-text-secondary) !important;
     }
   }
 

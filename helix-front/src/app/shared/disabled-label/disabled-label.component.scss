@@ -14,3 +14,9 @@
   );
   color: rgb(255, 255, 255);
 }
+
+:host-context(.dark-theme) .status-disabled {
+  border-color: rgba(242, 139, 130, 0.45);
+  background-color: rgba(242, 139, 130, 0.16);
+  color: #f6aea9;
+}

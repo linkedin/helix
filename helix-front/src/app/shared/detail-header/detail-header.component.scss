@@ -14,6 +14,14 @@ h4 {
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.54));
 }
 
+$tags: (
+  cluster: mat.define-palette(mat.$indigo-palette),
+  controller: mat.define-palette(mat.$purple-palette),
+  resource: mat.define-palette(mat.$teal-palette),
+  instance: mat.define-palette(mat.$blue-palette),
+  workflow: mat.define-palette(mat.$deep-orange-palette),
+);
+
 .tag {
   padding-left: 10px;
 
@@ -27,33 +35,21 @@ h4 {
     padding: 6px 8px;
   }
 
-  .cluster {
-    background-color: mat.get-color-from-palette(
-      mat.define-palette(mat.$indigo-palette)
-    );
+  @each $kind, $palette in $tags {
+    .#{$kind} {
+      background-color: mat.get-color-from-palette($palette);
+    }
   }
+}
 
-  .controller {
-    background-color: mat.get-color-from-palette(
-      mat.define-palette(mat.$purple-palette)
-    );
-  }
-
-  .resource {
-    background-color: mat.get-color-from-palette(
-      mat.define-palette(mat.$teal-palette)
-    );
-  }
-
-  .instance {
-    background-color: mat.get-color-from-palette(
-      mat.define-palette(mat.$blue-palette)
-    );
-  }
-
-  .workflow {
-    background-color: mat.get-color-from-palette(
-      mat.define-palette(mat.$deep-orange-palette)
-    );
+// Dark mode tints each tag like a label instead of a solid fill
+:host-context(.dark-theme) .tag {
+  @each $kind, $palette in $tags {
+    .#{$kind} {
+      $c: mat.get-color-from-palette($palette, 300);
+      background-color: rgba($c, 0.16);
+      box-shadow: inset 0 0 0 1px rgba($c, 0.45);
+      color: mat.get-color-from-palette($palette, 200);
+    }
   }
 }

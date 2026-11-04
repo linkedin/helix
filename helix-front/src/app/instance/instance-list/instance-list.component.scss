@@ -68,9 +68,9 @@
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
   &.active {
-    background: #1565c0;
-    border-color: #1565c0;
-    color: #fff;
+    background: var(--hi-chip-active-bg, #1565c0);
+    border-color: var(--hi-chip-active-border, #1565c0);
+    color: var(--hi-chip-active-text, #fff);
   }
 }
 
@@ -96,11 +96,11 @@
 
 .op-detail {
   font-size: 11px;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
 }
 
 .op-entry.active .op-detail {
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--hi-text, rgba(0, 0, 0, 0.87));
 }
 
 .op-chip {
@@ -109,27 +109,27 @@
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 11px;
-  background: rgba(0, 0, 0, 0.08);
-  color: rgba(0, 0, 0, 0.75);
+  background: var(--hi-track, rgba(0, 0, 0, 0.08));
+  color: var(--hi-text, rgba(0, 0, 0, 0.75));
 
   &[data-operation='DISABLE'] {
-    background: #eceff1;
+    background: var(--hi-op-disable-bg, #eceff1);
   }
   &[data-operation='EVACUATE'] {
-    background: #ffe0b2;
+    background: var(--hi-op-evacuate-bg, #ffe0b2);
   }
   &[data-operation='UNKNOWN'] {
-    background: #ffecb3;
+    background: var(--hi-op-unknown-bg, #ffecb3);
   }
   &[data-operation='SWAP_IN'] {
-    background: #e1bee7;
+    background: var(--hi-op-swap-bg, #e1bee7);
   }
   &.marker {
-    background: #e3f2fd;
-    color: #1565c0;
+    background: var(--hi-info-bg, #e3f2fd);
+    color: var(--hi-info, #1565c0);
   }
   &.error {
-    background: #ffcdd2;
-    color: #b71c1c;
+    background: var(--hi-error-bg, #ffcdd2);
+    color: var(--hi-error, #b71c1c);
   }
 }
