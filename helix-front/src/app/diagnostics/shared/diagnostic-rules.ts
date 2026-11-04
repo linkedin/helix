@@ -46,18 +46,20 @@ const OPERATION_TITLES: Record<string, string> = {
 };
 
 // Issues come from published Helix state only (capacity snapshot, instance
-// and resource summaries), never from application health.
+// and resource summaries), never from application health. A null snapshot
+// (the read failed) skips the cluster, ERROR and capacity rules.
 export function diagnosticIssues(
-  snapshot: CapacitySnapshot,
+  snapshot: CapacitySnapshot | null,
   instances: Instance[],
   resources: ResourceSummary[],
 ): DiagnosticIssue[] {
+  const rows = snapshot?.instances || [];
   const issues = [
-    ...clusterIssues(snapshot),
+    ...(snapshot ? clusterIssues(snapshot) : []),
     ...resources.map(resourceIssue),
     ...instances.map(instanceIssue),
-    ...snapshot.instances.map(errorIssue),
-    ...snapshot.instances.map((row) => capacityIssue(row, snapshot)),
+    ...rows.map(errorIssue),
+    ...rows.map((row) => capacityIssue(row, snapshot)),
   ].filter((issue): issue is DiagnosticIssue => !!issue);
   const rank = (issue: DiagnosticIssue) =>
     SEVERITIES.indexOf(issue.severity) * 10 +

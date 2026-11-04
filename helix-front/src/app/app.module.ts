@@ -22,6 +22,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { TopologyModule } from './topology/topology.module';
 import { CapacityModule } from './capacity/capacity.module';
 import { DiagnosticsModule } from './diagnostics/diagnostics.module';
+import { OverviewModule } from './overview/overview.module';
 
 @NgModule({
   declarations: [AppComponent],
@@ -45,6 +46,7 @@ import { DiagnosticsModule } from './diagnostics/diagnostics.module';
     TopologyModule,
     CapacityModule,
     DiagnosticsModule,
+    OverviewModule,
   ],
   providers: [
     { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptor, multi: true },
