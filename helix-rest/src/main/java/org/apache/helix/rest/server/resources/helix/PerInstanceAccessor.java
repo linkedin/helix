@@ -680,7 +680,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           if (dryRun || !force) {
             WagedAssignmentProvider wagedAssignmentProvider =
                 (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                    .getTargetAssignmentForWagedFullAutoOrThrow(getZkBucketDataAccessor(),
                         new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
                         liveInstances, idealStates, resourceConfigs);
             GuardrailContext removeTagContext = GuardrailContext.newBuilder(clusterId)
