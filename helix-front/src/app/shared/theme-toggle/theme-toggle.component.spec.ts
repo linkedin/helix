@@ -33,6 +33,9 @@ describe('ThemeToggleComponent', () => {
 
     const trigger: HTMLElement = fixture.nativeElement.querySelector('button');
     expect(trigger.getAttribute('aria-label')).toBe('Color theme: Light');
+    expect(trigger.querySelector('mat-icon').textContent.trim()).toBe(
+      'dark_mode',
+    );
 
     trigger.click();
     fixture.detectChanges();
@@ -55,5 +58,8 @@ describe('ThemeToggleComponent', () => {
     expect(TestBed.inject(ThemeService).mode).toBe('dark');
     expect(document.body.classList.contains(DARK_THEME_CLASS)).toBe(true);
     expect(trigger.getAttribute('aria-label')).toBe('Color theme: Dark');
+    expect(trigger.querySelector('mat-icon').textContent.trim()).toBe(
+      'light_mode',
+    );
   });
 });

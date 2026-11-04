@@ -4,7 +4,9 @@
   [attr.aria-label]="'Color theme: ' + current.label"
   [matTooltip]="'Theme: ' + current.label"
 >
-  <mat-icon>{{ current.icon }}</mat-icon>
+  <mat-icon>{{
+    (theme.isDark$ | async) ? 'light_mode' : 'dark_mode'
+  }}</mat-icon>
 </button>
 <mat-menu #themeMenu="matMenu">
   <button
