@@ -1,0 +1,62 @@
+<div class="legend">
+  <span
+    class="legend-item"
+    *ngFor="let band of bands"
+    [attr.data-band]="band.id"
+  >
+    <i class="swatch band-{{ band.id }}"></i>{{ band.label }}
+    <b>{{ counts[band.id] || 0 }}</b>
+  </span>
+  <span>
+    Tile size grows with load. Striped: not live. Outlined: under an operation.
+    !: ERROR replicas.
+  </span>
+</div>
+
+<div
+  #map
+  class="map"
+  role="group"
+  aria-label="Instances by fault zone"
+  [style.height.px]="height"
+>
+  <section
+    class="zone"
+    *ngFor="let box of boxes; trackBy: byZone"
+    [attr.data-zone]="box.zone.label"
+    [attr.aria-label]="
+      box.zone.label + ', ' + box.zone.tiles.length + ' instances'
+    "
+    [style.left.px]="box.x"
+    [style.top.px]="box.y"
+    [style.width.px]="box.w"
+    [style.height.px]="box.h"
+  >
+    <div class="zone-head" *ngIf="box.head" [title]="box.zone.label">
+      {{ box.zone.label }} ({{ box.zone.tiles.length }})
+    </div>
+    <button
+      type="button"
+      *ngFor="let t of box.tiles; trackBy: byTile"
+      class="tile band-{{ t.value.band }}"
+      [class.offline]="!t.value.instance.live"
+      [class.op]="!!t.value.operation"
+      [attr.data-instance]="t.value.instance.name"
+      [attr.aria-label]="t.value.label"
+      [title]="t.value.label"
+      [style.left.px]="t.x"
+      [style.top.px]="t.y"
+      [style.width.px]="t.w"
+      [style.height.px]="t.h"
+      (click)="open(t.value)"
+    >
+      <span class="name" *ngIf="t.w >= 44 && t.h >= 16">{{
+        t.value.instance.name
+      }}</span>
+      <span class="value" *ngIf="t.w >= 44 && t.h >= 32">{{
+        t.value.text
+      }}</span>
+      <span class="err-mark" *ngIf="t.value.instance.errorReplicas">!</span>
+    </button>
+  </section>
+</div>
