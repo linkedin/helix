@@ -1348,6 +1348,59 @@ public class TestInstancesAccessor extends AbstractTestClass {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  /**
+   * command=instanceOperationMaintenance and the per-instance endpoint keep their marker-only
+   * contract, and every writer counts the same live markers against the cap.
+   */
+  @Test
+  public void testLegacyInstanceOperationMaintenance() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String cluster = "TestLegacyInstanceOperationMaintenanceCluster";
+    try {
+      _gSetupTool.addCluster(cluster, true);
+      ClusterConfig clusterConfig = _configAccessor.getClusterConfig(cluster);
+      clusterConfig.setInstanceOperationMaintenanceBudget(1);
+      _configAccessor.setClusterConfig(cluster, clusterConfig);
+      String first = cluster + "_localhost_13220";
+      String second = cluster + "_localhost_13221";
+      _gSetupTool.addInstanceToCluster(cluster, first);
+      _gSetupTool.addInstanceToCluster(cluster, second);
+      long expiresAt = System.currentTimeMillis() + 600_000L;
+      String legacy = "clusters/" + cluster + "/instances?command=instanceOperationMaintenance";
+
+      JsonNode response = post(legacy, "{\"instances\":[\"" + first + "\",\"" + second
+          + "\"],\"expiresAtMillis\":" + expiresAt + "}", Response.Status.OK);
+      Assert.assertEquals(response.get("applied").toString(), "[\"" + first + "\"]");
+      Assert.assertEquals(response.get("rejected").get(second).asText(),
+          "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=1");
+      Assert.assertEquals(response.get("expiresAtMillis").asLong(), expiresAt);
+      String markSecond = "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":"
+          + expiresAt + "}";
+      Assert.assertEquals(postInstanceOperationMaintenance(cluster, markSecond).get(second)
+          .get("status").asText(), "BUDGET_EXHAUSTED");
+
+      // The operation would be dropped here, so it is refused before anything is written.
+      Assert.assertEquals(post(legacy, "{\"instances\":[\"" + second + "\"],"
+          + "\"instanceOperation\":\"EVACUATE\",\"instanceOperationSource\":\"AUTOMATION\"}",
+          Response.Status.BAD_REQUEST).get("error").asText(), "instanceOperation needs "
+          + "command=setInstanceOperationMaintenance. This command only writes the marker.");
+      Assert.assertTrue(_configAccessor.getInstanceConfig(cluster, second).isAssignable());
+
+      Assert.assertEquals(post("clusters/" + cluster + "/instances/" + first
+          + "/instanceOperationMaintenance", "{\"expiresAtMillis\":-1}", Response.Status.OK)
+          .get("instance").asText(), first);
+      Assert.assertEquals(postInstanceOperationMaintenance(cluster, markSecond).get(second),
+          applied("Took a maintenance marker until " + Instant.ofEpochMilli(expiresAt) + ".",
+              expiresAt));
+      Assert.assertEquals(post(legacy, "{\"instances\":[\"" + first + "\"],\"expiresAtMillis\":"
+          + expiresAt + "}", Response.Status.OK).get("rejected").get(first).asText(),
+          "would exceed INSTANCE_OPERATION_MAINTENANCE_BUDGET=1");
+    } finally {
+      deleteTestCluster(cluster);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   private static JsonNode applied(String message, Long expiresAtMillis) {
     ObjectNode outcome = OBJECT_MAPPER.createObjectNode().put("status", "APPLIED")
         .put("message", message);
@@ -1364,22 +1417,22 @@ public class TestInstancesAccessor extends AbstractTestClass {
 
   private JsonNode postInstanceOperationMaintenanceResponse(String cluster, String body)
       throws IOException {
-    return OBJECT_MAPPER.readTree(new JerseyUriRequestBuilder(
-        "clusters/{}/instances?command=instanceOperationMaintenance")
-        .isBodyReturnExpected(true).format(cluster)
-        .post(this, Entity.entity(body, MediaType.APPLICATION_JSON_TYPE))
-        .readEntity(String.class));
+    return post("clusters/" + cluster + "/instances?command=setInstanceOperationMaintenance",
+        body, Response.Status.OK);
   }
 
   /** Posts a request that must be a bad request, and returns its error. */
   private String postBadInstanceOperationMaintenance(String cluster, String body)
       throws IOException {
-    return OBJECT_MAPPER.readTree(new JerseyUriRequestBuilder(
-        "clusters/{}/instances?command=instanceOperationMaintenance")
-        .expectedReturnStatusCode(Response.Status.BAD_REQUEST.getStatusCode())
-        .isBodyReturnExpected(true).format(cluster)
+    return post("clusters/" + cluster + "/instances?command=setInstanceOperationMaintenance",
+        body, Response.Status.BAD_REQUEST).get("error").asText();
+  }
+
+  private JsonNode post(String uri, String body, Response.Status status) throws IOException {
+    return OBJECT_MAPPER.readTree(new JerseyUriRequestBuilder(uri)
+        .expectedReturnStatusCode(status.getStatusCode()).isBodyReturnExpected(true)
         .post(this, Entity.entity(body, MediaType.APPLICATION_JSON_TYPE))
-        .readEntity(String.class)).get("error").asText();
+        .readEntity(String.class));
   }
 
   private void setInstanceOperation(String clusterName, String instanceName,
