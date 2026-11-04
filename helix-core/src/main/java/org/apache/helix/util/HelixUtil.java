@@ -196,7 +196,7 @@ public final class HelixUtil {
     Map<String, ResourceAssignment> result =
         getAssignmentForWagedFullAutoImpl(new ZkBucketDataAccessor(metadataStoreAddress),
             baseDataAccessor, clusterConfig, instanceConfigs, liveInstances, idealStates,
-            resourceConfigs, false);
+            resourceConfigs, false, false);
     baseDataAccessor.close();
     return result;
   }
@@ -219,7 +219,21 @@ public final class HelixUtil {
       ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
       List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
     return getAssignmentForWagedFullAutoImpl(zkBucketDataAccessor, baseDataAccessor, clusterConfig,
-        instanceConfigs, liveInstances, idealStates, resourceConfigs, true);
+        instanceConfigs, liveInstances, idealStates, resourceConfigs, true, false);
+  }
+
+  /**
+   * Same as {@link #getTargetAssignmentForWagedFullAuto(ZkBucketDataAccessor, BaseDataAccessor,
+   * ClusterConfig, List, List, List, List)}, but throws a HelixException when WAGED cannot compute
+   * one of the given resources, instead of returning it with empty replica maps. Use it where an
+   * empty result must not read as a valid assignment, such as a guardrail what-if.
+   */
+  public static Map<String, ResourceAssignment> getTargetAssignmentForWagedFullAutoOrThrow(
+      ZkBucketDataAccessor zkBucketDataAccessor, BaseDataAccessor<ZNRecord> baseDataAccessor,
+      ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+    return getAssignmentForWagedFullAutoImpl(zkBucketDataAccessor, baseDataAccessor, clusterConfig,
+        instanceConfigs, liveInstances, idealStates, resourceConfigs, true, true);
   }
 
   /**
@@ -244,7 +258,7 @@ public final class HelixUtil {
     Map<String, ResourceAssignment> result =
         getAssignmentForWagedFullAutoImpl(new ZkBucketDataAccessor(metadataStoreAddress),
             baseDataAccessor, clusterConfig, instanceConfigs, liveInstances, idealStates,
-            resourceConfigs, false);
+            resourceConfigs, false, false);
     baseDataAccessor.close();
     return result;
   }
@@ -252,12 +266,14 @@ public final class HelixUtil {
   /*
    * If usePrefLists is set to true, the returned assignment is based on preference lists; if
    * false, the returned assignment is based on partition state mapping, which may differ from
-   * preference lists.
+   * preference lists. If failOnUncomputed is set, a resource the stage could not compute throws
+   * instead of coming back with empty replica maps.
    */
   private static Map<String, ResourceAssignment> getAssignmentForWagedFullAutoImpl(
       ZkBucketDataAccessor zkBucketDataAccessor, BaseDataAccessor<ZNRecord> baseDataAccessor,
       ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs, boolean usePrefLists) {
+      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs, boolean usePrefLists,
+      boolean failOnUncomputed) {
 
     // Copy the cluster config and make globalRebalance happen synchronously
     // Otherwise, globalRebalance may not complete and this util might end up returning
@@ -327,8 +343,7 @@ public final class HelixUtil {
       RebalanceUtil.runStage(event, new CurrentStateComputationStage());
       RebalanceUtil.runStage(event, new BestPossibleStateCalcStage());
     } catch (Exception e) {
-      throw new HelixException(
-          "getIdealAssignmentForWagedFullAuto(): Failed to compute ResourceAssignments!", e);
+      LOG.error("getIdealAssignmentForWagedFullAuto(): Failed to compute ResourceAssignments!", e);
     } finally {
       // Close all ZK connections
       readOnlyWagedRebalancer.close();
@@ -337,7 +352,8 @@ public final class HelixUtil {
     // Convert the resulting BestPossibleStateOutput to Map<String, ResourceAssignment>
     Map<String, ResourceAssignment> result = new HashMap<>();
     BestPossibleStateOutput output = event.getAttribute(AttributeName.BEST_POSSIBLE_STATE.name());
-    if (output == null) {
+    if (output == null || (output.getPreferenceLists() == null && output.getResourceStatesMap()
+        .isEmpty())) {
       throw new HelixException(
           "getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed to compute BestPossibleState!");
     }
@@ -345,7 +361,7 @@ public final class HelixUtil {
     List<String> failed = idealStates.stream().map(IdealState::getResourceName)
         .filter(resource -> output.getPreferenceLists(resource) == null)
         .collect(Collectors.toList());
-    if (!failed.isEmpty()) {
+    if (failOnUncomputed && !failed.isEmpty()) {
       throw new HelixException("getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed "
           + "to compute BestPossibleState for " + failed);
     }

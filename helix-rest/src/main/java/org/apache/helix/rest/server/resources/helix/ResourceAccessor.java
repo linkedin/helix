@@ -751,7 +751,7 @@ public class ResourceAccessor extends AbstractHelixResource {
         // the verdict (even together with force) so it can be previewed.
         WagedAssignmentProvider wagedAssignmentProvider = (dryRun || !force)
             ? (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                .getTargetAssignmentForWagedFullAutoOrThrow(getZkBucketDataAccessor(),
                     new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
                     liveInstances, idealStates, resourceConfigs)
             : null;
