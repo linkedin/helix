@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.google.common.base.Strings;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
@@ -235,6 +236,21 @@ final class WagedRebalanceFeasibilityWhatIf {
     }
 
     // Flag only partitions that lose placeable replicas as a result of the mutation.
+    // With tag isolation on, a clique that cannot be placed keeps its old assignment, which can
+    // still name the instance this change takes away. So count only replicas on instances the
+    // resource can use. A new assignment only uses such instances anyway.
+    boolean instanceTagIsolation = simulationClusterConfig.isWagedInstanceTagIsolationEnabled();
+    Map<String, InstanceConfig> baselineConfigByName = null;
+    Map<String, InstanceConfig> candidateConfigByName = null;
+    Map<String, IdealState> idealStateByName = null;
+    if (instanceTagIsolation) {
+      baselineConfigByName = indexByInstanceName(baselineInstanceConfigs);
+      candidateConfigByName = indexByInstanceName(candidateInstanceConfigs);
+      idealStateByName = new HashMap<>();
+      for (IdealState idealState : wagedIdealStates) {
+        idealStateByName.put(idealState.getResourceName(), idealState);
+      }
+    }
     List<Violation> violations = new ArrayList<>();
     int totalViolations = 0;
     List<String> resourceNames = new ArrayList<>(baseline.keySet());
@@ -245,12 +261,30 @@ final class WagedRebalanceFeasibilityWhatIf {
         continue;
       }
       ResourceAssignment candidateAssignment = candidate.get(resourceName);
+      String groupTag = null;
+      if (instanceTagIsolation) {
+        ResourceConfig mergedConfig = ResourceConfig.mergeIdealStateWithResourceConfig(
+            resourceConfigByName.get(resourceName), idealStateByName.get(resourceName));
+        // WAGED treats an empty tag as no tag, so the resource can use every instance.
+        groupTag = mergedConfig == null ? null
+            : Strings.emptyToNull(mergedConfig.getInstanceGroupTag());
+      }
       List<Partition> partitions = new ArrayList<>(baselineAssignment.getMappedPartitions());
       partitions.sort(Comparator.comparing(Partition::getPartitionName));
       for (Partition partition : partitions) {
-        int baselineReplicas = countPlacedReplicas(baselineAssignment.getReplicaMap(partition));
-        int candidateReplicas = candidateAssignment == null ? 0
-            : countPlacedReplicas(candidateAssignment.getReplicaMap(partition));
+        int baselineReplicas;
+        int candidateReplicas;
+        if (instanceTagIsolation) {
+          baselineReplicas = countUsableReplicas(baselineAssignment.getReplicaMap(partition),
+              baselineConfigByName, groupTag);
+          candidateReplicas = candidateAssignment == null ? 0
+              : countUsableReplicas(candidateAssignment.getReplicaMap(partition),
+                  candidateConfigByName, groupTag);
+        } else {
+          baselineReplicas = countPlacedReplicas(baselineAssignment.getReplicaMap(partition));
+          candidateReplicas = candidateAssignment == null ? 0
+              : countPlacedReplicas(candidateAssignment.getReplicaMap(partition));
+        }
         if (candidateReplicas < baselineReplicas) {
           totalViolations++;
           // Enumerate at most MAX_REPORTED_VIOLATIONS; the overflow is summarized after the loop.
@@ -303,5 +337,41 @@ final class WagedRebalanceFeasibilityWhatIf {
       }
     }
     return count;
+  }
+
+  /**
+   * Like {@link #countPlacedReplicas(Map)}, but a replica only counts when its instance could hold
+   * it in the simulated cluster: the instance is known, assignable, and carries the resource's
+   * instance group tag when the resource has one.
+   */
+  private static int countUsableReplicas(Map<String, String> replicaMap,
+      Map<String, InstanceConfig> instanceConfigByName, String groupTag) {
+    if (replicaMap == null || replicaMap.isEmpty()) {
+      return 0;
+    }
+    int count = 0;
+    for (Map.Entry<String, String> replica : replicaMap.entrySet()) {
+      String state = replica.getValue();
+      if (state == null || HelixDefinedState.DROPPED.name().equals(state)) {
+        continue;
+      }
+      InstanceConfig instanceConfig = instanceConfigByName.get(replica.getKey());
+      if (instanceConfig != null && instanceConfig.isAssignable()
+          && (groupTag == null || instanceConfig.containsTag(groupTag))) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private static Map<String, InstanceConfig> indexByInstanceName(
+      List<InstanceConfig> instanceConfigs) {
+    Map<String, InstanceConfig> instanceConfigByName = new HashMap<>();
+    for (InstanceConfig instanceConfig : instanceConfigs) {
+      if (instanceConfig != null) {
+        instanceConfigByName.put(instanceConfig.getInstanceName(), instanceConfig);
+      }
+    }
+    return instanceConfigByName;
   }
 }

@@ -19,7 +19,9 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -31,6 +33,7 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.TestAbstractRebalancer;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -39,9 +42,13 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.util.StageThreadPoolHelper;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
+
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 
 public class TestBestPossibleStateCalcStage extends BaseStageTest {
 
@@ -530,6 +537,49 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
         Assert.assertEquals(cache.getClusterConfig().getRecord().getSimpleField(retiredKey), "1");
       }
     }
+  }
+
+  /**
+   * With instance tag isolation on, a WAGED resource skipped before it was ever assigned has no
+   * entry in the output. The swap-in step must pass over it and still hand the other resources'
+   * replicas to the swap-in instance.
+   */
+  @Test
+  public void testSwapInPassesOverAWagedResourceIsolationLeftOut() throws Exception {
+    ResourceControllerDataProvider cache = Mockito.mock(ResourceControllerDataProvider.class);
+    when(cache.getSwapOutToSwapInInstancePairs()).thenReturn(Collections.singletonMap("out", "in"));
+    when(cache.getSwapInToSwapOutInstancePairs()).thenReturn(Collections.singletonMap("in", "out"));
+    when(cache.getLiveSwapInInstanceNames()).thenReturn(Collections.singleton("in"));
+    when(cache.getStateModelDef("MasterSlave"))
+        .thenReturn(BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition());
+    when(cache.getDisabledInstancesForPartition(anyString(), anyString()))
+        .thenReturn(Collections.emptySet());
+    IdealState skipped = new IdealState("Skipped");
+    skipped.setRebalanceMode(RebalanceMode.FULL_AUTO);
+    skipped.setRebalancerClassName(WagedRebalancer.class.getName());
+    when(cache.getIdealState("Skipped")).thenReturn(skipped);
+    ClusterConfig clusterConfig = new ClusterConfig("swapInCluster");
+    clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    when(cache.getClusterConfig()).thenReturn(clusterConfig);
+
+    Map<String, Resource> resourceMap = new HashMap<>();
+    for (String name : new String[]{"Skipped", "Placed"}) {
+      Resource resource = new Resource(name);
+      resource.setStateModelDefRef("MasterSlave");
+      resource.addPartition(name + "_0");
+      resourceMap.put(name, resource);
+    }
+    Partition placed = new Partition("Placed_0");
+    Method addSwapIn = BestPossibleStateCalcStage.class.getDeclaredMethod(
+        "addSwapInInstancesToBestPossibleState", Map.class, BestPossibleStateOutput.class,
+        ResourceControllerDataProvider.class);
+    addSwapIn.setAccessible(true);
+
+    BestPossibleStateOutput output = new BestPossibleStateOutput();
+    output.setState("Placed", placed, "out", "MASTER");
+    addSwapIn.invoke(new BestPossibleStateCalcStage(), resourceMap, output, cache);
+    Assert.assertEquals(output.getInstanceStateMap("Placed", placed).get("in"), "SLAVE");
+    Assert.assertFalse(output.containsResource("Skipped"));
   }
 
   /**

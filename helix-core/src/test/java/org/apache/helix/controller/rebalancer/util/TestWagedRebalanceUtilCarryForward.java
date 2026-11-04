@@ -26,11 +26,13 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
+import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -217,6 +219,65 @@ public class TestWagedRebalanceUtilCarryForward {
   }
 
   @Test
+  public void testFinalIsolationReportIncludesResourcesYieldingToACollision() throws Exception {
+    Map<String, ResourceAssignment> calculated = new HashMap<>();
+    calculated.put("Mover", assignment("Mover", "instance-1"));
+    calculated.put("Healthy", assignment("Healthy", "instance-7"));
+    Map<String, ResourceAssignment> previous = new HashMap<>();
+    previous.put("Skipped", assignment("Skipped", "instance-1"));
+    previous.put("Mover", assignment("Mover", "instance-3"));
+    OptimalAssignment optimal = Mockito.mock(OptimalAssignment.class);
+    Mockito.when(optimal.getOptimalResourceAssignment()).thenReturn(calculated);
+    // Mutable on purpose, so the last assert, not an exception, catches an in place change.
+    Mockito.when(optimal.getSkippedResources())
+        .thenReturn(new HashSet<>(Collections.singleton("Skipped")));
+    RebalanceAlgorithm algorithm = Mockito.mock(RebalanceAlgorithm.class);
+    ClusterModel model = Mockito.mock(ClusterModel.class);
+    ClusterContext context = Mockito.mock(ClusterContext.class);
+    Mockito.when(model.getContext()).thenReturn(context);
+    Mockito.when(model.getRebalanceScopeType())
+        .thenReturn(ClusterModel.RebalanceScopeType.EMERGENCY);
+    Mockito.when(algorithm.calculate(model)).thenReturn(optimal);
+
+    WagedRebalanceUtil.calculateAssignment(model, algorithm, previous);
+
+    Set<String> expected = new HashSet<>();
+    expected.add("Skipped");
+    expected.add("Mover");
+    Mockito.verify(algorithm, Mockito.times(1)).onAssignmentComputed(
+        ClusterModel.RebalanceScopeType.EMERGENCY, Collections.emptySet(), expected);
+    Assert.assertEquals(optimal.getSkippedResources(), Collections.singleton("Skipped"),
+        "Final reporting must not change the algorithm's result");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHookGetsReadOnlySnapshots() throws Exception {
+    Map<String, Set<AssignableReplica>> replicaMap = new HashMap<>();
+    replicaMap.put("Healthy", Collections.emptySet());
+    ClusterModel model = Mockito.mock(ClusterModel.class);
+    Mockito.when(model.getAssignableReplicaMap()).thenReturn(replicaMap);
+    OptimalAssignment optimal = Mockito.mock(OptimalAssignment.class);
+    Mockito.when(optimal.getOptimalResourceAssignment())
+        .thenReturn(Collections.singletonMap("Healthy", assignment("Healthy", "instance-1")));
+    Mockito.when(optimal.getSkippedResources()).thenReturn(new HashSet<>());
+    RebalanceAlgorithm algorithm = Mockito.mock(RebalanceAlgorithm.class);
+    Mockito.when(algorithm.calculate(model)).thenReturn(optimal);
+
+    WagedRebalanceUtil.calculateAssignment(model, algorithm, Collections.emptyMap());
+
+    ArgumentCaptor<Set<String>> evaluated = ArgumentCaptor.forClass(Set.class);
+    ArgumentCaptor<Set<String>> skipped = ArgumentCaptor.forClass(Set.class);
+    Mockito.verify(algorithm).onAssignmentComputed(Mockito.any(), evaluated.capture(),
+        skipped.capture());
+    replicaMap.put("Added", Collections.emptySet());
+    Assert.assertEquals(evaluated.getValue(), Collections.singleton("Healthy"),
+        "The hook must get a snapshot, not the model's live key set");
+    assertReadOnly(evaluated.getValue());
+    assertReadOnly(skipped.getValue());
+  }
+
+  @Test
   public void testNothingChangesWhenNoResourceWasSkipped() throws Exception {
     Map<String, ResourceAssignment> calculated = new HashMap<>();
     calculated.put("Healthy", assignment("Healthy", "instance-2"));
@@ -247,6 +308,15 @@ public class TestWagedRebalanceUtilCarryForward {
     Mockito.when(clusterModel.getContext()).thenReturn(context);
 
     return WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, previous);
+  }
+
+  private static void assertReadOnly(Set<String> reported) {
+    try {
+      reported.clear();
+      Assert.fail("The hook could change a set it was given");
+    } catch (UnsupportedOperationException expected) {
+      // expected
+    }
   }
 
   private static ResourceAssignment assignment(String resource, String instance) {
