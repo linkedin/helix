@@ -76,3 +76,57 @@
   color: rgba(0, 0, 0, 0.5);
   margin-left: 4px;
 }
+
+.mono {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.op-entry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 2px 0;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.op-detail {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.op-entry.active .op-detail {
+  color: rgba(0, 0, 0, 0.87);
+}
+
+.op-chip {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(0, 0, 0, 0.75);
+
+  &[data-operation='DISABLE'] {
+    background: #eceff1;
+  }
+  &[data-operation='EVACUATE'] {
+    background: #ffe0b2;
+  }
+  &[data-operation='UNKNOWN'] {
+    background: #ffecb3;
+  }
+  &[data-operation='SWAP_IN'] {
+    background: #e1bee7;
+  }
+  &.marker {
+    background: #e3f2fd;
+    color: #1565c0;
+  }
+  &.error {
+    background: #ffcdd2;
+    color: #b71c1c;
+  }
+}

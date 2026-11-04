@@ -508,6 +508,16 @@ public class InstanceConfig extends HelixProperty {
     return _record.getStringField(InstanceConfigProperty.HELIX_DISABLED_REASON.name(), "");
   }
 
+  /**
+   * Every stored instance operation, at most one per source, oldest first. The last entry is the
+   * one {@link #getInstanceOperation()} resolves to, before the legacy HELIX_ENABLED override.
+   *
+   * @return a read-only copy of the stored instance operations, empty if none were ever set
+   */
+  public List<InstanceOperation> getInstanceOperationList() {
+    return Collections.unmodifiableList(new ArrayList<>(getInstanceOperations()));
+  }
+
   private List<InstanceOperation> getInstanceOperations() {
     if (_deserializedInstanceOperations == null || _deserializedInstanceOperations.isEmpty()) {
       // If the _deserializedInstanceOperations is not set, then we need to build it from the real

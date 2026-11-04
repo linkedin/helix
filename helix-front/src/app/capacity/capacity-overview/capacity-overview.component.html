@@ -1,0 +1,196 @@
+<section class="capacity">
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="snapshot ? snapshot.instances.length : null"
+    [updated]="updated"
+    label="instances"
+    loadingText="Reading the cluster. A cold read can take a minute or two."
+    emptyText="This cluster has no instances."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <ng-container *ngIf="snapshot">
+    <div class="banner" *ngIf="snapshot.paused" data-testid="paused">
+      The controller is paused. Assignments are not being changed.
+    </div>
+    <div class="banner" *ngIf="snapshot.maintenance" data-testid="maintenance">
+      Cluster is in maintenance mode{{
+        snapshot.maintenanceReason ? ': ' + snapshot.maintenanceReason : ''
+      }}.
+    </div>
+    <div class="banner warn" *ngFor="let warning of snapshot.warnings">
+      {{ warning }}
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="value">
+          {{ snapshot.summary.liveInstances }} /
+          {{ snapshot.summary.totalInstances }}
+        </div>
+        <div class="label">instances live</div>
+      </div>
+      <div class="card">
+        <div class="value">{{ snapshot.summary.enabledInstances }}</div>
+        <div class="label">enabled</div>
+      </div>
+      <div class="card" [class.bad]="snapshot.summary.instancesOverCapacity">
+        <div class="value">{{ snapshot.summary.instancesOverCapacity }}</div>
+        <div class="label">over capacity</div>
+      </div>
+      <div
+        class="card"
+        [class.warn]="snapshot.summary.instancesWithUnknownCapacity"
+      >
+        <div class="value">
+          {{ snapshot.summary.instancesWithUnknownCapacity }}
+        </div>
+        <div class="label">unknown capacity</div>
+      </div>
+      <div class="card" [class.bad]="snapshot.summary.totalErrorReplicas">
+        <div class="value">{{ snapshot.summary.totalErrorReplicas }}</div>
+        <div class="label">ERROR replicas</div>
+      </div>
+      <div class="card">
+        <div class="value">
+          {{ snapshot.wagedResourceCount }} /
+          {{ snapshot.nonWagedResourceCount }}
+        </div>
+        <div class="label">WAGED / not WAGED resources</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <span class="controls-label">View</span>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="view === 'table'"
+        (click)="view = 'table'"
+      >
+        Table
+      </button>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="view === 'heatmap'"
+        (click)="view = 'heatmap'"
+      >
+        Heat map
+      </button>
+      <span class="controls-label">Capacity key</span>
+      <button
+        *ngFor="let k of snapshot.capacityKeys"
+        type="button"
+        class="chip"
+        [class.active]="key === k"
+        [attr.aria-pressed]="key === k"
+        (click)="setKey(k)"
+      >
+        {{ k }}
+      </button>
+      <span class="controls-label">Replicas</span>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="!topStateOnly"
+        (click)="setTopStateOnly(false)"
+      >
+        All
+      </button>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="topStateOnly"
+        (click)="setTopStateOnly(true)"
+      >
+        Top state only
+      </button>
+    </div>
+
+    <p class="empty" *ngIf="!snapshot.capacityKeys.length">
+      This cluster does not define WAGED capacity keys, so only partition counts
+      are shown.
+    </p>
+
+    <hi-capacity-heatmap
+      *ngIf="view === 'heatmap'"
+      [snapshot]="snapshot"
+      [key]="key"
+      [topStateOnly]="topStateOnly"
+    ></hi-capacity-heatmap>
+
+    <table class="capacity-table" *ngIf="view === 'table'">
+      <thead>
+        <tr>
+          <th>Instance</th>
+          <th>{{ snapshot.faultZoneType || 'Zone' }}</th>
+          <th>State</th>
+          <th class="util-col">{{ key }} used / max</th>
+          <th>WAGED partitions</th>
+          <th>Other partitions</th>
+          <th>ERROR</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let row of rows" [attr.data-instance]="row.instance.name">
+          <td>
+            {{ row.instance.name }}
+            <span
+              *ngIf="!row.instance.registered"
+              class="tag"
+              title="Appears in an external view but has no instance config."
+              >unregistered</span
+            >
+          </td>
+          <td>{{ row.instance.zone }}</td>
+          <td>
+            <span class="tag" [class.off]="!row.instance.live">{{
+              row.instance.live ? 'live' : 'offline'
+            }}</span>
+            <span class="tag" *ngIf="row.instance.operation !== 'ENABLE'">{{
+              row.instance.operation || 'no config'
+            }}</span>
+          </td>
+          <td class="util-col">
+            <div class="bar" *ngIf="row.ratio !== null">
+              <div
+                class="fill"
+                [class.over]="row.ratio > 1"
+                [class.hot]="row.ratio > 0.85 && row.ratio <= 1"
+                [style.width.%]="min(row.ratio * 100, 100)"
+              ></div>
+            </div>
+            <span class="ratio" [class.over]="row.ratio > 1">{{
+              ratioText(row)
+            }}</span>
+            <span class="used">{{ usedText(row) }}</span>
+          </td>
+          <td>
+            {{ row.instance.wagedPartitions }}
+            <span class="sub"
+              >({{ row.instance.wagedTopStatePartitions }} top)</span
+            >
+          </td>
+          <td>
+            {{ row.instance.nonWagedPartitions }}
+            <span class="sub"
+              >({{ row.instance.nonWagedTopStatePartitions }} top)</span
+            >
+          </td>
+          <td [class.err]="row.instance.errorReplicas">
+            {{ row.instance.errorReplicas || '' }}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="footnote">
+      Used is the sum of WAGED partition weights over the last published
+      external view, not live CPU or disk. Unknown means a weight or capacity
+      could not be read, never zero. Not WAGED resources count toward partition
+      columns only.
+    </p>
+  </ng-container>
+</section>

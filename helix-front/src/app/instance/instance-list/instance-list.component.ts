@@ -1,9 +1,22 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { Router, ActivatedRoute } from '@angular/router';
 
+import { Subscription, of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+
 import { Settings } from '../../core/settings';
-import { Instance, InstanceOperationState } from '../shared/instance.model';
+import {
+  Instance,
+  InstanceErrorSummary,
+  InstanceOperationState,
+} from '../shared/instance.model';
 import { InstanceService } from '../shared/instance.service';
+import {
+  OperationRow,
+  formatUtc,
+  operationDetail,
+  operationRows,
+} from '../shared/instance-operations';
 import { HelperService } from '../../shared/helper.service';
 
 type InstanceFilter =
@@ -21,7 +34,7 @@ type InstanceFilter =
   templateUrl: './instance-list.component.html',
   styleUrls: ['./instance-list.component.scss'],
 })
-export class InstanceListComponent implements OnInit {
+export class InstanceListComponent implements OnInit, OnDestroy {
   isLoading = true;
   error = '';
   updated: number | null = null;
@@ -29,6 +42,12 @@ export class InstanceListComponent implements OnInit {
   allInstances: Instance[] = [];
   instances: Instance[] = [];
   filter: InstanceFilter = 'all';
+  // null when the error summaries could not be read
+  errors: Record<string, InstanceErrorSummary> | null = {};
+  // the error scan reads ZooKeeper per instance, so it fills in after the table
+  errorsPending = false;
+  private summaryRead: Subscription;
+  private errorRead: Subscription;
   readonly operationFilters: ReadonlyArray<{
     filter: InstanceFilter;
     state: InstanceOperationState;
@@ -61,14 +80,23 @@ export class InstanceListComponent implements OnInit {
     }
   }
 
+  ngOnDestroy() {
+    this.summaryRead?.unsubscribe();
+    this.errorRead?.unsubscribe();
+  }
+
   load() {
     this.isLoading = true;
     this.error = '';
-    this.service.getAll(this.clusterName).subscribe(
+    this.summaryRead?.unsubscribe();
+    this.errorRead?.unsubscribe();
+    this.summaryRead = this.service.getSummaries(this.clusterName).subscribe(
       (data) => {
         this.allInstances = data;
         this.applyFilter();
         this.updated = Date.now();
+        this.isLoading = false;
+        this.readErrors();
       },
       (error) => {
         // finish the loading flag on failure instead of leaving a spinner
@@ -77,8 +105,53 @@ export class InstanceListComponent implements OnInit {
         this.isLoading = false;
         this.helper.showError(error);
       },
-      () => (this.isLoading = false),
     );
+  }
+
+  private readErrors() {
+    this.errors = {};
+    this.errorsPending = true;
+    this.errorRead = this.service
+      .getErrorSummaries(this.clusterName)
+      .pipe(catchError(() => of(null)))
+      .subscribe((errors) => {
+        this.errors = errors;
+        this.errorsPending = false;
+      });
+  }
+
+  errorCount(instance: Instance): number | null {
+    return this.errors ? this.errors[instance.name]?.errorCount || 0 : null;
+  }
+
+  errorTitle(instance: Instance): string {
+    const resources = this.errors?.[instance.name]?.resources || {};
+    return Object.entries(resources)
+      .map(([resource, count]) => `${resource}: ${count}`)
+      .join(', ');
+  }
+
+  operations(instance: Instance): OperationRow[] {
+    return operationRows(instance.summary, instance.operationState);
+  }
+
+  operationDetail(row: OperationRow): string {
+    return operationDetail(row);
+  }
+
+  operationTitle(row: OperationRow): string {
+    return `${row.entry.operation} from ${row.entry.source || 'unknown source'}${row.active ? ' (active)' : ''}: ${operationDetail(row)}`;
+  }
+
+  markerUntil(instance: Instance): string {
+    const until = instance.summary?.maintenanceMarkerExpiresAtMillis;
+    return until ? formatUtc(until) : '';
+  }
+
+  capacityText(instance: Instance): string {
+    return Object.entries(instance.summary?.capacity || {})
+      .map(([key, value]) => `${key} ${value}`)
+      .join(', ');
   }
 
   setFilter(filter: InstanceFilter) {
