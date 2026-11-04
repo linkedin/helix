@@ -234,7 +234,7 @@ public class AbstractHelixResource extends AbstractResource {
       public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
           List<InstanceConfig> instanceConfigs, List<String> liveInstances,
           List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
-        return HelixUtil.getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+        return HelixUtil.getTargetAssignmentForWagedFullAutoOrThrow(getZkBucketDataAccessor(),
             new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
             liveInstances, idealStates, resourceConfigs);
       }

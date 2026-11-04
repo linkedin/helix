@@ -23,18 +23,22 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import org.apache.helix.AccessOption;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.PropertyKey;
 import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.ValidationResult;
+import org.apache.helix.guardrail.Violation;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.WagedAssignmentProvider.DrainFeasibility;
 import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZkBucketDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.IdealState;
@@ -44,7 +48,12 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.util.HelixUtil;
+import org.apache.helix.zookeeper.api.client.HelixZkClient;
+import org.apache.helix.zookeeper.datamodel.serializer.ByteArraySerializer;
+import org.apache.helix.zookeeper.impl.factory.DedicatedZkClientFactory;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 /**
@@ -77,6 +86,20 @@ import org.testng.annotations.Test;
 public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
   private static final String CAPACITY_KEY = "DISK";
   private static final int CAPACITY = 100;
+  // One byte-array client for the WAGED metadata store, shared across what-ifs as helix-rest does.
+  private HelixZkClient _bucketZkClient;
+
+  @BeforeClass
+  public void connectBucketZkClient() {
+    _bucketZkClient = DedicatedZkClientFactory.getInstance()
+        .buildZkClient(new HelixZkClient.ZkConnectionConfig(ZK_ADDR));
+    _bucketZkClient.setZkSerializer(new ByteArraySerializer());
+  }
+
+  @AfterClass
+  public void closeBucketZkClient() {
+    _bucketZkClient.close();
+  }
 
   /**
    * A normal feasible drain: both the fast path and the full what-if agree the drain is feasible, and
@@ -249,17 +272,122 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
     tearDownCluster(cluster);
   }
 
+  // Real WAGED on a topology-aware cluster with a persisted assignment, then TOPOLOGY removed:
+  // WAGED drops every node and places nothing. The EVACUATE what-if must be indeterminate, not
+  // approved, while the public lenient util keeps returning empty replica maps.
+  @Test
+  public void testWagedThatCannotComputeIsIndeterminate() {
+    String cluster = "TestDrainNoTopology";
+    setupCluster(cluster, 3, 20);
+    createResourceWithWagedRebalance(cluster, "R", "MasterSlave", 3, 2, 2);
+    seedBestPossible(cluster, readIdealStates(cluster));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
+    clusterConfig.getRecord().getSimpleFields()
+        .remove(ClusterConfig.ClusterConfigProperty.TOPOLOGY.name());
+    accessor.setProperty(accessor.keyBuilder().clusterConfig(), clusterConfig);
+
+    Outcome outcome = evaluateRule(cluster, instanceName(0), true);
+    Assert.assertFalse(outcome.feasible, "a what-if WAGED cannot compute must not pass");
+    Assert.assertTrue(outcome.indeterminate, "it must be reported as indeterminate");
+
+    ResourceAssignment lenient = HelixUtil.getTargetAssignmentForWagedFullAuto(ZK_ADDR,
+        clusterConfig, accessor.getChildValues(accessor.keyBuilder().instanceConfigs(), true),
+        accessor.getChildNames(accessor.keyBuilder().liveInstances()), readIdealStates(cluster),
+        accessor.getChildValues(accessor.keyBuilder().resourceConfigs(), true)).get("R");
+    Assert.assertTrue(lenient.getMappedPartitions().stream()
+        .allMatch(partition -> lenient.getReplicaMap(partition).isEmpty()));
+    tearDownCluster(cluster);
+  }
+
+  // Seeded random small clusters: per-instance capacity, per-resource weight, shared fault zones,
+  // instance group tags and disabled partitions, some changed after the best possible was written.
+  // Whenever the fast path certifies draining an instance, the full what-if must agree.
+  @Test
+  public void testFastPathNeverApprovesWhatFullWhatIfRejects() throws Exception {
+    int certified = 0;
+    for (int seed = 0; seed < 10; seed++) {
+      Random random = new Random(seed);
+      String cluster = "TestDrainParityRandom" + seed;
+      int numInstances = 3 + random.nextInt(6);
+      int numZones = 2 + random.nextInt(2);
+      int numResources = 1 + random.nextInt(3);
+      setupCluster(cluster, numInstances, 10);
+      ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+      PropertyKey.Builder keys = accessor.keyBuilder();
+      for (int r = 0; r < numResources; r++) {
+        IdealState idealState = createResourceWithWagedRebalance(cluster, "R" + r, "MasterSlave",
+            1 + random.nextInt(5), 1 + random.nextInt(3), 1);
+        if (random.nextInt(3) == 0) {
+          idealState.setInstanceGroupTag("tagged");
+          accessor.setProperty(keys.idealStates("R" + r), idealState);
+        }
+        ResourceConfig resourceConfig = new ResourceConfig("R" + r);
+        resourceConfig.setPartitionCapacityMap(Collections.singletonMap(
+            ResourceConfig.DEFAULT_PARTITION_KEY,
+            Collections.singletonMap(CAPACITY_KEY, 5 + random.nextInt(20))));
+        accessor.setProperty(keys.resourceConfig("R" + r), resourceConfig);
+      }
+      for (int i = 0; i < numInstances; i++) {
+        InstanceConfig config = accessor.getProperty(keys.instanceConfig(instanceName(i)));
+        config.setDomain(String.format("zone=zone%d,instance=%s", i % numZones, instanceName(i)));
+        config.setInstanceCapacityMap(
+            Collections.singletonMap(CAPACITY_KEY, 40 + random.nextInt(60)));
+        if (random.nextInt(4) > 0) {
+          config.addTag("tagged");
+        }
+        if (random.nextInt(4) == 0) {
+          config.setInstanceEnabledForPartition("R0", "R0_0", false);
+        }
+        accessor.setProperty(keys.instanceConfig(instanceName(i)), config);
+      }
+      seedBestPossible(cluster, readIdealStates(cluster));
+      // An operator change after the best possible was written.
+      String changed = instanceName(random.nextInt(numInstances));
+      InstanceConfig config = accessor.getProperty(keys.instanceConfig(changed));
+      int change = random.nextInt(4);
+      if (change == 0) {
+        config.setInstanceEnabledForPartition("R0", "R0_0", false);
+      } else if (change == 1) {
+        config.setInstanceCapacityMap(Collections.singletonMap(CAPACITY_KEY, 20));
+      } else if (change == 2) {
+        config.removeTag("tagged");
+      }
+      accessor.setProperty(keys.instanceConfig(changed), config);
+
+      ClusterConfig clusterConfig = accessor.getProperty(keys.clusterConfig());
+      List<InstanceConfig> instanceConfigs = accessor.getChildValues(keys.instanceConfigs(), true);
+      List<String> liveInstances = accessor.getChildNames(keys.liveInstances());
+      List<ResourceConfig> resourceConfigs = accessor.getChildValues(keys.resourceConfigs(), true);
+      for (int i = 0; i < numInstances; i++) {
+        if (HelixUtil.isDrainFeasibleViaPartialRebalance(
+            new ZkBucketDataAccessor(_bucketZkClient), _baseAccessor, clusterConfig,
+            instanceConfigs, liveInstances, readIdealStates(cluster), resourceConfigs,
+            instanceName(i))) {
+          certified++;
+          Assert.assertTrue(evaluateRule(cluster, instanceName(i), false).feasible, "seed " + seed
+              + ": the fast path certified draining " + instanceName(i)
+              + " but the full what-if rejects it");
+        }
+      }
+      tearDownCluster(cluster);
+    }
+    Assert.assertTrue(certified > 0, "the fast path never certified a drain");
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
 
   private static final class Outcome {
     final boolean feasible;
+    final boolean indeterminate;
     final int probeHits;
     final int probeCalls;
 
-    Outcome(boolean feasible, int probeHits, int probeCalls) {
-      this.feasible = feasible;
+    Outcome(ValidationResult result, int probeHits, int probeCalls) {
+      this.feasible = result.isFeasible();
+      this.indeterminate = result.getViolations().stream().anyMatch(Violation::isIndeterminate);
       this.probeHits = probeHits;
       this.probeCalls = probeCalls;
     }
@@ -414,7 +542,8 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
       public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
           List<InstanceConfig> ics, List<String> lis, List<IdealState> iss,
           List<ResourceConfig> rcs) {
-        return HelixUtil.getTargetAssignmentForWagedFullAuto(ZK_ADDR, cfg, ics, lis, iss, rcs);
+        return HelixUtil.getTargetAssignmentForWagedFullAutoOrThrow(
+            new ZkBucketDataAccessor(_bucketZkClient), _baseAccessor, cfg, ics, lis, iss, rcs);
       }
 
       @Override
@@ -443,6 +572,6 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
         .build();
     ValidationResult result = rule.validate(context);
     Assert.assertNotNull(result);
-    return new Outcome(result.isFeasible(), hitCall[0], hitCall[1]);
+    return new Outcome(result, hitCall[0], hitCall[1]);
   }
 }
