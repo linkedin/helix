@@ -1,4 +1,10 @@
-import { Component, OnInit } from '@angular/core';
+import {
+  Component,
+  ElementRef,
+  HostListener,
+  OnInit,
+  ViewChild,
+} from '@angular/core';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { Router } from '@angular/router';
@@ -20,6 +26,51 @@ export class ClusterListComponent implements OnInit {
   // is the currrent user logged in? If true, then yes.
   can = false;
   service = '';
+  filter = '';
+
+  @ViewChild('filterInput') filterInput?: ElementRef<HTMLInputElement>;
+
+  get filteredClusters(): Cluster[] {
+    const query = this.filter.trim().toLowerCase();
+    return query
+      ? this.clusters.filter((c) => c.name.toLowerCase().includes(query))
+      : this.clusters;
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  focusFilterOnSlash(event: KeyboardEvent) {
+    const input = this.filterInput?.nativeElement;
+    if (
+      event.key !== '/' ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      !input ||
+      input.offsetParent === null ||
+      isEditable(event.target)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    input.focus();
+    input.select();
+  }
+
+  clearFilter(event: Event) {
+    if (this.filter) {
+      event.stopPropagation();
+      this.filter = '';
+    } else {
+      this.filterInput?.nativeElement.blur();
+    }
+  }
+
+  openFirstMatch() {
+    const [first] = this.filteredClusters;
+    if (this.filter && first) {
+      this.router.navigate([this.service, first.name]);
+    }
+  }
 
   constructor(
     protected clusterService: ClusterService,
@@ -90,4 +141,13 @@ export class ClusterListComponent implements OnInit {
       }
     });
   }
+}
+
+function isEditable(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return (
+    !!el &&
+    (el.isContentEditable ||
+      ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))
+  );
 }

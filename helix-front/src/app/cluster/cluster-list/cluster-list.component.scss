@@ -35,6 +35,57 @@
 
 .empty {
   font-size: 14px;
-  // font-style: italic;
-  padding: 10px;
+  padding: 10px 16px;
+}
+
+.cluster-filter {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 12px;
+  background: var(--hi-surface, #fff);
+}
+
+.cluster-filter-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  height: 36px;
+  border: 1px solid var(--hi-border, rgba(0, 0, 0, 0.18));
+  border-radius: 8px;
+  transition: border-color var(--hi-motion-fast, 120ms) var(--hi-ease, ease-out);
+
+  &:focus-within {
+    border-color: var(--hi-focus, #1976d2);
+    box-shadow: 0 0 0 1px var(--hi-focus, #1976d2);
+  }
+
+  input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+  }
+
+  kbd {
+    padding: 0 6px;
+    border: 1px solid var(--hi-border, rgba(0, 0, 0, 0.18));
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--hi-text-secondary, #666);
+  }
+}
+
+.cluster-filter-icon {
+  font-size: 20px;
+  width: 20px;
+  height: 20px;
+  color: var(--hi-text-secondary, #666);
 }
