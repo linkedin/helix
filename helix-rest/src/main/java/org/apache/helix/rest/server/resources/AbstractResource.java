@@ -76,6 +76,8 @@ public class AbstractResource {
     setInstanceOperationMaintenance,
     getInstancesUnableToAcceptOnlineReplicas,
     getInstancesUnderInstanceOperationMaintenance,
+    getInstanceSummaries,
+    getInstanceErrorSummaries,
     rebalance,
     reset,
     resetPartitions,
@@ -95,6 +97,7 @@ public class AbstractResource {
     onDemandRebalance,
     isEvacuateFinished,
     isInstanceDrained,
+    areReplicasOffline,
     setPartitionsToError,
     forceKillInstance
   }

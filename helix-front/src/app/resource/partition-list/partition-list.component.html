@@ -17,18 +17,50 @@
   ~ under the License.
   -->
 
-<section>
+<section class="diagnostics">
+  <hi-list-status
+    [loading]="isLoading || instancesPending"
+    [error]="error"
+    [count]="partitions ? partitions.length : null"
+    [updated]="updated"
+    label="partitions"
+    [loadingText]="isLoading ? '' : 'Reading instance liveness.'"
+    emptyText="The IdealState and ExternalView list no partitions."
+    (refresh)="load()"
+  ></hi-list-status>
+  <p class="notice warning" *ngFor="let warning of warnings">{{ warning }}</p>
+  <div class="filters" *ngIf="partitions?.length">
+    <button
+      *ngFor="let f of filters"
+      type="button"
+      class="chip"
+      [class.active]="filter === f.value"
+      [attr.aria-pressed]="filter === f.value"
+      (click)="setFilter(f.value)"
+    >
+      {{ f.label }} {{ counts[f.value] ?? 'n/a' }}
+    </button>
+    <input
+      class="search"
+      type="search"
+      placeholder="Search partitions"
+      [ngModel]="search"
+      (ngModelChange)="setFilter(filter, $event)"
+    />
+  </div>
   <ngx-datatable
-    *ngIf="canAnalyse()"
+    *ngIf="partitions?.length"
     #partitionsTable
     class="material"
     [headerHeight]="headerHeight"
-    [rowHeight]="rowHeight"
+    rowHeight="auto"
     columnMode="force"
     [footerHeight]="rowHeight"
-    [rows]="partitions"
-    [sorts]="sorts"
+    [rows]="rows"
     [limit]="20"
+    [offset]="offset"
+    (page)="offset = $event.offset"
+    [messages]="{ emptyMessage: 'No partitions match this filter.' }"
     selectionType="single"
     (select)="onSelect($event)"
   >
@@ -45,34 +77,38 @@
     </ngx-datatable-column>
     <ngx-datatable-column
       name="Status"
-      prop="isReady"
-      [width]="85"
-      [resizeable]="false"
-      [draggable]="false"
+      [width]="110"
+      [sortable]="false"
       [canAutoResize]="false"
     >
-      <ng-template let-value="value" ngx-datatable-cell-template>
-        <mat-icon *ngIf="value" [ngClass]="'status-ready'"
-          >check_circle</mat-icon
-        >
-        <mat-icon *ngIf="!value" [ngClass]="'status-not-ready'">error</mat-icon>
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <span class="badge" [ngClass]="row.status">{{ row.status }}</span>
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Name"></ngx-datatable-column>
-    <ngx-datatable-column
-      name="Replicas"
-      [width]="100 * partitions[0].replicas.length"
-      [resizeable]="false"
-      [canAutoResize]="false"
-    >
+    <ngx-datatable-column name="Name" [width]="220" [sortable]="false">
+      <ng-template let-row="row" ngx-datatable-cell-template>
+        <div>{{ row.name }}</div>
+        <div class="muted">{{ row.explanation }}</div>
+      </ng-template>
+    </ngx-datatable-column>
+    <ngx-datatable-column name="Replicas" [width]="480" [sortable]="false">
       <ng-template let-value="value" ngx-datatable-cell-template>
-        <span *ngFor="let replica of value" [matTooltip]="replica.instanceName">
+        <span
+          *ngFor="let replica of value"
+          class="replica"
+          [matTooltip]="replica.instanceName"
+        >
           <hi-state-label
             [state]="replica.externalView"
-            [isReady]="
-              replica.externalView && replica.externalView == replica.idealState
-            "
+            [isReady]="replica.serving"
           ></hi-state-label>
+          <span *ngIf="instancesPending" class="muted">...</span>
+          <span *ngIf="replica.live === false" class="badge critical"
+            >not live</span
+          >
+          <span *ngIf="replica.operation" class="badge warning">{{
+            replica.operation
+          }}</span>
         </span>
       </ng-template>
     </ngx-datatable-column>
@@ -115,22 +151,8 @@
       </ng-template>
     </ngx-datatable-footer>
   </ngx-datatable>
-  <div
-    *ngIf="!canAnalyse()"
-    class="message"
-    fxLayout="column"
-    fxLayoutAlign="center center"
-  >
-    <mat-spinner *ngIf="isLoading"></mat-spinner>
-    <section *ngIf="!isLoading && getReasonWhyCannotAnalyse()" fxFlexFill>
-      {{ getReasonWhyCannotAnalyse() }}
-    </section>
-    <section *ngIf="!isLoading && !getReasonWhyCannotAnalyse()" fxFlexFill>
-      <div>
-        Sorry, we do not support this kind of partition information yet.
-        Detailed debugging information:
-      </div>
-      <ngx-json-viewer [json]="resource"></ngx-json-viewer>
-    </section>
-  </div>
+  <p class="muted">
+    A replica serves when its instance is live and its ExternalView state is not
+    the initial, ERROR or DROPPED state. This does not check application health.
+  </p>
 </section>

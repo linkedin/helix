@@ -24,6 +24,23 @@ export class Partition {
   }
 }
 
+// One row of GET /resources?command=getResourceSummaries
+export interface ResourceSummary {
+  cluster: string;
+  name: string;
+  rebalanceMode: string;
+  stateModelDef: string;
+  numPartitions: number;
+  replicas: string;
+  minActiveReplicas: number;
+  instanceGroupTag: string | null;
+  enabled: boolean;
+  waged: boolean;
+  hasExternalView: boolean;
+  // kept so the existing "alive" sort and status icon keep working
+  alive: boolean;
+}
+
 export class Resource {
   readonly name: string;
 

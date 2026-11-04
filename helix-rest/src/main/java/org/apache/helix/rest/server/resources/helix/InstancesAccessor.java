@@ -50,6 +50,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.helix.AccessOption;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
@@ -77,6 +78,7 @@ import org.apache.helix.rest.server.service.ClusterService;
 import org.apache.helix.rest.server.service.ClusterServiceImpl;
 import org.apache.helix.util.InstanceUtil;
 import org.apache.helix.util.InstanceValidationUtil;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -109,7 +111,9 @@ public class InstancesAccessor extends AbstractHelixResource {
     instance_stoppable_parallel,
     instance_not_stoppable_with_reasons,
     instances_unable_to_accept_online_replicas,
-    instances_under_instance_operation_maintenance
+    instances_under_instance_operation_maintenance,
+    instance_summaries,
+    instance_error_summaries
   }
 
   public enum InstanceHealthSelectionBase {
@@ -210,6 +214,10 @@ public class InstancesAccessor extends AbstractHelixResource {
       return getInstancesUnableToAcceptOnlineReplicas(clusterId, accessor);
     case getInstancesUnderInstanceOperationMaintenance:
       return getInstancesUnderInstanceOperationMaintenance(clusterId, accessor);
+    case getInstanceSummaries:
+      return getInstanceSummaries(clusterId, accessor);
+    case getInstanceErrorSummaries:
+      return getInstanceErrorSummaries(clusterId, accessor);
     default:
       _logger.error("Unsupported command :" + command);
       return badRequest("Unsupported command :" + command);
@@ -378,6 +386,200 @@ public class InstancesAccessor extends AbstractHelixResource {
       instanceNode.put("expiresAtMillis", instanceConfig.getInstanceOperationMaintenanceUntilMs());
     }
     return JSONRepresentation(root);
+  }
+
+  // One entry per source that holds an operation, oldest first. The last one is the active one.
+  private static void putInstanceOperations(ArrayNode operationsNode,
+      InstanceConfig instanceConfig) {
+    for (InstanceConfig.InstanceOperation operation : instanceConfig.getInstanceOperationList()) {
+      ObjectNode operationNode = operationsNode.addObject();
+      try {
+        operationNode.put("operation", operation.getOperation().name());
+      } catch (IllegalArgumentException e) {
+        operationNode.put("operation", InstanceConstants.InstanceOperation.UNKNOWN.name());
+      }
+      operationNode.put("source", operation.getSource().name());
+      operationNode.put("reason", operation.getReason());
+      operationNode.put("timestamp", operation.getTimestamp());
+    }
+  }
+
+  /**
+   * Lists every instance with a fixed, trimmed set of fields, from one bulk read of the instance
+   * configs and one of the live instance names, so a client does not have to fetch each instance
+   * config to render an instance table or a topology.
+   *
+   * <p>Response (HTTP 200), keyed by instance name in sorted order:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instance_summaries": {
+   *     "h1_12918": { "live": true, "host": "h1", "port": "12918",
+   *                   "instanceOperation": "ENABLE",
+   *                   "instanceOperations": [ { "operation": "DISABLE", "source": "AUTOMATION",
+   *                       "reason": "bad disk", "timestamp": 1776385000000 } ],
+   *                   "domain": "zone=z1,host=h1",
+   *                   "tags": ["tagA"], "capacity": { "CPU": 100, "DISK": 500 },
+   *                   "createdAtMillis": 1776380000000,
+   *                   "maintenanceMarkerExpiresAtMillis": 1776385800000 } } }
+   * }</pre>
+   *
+   * <p>{@code maintenanceMarkerExpiresAtMillis} is present only while the instance holds a valid
+   * instance-operation maintenance marker (see
+   * {@link InstanceConfig#isUnderInstanceOperationMaintenance(long)}); an expired marker is
+   * omitted.
+   *
+   * <p>{@code live} is the raw {@code /LIVEINSTANCES} membership and {@code instanceOperation} is
+   * the effective operation, as in {@code getInstancesUnderInstanceOperationMaintenance}.
+   * {@code capacity} is the WAGED instance capacity map, empty when unset or unparsable.
+   * {@code instanceOperations} lists every stored operation, one per source, oldest first, so a
+   * client can see which sources hold the instance and since when; the last one is the active one.
+   * An operation timestamp of -1 means it was set when the instance config was created (the INIT
+   * operation or the default ENABLE), so {@code createdAtMillis}, the creation time of the
+   * instance config znode, is the time to show for it. It is omitted when ZooKeeper did not
+   * report one.
+   */
+  private Response getInstanceSummaries(String clusterId, HelixDataAccessor accessor) {
+    try {
+      // 404 rather than an empty listing: HelixDataAccessor#getChildValues normalizes a missing
+      // cluster to an empty list. Unlike ZKUtil#isClusterSetup this lets a failed read surface as
+      // a 500 instead of reading as a missing cluster.
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
+        return notFound();
+      }
+      PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+      List<InstanceConfig> instanceConfigs =
+          accessor.getChildValues(keyBuilder.instanceConfigs(), true);
+      List<String> liveInstanceNames = accessor.getChildNames(keyBuilder.liveInstances());
+      Set<String> liveInstances =
+          liveInstanceNames == null ? Collections.emptySet() : new HashSet<>(liveInstanceNames);
+
+      long nowMs = System.currentTimeMillis();
+      // Sorted so the payload is stable across calls for the same cluster state.
+      Map<String, InstanceConfig> sortedConfigs = new TreeMap<>();
+      if (instanceConfigs != null) {
+        for (InstanceConfig instanceConfig : instanceConfigs) {
+          // A config znode with no record id has no instance name to list.
+          if (instanceConfig != null && instanceConfig.getInstanceName() != null) {
+            sortedConfigs.put(instanceConfig.getInstanceName(), instanceConfig);
+          }
+        }
+      }
+
+      // The config znode's creation time is not part of the bulk config read above.
+      List<String> instanceNames = new ArrayList<>(sortedConfigs.keySet());
+      Map<String, Stat> configStats = new HashMap<>();
+      if (!instanceNames.isEmpty()) {
+        Stat[] stats = accessor.getBaseDataAccessor().getStats(instanceNames.stream()
+            .map(name -> keyBuilder.instanceConfig(name).getPath()).collect(Collectors.toList()),
+            AccessOption.PERSISTENT);
+        for (int i = 0; i < stats.length; i++) {
+          if (stats[i] != null) {
+            configStats.put(instanceNames.get(i), stats[i]);
+          }
+        }
+      }
+
+      ObjectNode root = JsonNodeFactory.instance.objectNode();
+      root.put(Properties.id.name(), clusterId);
+      ObjectNode summariesNode = root.putObject(InstancesProperties.instance_summaries.name());
+      for (Map.Entry<String, InstanceConfig> entry : sortedConfigs.entrySet()) {
+        InstanceConfig instanceConfig = entry.getValue();
+        ObjectNode instanceNode = summariesNode.putObject(entry.getKey());
+        instanceNode.put("live", liveInstances.contains(entry.getKey()));
+        instanceNode.put("host", instanceConfig.getHostName());
+        instanceNode.put("port", instanceConfig.getPort());
+        instanceNode.put("instanceOperation",
+            instanceConfig.getInstanceOperation().getOperation().name());
+        putInstanceOperations(instanceNode.putArray("instanceOperations"), instanceConfig);
+        Stat configStat = configStats.get(entry.getKey());
+        if (configStat != null) {
+          instanceNode.put("createdAtMillis", configStat.getCtime());
+        }
+        instanceNode.put("domain", instanceConfig.getDomainAsString());
+        ArrayNode tagsNode = instanceNode.putArray("tags");
+        instanceConfig.getTags().forEach(tagsNode::add);
+        ObjectNode capacityNode = instanceNode.putObject("capacity");
+        try {
+          instanceConfig.getInstanceCapacityMap().forEach(capacityNode::put);
+        } catch (NumberFormatException e) {
+          capacityNode.removeAll();
+        }
+        if (instanceConfig.isUnderInstanceOperationMaintenance(nowMs)) {
+          instanceNode.put("maintenanceMarkerExpiresAtMillis",
+              instanceConfig.getInstanceOperationMaintenanceUntilMs());
+        }
+      }
+      return JSONRepresentation(root);
+    } catch (Exception e) {
+      _logger.error("Failed to list instance summaries for {}", clusterId, e);
+      return serverError(e);
+    }
+  }
+
+  /**
+   * Lists the instances that have state transition errors, with the number of distinct errored
+   * partitions per resource, so a client does not have to read {@code instances/{i}/errors} for
+   * every instance.
+   *
+   * <p>Response (HTTP 200), keyed by instance name in sorted order, instances without errors
+   * omitted:
+   * <pre>{@code
+   * { "id": "cluster0",
+   *   "instance_error_summaries": {
+   *     "h1_12918": { "errorCount": 3, "resources": { "db0": 2, "db1": 1 } } } }
+   * }</pre>
+   *
+   * <p>A partition that has an error under more than one session is counted once. The cost is
+   * one ZooKeeper listing per instance, session and resource under {@code /INSTANCES/*}{@code /ERRORS},
+   * which is why this is a separate command and not part of {@code getInstanceSummaries}.
+   */
+  private Response getInstanceErrorSummaries(String clusterId, HelixDataAccessor accessor) {
+    try {
+      if (!getRealmAwareZkClient().exists("/" + clusterId)) {
+        return notFound();
+      }
+      PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+      List<String> instanceNames = accessor.getChildNames(keyBuilder.instanceConfigs());
+
+      ObjectNode root = JsonNodeFactory.instance.objectNode();
+      root.put(Properties.id.name(), clusterId);
+      ObjectNode summariesNode =
+          root.putObject(InstancesProperties.instance_error_summaries.name());
+      for (String instanceName : new TreeSet<>(
+          instanceNames == null ? Collections.<String> emptyList() : instanceNames)) {
+        Map<String, Set<String>> partitionsByResource = new TreeMap<>();
+        List<String> sessionIds = accessor.getChildNames(keyBuilder.errors(instanceName));
+        for (String sessionId : sessionIds == null ? Collections.<String> emptyList()
+            : sessionIds) {
+          List<String> resources =
+              accessor.getChildNames(keyBuilder.errors(instanceName, sessionId));
+          for (String resourceName : resources == null ? Collections.<String> emptyList()
+              : resources) {
+            List<String> partitions =
+                accessor.getChildNames(keyBuilder.errors(instanceName, sessionId, resourceName));
+            if (partitions != null && !partitions.isEmpty()) {
+              partitionsByResource.computeIfAbsent(resourceName, r -> new HashSet<>())
+                  .addAll(partitions);
+            }
+          }
+        }
+        if (partitionsByResource.isEmpty()) {
+          continue;
+        }
+        ObjectNode instanceNode = summariesNode.putObject(instanceName);
+        ObjectNode resourcesNode = instanceNode.putObject("resources");
+        int total = 0;
+        for (Map.Entry<String, Set<String>> entry : partitionsByResource.entrySet()) {
+          resourcesNode.put(entry.getKey(), entry.getValue().size());
+          total += entry.getValue().size();
+        }
+        instanceNode.put("errorCount", total);
+      }
+      return JSONRepresentation(root);
+    } catch (Exception e) {
+      _logger.error("Failed to list instance error summaries for {}", clusterId, e);
+      return serverError(e);
+    }
   }
 
   @ResponseMetered(name = HttpConstants.WRITE_REQUEST)

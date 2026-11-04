@@ -211,16 +211,19 @@
     font-weight: 600;
     white-space: nowrap;
     &.critical,
-    &.ERROR {
+    &.ERROR,
+    &.UNSERVED {
       background: #fdebea;
       color: #a32323;
     }
     &.warning,
-    &.ATTENTION {
+    &.ATTENTION,
+    &.DEGRADED {
       background: #fff2d8;
       color: #825200;
     }
-    &.SERVING {
+    &.SERVING,
+    &.HEALTHY {
       background: #e9f4ed;
       color: #25613a;
     }
@@ -289,6 +292,21 @@
   }
   .empty mat-spinner {
     margin: auto auto 14px;
+  }
+}
+
+.chip {
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  background: #fff;
+  border-radius: 14px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.7);
+
+  &.active {
+    background: #1565c0;
+    border-color: #1565c0;
+    color: #fff;
   }
 }
 
