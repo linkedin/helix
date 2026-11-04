@@ -41,6 +41,8 @@ export class ListStatusComponent {
   @Input() updated: number | null = null;
   @Input() label = 'items';
   @Input() emptyText = '';
+  // shown next to the spinner for reads that can take a while
+  @Input() loadingText = '';
 
   @Output() refresh = new EventEmitter<void>();
 
