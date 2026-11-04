@@ -20,11 +20,13 @@ package org.apache.helix.controller.rebalancer.waged;
  */
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.helix.AccessOption;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.PropertyKey;
@@ -278,11 +280,8 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
   @Test
   public void testWagedThatCannotComputeIsIndeterminate() {
     String cluster = "TestDrainNoTopology";
-    setupCluster(cluster, 3, 20);
-    createResourceWithWagedRebalance(cluster, "R", "MasterSlave", 3, 2, 2);
-    seedBestPossible(cluster, readIdealStates(cluster));
+    ClusterConfig clusterConfig = setupSeededCluster(cluster, 3);
     ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
-    ClusterConfig clusterConfig = accessor.getProperty(accessor.keyBuilder().clusterConfig());
     clusterConfig.getRecord().getSimpleFields()
         .remove(ClusterConfig.ClusterConfigProperty.TOPOLOGY.name());
     accessor.setProperty(accessor.keyBuilder().clusterConfig(), clusterConfig);
@@ -297,6 +296,33 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
         accessor.getChildValues(accessor.keyBuilder().resourceConfigs(), true)).get("R");
     Assert.assertTrue(lenient.getMappedPartitions().stream()
         .allMatch(partition -> lenient.getReplicaMap(partition).isEmpty()));
+    tearDownCluster(cluster);
+  }
+
+  // Instance 0 lacks a required capacity key, so the cluster model only builds once it is drained,
+  // and instance 1 went offline after the assignment was persisted. The baseline then takes WAGED's
+  // emergency rebalance, whose INVALID_CLUSTER_STATUS falls back to the persisted assignment unless
+  // the strict what-if propagates it. The fast path is off: it proves the drained cluster directly.
+  @Test
+  public void testWagedClusterModelFailureIsIndeterminate() {
+    String cluster = "TestDrainNoClusterModel";
+    ClusterConfig clusterConfig = setupSeededCluster(cluster, 5);
+    clusterConfig.setInstanceCapacityKeys(Arrays.asList(CAPACITY_KEY, "CPU"));
+    clusterConfig.setDefaultPartitionWeightMap(ImmutableMap.of(CAPACITY_KEY, 20, "CPU", 1));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    PropertyKey.Builder keys = accessor.keyBuilder();
+    accessor.setProperty(keys.clusterConfig(), clusterConfig);
+    for (int i = 1; i < 5; i++) {
+      InstanceConfig config = accessor.getProperty(keys.instanceConfig(instanceName(i)));
+      config.setInstanceCapacityMap(ImmutableMap.of(CAPACITY_KEY, CAPACITY, "CPU", 100));
+      accessor.setProperty(keys.instanceConfig(instanceName(i)), config);
+    }
+    accessor.getBaseDataAccessor()
+        .remove(keys.liveInstance(instanceName(1)).getPath(), AccessOption.PERSISTENT);
+
+    Outcome outcome = evaluateRule(cluster, instanceName(0), false);
+    Assert.assertFalse(outcome.feasible, "a what-if WAGED cannot compute must not pass");
+    Assert.assertTrue(outcome.indeterminate, "it must be reported as indeterminate");
     tearDownCluster(cluster);
   }
 
@@ -461,6 +487,15 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
       accessor.getBaseDataAccessor().set(accessor.keyBuilder().liveInstance(name).getPath(),
           li.getRecord(), AccessOption.PERSISTENT);
     }
+  }
+
+  // Resource R on {@code numInstances} instances, its assignment persisted. Returns the config.
+  private ClusterConfig setupSeededCluster(String cluster, int numInstances) {
+    setupCluster(cluster, numInstances, 20);
+    createResourceWithWagedRebalance(cluster, "R", "MasterSlave", 3, 2, 2);
+    seedBestPossible(cluster, readIdealStates(cluster));
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    return accessor.getProperty(accessor.keyBuilder().clusterConfig());
   }
 
   private List<IdealState> readIdealStates(String cluster) {
