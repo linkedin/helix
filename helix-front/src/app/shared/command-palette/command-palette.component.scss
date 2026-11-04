@@ -1,0 +1,224 @@
+:host {
+  display: contents;
+}
+
+.palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  margin-right: 8px;
+  padding: 0 8px 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--hi-motion-fast, 120ms) var(--hi-ease, ease);
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  &:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    opacity: 0.85;
+  }
+
+  .label {
+    min-width: 96px;
+    text-align: left;
+    opacity: 0.85;
+  }
+
+  kbd {
+    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+  }
+}
+
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--hi-border, #d6dbe1);
+  border-radius: 4px;
+  background: var(--hi-surface-muted, #f4f6f8);
+  color: var(--hi-text-secondary, #5f6368);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+}
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  background: rgba(10, 14, 20, 0.45);
+  backdrop-filter: blur(2px);
+  animation: hi-fade var(--hi-motion-fast, 120ms) var(--hi-ease, ease);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, calc(100vw - 32px));
+  max-height: 60vh;
+  overflow: hidden;
+  border: 1px solid var(--hi-border, #d6dbe1);
+  border-radius: 12px;
+  background: var(--hi-surface, #fff);
+  color: var(--hi-text, rgba(0, 0, 0, 0.87));
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.32),
+    0 2px 8px rgba(0, 0, 0, 0.12);
+  animation: hi-pop var(--hi-motion, 200ms) var(--hi-ease, ease);
+}
+
+.palette-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--hi-border, #e3e6ea);
+
+  mat-icon {
+    color: var(--hi-text-secondary, #5f6368);
+  }
+
+  input {
+    flex: 1;
+    height: 52px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 16px;
+
+    &::placeholder {
+      color: var(--hi-text-secondary, #80868b);
+    }
+  }
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--hi-border, #d6dbe1);
+  border-top-color: var(--hi-primary-text, #1a73e8);
+  border-radius: 50%;
+  animation: hi-spin 0.7s linear infinite;
+}
+
+.palette-list {
+  flex: 1;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  list-style: none;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+
+    &.active {
+      background: var(--hi-selected, rgba(26, 115, 232, 0.1));
+    }
+  }
+
+  .kind {
+    flex: none;
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--hi-text-secondary, #5f6368);
+  }
+
+  .name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  mark {
+    background: none;
+    color: var(--hi-primary-text, #1a73e8);
+    font-weight: 600;
+  }
+
+  .hint {
+    margin-left: auto;
+    flex: none;
+    color: var(--hi-text-secondary, #5f6368);
+    font-size: 12px;
+  }
+
+  .empty {
+    justify-content: center;
+    height: 64px;
+    cursor: default;
+    color: var(--hi-text-secondary, #5f6368);
+  }
+}
+
+.palette-footer {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--hi-border, #e3e6ea);
+  color: var(--hi-text-secondary, #5f6368);
+  font-size: 12px;
+
+  kbd {
+    margin-right: 4px;
+  }
+}
+
+@keyframes hi-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes hi-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+
+@keyframes hi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .palette-backdrop,
+  .palette {
+    animation: none;
+  }
+}

@@ -1,0 +1,74 @@
+<button
+  type="button"
+  class="palette-trigger"
+  (click)="open()"
+  aria-label="Search clusters, resources and instances"
+>
+  <mat-icon>search</mat-icon>
+  <span class="label">Search</span>
+  <kbd>{{ shortcut }}</kbd>
+</button>
+
+<div *ngIf="isOpen" class="palette-backdrop" (mousedown)="close()">
+  <div
+    class="palette"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Command palette"
+    (mousedown)="$event.stopPropagation()"
+  >
+    <div class="palette-input">
+      <mat-icon>search</mat-icon>
+      <input
+        #input
+        type="text"
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="hi-palette-list"
+        aria-autocomplete="list"
+        [attr.aria-activedescendant]="
+          results.length ? 'hi-palette-opt-' + active : null
+        "
+        placeholder="Jump to a cluster, page, resource or instance"
+        autocomplete="off"
+        spellcheck="false"
+        [ngModel]="query"
+        (ngModelChange)="onQuery($event)"
+        (keydown)="onInputKey($event)"
+      />
+      <span *ngIf="loading" class="spinner" aria-hidden="true"></span>
+    </div>
+    <ul #list id="hi-palette-list" role="listbox" class="palette-list">
+      <li
+        *ngFor="let r of results; let i = index"
+        [id]="'hi-palette-opt-' + i"
+        role="option"
+        [attr.aria-selected]="i === active"
+        [class.active]="i === active"
+        (mousemove)="i !== active && (active = i)"
+        (click)="go(r.item)"
+      >
+        <mat-icon class="kind">{{
+          isRecent(r) ? 'history' : icons[r.item.kind]
+        }}</mat-icon>
+        <span class="name"
+          ><ng-container *ngFor="let s of r.segments"
+            ><mark *ngIf="s.hit">{{ s.text }}</mark
+            ><ng-container *ngIf="!s.hit">{{
+              s.text
+            }}</ng-container></ng-container
+          ></span
+        >
+        <span class="hint">{{ r.item.hint }}</span>
+      </li>
+      <li *ngIf="!results.length" class="empty" role="presentation">
+        {{ loading ? 'Loading' : 'No matches' }}
+      </li>
+    </ul>
+    <div class="palette-footer" aria-hidden="true">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> open</span>
+      <span><kbd>esc</kbd> close</span>
+    </div>
+  </div>
+</div>
