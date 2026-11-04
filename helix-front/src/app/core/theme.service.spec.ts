@@ -8,18 +8,20 @@ import {
 
 describe('ThemeService', () => {
   let systemDark: boolean;
+  let reducedMotion: boolean;
   let listeners: Array<() => void>;
   const hasDarkClass = () => document.body.classList.contains(DARK_THEME_CLASS);
 
   beforeEach(() => {
     systemDark = false;
+    reducedMotion = false;
     listeners = [];
     localStorage.clear();
     document.body.classList.remove(DARK_THEME_CLASS);
     (window as any).matchMedia = (media: string) => ({
       media,
       get matches() {
-        return systemDark;
+        return media.includes('reduced-motion') ? reducedMotion : systemDark;
       },
       addEventListener: (_: string, cb: () => void) => listeners.push(cb),
       removeEventListener: () => {},
@@ -28,6 +30,24 @@ describe('ThemeService', () => {
 
   afterEach(() => {
     delete (window as any).matchMedia;
+    delete (document as any).startViewTransition;
+  });
+
+  it('cross-fades the switch unless reduced motion is on', () => {
+    const service = new ThemeService(document);
+    const updates: Array<() => void> = [];
+    (document as any).startViewTransition = (cb: () => void) =>
+      updates.push(cb);
+
+    service.setMode('dark');
+    expect(hasDarkClass()).toBe(false);
+    updates[0]();
+    expect(hasDarkClass()).toBe(true);
+
+    reducedMotion = true;
+    service.setMode('light');
+    expect(updates.length).toBe(1);
+    expect(hasDarkClass()).toBe(false);
   });
 
   it('defaults to light, applies and persists the chosen mode', () => {

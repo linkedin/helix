@@ -1,5 +1,5 @@
 import { DOCUMENT } from '@angular/common';
-import { Inject, Injectable, OnDestroy } from '@angular/core';
+import { Inject, Injectable, NgZone, OnDestroy, Optional } from '@angular/core';
 import { BehaviorSubject } from 'rxjs';
 import { distinctUntilChanged } from 'rxjs/operators';
 
@@ -20,7 +20,10 @@ export class ThemeService implements OnDestroy {
 
   readonly isDark$ = this.dark.pipe(distinctUntilChanged());
 
-  constructor(@Inject(DOCUMENT) private document: Document) {
+  constructor(
+    @Inject(DOCUMENT) private document: Document,
+    @Optional() private zone?: NgZone,
+  ) {
     this.systemDark = document.defaultView?.matchMedia?.(
       '(prefers-color-scheme: dark)',
     );
@@ -40,7 +43,20 @@ export class ThemeService implements OnDestroy {
       // storage can be unavailable (private mode); the choice still applies
     }
     this.currentMode = mode;
-    this.apply();
+    // Cross-fade where supported; the callback runs outside the Angular zone
+    const doc = this.document as Document & {
+      startViewTransition?: (update: () => void) => unknown;
+    };
+    const reduceMotion = this.document.defaultView?.matchMedia?.(
+      '(prefers-reduced-motion: reduce)',
+    )?.matches;
+    if (doc.startViewTransition && !reduceMotion) {
+      doc.startViewTransition(() =>
+        this.zone ? this.zone.run(() => this.apply()) : this.apply(),
+      );
+    } else {
+      this.apply();
+    }
   }
 
   ngOnDestroy() {

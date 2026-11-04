@@ -45,7 +45,7 @@
   color: var(--hi-primary-text, #006fa6);
   font-weight: 500;
   text-decoration: none;
-  transition: background-color 0.12s;
+  transition: background-color var(--hi-motion-fast) var(--hi-ease);
 
   mat-icon {
     width: 16px;

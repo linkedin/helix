@@ -1,6 +1,4 @@
-// Material Icons & Fonts
-@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
-@import url('https://fonts.googleapis.com/css?family=Roboto:300,400,500,700,400italic');
+// Roboto and Material Icons are linked from index.html
 
 // ngx-vis styles (vis styles)
 @import '~vis-network/styles/vis-network.min.css';
@@ -43,7 +41,32 @@
 
 body {
   font-family: Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   margin: 0;
   padding: 0;
   height: 100vh;
+}
+
+:root {
+  --hi-motion-fast: 120ms;
+  --hi-motion: 200ms;
+  --hi-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ngx-datatable.material .datatable-body-row {
+  transition: background-color var(--hi-motion-fast) var(--hi-ease);
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--hi-motion);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+  }
 }
