@@ -19,6 +19,10 @@ import { AppComponent } from './app.component';
 import { WorkflowModule } from './workflow/workflow.module';
 import { ChooserModule } from './chooser/chooser.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { TopologyModule } from './topology/topology.module';
+import { CapacityModule } from './capacity/capacity.module';
+import { DiagnosticsModule } from './diagnostics/diagnostics.module';
+import { OverviewModule } from './overview/overview.module';
 
 @NgModule({
   declarations: [AppComponent],
@@ -39,6 +43,10 @@ import { DashboardModule } from './dashboard/dashboard.module';
     WorkflowModule,
     ChooserModule,
     DashboardModule,
+    TopologyModule,
+    CapacityModule,
+    DiagnosticsModule,
+    OverviewModule,
   ],
   providers: [
     { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptor, multi: true },

@@ -25,7 +25,8 @@ describe('InstanceListComponent', () => {
   ];
 
   const mockInstanceService = {
-    getAll: () => of(mockInstances),
+    getSummaries: () => of(mockInstances),
+    getErrorSummaries: () => of({}),
   };
 
   const mockHelperService = {

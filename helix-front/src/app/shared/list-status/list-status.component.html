@@ -21,6 +21,14 @@
   <mat-spinner *ngIf="loading" diameter="18"></mat-spinner>
 
   <span
+    *ngIf="loading && loadingText"
+    class="status-message status-loading"
+    data-testid="list-status-loading"
+  >
+    {{ loadingText }}
+  </span>
+
+  <span
     *ngIf="error"
     class="status-message status-error"
     data-testid="list-status-error"

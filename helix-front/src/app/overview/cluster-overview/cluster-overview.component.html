@@ -1,0 +1,81 @@
+<section class="diagnostics">
+  <hi-list-status
+    [loading]="isLoading"
+    [updated]="updated"
+    loadingText="Reading the cluster. A cold read can take a minute or two."
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <ng-container *ngIf="issues">
+    <p class="notice verdict" [ngClass]="tone" data-testid="verdict">
+      {{ verdict }}
+    </p>
+
+    <div class="summary-grid">
+      <a
+        *ngFor="let card of cards"
+        class="summary-card"
+        [ngClass]="card.tone"
+        [routerLink]="card.link"
+        data-testid="card"
+      >
+        <strong [class.long]="('' + card.value).length > 10">{{
+          card.value
+        }}</strong>
+        {{ card.label }}
+        <div class="muted">{{ card.detail }}</div>
+      </a>
+    </div>
+
+    <ng-container *ngIf="issues.length">
+      <div class="section-head">
+        <h2>Top issues</h2>
+        <a routerLink="../diagnostics" data-testid="see-all">
+          See all {{ issues.length }} in Diagnostics
+        </a>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Affected</th>
+              <th>Issue</th>
+              <th>Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let issue of issues | slice: 0 : 5" data-testid="issue">
+              <td>
+                <span class="badge" [ngClass]="issue.severity">
+                  {{ issue.severity }}
+                </span>
+              </td>
+              <td class="name">{{ issue.subject }}</td>
+              <td>
+                <div class="name">{{ issue.title }}</div>
+                <div class="sub">{{ issue.detail }}</div>
+              </td>
+              <td>
+                <a [routerLink]="link(issue)">{{ issue.linkLabel }}</a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </ng-container>
+
+    <p class="muted footnote" data-testid="read-times">
+      <ng-container *ngIf="snapshot">
+        ERROR replicas, capacity, controller and cluster mode are from the
+        sample taken at
+        {{ updated | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC, which can come
+        from the server cache.
+      </ng-container>
+      <ng-container *ngIf="instances || resources">
+        Instances and resources were read at
+        {{ listsReadAt | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC.
+      </ng-container>
+    </p>
+  </ng-container>
+</section>

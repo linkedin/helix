@@ -49,7 +49,11 @@ describe('InstanceListComponent Live column', () => {
           useValue: { parent: { snapshot: { params: { name: 'Demo' } } } },
         },
         { provide: Router, useValue: { navigate: () => {} } },
-        { provide: InstanceService, useValue: { getAll: () => of(instances) } },
+        { provide: InstanceService, useValue: {
+            getSummaries: () => of(instances),
+            getErrorSummaries: () => of({}),
+          },
+        },
         { provide: HelperService, useValue: { showError: () => {} } },
       ],
       schemas: [NO_ERRORS_SCHEMA],
