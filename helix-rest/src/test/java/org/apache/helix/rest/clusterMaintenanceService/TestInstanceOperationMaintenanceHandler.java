@@ -866,12 +866,12 @@ public class TestInstanceOperationMaintenanceHandler {
         + "so it cannot go with EVACUATE. Give a future expiry, or 0 for the cluster default.");
     assertBadRequest(() -> handler.apply(CLUSTER, one, operation(InstanceOperation.SWAP_IN),
         _expiresAt), "instanceOperation must be one of [ENABLE, DISABLE, EVACUATE] and "
-        + "instanceOperationSource one of [USER, AUTOMATION], given together; got SWAP_IN and "
+        + "instanceOperationSource one of [AUTOMATION], given together; got SWAP_IN and "
         + "AUTOMATION.");
     assertBadRequest(() -> handler.apply(CLUSTER, one, operation(InstanceOperation.UNKNOWN),
         _expiresAt));
-    for (InstanceOperationSource unsupported : Arrays.asList(InstanceOperationSource.ADMIN,
-        InstanceOperationSource.DEFAULT)) {
+    for (InstanceOperationSource unsupported : Arrays.asList(InstanceOperationSource.USER,
+        InstanceOperationSource.ADMIN, InstanceOperationSource.DEFAULT)) {
       assertBadRequest(() -> handler.apply(CLUSTER, one, new InstanceConfig.InstanceOperation
           .Builder().setOperation(InstanceOperation.EVACUATE).setSource(unsupported).build(),
           _expiresAt));

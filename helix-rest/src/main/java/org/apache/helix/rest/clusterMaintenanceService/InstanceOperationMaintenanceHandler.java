@@ -75,8 +75,10 @@ import org.slf4j.LoggerFactory;
  * with a live marker keeps it as is and takes no new budget, so a marker is written once and a
  * later request never extends or shortens it. With no cap configured, any number may take one.
  * Clearing a marker needs no room under the cap.
- * Only USER and AUTOMATION may set an operation. SWAP_IN and UNKNOWN never count as offline, so a
- * marker would exempt nothing, and an ADMIN operation would clear every other source's operation.
+ * Only AUTOMATION may set an operation, since the marker is automation's budget: a USER ENABLE
+ * here would clear it while an AUTOMATION drain still runs, and an ADMIN operation would clear
+ * every other source's operation. Users and admins set operations per instance, which never
+ * touches the marker. SWAP_IN and UNKNOWN never count as offline, so a marker would exempt nothing.
  *
  * <p>The expiry set at admission is a hard bound on how long the instance is exempt from
  * MAX_OFFLINE_INSTANCES_ALLOWED; resending cannot stretch it. A drain that outlives its marker
@@ -129,9 +131,8 @@ public class InstanceOperationMaintenanceHandler {
   private static final Set<InstanceConstants.InstanceOperation> OPERATIONS = EnumSet.of(
       InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE,
       InstanceConstants.InstanceOperation.EVACUATE);
-  private static final Set<InstanceConstants.InstanceOperationSource> SOURCES = EnumSet.of(
-      InstanceConstants.InstanceOperationSource.USER,
-      InstanceConstants.InstanceOperationSource.AUTOMATION);
+  private static final Set<InstanceConstants.InstanceOperationSource> SOURCES =
+      EnumSet.of(InstanceConstants.InstanceOperationSource.AUTOMATION);
 
   /** Per-instance status, each with the action it asks of the caller. */
   public enum Status {
