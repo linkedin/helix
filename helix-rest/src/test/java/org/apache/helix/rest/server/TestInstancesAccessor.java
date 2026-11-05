@@ -1340,14 +1340,14 @@ public class TestInstancesAccessor extends AbstractTestClass {
           InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
 
       // The operation and source come together: a defaulted source could leave another source's
-      // operation active, and dropping a lone one would write the marker alone. ADMIN would clear
-      // every other source's operation. The expiry must be a JSON integer that fits a long.
+      // operation active, and dropping a lone one would write the marker alone. Only AUTOMATION
+      // spends the marker. The expiry must be a JSON integer that fits a long.
       String toSecond = "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":";
       String evacuateSecond = toSecond + expiresAt + ",\"instanceOperation\":";
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
           evacuateSecond + "\"DRAIN\",\"instanceOperationSource\":\"AUTOMATION\"}"),
           "instanceOperation must be one of [ENABLE, DISABLE, EVACUATE] and "
-              + "instanceOperationSource one of [USER, AUTOMATION], given together; got DRAIN and "
+              + "instanceOperationSource one of [AUTOMATION], given together; got DRAIN and "
               + "AUTOMATION.");
       String noInstances = "The request body must have \"instances\", a list of instance names.";
       for (String instancesField : Arrays.asList("", "\"instances\":\"" + second + "\",",
@@ -1387,6 +1387,7 @@ public class TestInstancesAccessor extends AbstractTestClass {
           toSecond + expiresAt + ",\"instanceOperationSource\":\"AUTOMATION\"}",
           evacuateSecond + "\"DRAIN\",\"instanceOperationSource\":\"AUTOMATION\"}",
           evacuateSecond + "\"EVACUATE\",\"instanceOperationSource\":\"ADMIN\"}",
+          evacuateSecond + "\"DISABLE\",\"instanceOperationSource\":\"USER\"}",
           toSecond + "\"" + expiresAt + "\"}", toSecond + expiresAt + ".5}",
           toSecond + "99999999999999999999}", toSecond + "-5}",
           "{\"instances\":[\"" + second + "\"]}",

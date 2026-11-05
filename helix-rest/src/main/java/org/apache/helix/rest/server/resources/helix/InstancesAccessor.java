@@ -666,11 +666,12 @@ public class InstancesAccessor extends AbstractHelixResource {
    * check, in one commit. The marker cap fails closed. See
    * {@link InstanceOperationMaintenanceHandler}.
    *
-   * <p>Request body. {@code instanceOperation} and {@code instanceOperationSource} come together;
-   * without them only the marker is written. {@code reason} is optional. {@code expiresAtMillis}
-   * defaults to 0, the cluster's default marker duration. Without an operation, -1 clears the
-   * marker. ENABLE ignores it and clears the marker. A live marker is never extended or
-   * shortened; it runs until the expiry it was taken with.
+   * <p>Request body. {@code instanceOperation} and {@code instanceOperationSource} come together,
+   * and the source must be AUTOMATION; without them only the marker is written. {@code reason} is
+   * optional. {@code expiresAtMillis} defaults to 0, the cluster's default marker duration, and
+   * may be at most 7 days away. Without an operation, -1 clears the marker. ENABLE ignores it and
+   * clears the marker. A live marker is never extended or shortened; it runs until the expiry it
+   * was taken with.
    * <pre>{@code
    * { "instances": ["h1", "h2"], "instanceOperation": "EVACUATE",
    *   "instanceOperationSource": "AUTOMATION", "reason": "...", "expiresAtMillis": 1776385800000 }
