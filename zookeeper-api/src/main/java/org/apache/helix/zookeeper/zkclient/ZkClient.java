@@ -163,6 +163,9 @@ public class ZkClient implements Watcher {
   // listeners starts. See PersistEventEpoch.
   private final AtomicLong _persistEventEpoch = new AtomicLong();
 
+  // How often a resync waiting for the persist listener mutex checks whether it is stale.
+  private static final long PERSIST_RESYNC_LOCK_POLL_INTERVAL_MS = 100;
+
   // To automatically retry the async operation, we need a separate thread other than the
   // ZkEventThread. Otherwise the retry request might block the normal event processing.
   protected final ZkAsyncRetryThread _asyncCallRetryThread;
@@ -1444,8 +1447,17 @@ public class ZkClient implements Watcher {
           @Override
           public void run() throws Exception {
             // Hold the mutex so that persist listeners are not added or removed between adding
-            // the watches back and notifying the listeners.
-            executeWithInPersistListenerMutex(() -> {
+            // the watches back and notifying the listeners. A subscribe can hold the mutex while
+            // it waits for the connection to come back, so stop waiting for it once this resync
+            // is stale. Otherwise the state change queued behind it would wait as well.
+            while (!_persistListenerMutex.tryLock(PERSIST_RESYNC_LOCK_POLL_INTERVAL_MS,
+                TimeUnit.MILLISECONDS)) {
+              if (epoch.isStale()) {
+                LOG.info("zkclient {}, stopped the stale resync of persist listeners.", _uid);
+                return;
+              }
+            }
+            try {
               Set<String> watchedPaths = new HashSet<>();
               for (String path : getPersistListenerPaths()) {
                 if (epoch.isStale()) {
@@ -1495,7 +1507,9 @@ public class ZkClient implements Watcher {
                   fireRecursiveResyncEvents(entry.getKey(), listeners, event.getType(), epoch);
                 }
               }
-            });
+            } finally {
+              _persistListenerMutex.unlock();
+            }
           }
         });
   }

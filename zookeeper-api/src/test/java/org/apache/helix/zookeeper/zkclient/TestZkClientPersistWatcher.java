@@ -390,6 +390,55 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
     zkClient.close();
   }
 
+  /**
+   * A subscribe holds the persist listener mutex while it retries adding its watch. A resync that
+   * waits for the mutex stops once the connection is lost again, so the event thread delivers the
+   * state change without waiting for the subscribe. The next reconnect resyncs the listeners.
+   */
+  @Test
+  void testStaleResyncDoesNotWaitForSubscribe() throws Exception {
+    FailingZkConnection connection = new FailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(
+        new ZkClient.Builder().setConnection(connection).setOperationRetryTimeout(30000L));
+    String path = "/testStaleResyncDoesNotWaitForSubscribe";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    AtomicInteger disconnects = countDisconnects(zkClient);
+    zkClient.createPersistent(path + "/subscribe", true);
+
+    connection.failAddWatch(KeeperException.Code.CONNECTIONLOSS);
+    AtomicReference<Throwable> subscribeError = new AtomicReference<>();
+    Thread subscriber = new Thread(() -> {
+      try {
+        zkClient.subscribePersistRecursiveListener(path + "/subscribe", (p, type) -> {
+        });
+      } catch (Throwable e) {
+        subscribeError.set(e);
+      }
+    });
+    subscriber.start();
+    try {
+      Assert.assertTrue(TestHelper.verify(() -> connection.getFailedAddWatchCount() > 0, 10000));
+      // The resync of this reconnect waits for the mutex, then the connection is lost again.
+      simulateZkStateReconnected(zkClient);
+      simulateZkState(zkClient, KeeperState.Disconnected);
+      Assert.assertTrue(TestHelper.verify(() -> disconnects.get() == 2, 10000),
+          "The event thread should not wait for the subscribe");
+      Assert.assertTrue(subscriber.isAlive(), "The subscribe should still be retrying");
+      Assert.assertTrue(events.isEmpty(), "No event is expected: " + events);
+    } finally {
+      connection.failAddWatch(null);
+      simulateZkState(zkClient, KeeperState.SyncConnected);
+      subscriber.join(30000);
+    }
+    Assert.assertFalse(subscriber.isAlive(), "The subscribe should be done");
+    Assert.assertNull(subscribeError.get(), "The subscribe should succeed");
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
   // Delivers the state change from another thread, as ZooKeeper does. ZkClient rejects ZK
   // operations from the thread that delivers them.
   private static void simulateZkState(ZkClient zkClient, KeeperState state)
