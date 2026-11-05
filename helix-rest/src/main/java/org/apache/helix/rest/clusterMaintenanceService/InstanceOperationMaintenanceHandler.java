@@ -74,8 +74,19 @@ import org.slf4j.LoggerFactory;
  * An instance without a live marker takes one only while live markers are below the cap. One
  * with a live marker keeps it as is and takes no new budget, so a marker is written once and a
  * later request never extends or shortens it. With no cap configured, any number may take one.
+ * Clearing a marker needs no room under the cap.
  * Only USER and AUTOMATION may set an operation. SWAP_IN and UNKNOWN never count as offline, so a
  * marker would exempt nothing, and an ADMIN operation would clear every other source's operation.
+ *
+ * <p>The expiry set at admission is a hard bound on how long the instance is exempt from
+ * MAX_OFFLINE_INSTANCES_ALLOWED; resending cannot stretch it. A drain that outlives its marker
+ * counts toward MAX_OFFLINE_INSTANCES_ALLOWED once the marker lapses, like any other offline
+ * instance. A lapsed marker is not live, so a later request takes a new one without a clear first,
+ * if the cap has room.
+ *
+ * <p>Liveness is judged on this server's clock, and the controller judges the exemption on its
+ * own. A marker that expires within the skew between the two can count as free here while the
+ * controller still exempts it, for at most the skew. NTP keeps that to milliseconds.
  *
  * <p>A request commits every instance that passes every check, in one ZooKeeper multi: a versioned
  * write of each changed instance config, a version check of each instance left as is, and a
@@ -110,6 +121,8 @@ public class InstanceOperationMaintenanceHandler {
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
   public static final long CLEAR_MARKER = -1L;
+  /** The longest a marker may run, so a wrong expiry cannot exempt an instance for good. */
+  static final long MAX_DURATION_MS = 7 * 24 * 3_600_000L;
   /** How {@link org.apache.helix.guardrail.GuardrailPipeline} reports a rule that failed. */
   private static final String RULE_FAILED = "Rule evaluation failed: ";
   private static final String RULE_RETURNED_NOTHING = "Rule returned no result.";
@@ -263,7 +276,8 @@ public class InstanceOperationMaintenanceHandler {
    *     operation {@link #CLEAR_MARKER}. Ignored for ENABLE.
    * @throws BadRequestException if the operation or source is not supported, the instance list
    *     is empty or has a name that is not a valid znode name, the cluster does not exist, or the
-   *     expiry is in the past or the default with no positive cluster default.
+   *     expiry is in the past, more than {@link #MAX_DURATION_MS} away, or the default with no
+   *     cluster default in that range.
    */
   public Map<String, Outcome> apply(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
@@ -301,6 +315,12 @@ public class InstanceOperationMaintenanceHandler {
             + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS. Give an expiry, or set the "
             + "cluster default.");
       }
+      if (defaultDurationMs > MAX_DURATION_MS) {
+        throw new BadRequestException("Cluster " + clusterId + " has "
+            + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS " + defaultDurationMs + ", over "
+            + "the " + MAX_DURATION_MS + " ms (7 days) a marker may run. Give an expiry, or lower "
+            + "the cluster default.");
+      }
       expiresAt = System.currentTimeMillis() + defaultDurationMs;
     } else if (expiresAtMillis == CLEAR_MARKER) {
       throw new BadRequestException("expiresAtMillis -1 clears the marker, so it cannot go with "
@@ -312,6 +332,10 @@ public class InstanceOperationMaintenanceHandler {
     } else if (expiresAtMillis <= System.currentTimeMillis()) {
       throw new BadRequestException("expiresAtMillis " + expiresAtMillis + " ("
           + Instant.ofEpochMilli(expiresAtMillis) + ") is not in the future. Give a later expiry.");
+    } else if (expiresAtMillis - System.currentTimeMillis() > MAX_DURATION_MS) {
+      throw new BadRequestException("expiresAtMillis " + expiresAtMillis + " ("
+          + Instant.ofEpochMilli(expiresAtMillis) + ") is more than 7 days away, the longest a "
+          + "marker may run. Give an earlier expiry.");
     }
 
     List<String> names = new ArrayList<>(new LinkedHashSet<>(instances));
@@ -364,6 +388,7 @@ public class InstanceOperationMaintenanceHandler {
     Map<String, Outcome> outcomes = new LinkedHashMap<>();
     // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
     Map<String, Op> staged = new LinkedHashMap<>();
+    Map<Integer, ZNRecord> written = new LinkedHashMap<>();
     for (int i = 0; i < instances.size(); i++) {
       String instance = instances.get(i);
       if (records.get(i) == null) {
@@ -440,6 +465,7 @@ public class InstanceOperationMaintenanceHandler {
           applied(config, operation, holds, expiresAt, before, wasLive),
           config.isUnderInstanceOperationMaintenance(nowMs) ? until : null));
       if (!holds || until != before) {
+        written.put(i, config.getRecord());
         staged.put(instance, Op.setData(paths.get(i),
             _zkClient.serialize(config.getRecord(), paths.get(i)), stats.get(i).getVersion()));
       } else {
@@ -493,14 +519,36 @@ public class InstanceOperationMaintenanceHandler {
     if (ops.isEmpty()) {
       return outcomes;
     }
+    written.keySet().removeIf(i -> outcomes.get(instances.get(i)).getStatus() != Status.APPLIED);
     ops.addAll(checks);
     ops.add(Op.check(clusterConfigPath, clusterStat.getVersion()));
     try {
       _zkClient.multi(ops);
       return outcomes;
     } catch (ZkBadVersionException | ZkNoNodeException e) {
-      return null;
+      return landed(paths, stats, written) ? outcomes : null;
     }
+  }
+
+  /**
+   * Whether this commit landed after all. ZkClient resends a multi after a connection loss, and if
+   * the first one landed, the resend fails as if a race was lost. It landed if every config it
+   * wrote holds what it wrote, one version past the read, from one transaction. A config written
+   * again since then reads as a lost race, so the request is judged again.
+   */
+  private boolean landed(List<String> paths, List<Stat> stats, Map<Integer, ZNRecord> written) {
+    Long zxid = null;
+    for (Map.Entry<Integer, ZNRecord> write : written.entrySet()) {
+      Stat stat = new Stat();
+      ZNRecord now = _accessor.get(paths.get(write.getKey()), stat, AccessOption.PERSISTENT);
+      if (now == null || !now.equals(write.getValue())
+          || stat.getVersion() != stats.get(write.getKey()).getVersion() + 1
+          || (zxid != null && zxid != stat.getMzxid())) {
+        return false;
+      }
+      zxid = stat.getMzxid();
+    }
+    return true;
   }
 
   /** One line for the whole request, to show next to the per-instance outcomes. */
@@ -587,7 +635,8 @@ public class InstanceOperationMaintenanceHandler {
       sentences.add((wasLive ? "Kept its live maintenance marker, which runs until "
           : "Took a maintenance marker until ") + expiry + ".");
     } else if (before > 0L) {
-      sentences.add("Cleared the maintenance marker.");
+      sentences.add(wasLive ? "Cleared the maintenance marker."
+          : "Cleared its expired maintenance marker.");
     } else if (requested == null) {
       sentences.add("It had no maintenance marker to clear.");
     }
@@ -689,11 +738,13 @@ public class InstanceOperationMaintenanceHandler {
     // Fails rather than under-count when a child cannot be read.
     List<ZNRecord> records = _accessor.getChildren(PropertyPathBuilder.instanceConfig(clusterId),
         null, AccessOption.PERSISTENT, 3, 100);
-    int cap = absoluteCap >= 0 ? absoluteCap : (int) (percentageCap * (long) records.size() / 100);
+    int share = (int) (percentageCap * (long) records.size() / 100);
+    // A positive percentage admits at least one, so it never rounds a small cluster down to 0.
+    int cap = absoluteCap >= 0 ? absoluteCap : percentageCap > 0 ? Math.max(1, share) : 0;
     long live = records.stream().filter(
         r -> r != null && new InstanceConfig(r).isUnderInstanceOperationMaintenance(nowMs)).count();
-    String label = absoluteCap >= 0 ? String.valueOf(cap)
-        : cap + " (" + percentageCap + "% of " + plural(records.size(), "instance") + ")";
+    String label = absoluteCap >= 0 ? String.valueOf(cap) : cap + " (" + percentageCap + "% of "
+        + plural(records.size(), "instance") + (cap > share ? ", at least 1" : "") + ")";
     return new MarkerCap(cap, live, label);
   }
 

@@ -157,6 +157,56 @@ public class TestInstanceOperationMaintenanceHandler {
     assertStatuses(outcomes, Status.APPLIED, Status.APPLIED);
     Assert.assertEquals(InstanceOperationMaintenanceHandler.summarize(outcomes),
         "Applied to all 2 instances.");
+
+    setCap(-1, 5); // 5% of 6 instances rounds down to 0, and admits 1.
+    marker(InstanceOperationMaintenanceHandler.CLEAR_MARKER, instance(0), instance(1),
+        instance(2), instance(3));
+    outcomes = marker(_expiresAt, instance(4), instance(5));
+    assertStatuses(outcomes, Status.APPLIED, Status.BUDGET_EXHAUSTED);
+    Assert.assertEquals(outcomes.get(instance(5)).getMessage(), "The maintenance marker cap of 1 "
+        + "(5% of 6 instances, at least 1) had room for 1 new marker (0 live), and instances "
+        + "earlier in this request used it up. Retry once markers are cleared or expire.");
+  }
+
+  @Test
+  public void testClearNeedsNoRoomUnderAFullCap() {
+    setCap(1, -1);
+    marker(_expiresAt, instance(0));
+    InstanceConfig expired = read(1);
+    expired.setInstanceOperationMaintenanceUntilMs(System.currentTimeMillis() - 1);
+    _accessor.set(path(1), expired.getRecord(), AccessOption.PERSISTENT);
+
+    Map<String, Outcome> outcomes = marker(InstanceOperationMaintenanceHandler.CLEAR_MARKER,
+        instance(1), instance(2));
+
+    assertStatuses(outcomes, Status.APPLIED, Status.APPLIED);
+    Assert.assertEquals(outcomes.get(instance(1)).getMessage(),
+        "Cleared its expired maintenance marker.");
+    Assert.assertEquals(outcomes.get(instance(2)).getMessage(),
+        "It had no maintenance marker to clear.");
+    Assert.assertEquals(read(1).getInstanceOperationMaintenanceUntilMs(),
+        InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
+  }
+
+  @Test
+  public void testCommitThatLandedBeforeAResendIsApplied() {
+    marker(_expiresAt, instance(1));
+    AtomicInteger commits = new AtomicInteger();
+    // The commit lands but its reply is lost, and ZkClient resends it, which fails on versions.
+    RealmAwareZkClient resending = withMulti(ops -> {
+      commits.incrementAndGet();
+      _zkClient.multi(ops);
+      _zkClient.multi(ops);
+    });
+
+    Map<String, Outcome> taken = marker(resending, _expiresAt, instance(0));
+    Map<String, Outcome> cleared =
+        marker(resending, InstanceOperationMaintenanceHandler.CLEAR_MARKER, instance(1));
+
+    Assert.assertEquals(commits.get(), 2);
+    Assert.assertEquals(taken.get(instance(0)).getMessage(),
+        "Took a maintenance marker until " + at(_expiresAt) + ".");
+    Assert.assertEquals(cleared.get(instance(1)).getMessage(), "Cleared the maintenance marker.");
   }
 
   @Test
@@ -368,6 +418,17 @@ public class TestInstanceOperationMaintenanceHandler {
     assertBadRequest(() -> marker(-5L, instance(0)), "expiresAtMillis -5 is negative. Give a "
         + "future epoch time in milliseconds, 0 for the cluster default, or -1 with no "
         + "instanceOperation to clear the marker.");
+    long tooLate = System.currentTimeMillis() + 8 * 24 * HOUR_MS;
+    assertBadRequest(() -> marker(tooLate, instance(0)), "expiresAtMillis " + tooLate + " ("
+        + at(tooLate) + ") is more than 7 days away, the longest a marker may run. Give an "
+        + "earlier expiry.");
+    // A default that would overflow the expiry is turned away, not taken as a clear.
+    config.setDefaultInstanceOperationMaintenanceDurationMs(Long.MAX_VALUE);
+    _configAccessor.setClusterConfig(CLUSTER, config);
+    assertBadRequest(() -> marker(InstanceOperationMaintenanceHandler.DEFAULT_EXPIRY,
+        instance(0)), "Cluster " + CLUSTER + " has DEFAULT_INSTANCE_OPERATION_MAINTENANCE_"
+        + "DURATION_MS " + Long.MAX_VALUE + ", over the 604800000 ms (7 days) a marker may run. "
+        + "Give an expiry, or lower the cluster default.");
     Assert.assertFalse(_accessor.exists("/noSuchCluster", AccessOption.PERSISTENT));
     Assert.assertEquals(read(0).getInstanceOperationMaintenanceUntilMs(),
         InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
