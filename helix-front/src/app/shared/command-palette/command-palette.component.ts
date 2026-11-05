@@ -21,6 +21,7 @@ import { PaletteService } from './palette.service';
 const RECENT_KEY = 'hi-palette-recent';
 const DEEP_QUERY_MIN = 2;
 const ICONS: Record<PaletteKind, string> = {
+  helix: 'group_work',
   page: 'tab',
   cluster: 'device_hub',
   resource: 'storage',
@@ -46,6 +47,7 @@ export class CommandPaletteComponent implements OnDestroy {
   active = 0;
   results: Ranked[] = [];
   loading = 0;
+  placeholder = '';
 
   private items: PaletteItem[] = [];
   private groups: PaletteItem[][] = [];
@@ -150,11 +152,22 @@ export class CommandPaletteComponent implements OnDestroy {
           route: [helix, cluster, p.toLowerCase()],
         }))
       : [];
+    this.placeholder = helix
+      ? 'Jump to a cluster, page, resource or instance'
+      : 'Jump to a helix';
     this.groups = [pages, [], [], []];
     this.deepLoaded = !cluster;
     this.items = pages;
     this.refresh();
-    if (!helix) return;
+    if (!helix) {
+      this.add(1, this.service.helixes(), (n) => ({
+        kind: 'helix',
+        label: n,
+        hint: 'Helix',
+        route: [n],
+      }));
+      return;
+    }
     this.add(1, this.service.clusters(helix), (n) => ({
       kind: 'cluster',
       label: n,

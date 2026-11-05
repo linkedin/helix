@@ -15,13 +15,24 @@ export class PaletteService extends HelixService {
     { at: number; names$: Observable<string[]> }
   >();
 
+  // Helix keys from the UI's own endpoint config, as on the home page.
+  helixes() {
+    return this.names('', '/list', (d) =>
+      [].concat(
+        ...Object.keys(d || {}).map((group) =>
+          [].concat(...d[group].map(Object.keys)).map((h) => `${group}.${h}`),
+        ),
+      ),
+    );
+  }
+
   clusters(helix: string) {
-    return this.names(helix, '/clusters', (d) => d.clusters);
+    return this.names(`/${helix}`, '/clusters', (d) => d.clusters);
   }
 
   resources(helix: string, cluster: string) {
     return this.names(
-      helix,
+      `/${helix}`,
       `/clusters/${encodeURIComponent(cluster)}/resources`,
       (d) => d.idealStates,
     );
@@ -29,17 +40,17 @@ export class PaletteService extends HelixService {
 
   instances(helix: string, cluster: string) {
     return this.names(
-      helix,
+      `/${helix}`,
       `/clusters/${encodeURIComponent(cluster)}/instances`,
       (d) => d.instances,
     );
   }
 
-  private names(helix: string, path: string, pick: (d: any) => string[]) {
-    const key = `/${helix}${path}`;
+  private names(prefix: string, path: string, pick: (d: any) => string[]) {
+    const key = `${prefix}${path}`;
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < TTL_MS) return hit.names$;
-    const names$ = this.request(path, `/${helix}`).pipe(
+    const names$ = this.request(path, prefix).pipe(
       map((d) => [...(pick(d) || [])].sort()),
       catchError(() => {
         this.cache.delete(key);

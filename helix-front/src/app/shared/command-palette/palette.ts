@@ -1,4 +1,9 @@
-export type PaletteKind = 'page' | 'cluster' | 'resource' | 'instance';
+export type PaletteKind =
+  | 'helix'
+  | 'page'
+  | 'cluster'
+  | 'resource'
+  | 'instance';
 
 export interface PaletteItem {
   kind: PaletteKind;

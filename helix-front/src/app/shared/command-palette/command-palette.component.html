@@ -29,7 +29,7 @@
         [attr.aria-activedescendant]="
           results.length ? 'hi-palette-opt-' + active : null
         "
-        placeholder="Jump to a cluster, page, resource or instance"
+        [placeholder]="placeholder"
         autocomplete="off"
         spellcheck="false"
         [ngModel]="query"

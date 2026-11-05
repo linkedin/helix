@@ -67,6 +67,7 @@ describe('CommandPaletteComponent', () => {
     localStorage.clear();
     const router = { url: '/helix.default/Demo/overview', navigate: jest.fn() };
     const service = {
+      helixes: jest.fn(() => of(['helix.default', 'helix.test'])),
       clusters: jest.fn(() => of(['Demo', 'Other'])),
       resources: jest.fn(() => of(['db'])),
       instances: jest.fn(() => of(['host_1'])),
@@ -105,6 +106,17 @@ describe('CommandPaletteComponent', () => {
     expect(service.instances).toHaveBeenCalledTimes(1);
     expect(service.resources).toHaveBeenCalledTimes(1);
     expect(c.results.map((r) => r.item.label)).toContain('host_1');
+  });
+
+  it('offers helixes from the home page', () => {
+    const { c, router, service } = create();
+    router.url = '/';
+    c.open();
+    expect(service.clusters).not.toHaveBeenCalled();
+    c.onQuery('test');
+    expect(service.instances).not.toHaveBeenCalled();
+    c.onInputKey(key('Enter'));
+    expect(router.navigate).toHaveBeenCalledWith(['/', 'helix.test']);
   });
 
   it('clears the loading state when closed mid-fetch', () => {
@@ -170,5 +182,19 @@ describe('PaletteService', () => {
     svc.clusters('x').subscribe();
     expect(get).toHaveBeenCalledTimes(4);
     jest.restoreAllMocks();
+  });
+
+  it('reads helix keys from the endpoint list', () => {
+    const get = jest.fn(() =>
+      of({
+        helix: [{ default: ['u1'] }, { test: ['u2'] }],
+        other: [{ a: [] }],
+      }),
+    );
+    const svc = new PaletteService({ url: '/' } as any, { get } as any);
+    let names: string[] = [];
+    svc.helixes().subscribe((n) => (names = n));
+    expect(names).toEqual(['helix.default', 'helix.test', 'other.a']);
+    expect(String((get.mock.calls[0] as any[])[0])).toMatch(/\/list$/);
   });
 });
