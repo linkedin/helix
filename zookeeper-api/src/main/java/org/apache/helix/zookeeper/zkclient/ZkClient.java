@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -158,9 +159,45 @@ public class ZkClient implements Watcher {
 
   private final ReentrantLock _persistListenerMutex;
 
+  // Persist mode only. Incremented when the connection is lost and when a resync of the persist
+  // listeners starts. See PersistEventEpoch.
+  private final AtomicLong _persistEventEpoch = new AtomicLong();
+
+  // How often a resync waiting for the persist listener mutex checks whether it is stale.
+  private static final long PERSIST_RESYNC_LOCK_POLL_INTERVAL_MS = 100;
+
   // To automatically retry the async operation, we need a separate thread other than the
   // ZkEventThread. Otherwise the retry request might block the normal event processing.
   protected final ZkAsyncRetryThread _asyncCallRetryThread;
+
+  /**
+   * Persist mode only. Tells whether the events of persist listeners queued at the same time are
+   * stale: the connection they were queued on was lost, or a newer resync started. Stale events
+   * skip their ZK reads and their listener callbacks, so that they do not block the event thread
+   * while the client is disconnected. Nothing is missed, because every reconnect resyncs all the
+   * persist listeners.
+   */
+  private final class PersistEventEpoch {
+    private final long _epoch = _persistEventEpoch.get();
+    private volatile boolean _connectionLost;
+
+    boolean isStale() {
+      return _connectionLost || _epoch != _persistEventEpoch.get();
+    }
+
+    // Lets the other events of the same batch skip their reads before the connection loss is
+    // processed as a state change.
+    void markConnectionLost() {
+      _connectionLost = true;
+    }
+  }
+
+  // Thrown instead of retrying when a read with failOnConnectionLoss loses the connection.
+  private static final class ZkConnectionLostException extends ZkException {
+    ZkConnectionLostException(KeeperException cause) {
+      super(cause);
+    }
+  }
 
   private class IZkDataListenerEntry {
     final IZkDataListener _dataListener;
@@ -1371,10 +1408,189 @@ public class ZkClient implements Watcher {
   private void fireAllEvents(WatchedEvent event) {
     //TODO: During handling new session, if the path is deleted, watcher leakage could still happen
     for (Entry<String, Set<IZkChildListener>> entry : _childListener.entrySet()) {
-      fireChildChangedEvents(entry.getKey(), entry.getValue(), true, event.getType());
+      fireChildChangedEvents(entry.getKey(), entry.getValue(), true, event.getType(), null);
     }
     for (Entry<String, Set<IZkDataListenerEntry>> entry : _dataListener.entrySet()) {
-      fireDataChangedEvents(entry.getKey(), entry.getValue(), OptionalLong.empty(), true, event.getType());
+      fireDataChangedEvents(entry.getKey(), entry.getValue(), OptionalLong.empty(), true,
+          event.getType(), null);
+    }
+  }
+
+  /**
+   * Resyncs the persist listeners after the client connects again, on the same session or on a
+   * new one. A new session does not inherit the persistent watches of the expired one, and on the
+   * same session ZooKeeper does not deliver the changes made while the client was disconnected
+   * (ZOOKEEPER-4698). So this adds the watch of every persist listener back, then notifies the
+   * listeners on each path whose watch is in place, so that they read the current state.
+   * <p>
+   * Every watch is added back on every reconnect, because adding a watch that is already in place
+   * is a no-op. So a watch that cannot be added back is retried on the next reconnect. Until then,
+   * its listeners are not notified, because they would read a state that no watch tracks.
+   * <p>
+   * Only the listeners registered when the client connects again are notified. A listener that
+   * subscribes later adds its own watch and reads the current state when it subscribes.
+   * <p>
+   * The resync stops as soon as the connection is lost again, and only the latest one runs when the
+   * connection flaps. The reconnect that follows starts a new one, so nothing is missed.
+   */
+  private void resyncPersistListeners(final WatchedEvent event) {
+    final String sessionId = getHexSessionId();
+    final Map<String, Set<IZkChildListener>> childListeners = copyListeners(_childListener);
+    final Map<String, Set<IZkDataListenerEntry>> dataListeners = copyListeners(_dataListener);
+    final Map<String, Set<RecursivePersistListener>> recursiveListeners =
+        _zkPathRecursiveWatcherTrie.getRecursiveListenersByPath();
+    // The events queued before are replaced by this resync.
+    _persistEventEpoch.incrementAndGet();
+    final PersistEventEpoch epoch = new PersistEventEpoch();
+    _eventThread.send(
+        new ZkEventThread.ZkEvent("Resync persist listeners for session " + sessionId, sessionId) {
+          @Override
+          public void run() throws Exception {
+            // Hold the mutex so that persist listeners are not added or removed between adding
+            // the watches back and notifying the listeners. A subscribe can hold the mutex while
+            // it waits for the connection to come back, so stop waiting for it once this resync
+            // is stale. Otherwise the state change queued behind it would wait as well.
+            while (!_persistListenerMutex.tryLock(PERSIST_RESYNC_LOCK_POLL_INTERVAL_MS,
+                TimeUnit.MILLISECONDS)) {
+              if (epoch.isStale()) {
+                LOG.info("zkclient {}, stopped the stale resync of persist listeners.", _uid);
+                return;
+              }
+            }
+            try {
+              Set<String> watchedPaths = new HashSet<>();
+              for (String path : getPersistListenerPaths()) {
+                if (epoch.isStale()) {
+                  LOG.info("zkclient {}, stopped the stale resync of persist listeners.", _uid);
+                  return;
+                }
+                if (addPersistWatch(path, AddWatchMode.PERSISTENT, epoch)) {
+                  watchedPaths.add(path);
+                }
+              }
+              Map<String, Set<RecursivePersistListener>> currentRecursiveListeners =
+                  _zkPathRecursiveWatcherTrie.getRecursiveListenersByPath();
+              Set<String> recursiveWatchedPaths = new HashSet<>();
+              for (String path : currentRecursiveListeners.keySet()) {
+                if (epoch.isStale()) {
+                  LOG.info("zkclient {}, stopped the stale resync of persist listeners.", _uid);
+                  return;
+                }
+                if (addPersistWatch(path, AddWatchMode.PERSISTENT_RECURSIVE, epoch)) {
+                  recursiveWatchedPaths.add(path);
+                }
+              }
+              if (epoch.isStale()) {
+                LOG.info("zkclient {}, stopped the stale resync of persist listeners.", _uid);
+                return;
+              }
+              for (Entry<String, Set<IZkChildListener>> entry : childListeners.entrySet()) {
+                Set<IZkChildListener> listeners =
+                    stillRegistered(entry.getValue(), _childListener.get(entry.getKey()));
+                if (watchedPaths.contains(entry.getKey()) && !listeners.isEmpty()) {
+                  fireChildChangedEvents(entry.getKey(), listeners, true, event.getType(), epoch);
+                }
+              }
+              for (Entry<String, Set<IZkDataListenerEntry>> entry : dataListeners.entrySet()) {
+                Set<IZkDataListenerEntry> listeners =
+                    stillRegistered(entry.getValue(), _dataListener.get(entry.getKey()));
+                if (watchedPaths.contains(entry.getKey()) && !listeners.isEmpty()) {
+                  fireDataChangedEvents(entry.getKey(), listeners, OptionalLong.empty(), true,
+                      event.getType(), epoch);
+                }
+              }
+              for (Entry<String, Set<RecursivePersistListener>> entry : recursiveListeners
+                  .entrySet()) {
+                Set<RecursivePersistListener> listeners = stillRegistered(entry.getValue(),
+                    currentRecursiveListeners.get(entry.getKey()));
+                if (recursiveWatchedPaths.contains(entry.getKey()) && !listeners.isEmpty()) {
+                  fireRecursiveResyncEvents(entry.getKey(), listeners, event.getType(), epoch);
+                }
+              }
+            } finally {
+              _persistListenerMutex.unlock();
+            }
+          }
+        });
+  }
+
+  // Returns the paths that have at least one persist child or data listener.
+  private Set<String> getPersistListenerPaths() {
+    Set<String> paths = new HashSet<>();
+    for (Entry<String, Set<IZkChildListener>> entry : _childListener.entrySet()) {
+      if (!entry.getValue().isEmpty()) {
+        paths.add(entry.getKey());
+      }
+    }
+    for (Entry<String, Set<IZkDataListenerEntry>> entry : _dataListener.entrySet()) {
+      if (!entry.getValue().isEmpty()) {
+        paths.add(entry.getKey());
+      }
+    }
+    return paths;
+  }
+
+  // Copies the listeners of each path, skipping the paths that have none.
+  private static <T> Map<String, Set<T>> copyListeners(Map<String, Set<T>> listeners) {
+    Map<String, Set<T>> copy = new HashMap<>();
+    for (Entry<String, Set<T>> entry : listeners.entrySet()) {
+      if (!entry.getValue().isEmpty()) {
+        copy.put(entry.getKey(), new HashSet<>(entry.getValue()));
+      }
+    }
+    return copy;
+  }
+
+  // Returns the listeners of the snapshot that are still registered.
+  private static <T> Set<T> stillRegistered(Set<T> snapshot, Set<T> registered) {
+    Set<T> listeners = new HashSet<>(snapshot);
+    if (registered == null) {
+      listeners.clear();
+    } else {
+      listeners.retainAll(registered);
+    }
+    return listeners;
+  }
+
+  // Adds the persistent watch of the path and returns whether it is in place.
+  private boolean addPersistWatch(final String path, final AddWatchMode mode,
+      final PersistEventEpoch epoch) {
+    if (isClosed()) {
+      return false;
+    }
+    try {
+      retryUntilConnected(() -> {
+        getConnection().addWatch(path, ZkClient.this, mode);
+        return null;
+      }, true);
+      return true;
+    } catch (ZkConnectionLostException e) {
+      // The reconnect that follows adds the watch back.
+      epoch.markConnectionLost();
+      LOG.info("zkclient {}, connection lost while adding {} watch on path: {}.", _uid, mode, path);
+      return false;
+    } catch (Exception e) {
+      LOG.error("zkclient {}, failed to add {} watch on path: {}. Its listeners are not resynced "
+          + "until the next reconnect.", _uid, mode, path, e);
+      return false;
+    }
+  }
+
+  // The changed descendants are unknown, so notify the recursive listeners on their own path.
+  private void fireRecursiveResyncEvents(final String path,
+      Set<RecursivePersistListener> listeners, final EventType eventType,
+      final PersistEventEpoch epoch) {
+    for (final RecursivePersistListener listener : listeners) {
+      _eventThread.send(
+          new ZkEventThread.ZkEvent("State of " + path + " resync sent to " + listener) {
+            @Override
+            public void run() throws Exception {
+              if (epoch.isStale()) {
+                return;
+              }
+              listener.handleZNodeChange(path, eventType);
+            }
+          });
     }
   }
 
@@ -1397,6 +1613,11 @@ public class ZkClient implements Watcher {
   }
 
   protected List<String> getChildren(final String path, final boolean watch) {
+    return getChildren(path, watch, false);
+  }
+
+  private List<String> getChildren(final String path, final boolean watch,
+      final boolean failOnConnectionLoss) {
     validateNativeZkWatcherType(watch);
     long startT = System.currentTimeMillis();
 
@@ -1427,7 +1648,7 @@ public class ZkClient implements Watcher {
             throw e;
           }
         }
-      });
+      }, failOnConnectionLoss);
       record(path, null, startT, ZkClientMonitor.AccessType.READ);
       return children;
     } catch (ZkNoNodeException e) {
@@ -1492,12 +1713,18 @@ public class ZkClient implements Watcher {
   }
 
   private Stat getStat(final String path, final boolean watch) {
+    return getStat(path, watch, false);
+  }
+
+  private Stat getStat(final String path, final boolean watch,
+      final boolean failOnConnectionLoss) {
     validateNativeZkWatcherType(watch);
     long startT = System.currentTimeMillis();
     final Stat stat;
     try {
       stat = retryUntilConnected(
-          () -> ((ZkConnection) getConnection()).getZookeeper().exists(path, watch));
+          () -> ((ZkConnection) getConnection()).getZookeeper().exists(path, watch),
+          failOnConnectionLoss);
       record(path, null, startT, ZkClientMonitor.AccessType.READ);
       return stat;
     } catch (Exception e) {
@@ -1549,6 +1776,12 @@ public class ZkClient implements Watcher {
       return;
     }
 
+    if (_usePersistWatcher && (event.getState() == KeeperState.Disconnected
+        || event.getState() == KeeperState.Expired)) {
+      // The persist listener events queued so far are stale: the reconnect resyncs all listeners.
+      _persistEventEpoch.incrementAndGet();
+    }
+
     fireStateChangedEvent(prevState, event.getState());
 
     /*
@@ -1576,9 +1809,24 @@ public class ZkClient implements Watcher {
         /*
          * With this first SyncConnected state, we just get connected to zookeeper service after
          * reconnecting when the session expired. Because previous session expired, we also have to
-         * notify all listeners that something might have changed.
+         * notify all listeners that something might have changed. Persistent watches are not
+         * carried over to the new session, so the persist resync also adds them back.
          */
-        fireAllEvents(event);
+        if (_usePersistWatcher) {
+          resyncPersistListeners(event);
+        } else {
+          fireAllEvents(event);
+        }
+      } else if (_usePersistWatcher && _isNewSessionEventFired
+          && prevState != KeeperState.SyncConnected) {
+        /*
+         * Reconnected on the same session. ZooKeeper re-arms persistent watches on reconnect but,
+         * unlike one-time watches, does not send the events for changes made while the client was
+         * disconnected (ZOOKEEPER-4698). Resync the persist listeners so that they observe the
+         * current state. This also adds back any watch that could not be added on a previous
+         * reconnect.
+         */
+        resyncPersistListeners(event);
       }
     } else if (event.getState() == KeeperState.Expired) {
       _isNewSessionEventFired = false;
@@ -1889,13 +2137,16 @@ public class ZkClient implements Watcher {
       LOG.debug("zkclient{}, Event NodeDeleted: {}", _uid, event.getPath());
     }
 
+    // Persist listener events are skipped once the connection is lost, see PersistEventEpoch.
+    final PersistEventEpoch epoch = _usePersistWatcher ? new PersistEventEpoch() : null;
+
     if (event.getType() == EventType.NodeChildrenChanged || event.getType() == EventType.NodeCreated
         || event.getType() == EventType.NodeDeleted) {
       Set<IZkChildListener> childListeners = _childListener.get(path);
       if (childListeners != null && !childListeners.isEmpty()) {
         // TODO recording child changed event propagation latency as well. Note this change will
         // introduce additional ZK access.
-        fireChildChangedEvents(path, childListeners, pathExists, event.getType());
+        fireChildChangedEvents(path, childListeners, pathExists, event.getType(), epoch);
       }
     }
 
@@ -1904,7 +2155,7 @@ public class ZkClient implements Watcher {
       Set<IZkDataListenerEntry> listeners = _dataListener.get(path);
       if (listeners != null && !listeners.isEmpty()) {
         fireDataChangedEvents(event.getPath(), listeners, OptionalLong.of(notificationTime),
-            pathExists, event.getType());
+            pathExists, event.getType(), epoch);
       }
 
       // fire change event for persist recursive listener
@@ -1917,6 +2168,9 @@ public class ZkClient implements Watcher {
                 new ZkEventThread.ZkEvent("Data of " + path + " changed sent to " + listener) {
                   @Override
                   public void run() throws Exception {
+                    if (epoch.isStale()) {
+                      return;
+                    }
                     listener.handleZNodeChange(path, event.getType());
                   }
                 });
@@ -1927,7 +2181,8 @@ public class ZkClient implements Watcher {
   }
 
   private void fireDataChangedEvents(final String path, Set<IZkDataListenerEntry> listeners,
-      final OptionalLong notificationTime, boolean pathExists, EventType eventType) {
+      final OptionalLong notificationTime, boolean pathExists, EventType eventType,
+      final PersistEventEpoch epoch) {
     try {
       final ZkPathStatRecord pathStatRecord = new ZkPathStatRecord(path);
       // Trigger listener callbacks
@@ -1937,38 +2192,50 @@ public class ZkClient implements Watcher {
                 + " prefetch data: " + listener.isPrefetchData()) {
           @Override
           public void run() throws Exception {
-            if (!pathStatRecord.pathChecked()) {
-              // getStat() wrapp two ways to install data watch by using exists() or getData().
-              // getData() aka useGetData (true) would not install the watch if the node not ]
-              // existing. Exists() aka useGetData (false) would install (leak) the watch if the
-              // node not existing.
-              // Here the goal is to avoid leaking watch. Thus, if we know path not exists, we use
-              // the exists() useGetData (false) route to check stat. Otherwise, we use getData()
-              // to install watch.
-              Stat stat = null;
-              // no register one time watcher when _usePersistWatcher is true.
-              if (_usePersistWatcher || !pathExists) {
-                stat = getStat(path, false);
-              } else {
-                stat = installWatchOnlyPathExist(path);
-              }
-              pathStatRecord.recordPathStat(stat, notificationTime);
+            if (isStalePersistEvent(epoch)) {
+              return;
             }
-            if (!pathStatRecord.pathExists()) {
-              listener.getDataListener().handleDataDeleted(path);
-            } else {
-              Object data = null;
-              if (listener.isPrefetchData()) {
+            boolean pathDeleted;
+            Object data = null;
+            try {
+              if (!pathStatRecord.pathChecked()) {
+                // getStat() wrapp two ways to install data watch by using exists() or getData().
+                // getData() aka useGetData (true) would not install the watch if the node not ]
+                // existing. Exists() aka useGetData (false) would install (leak) the watch if the
+                // node not existing.
+                // Here the goal is to avoid leaking watch. Thus, if we know path not exists, we
+                // use the exists() useGetData (false) route to check stat. Otherwise, we use
+                // getData() to install watch.
+                Stat stat = null;
+                // no register one time watcher when _usePersistWatcher is true.
+                if (_usePersistWatcher || !pathExists) {
+                  stat = getStat(path, false, epoch != null);
+                } else {
+                  stat = installWatchOnlyPathExist(path);
+                }
+                pathStatRecord.recordPathStat(stat, notificationTime);
+              }
+              pathDeleted = !pathStatRecord.pathExists();
+              if (!pathDeleted && listener.isPrefetchData()) {
                 LOG.debug("zkclient {} Prefetch data for path: {}", _uid, path);
                 try {
                   // TODO: the data is redundantly read multiple times when multiple listeners exist
-                  data = readData(path, null, !_usePersistWatcher);
+                  data = readData(path, null, !_usePersistWatcher, epoch != null);
                 } catch (ZkNoNodeException e) {
                   LOG.warn("zkclient {} Prefetch data for path: {} failed.", _uid, path, e);
-                  listener.getDataListener().handleDataDeleted(path);
-                  return;
+                  pathDeleted = true;
                 }
               }
+            } catch (ZkConnectionLostException e) {
+              onPersistEventConnectionLost(path, epoch);
+              return;
+            }
+            if (isStalePersistEvent(epoch)) {
+              return;
+            }
+            if (pathDeleted) {
+              listener.getDataListener().handleDataDeleted(path);
+            } else {
               listener.getDataListener().handleDataChange(path, data, eventType);
             }
           }
@@ -1980,32 +2247,44 @@ public class ZkClient implements Watcher {
   }
 
   private void fireChildChangedEvents(final String path, Set<IZkChildListener> childListeners, boolean pathExists,
-      EventType eventType) {
+      EventType eventType, final PersistEventEpoch epoch) {
     try {
       final ZkPathStatRecord pathStatRecord = new ZkPathStatRecord(path);
       for (final IZkChildListener listener : childListeners) {
         _eventThread.send(new ZkEventThread.ZkEvent("Children of " + path + " changed sent to " + listener) {
           @Override
           public void run() throws Exception {
-            if (!pathStatRecord.pathChecked()) {
-              Stat stat = null;
-              if (_usePersistWatcher || !pathExists || !hasChildOrDataListeners(path)) {
-                // will not install listener using exists call
-                stat = getStat(path, false);
-              } else {
-                // will install listener using getData() call; if node not there, install nothing
-                stat = installWatchOnlyPathExist(path);
-              }
-              pathStatRecord.recordPathStat(stat, OptionalLong.empty());
+            if (isStalePersistEvent(epoch)) {
+              return;
             }
             List<String> children = null;
-            if (pathStatRecord.pathExists()) {
-              try {
-                children = getChildren(path);
-              } catch (ZkNoNodeException e) {
-                LOG.warn("zkclient {} Get children under path: {} failed.", _uid, path, e);
-                // Continue trigger the change handler
+            try {
+              if (!pathStatRecord.pathChecked()) {
+                Stat stat = null;
+                if (_usePersistWatcher || !pathExists || !hasChildOrDataListeners(path)) {
+                  // will not install listener using exists call
+                  stat = getStat(path, false, epoch != null);
+                } else {
+                  // will install listener using getData() call; if node not there, install nothing
+                  stat = installWatchOnlyPathExist(path);
+                }
+                pathStatRecord.recordPathStat(stat, OptionalLong.empty());
               }
+              if (pathStatRecord.pathExists()) {
+                try {
+                  // Persist events read without a watch and fail fast, see PersistEventEpoch.
+                  children = epoch != null ? getChildren(path, false, true) : getChildren(path);
+                } catch (ZkNoNodeException e) {
+                  LOG.warn("zkclient {} Get children under path: {} failed.", _uid, path, e);
+                  // Continue trigger the change handler
+                }
+              }
+            } catch (ZkConnectionLostException e) {
+              onPersistEventConnectionLost(path, epoch);
+              return;
+            }
+            if (isStalePersistEvent(epoch)) {
+              return;
             }
             listener.handleChildChange(path, children, eventType);
           }
@@ -2014,6 +2293,16 @@ public class ZkClient implements Watcher {
     } catch (Exception e) {
       LOG.error("zkclient {} Failed to fire child changed event. Unable to getChildren.", _uid, e);
     }
+  }
+
+  private static boolean isStalePersistEvent(PersistEventEpoch epoch) {
+    return epoch != null && epoch.isStale();
+  }
+
+  private void onPersistEventConnectionLost(String path, PersistEventEpoch epoch) {
+    epoch.markConnectionLost();
+    LOG.info("zkclient {}, connection lost while reading path: {} for its listeners. They are "
+        + "resynced after the reconnect.", _uid, path);
   }
 
   public boolean waitUntilExists(String path, TimeUnit timeUnit, long time)
@@ -2111,6 +2400,16 @@ public class ZkClient implements Watcher {
    */
   public <T> T retryUntilConnected(final Callable<T> callable)
       throws IllegalArgumentException, ZkException {
+    return retryUntilConnected(callable, false);
+  }
+
+  /**
+   * Same as {@link #retryUntilConnected(Callable)}, but if failOnConnectionLoss is true, a
+   * ConnectionLoss or SessionExpired error throws a {@link ZkConnectionLostException} right away
+   * instead of waiting for the client to reconnect.
+   */
+  private <T> T retryUntilConnected(final Callable<T> callable, boolean failOnConnectionLoss)
+      throws IllegalArgumentException, ZkException {
     if (_zookeeperEventThread != null && Thread.currentThread() == _zookeeperEventThread) {
       throw new IllegalArgumentException("Must not be done in the zookeeper event thread.");
     }
@@ -2140,12 +2439,18 @@ public class ZkClient implements Watcher {
           }
           return callable.call();
         } catch (ConnectionLossException e) {
+          if (failOnConnectionLoss) {
+            throw new ZkConnectionLostException(e);
+          }
           retryCauseCode = e.code();
           // we give the event thread some time to update the status to 'Disconnected'
           Thread.yield();
           waitForRetry(ExponentialBackoffStrategy.getWaitInterval(currTime,
             _operationRetryTimeoutInMillis, true, retryCount++));
         } catch (SessionExpiredException e) {
+          if (failOnConnectionLoss) {
+            throw new ZkConnectionLostException(e);
+          }
           retryCauseCode = e.code();
           // we give the event thread some time to update the status to 'Expired'
           Thread.yield();
@@ -2312,6 +2617,12 @@ public class ZkClient implements Watcher {
 
   @SuppressWarnings("unchecked")
   public <T extends Object> T readData(final String path, final Stat stat, final boolean watch) {
+    return (T) readData(path, stat, watch, false);
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T extends Object> T readData(final String path, final Stat stat, final boolean watch,
+      final boolean failOnConnectionLoss) {
     validateNativeZkWatcherType(watch);
     long startT = System.currentTimeMillis();
     byte[] data = null;
@@ -2322,7 +2633,7 @@ public class ZkClient implements Watcher {
         public byte[] call() throws Exception {
           return getConnection().readData(path, stat, watch);
         }
-      });
+      }, failOnConnectionLoss);
       record(path, data, startT, ZkClientMonitor.AccessType.READ);
       return (T) deserialize(data, path);
     } catch (ZkNoNodeException e) {

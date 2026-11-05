@@ -27,12 +27,15 @@ import org.apache.helix.metaclient.factories.MetaClientCacheConfig;
 import org.apache.helix.metaclient.impl.zk.adapter.ChildListenerAdapter;
 import org.apache.helix.metaclient.impl.zk.factory.ZkMetaClientConfig;
 import org.apache.helix.zookeeper.zkclient.ZkClient;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 
 import java.util.concurrent.ConcurrentHashMap;
@@ -147,32 +150,88 @@ public class ZkMetaClientCache<T> extends ZkMetaClient<T> implements MetaClientC
 
     private void populateAllCache() {
         // TODO: Concurrently populate children and data cache.
-        if (!_cacheClient.exists(_rootEntry)) {
+        // The data map and the children tree are null when they are not cached.
+        if (!readTree(_dataCacheMap, _childrenCacheTree)) {
             LOG.warn("Root entry: {} does not exist.", _rootEntry);
-            // Let the other threads know that the cache is populated.
-            _initializedCache.countDown();
-            return;
         }
+        // Let the other threads know that the cache is populated.
+        _initializedCache.countDown();
+    }
 
+    /**
+     * Reads the data and the children of every entry under the root entry, root included.
+     * Entries deleted during the read are skipped.
+     * @param dataMap map to put the data into, or null to skip reading data
+     * @param childrenTree trie to add the entries into, or null to skip it
+     * @return false if the root entry does not exist
+     */
+    private boolean readTree(Map<String, T> dataMap, TrieNode childrenTree) {
         Queue<String> queue = new ArrayDeque<>();
         queue.add(_rootEntry);
 
         while (!queue.isEmpty()) {
             String node = queue.poll();
-            if (_cacheData) {
+            List<String> childNodes;
+            try {
+                childNodes = _cacheClient.getChildren(node);
+            } catch (ZkNoNodeException e) {
+                if (node.equals(_rootEntry)) {
+                    return false;
+                }
+                continue;
+            }
+            if (dataMap != null) {
                 T dataRecord = _cacheClient.readData(node, true);
-                _dataCacheMap.put(node, dataRecord);
+                if (dataRecord != null) {
+                    dataMap.put(node, dataRecord);
+                }
             }
-            if (_cacheChildren) {
-                _childrenCacheTree.processPath(node, true);
+            if (childrenTree != null) {
+                childrenTree.processPath(node, true);
             }
-            List<String> childNodes = _cacheClient.getChildren(node);
             for (String child : childNodes) {
                 queue.add(node + "/" + child); // Add child nodes to the queue with their full path.
             }
         }
-        // Let the other threads know that the cache is populated.
-        _initializedCache.countDown();
+        return true;
+    }
+
+    /**
+     * Re-reads the tree under the root entry and updates the cache to match it. Called after the
+     * client connects again, as the changes made while it was disconnected are not delivered. The
+     * cache is only updated after the whole tree is read, so a failed read leaves it unchanged.
+     */
+    private void rebuildCache() {
+        Map<String, T> dataMap = new HashMap<>();
+        TrieNode childrenTree = new TrieNode(_rootEntry, _rootEntry.substring(1));
+        try {
+            if (!readTree(_cacheData ? dataMap : null, _cacheChildren ? childrenTree : null)) {
+                LOG.warn("Root entry: {} does not exist.", _rootEntry);
+            }
+        } catch (Exception e) {
+            LOG.error("Failed to rebuild the cache of root entry: {}. It may be stale until the "
+                + "next reconnect.", _rootEntry, e);
+            return;
+        }
+        if (_cacheData) {
+            _dataCacheMap.keySet().retainAll(dataMap.keySet());
+            _dataCacheMap.putAll(dataMap);
+        }
+        if (_cacheChildren) {
+            syncChildren(_childrenCacheTree, childrenTree);
+        }
+    }
+
+    // Makes the subtree of the cached trie node match the subtree of the current one.
+    private static void syncChildren(TrieNode cachedNode, TrieNode currentNode) {
+        Map<String, TrieNode> cachedChildren = cachedNode.getChildren();
+        cachedChildren.keySet().retainAll(currentNode.getChildren().keySet());
+        for (Map.Entry<String, TrieNode> child : currentNode.getChildren().entrySet()) {
+            TrieNode cachedChild = cachedChildren.putIfAbsent(child.getKey(), child.getValue());
+            if (cachedChild != null) {
+                syncChildren(cachedChild, child.getValue());
+            }
+        }
     }
 
     private class CacheUpdateRunnable implements Runnable {
@@ -200,6 +259,9 @@ public class ZkMetaClientCache<T> extends ZkMetaClient<T> implements MetaClientC
                 case ENTRY_DATA_CHANGE:
                     modifyDataInCache(path, false);
                     break;
+                case ENTRY_RESYNC:
+                    rebuildCache();
+                    break;
                 default:
                     LOG.error("Unknown change type: " + changeType);
             }
@@ -220,7 +282,12 @@ public class ZkMetaClientCache<T> extends ZkMetaClient<T> implements MetaClientC
                 getDataCacheMap().remove(path);
             } else {
                 T dataRecord = _cacheClient.readData(path, true);
-                getDataCacheMap().put(path, dataRecord);
+                if (dataRecord == null) {
+                    // The entry was deleted after the event.
+                    getDataCacheMap().remove(path);
+                } else {
+                    getDataCacheMap().put(path, dataRecord);
+                }
             }
         }
     }

@@ -19,18 +19,32 @@ package org.apache.helix.zookeeper.zkclient;
  * under the License.
  */
 
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.helix.zookeeper.impl.TestHelper;
 import org.apache.helix.zookeeper.impl.ZkTestBase;
+import org.apache.helix.zookeeper.impl.ZkTestHelper;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.helix.zookeeper.zkclient.serialize.BasicZkSerializer;
 import org.apache.helix.zookeeper.zkclient.serialize.SerializableSerializer;
+import org.apache.zookeeper.AddWatchMode;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.Watcher.Event.EventType;
+import org.apache.zookeeper.Watcher.Event.KeeperState;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -168,6 +182,427 @@ public class TestZkClientPersistWatcher extends ZkTestBase {
 
     zkClient.deleteRecursively(path);
     zkClient.close();
+  }
+
+  /**
+   * ZooKeeper does not deliver the changes made while the client was disconnected to persistent
+   * watches (ZOOKEEPER-4698), so all persist listeners must be notified on a same-session
+   * reconnect.
+   */
+  @Test
+  void testPersistListenersResyncOnSameSessionReconnect() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testPersistListenersResyncOnSameSessionReconnect";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    long sessionId = zkClient.getSessionId();
+
+    simulateZkStateReconnected(zkClient);
+
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+    Assert.assertEquals(zkClient.getSessionId(), sessionId);
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A new session does not inherit the persistent watches of the expired one, so they must be
+   * re-added for the persist listeners to keep receiving events.
+   */
+  @Test
+  void testPersistListenersSurviveSessionExpiry() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testPersistListenersSurviveSessionExpiry";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    long sessionId = zkClient.getSessionId();
+
+    ZkTestHelper.expireSession(zkClient);
+
+    Assert.assertTrue(zkClient.getSessionId() != sessionId, "Session should have expired");
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    events.clear();
+    zkClient.writeData(path + "/data", "newData");
+    zkClient.create(path + "/child/c", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/c", "datat", CreateMode.PERSISTENT);
+    assertEvents(events, "data " + path + "/data NodeDataChanged",
+        "child " + path + "/child NodeChildrenChanged",
+        "recursive " + path + "/recursive/c NodeCreated");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A persist watch that cannot be added back after a reconnect is added back on the next
+   * reconnect. Its listeners are not resynced until then, as no watch tracks their path.
+   */
+  @Test
+  void testPersistWatchAddedBackOnNextReconnectAfterFailure() throws Exception {
+    FailingZkConnection connection = new FailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(new ZkClient.Builder().setConnection(connection));
+    String path = "/testPersistWatchAddedBackOnNextReconnectAfterFailure";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+
+    // The new session has no watch, and adding the 3 watches back fails.
+    connection.failAddWatch(KeeperException.Code.NOAUTH);
+    ZkTestHelper.expireSession(zkClient);
+    Assert.assertTrue(TestHelper.verify(() -> connection.getFailedAddWatchCount() == 3, 10000));
+    zkClient.writeData(path + "/data", "missed");
+    zkClient.create(path + "/child/missed", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/missed", "datat", CreateMode.PERSISTENT);
+    Thread.sleep(1000);
+    Assert.assertTrue(events.isEmpty(), "No event is expected without watches: " + events);
+
+    // The next reconnect adds the watches back and resyncs the listeners.
+    connection.failAddWatch(null);
+    simulateZkStateReconnected(zkClient);
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    events.clear();
+    zkClient.writeData(path + "/data", "newData");
+    zkClient.create(path + "/child/c", "datat", CreateMode.PERSISTENT);
+    zkClient.create(path + "/recursive/c", "datat", CreateMode.PERSISTENT);
+    assertEvents(events, "data " + path + "/data NodeDataChanged",
+        "child " + path + "/child NodeChildrenChanged",
+        "recursive " + path + "/recursive/c NodeCreated");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A reconnect resyncs only the listeners registered at that time. A listener that subscribes
+   * later adds its own watch and reads the current state itself, so it is not notified.
+   */
+  @Test
+  void testPersistListenerSubscribedAfterReconnectIsNotResynced() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testPersistListenerSubscribedAfterReconnectIsNotResynced";
+    Set<String> events = subscribePersistListeners(zkClient, path + "/before");
+
+    // Subscribe while the resync is queued behind a blocked state listener.
+    CountDownLatch release = blockEventThreadOnSyncConnected(zkClient);
+    simulateZkStateReconnected(zkClient);
+    Set<String> lateEvents = subscribePersistListeners(zkClient, path + "/after");
+    release.countDown();
+
+    assertEvents(events, "data " + path + "/before/data None",
+        "child " + path + "/before/child None", "recursive " + path + "/before/recursive None");
+    Thread.sleep(1000);
+    Assert.assertTrue(lateEvents.isEmpty(), "No resync is expected: " + lateEvents);
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A resync that loses the connection while adding the watches back stops instead of retrying,
+   * so the event thread delivers the state changes that follow. The next reconnect resyncs the
+   * listeners.
+   */
+  @Test
+  void testPersistResyncStopsOnConnectionLoss() throws Exception {
+    FailingZkConnection connection = new FailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(new ZkClient.Builder().setConnection(connection));
+    String path = "/testPersistResyncStopsOnConnectionLoss";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    AtomicInteger disconnects = countDisconnects(zkClient);
+
+    connection.failAddWatch(KeeperException.Code.CONNECTIONLOSS);
+    simulateZkStateReconnected(zkClient);
+    Assert.assertTrue(TestHelper.verify(() -> connection.getFailedAddWatchCount() == 1, 10000));
+    simulateZkState(zkClient, KeeperState.Disconnected);
+    Assert.assertTrue(TestHelper.verify(() -> disconnects.get() == 2, 10000),
+        "The event thread should not be blocked by the resync");
+    Assert.assertEquals(connection.getFailedAddWatchCount(), 1, "The resync should not retry");
+    Assert.assertTrue(events.isEmpty(), "No event is expected: " + events);
+
+    connection.failAddWatch(null);
+    simulateZkState(zkClient, KeeperState.SyncConnected);
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A listener event whose read loses the connection stops instead of retrying, and so do the
+   * other events queued with it, so the event thread delivers the state changes that follow. The
+   * next reconnect resyncs the listeners.
+   */
+  @Test
+  void testPersistListenerEventsStopOnConnectionLoss() throws Exception {
+    FailingZkConnection connection = new FailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(new ZkClient.Builder().setConnection(connection));
+    String path = "/testPersistListenerEventsStopOnConnectionLoss";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    AtomicInteger disconnects = countDisconnects(zkClient);
+
+    connection.failGetChildren(true);
+    simulateZkStateReconnected(zkClient);
+    Assert.assertTrue(TestHelper.verify(() -> connection.getFailedGetChildrenCount() == 1, 10000));
+    simulateZkState(zkClient, KeeperState.Disconnected);
+    Assert.assertTrue(TestHelper.verify(() -> disconnects.get() == 2, 10000),
+        "The event thread should not be blocked by the listener event");
+    Assert.assertEquals(connection.getFailedGetChildrenCount(), 1, "The read should not retry");
+    Assert.assertTrue(events.isEmpty(), "No event is expected: " + events);
+
+    connection.failGetChildren(false);
+    simulateZkState(zkClient, KeeperState.SyncConnected);
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * When the connection flaps, only the resync of the latest reconnect runs, so each listener is
+   * notified once.
+   */
+  @Test
+  void testOnlyLatestPersistResyncRunsWhenConnectionFlaps() throws Exception {
+    ZkClient zkClient = createPersistWatcherZkClient();
+    String path = "/testOnlyLatestPersistResyncRunsWhenConnectionFlaps";
+    List<String> events = new CopyOnWriteArrayList<>();
+    subscribePersistListeners(zkClient, path, events);
+
+    // Queue the reconnects behind a blocked state listener.
+    CountDownLatch release = blockEventThreadOnSyncConnected(zkClient);
+    for (int i = 0; i < 3; i++) {
+      simulateZkStateReconnected(zkClient);
+    }
+    release.countDown();
+
+    Assert.assertTrue(TestHelper.verify(() -> events.size() >= 3, 10000), "Events: " + events);
+    Thread.sleep(1000);
+    Assert.assertEquals(new HashSet<>(events), new HashSet<>(Arrays.asList(
+        "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None")));
+    Assert.assertEquals(events.size(), 3, "Each listener should be resynced once: " + events);
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  /**
+   * A subscribe holds the persist listener mutex while it retries adding its watch. A resync that
+   * waits for the mutex stops once the connection is lost again, so the event thread delivers the
+   * state change without waiting for the subscribe. The next reconnect resyncs the listeners.
+   */
+  @Test
+  void testStaleResyncDoesNotWaitForSubscribe() throws Exception {
+    FailingZkConnection connection = new FailingZkConnection(ZkTestBase.ZK_ADDR);
+    ZkClient zkClient = createPersistWatcherZkClient(
+        new ZkClient.Builder().setConnection(connection).setOperationRetryTimeout(30000L));
+    String path = "/testStaleResyncDoesNotWaitForSubscribe";
+    Set<String> events = subscribePersistListeners(zkClient, path);
+    AtomicInteger disconnects = countDisconnects(zkClient);
+    zkClient.createPersistent(path + "/subscribe", true);
+
+    connection.failAddWatch(KeeperException.Code.CONNECTIONLOSS);
+    AtomicReference<Throwable> subscribeError = new AtomicReference<>();
+    Thread subscriber = new Thread(() -> {
+      try {
+        zkClient.subscribePersistRecursiveListener(path + "/subscribe", (p, type) -> {
+        });
+      } catch (Throwable e) {
+        subscribeError.set(e);
+      }
+    });
+    subscriber.start();
+    try {
+      Assert.assertTrue(TestHelper.verify(() -> connection.getFailedAddWatchCount() > 0, 10000));
+      // The resync of this reconnect waits for the mutex, then the connection is lost again.
+      simulateZkStateReconnected(zkClient);
+      simulateZkState(zkClient, KeeperState.Disconnected);
+      Assert.assertTrue(TestHelper.verify(() -> disconnects.get() == 2, 10000),
+          "The event thread should not wait for the subscribe");
+      Assert.assertTrue(subscriber.isAlive(), "The subscribe should still be retrying");
+      Assert.assertTrue(events.isEmpty(), "No event is expected: " + events);
+    } finally {
+      connection.failAddWatch(null);
+      simulateZkState(zkClient, KeeperState.SyncConnected);
+      subscriber.join(30000);
+    }
+    Assert.assertFalse(subscriber.isAlive(), "The subscribe should be done");
+    Assert.assertNull(subscribeError.get(), "The subscribe should succeed");
+    assertEvents(events, "data " + path + "/data None", "child " + path + "/child None",
+        "recursive " + path + "/recursive None");
+
+    zkClient.deleteRecursively(path);
+    zkClient.close();
+  }
+
+  // Delivers the state change from another thread, as ZooKeeper does. ZkClient rejects ZK
+  // operations from the thread that delivers them.
+  private static void simulateZkState(ZkClient zkClient, KeeperState state)
+      throws InterruptedException {
+    Thread zkEventThread =
+        new Thread(() -> zkClient.process(new WatchedEvent(EventType.None, state, null)));
+    zkEventThread.start();
+    zkEventThread.join();
+  }
+
+  private static void simulateZkStateReconnected(ZkClient zkClient) throws InterruptedException {
+    Thread zkEventThread = new Thread(() -> ZkTestHelper.simulateZkStateReconnected(zkClient));
+    zkEventThread.start();
+    zkEventThread.join();
+  }
+
+  // Blocks the event thread on the next SyncConnected state until the returned latch is released.
+  private static CountDownLatch blockEventThreadOnSyncConnected(ZkClient zkClient) {
+    CountDownLatch release = new CountDownLatch(1);
+    zkClient.subscribeStateChanges(new StateListener() {
+      @Override
+      public void handleStateChanged(KeeperState state) throws Exception {
+        if (state == KeeperState.SyncConnected) {
+          release.await(30, TimeUnit.SECONDS);
+        }
+      }
+    });
+    return release;
+  }
+
+  // Returns the number of Disconnected states delivered to the state listeners.
+  private static AtomicInteger countDisconnects(ZkClient zkClient) {
+    AtomicInteger disconnects = new AtomicInteger();
+    zkClient.subscribeStateChanges(new StateListener() {
+      @Override
+      public void handleStateChanged(KeeperState state) {
+        if (state == KeeperState.Disconnected) {
+          disconnects.incrementAndGet();
+        }
+      }
+    });
+    return disconnects;
+  }
+
+  private abstract static class StateListener implements IZkStateListener {
+    @Override
+    public void handleNewSession(String sessionId) {
+    }
+
+    @Override
+    public void handleSessionEstablishmentError(Throwable error) {
+    }
+  }
+
+  private static ZkClient createPersistWatcherZkClient() {
+    return createPersistWatcherZkClient(new ZkClient.Builder().setZkServer(ZkTestBase.ZK_ADDR));
+  }
+
+  private static ZkClient createPersistWatcherZkClient(ZkClient.Builder builder) {
+    builder.setMonitorRootPathOnly(false).setUsePersistWatcher(true);
+    ZkClient zkClient = builder.build();
+    zkClient.setZkSerializer(new BasicZkSerializer(new SerializableSerializer()));
+    return zkClient;
+  }
+
+  // Subscribes a data, a child and a recursive persist listener under the path and returns the
+  // set the listeners record their events into.
+  private static Set<String> subscribePersistListeners(ZkClient zkClient, String path) {
+    Set<String> events = ConcurrentHashMap.newKeySet();
+    subscribePersistListeners(zkClient, path, events);
+    return events;
+  }
+
+  private static void subscribePersistListeners(ZkClient zkClient, String path,
+      Collection<String> events) {
+    zkClient.createPersistent(path + "/data", true);
+    zkClient.createPersistent(path + "/child", true);
+    zkClient.createPersistent(path + "/recursive", true);
+    zkClient.subscribeDataChanges(path + "/data", new IZkDataListener() {
+      @Override
+      public void handleDataChange(String dataPath, Object data) {
+      }
+
+      @Override
+      public void handleDataChange(String dataPath, Object data,
+          Watcher.Event.EventType eventType) {
+        events.add("data " + dataPath + " " + eventType);
+      }
+
+      @Override
+      public void handleDataDeleted(String dataPath) {
+        events.add("data " + dataPath + " deleted");
+      }
+    });
+    zkClient.subscribeChildChanges(path + "/child", new IZkChildListener() {
+      @Override
+      public void handleChildChange(String parentPath, List<String> currentChilds) {
+      }
+
+      @Override
+      public void handleChildChange(String parentPath, List<String> currentChilds,
+          Watcher.Event.EventType eventType) {
+        events.add("child " + parentPath + " " + eventType);
+      }
+    });
+    zkClient.subscribePersistRecursiveListener(path + "/recursive",
+        (dataPath, eventType) -> events.add("recursive " + dataPath + " " + eventType));
+  }
+
+  private static void assertEvents(Set<String> events, String... expected) throws Exception {
+    Set<String> expectedEvents = new HashSet<>(Arrays.asList(expected));
+    Assert.assertTrue(TestHelper.verify(() -> events.equals(expectedEvents), 10000),
+        "Expected events " + expectedEvents + " but got " + events);
+  }
+
+  // A connection on which adding a watch and getting children can be made to fail.
+  private static class FailingZkConnection extends ZkConnection {
+    private final AtomicReference<KeeperException.Code> _addWatchFailure = new AtomicReference<>();
+    private final AtomicInteger _failedAddWatchCount = new AtomicInteger();
+    private final AtomicBoolean _failGetChildren = new AtomicBoolean();
+    private final AtomicInteger _failedGetChildrenCount = new AtomicInteger();
+
+    FailingZkConnection(String zkServers) {
+      super(zkServers);
+    }
+
+    // Adding a watch fails with the code, or succeeds if it is null.
+    void failAddWatch(KeeperException.Code code) {
+      _addWatchFailure.set(code);
+    }
+
+    int getFailedAddWatchCount() {
+      return _failedAddWatchCount.get();
+    }
+
+    // Getting children loses the connection while set.
+    void failGetChildren(boolean fail) {
+      _failGetChildren.set(fail);
+    }
+
+    int getFailedGetChildrenCount() {
+      return _failedGetChildrenCount.get();
+    }
+
+    @Override
+    public void addWatch(String basePath, Watcher watcher, AddWatchMode mode)
+        throws KeeperException, InterruptedException {
+      KeeperException.Code code = _addWatchFailure.get();
+      if (code != null) {
+        _failedAddWatchCount.incrementAndGet();
+        throw KeeperException.create(code, basePath);
+      }
+      super.addWatch(basePath, watcher, mode);
+    }
+
+    @Override
+    public List<String> getChildren(String path, boolean watch)
+        throws KeeperException, InterruptedException {
+      if (_failGetChildren.get()) {
+        _failedGetChildrenCount.incrementAndGet();
+        throw KeeperException.create(KeeperException.Code.CONNECTIONLOSS, path);
+      }
+      return super.getChildren(path, watch);
+    }
   }
 
   @Test

@@ -55,6 +55,9 @@ public class DataListenerAdapter implements IZkDataListener {
       case NodeCreated: return DataChangeListener.ChangeType.ENTRY_CREATED;
       case NodeDataChanged: return DataChangeListener.ChangeType.ENTRY_UPDATE;
       case NodeDeleted: return DataChangeListener.ChangeType.ENTRY_DELETED;
+      // Resync after a reconnect or a new session. A missing entry is reported through
+      // handleDataDeleted, so the entry exists here.
+      case None: return DataChangeListener.ChangeType.ENTRY_UPDATE;
       default: throw new IllegalArgumentException("EventType " + eventType + " is not supported.");
     }
   }

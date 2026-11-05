@@ -168,6 +168,29 @@ public class ZkPathRecursiveWatcherTrie {
   }
 
   /**
+   * Get a snapshot of all the paths that have at least one RecursivePersistListener registered,
+   * mapped to the listeners registered on exactly that path.
+   * @return a map from the registered path to a copy of its listeners
+   */
+  public Map<String, Set<RecursivePersistListener>> getRecursiveListenersByPath() {
+    Map<String, Set<RecursivePersistListener>> result = new HashMap<>();
+    synchronized (this) {
+      collectRecursiveListeners(_rootNode, "", result);
+    }
+    return result;
+  }
+
+  private static void collectRecursiveListeners(TrieNode node, String nodePath,
+      Map<String, Set<RecursivePersistListener>> result) {
+    if (!node.getRecursiveListeners().isEmpty()) {
+      result.put(nodePath.isEmpty() ? "/" : nodePath, new HashSet<>(node.getRecursiveListeners()));
+    }
+    for (Map.Entry<String, TrieNode> child : node.getChildren().entrySet()) {
+      collectRecursiveListeners(child.getValue(), nodePath + "/" + child.getKey(), result);
+    }
+  }
+
+  /**
    * Removing a RecursivePersistWatcherListener on a path.
    *
    * Delete a path from the nearest trie node to current node if this is the only listener and there

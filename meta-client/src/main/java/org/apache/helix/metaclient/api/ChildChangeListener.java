@@ -30,7 +30,13 @@ public interface ChildChangeListener {
   enum ChangeType {
     ENTRY_CREATED,     // Any child entry created
     ENTRY_DELETED,     // Any child entry deleted
-    ENTRY_DATA_CHANGE  // Any child entry has value change
+    ENTRY_DATA_CHANGE, // Any child entry has value change
+    /*
+     * The client connected again after being disconnected or after its session expired, and
+     * changes under the subscribed key may have been missed. The changed path is the subscribed
+     * key. Re-read the state under it that the listener depends on.
+     */
+    ENTRY_RESYNC
   }
   /**
    * Called when any child of the current key has changed.
