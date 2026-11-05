@@ -19,6 +19,7 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
@@ -32,27 +33,30 @@ import java.util.TreeMap;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
+import org.apache.helix.controller.rebalancer.AutoRebalancer;
+import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalanceStatus;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ConvergenceStatus.OptimizerStatus;
 import org.apache.helix.model.ConvergenceStatus.Reason;
 import org.apache.helix.model.ConvergenceStatus.Status;
 import org.apache.helix.model.ConvergenceStatus.TargetFreshness;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.task.TaskConstants;
 
 /**
- * Decides, partition by partition, whether the current assignment has reached the target.
- *
- * Built to run off the controller pipeline thread. The cost is one pass over the partitions with no
- * allocation per partition, and memory is bounded by the counters, whatever the partition count.
+ * Decides, partition by partition, whether the current assignment has reached the target: one
+ * pass with no allocation per partition, off the pipeline thread, memory bounded by the counters.
  */
 public final class ConvergenceStatusCalculator {
   private static final int STATUS_COUNT = Status.values().length;
@@ -76,9 +80,26 @@ public final class ConvergenceStatusCalculator {
     List<Message> _failedMessages = Collections.emptyList();
     Reason _pausedReason;
     Set<String> _liveInstances = Collections.emptySet();
+    Set<String> _disabledInstances = Collections.emptySet();
     Map<String, String> _initialStates = Collections.emptyMap();
     Set<String> _wagedResources = Collections.emptySet();
     Set<String> _delayedResources = Collections.emptySet();
+    // Active replicas each partition should have, for resources placed by a built-in rebalancer
+    // where that can be told.
+    Map<String, Integer> _expectedReplicas = Collections.emptyMap();
+    // SEMI_AUTO resources, which place as many replicas as each preference list names.
+    Set<String> _semiAuto = Collections.emptySet();
+    // Delayed resources that can be placed on an unavailable node still inside its delay window,
+    // with the replicas the rebalancer keeps active while it waits (min active replicas).
+    Map<String, Integer> _waitingForDelay = Collections.emptyMap();
+    // Resource to partition to instances an operator disabled that partition on.
+    Map<String, Map<String, Set<String>>> _disabledPartitions = Collections.emptyMap();
+    // The newest ideal state creation time among the resources this run covers.
+    long _coveredThrough;
+    // CUSTOMIZED resources, whose ideal state names the replicas directly.
+    Map<String, IdealState> _customized = Collections.emptyMap();
+    // Both sides of a swap; a replica on either is expected outside the preference list.
+    Set<String> _swapInstances = Collections.emptySet();
     WagedRebalanceStatus _wagedStatus;
     String _controllerName;
 
@@ -130,6 +151,11 @@ public final class ConvergenceStatusCalculator {
       return this;
     }
 
+    public Inputs disabledInstances(Set<String> disabledInstances) {
+      _disabledInstances = disabledInstances;
+      return this;
+    }
+
     public Inputs initialStates(Map<String, String> initialStates) {
       _initialStates = initialStates;
       return this;
@@ -146,7 +172,23 @@ public final class ConvergenceStatusCalculator {
       return this;
     }
 
-    /** Snapshots the event on the pipeline thread: O(resources + live instances). */
+    public Inputs expectedReplicas(Map<String, Integer> expectedReplicas,
+        Map<String, IdealState> customized, Set<String> swapInstances) {
+      _expectedReplicas = expectedReplicas;
+      _customized = customized;
+      _swapInstances = swapInstances;
+      return this;
+    }
+
+    public Inputs placement(Set<String> semiAuto, Map<String, Integer> waitingForDelay,
+        Map<String, Map<String, Set<String>>> disabledPartitions) {
+      _semiAuto = semiAuto;
+      _waitingForDelay = waitingForDelay;
+      _disabledPartitions = disabledPartitions;
+      return this;
+    }
+
+    /** Snapshots the event on the pipeline thread: O(resources + instances x instance tags). */
     @SuppressWarnings("unchecked")
     public static Inputs from(ClusterEvent event, BaseControllerDataProvider cache,
         String clusterName) {
@@ -155,6 +197,16 @@ public final class ConvergenceStatusCalculator {
       Map<String, String> initialStates = new HashMap<>();
       Set<String> waged = new HashSet<>();
       Set<String> delayed = new HashSet<>();
+      Map<String, Integer> expected = new HashMap<>();
+      Map<String, IdealState> customized = new HashMap<>();
+      Set<String> semiAuto = new HashSet<>();
+      Map<String, Integer> waiting = new HashMap<>();
+      ClusterConfig clusterConfig = cache.getClusterConfig();
+      Map<String, Long> unavailableSince = unavailableSince(cache);
+      // Most resources share a few instance tags, so each tag's instances are walked once a run.
+      Map<String, TagView> tags = new HashMap<>();
+      long now = System.currentTimeMillis();
+      long coveredThrough = 0L;
       for (Map.Entry<String, Resource> entry : resources.entrySet()) {
         StateModelDefinition stateModel =
             cache.getStateModelDef(entry.getValue().getStateModelDefRef());
@@ -162,14 +214,55 @@ public final class ConvergenceStatusCalculator {
           initialStates.put(entry.getKey(), stateModel.getInitialState());
         }
         IdealState idealState = cache.getIdealState(entry.getKey());
-        if (idealState != null && WagedValidationUtil.isWagedEnabled(idealState)) {
-          waged.add(entry.getKey());
+        if (idealState == null) {
+          continue;
         }
-        if (idealState != null && DelayedRebalanceUtil.isDelayRebalanceEnabled(idealState,
-            cache.getClusterConfig())) {
-          delayed.add(entry.getKey());
+        coveredThrough = Math.max(coveredThrough, idealState.getRecord().getCreationTime());
+        if (stateModel == null || !idealState.isEnabled()) {
+          continue;
+        }
+        String name = entry.getKey();
+        boolean isWaged = WagedValidationUtil.isWagedEnabled(idealState);
+        if (isWaged) {
+          waged.add(name);
+        }
+        IdealState.RebalanceMode mode = idealState.getRebalanceMode();
+        TagView tag = tags.computeIfAbsent(idealState.getInstanceGroupTag(),
+            t -> new TagView(cache, t, unavailableSince));
+        // Only FULL_AUTO holds a replica for a node through the delay window, and only for a node
+        // the resource can be placed on.
+        if (mode == IdealState.RebalanceMode.FULL_AUTO
+            && DelayedRebalanceUtil.isDelayRebalanceEnabled(idealState, clusterConfig)) {
+          delayed.add(name);
+          long delay = DelayedRebalanceUtil.getRebalanceDelay(idealState, clusterConfig);
+          for (long since : tag._unavailableSince) {
+            if (since <= 0 || now - since < delay) {
+              waiting.put(name, DelayedRebalanceUtil.getMinActiveReplica(idealState,
+                  idealState.getReplicaCount(tag._assignable.size())));
+              break;
+            }
+          }
+        }
+        if (mode == IdealState.RebalanceMode.CUSTOMIZED) {
+          customized.put(name, idealState);
+        } else if (mode == IdealState.RebalanceMode.SEMI_AUTO
+            || mode == IdealState.RebalanceMode.FULL_AUTO && isBuiltIn(idealState)) {
+          if (mode == IdealState.RebalanceMode.SEMI_AUTO) {
+            semiAuto.add(name);
+          }
+          int replicas = expectedReplicas(idealState, stateModel, tag._assignable.size(),
+              isWaged || clusterConfig != null && clusterConfig.isTopologyAwareEnabled()
+                  ? tag.faultZones(cache, clusterConfig) : Integer.MAX_VALUE);
+          if (replicas > 0) {
+            expected.put(name, replicas);
+          }
         }
       }
+      Set<String> swapInstances = new HashSet<>();
+      cache.getSwapInToSwapOutInstancePairs().forEach((in, out) -> {
+        swapInstances.add(in);
+        swapInstances.add(out);
+      });
       Object rebalancer = event.getAttribute(AttributeName.STATEFUL_REBALANCER.name());
       WagedRebalanceStatus wagedStatus = rebalancer instanceof WagedRebalancer
           ? ((WagedRebalancer) rebalancer).getConvergenceStatus() : null;
@@ -184,8 +277,133 @@ public final class ConvergenceStatusCalculator {
           .failedMessages(failed == null ? Collections.emptyList() : failed)
           .pausedReason(cache.isMaintenanceModeEnabled() ? Reason.MAINTENANCE_MODE : null)
           .liveInstances(new HashSet<>(cache.getLiveInstances().keySet()))
+          .disabledInstances(new HashSet<>(cache.getDisabledInstances()))
           .initialStates(initialStates).wagedResources(waged, wagedStatus)
-          .delayedResources(delayed);
+          .delayedResources(delayed).expectedReplicas(expected, customized, swapInstances)
+          .placement(semiAuto, waiting, disabledPartitions(cache)).coveredThrough(coveredThrough);
+    }
+
+    public Inputs coveredThrough(long coveredThrough) {
+      _coveredThrough = coveredThrough;
+      return this;
+    }
+
+    private static final Set<String> BUILT_IN_REBALANCERS = new HashSet<>(Arrays.asList(
+        AutoRebalancer.class.getName(), DelayedAutoRebalancer.class.getName(),
+        WagedRebalancer.class.getName()));
+
+    /** Whose preference lists and placement this calculation understands. */
+    private static boolean isBuiltIn(IdealState idealState) {
+      String rebalancer = idealState.getRebalancerClassName();
+      return rebalancer == null || BUILT_IN_REBALANCERS.contains(rebalancer);
+    }
+
+    /** When each unavailable instance went down or was disabled; 0 when not known. */
+    private static Map<String, Long> unavailableSince(BaseControllerDataProvider cache) {
+      Map<String, Long> since = new HashMap<>();
+      Map<String, Long> offline = cache.getInstanceOfflineTimeMap();
+      Set<String> live = cache.getLiveInstances().keySet();
+      for (InstanceConfig config : cache.getInstanceConfigMap().values()) {
+        String instance = config.getInstanceName();
+        if (!live.contains(instance)) {
+          Long time = offline == null ? null : offline.get(instance);
+          since.put(instance, time == null ? 0L : time);
+        } else if (cache.getDisabledInstances().contains(instance)) {
+          since.put(instance, Math.max(0L, config.getInstanceEnabledTime()));
+        }
+      }
+      return since;
+    }
+
+    /** The instances a resource with one instance tag, or none, can be placed on. */
+    private static final class TagView {
+      final Set<String> _assignable;
+      // When each of those that is unavailable went down; 0 when not known.
+      final List<Long> _unavailableSince = new ArrayList<>();
+      private int _faultZones = -1;
+
+      TagView(BaseControllerDataProvider cache, String tag, Map<String, Long> unavailableSince) {
+        _assignable = tag == null ? cache.getAssignableInstances()
+            : cache.getAssignableInstancesWithTag(tag);
+        unavailableSince.forEach((instance, since) -> {
+          if (_assignable.contains(instance)) {
+            _unavailableSince.add(since);
+          }
+        });
+      }
+
+      int faultZones(BaseControllerDataProvider cache, ClusterConfig clusterConfig) {
+        if (_faultZones < 0) {
+          String zoneType = clusterConfig.getFaultZoneType();
+          Set<String> zones = new HashSet<>();
+          if (zoneType != null) {
+            for (String instance : _assignable) {
+              InstanceConfig config = cache.getInstanceConfigMap().get(instance);
+              String zone = config == null ? null : config.getDomainAsMap().get(zoneType);
+              if (zone != null) {
+                zones.add(zone);
+              }
+            }
+          }
+          _faultZones = zones.isEmpty() ? Integer.MAX_VALUE : zones.size();
+        }
+        return _faultZones;
+      }
+    }
+
+    private static Map<String, Map<String, Set<String>>> disabledPartitions(
+        BaseControllerDataProvider cache) {
+      Map<String, Map<String, Set<String>>> disabled = new HashMap<>();
+      for (InstanceConfig config : cache.getInstanceConfigMap().values()) {
+        for (Map.Entry<String, List<String>> entry : config.getDisabledPartitionsMap().entrySet()) {
+          for (String partition : entry.getValue()) {
+            disabled.computeIfAbsent(entry.getKey(), k -> new HashMap<>())
+                .computeIfAbsent(partition, k -> new HashSet<>()).add(config.getInstanceName());
+          }
+        }
+      }
+      return disabled;
+    }
+
+    /**
+     * The active replicas a partition should have: the ideal state's replica count, capped by what
+     * the state model can hold, by the instances the resource may be placed on, dead or alive, and
+     * by the fault zones when placement is zone aware. -1 when it cannot be told, such as
+     * ANY_LIVEINSTANCE or a state bounded by N.
+     */
+    static int expectedReplicas(IdealState idealState, StateModelDefinition stateModel,
+        int instances, int faultZones) {
+      int replicas;
+      try {
+        replicas = Integer.parseInt(idealState.getReplicas());
+      } catch (NumberFormatException | NullPointerException e) {
+        return -1;
+      }
+      int capacity = 0;
+      for (String state : stateModel.getStatesPriorityList()) {
+        if (state.equals(stateModel.getInitialState())
+            || state.equals(HelixDefinedState.DROPPED.name())
+            || state.equals(HelixDefinedState.ERROR.name())) {
+          continue;
+        }
+        String bound = stateModel.getNumInstancesPerState(state);
+        if (bound == null) {
+          continue;
+        }
+        if ("R".equals(bound)) {
+          capacity += replicas;
+        } else if ("N".equals(bound)) {
+          return -1;
+        } else {
+          try {
+            // A state with no bound declares -1; it adds nothing.
+            capacity += Math.max(0, Integer.parseInt(bound));
+          } catch (NumberFormatException e) {
+            return -1;
+          }
+        }
+      }
+      return Math.min(Math.min(replicas, capacity), Math.min(instances, faultZones));
     }
   }
 
@@ -202,7 +420,6 @@ public final class ConvergenceStatusCalculator {
       return _cluster;
     }
 
-    /** Resource name to report. Task resources are not included. */
     public Map<String, ConvergenceStatus> getResources() {
       return _resources;
     }
@@ -275,6 +492,7 @@ public final class ConvergenceStatusCalculator {
     ConvergenceStatus cluster = new ConvergenceStatus(in._clusterName);
     fill(cluster, clusterTally, in._controllerName, controllerSessionId, now);
     cluster.setResourceCount(reports.size());
+    cluster.setCoveredThrough(in._coveredThrough);
     cluster.setTargetFreshness(clusterFreshness);
     cluster.setOptimizerStatus(clusterOptimizer);
     if (in._pausedReason != null) {
@@ -298,6 +516,9 @@ public final class ConvergenceStatusCalculator {
     report.setControllerSessionId(sessionId);
     report.setControllerName(controllerName);
   }
+
+  private static final String ANY_LIVEINSTANCE =
+      ResourceConfig.ResourceConfigConstants.ANY_LIVEINSTANCE.name();
 
   /** The walk over one resource. */
   private static final class ResourceEvaluation {
@@ -352,9 +573,11 @@ public final class ConvergenceStatusCalculator {
     }
 
     void overrideAllUnknown(Reason reason) {
+      int errors = _tally._counts[Status.BLOCKED.ordinal()][Reason.ERROR_STATE.ordinal()];
       int total = _tally.total();
       _tally.reset();
-      _tally.record(Status.UNKNOWN, reason, total);
+      _tally.record(Status.BLOCKED, Reason.ERROR_STATE, errors);
+      _tally.record(Status.UNKNOWN, reason, total - errors);
     }
 
     private void visit(Partition partition) {
@@ -377,10 +600,17 @@ public final class ConvergenceStatusCalculator {
       int comparison = compare(current, target);
       if (comparison == INVALID) {
         _tally.record(Status.UNKNOWN, Reason.INVALID_STATE);
-      } else if (comparison == SAME && !active) {
-        boolean held = holdsOfflineNode(partition);
-        _tally.record(held ? Status.IN_PROGRESS : Status.CONVERGED,
-            held ? Reason.WAITING_FOR_DELAY : Reason.NONE);
+      } else if (comparison == SAME && !active && !hasMessages(_in._allMessages, partition)) {
+        if (holdsOfflineNode(partition)) {
+          _tally.record(Status.IN_PROGRESS, Reason.WAITING_FOR_DELAY);
+        } else {
+          // The target is what the rebalancer could do, which already leaves out dead nodes and
+          // full ones, so matching it is not enough.
+          Reason gap = placementGap(partition, target);
+          _tally.record(gap == null ? Status.CONVERGED
+                  : gap == Reason.WAITING_FOR_DELAY ? Status.IN_PROGRESS : Status.BLOCKED,
+              gap == null ? Reason.NONE : gap);
+        }
       } else {
         classifyUnconverged(partition, current, target, pending, cancellations, relays);
       }
@@ -422,11 +652,116 @@ public final class ConvergenceStatusCalculator {
       }
     }
 
-    /** Best possible lists live nodes only; a node held for the delay window is in the list. */
+    /** Best possible skips an offline or disabled node the preference list keeps for the delay. */
     private boolean holdsOfflineNode(Partition partition) {
-      List<String> held = _delayed && _in._bestPossible != null
-          ? _in._bestPossible.getPreferenceList(_name, partition.getPartitionName()) : null;
-      return held != null && !_in._liveInstances.containsAll(held);
+      return _delayed && hasUnavailable(preferenceList(partition));
+    }
+
+    /** Null when there is none or it is the ANY_LIVEINSTANCE placeholder. */
+    private List<String> preferenceList(Partition partition) {
+      List<String> list = _in._bestPossible == null ? null
+          : _in._bestPossible.getPreferenceList(_name, partition.getPartitionName());
+      return list == null || list.contains(ANY_LIVEINSTANCE) ? null : list;
+    }
+
+    private boolean hasUnavailable(List<String> instances) {
+      if (instances != null) {
+        for (String instance : instances) {
+          if (!_in._liveInstances.contains(instance)
+              || _in._disabledInstances.contains(instance)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    /**
+     * Why a partition that matches its target is still short of what was asked for, or null:
+     * fewer active replicas than asked for, a CUSTOMIZED replica on a node that is down, or a
+     * replica left outside the preference list. Replicas an operator disabled are not asked for.
+     */
+    private Reason placementGap(Partition partition, Map<String, String> target) {
+      String name = partition.getPartitionName();
+      Set<String> disabled = disabledFor(name);
+      int active = 0;
+      for (String state : target.values()) {
+        if (!ignored(state)) {
+          active++;
+        }
+      }
+      IdealState custom = _in._customized.get(_name);
+      if (custom != null) {
+        Map<String, String> wanted = custom.getInstanceStateMap(name);
+        int expected = 0;
+        if (wanted != null) {
+          for (Map.Entry<String, String> entry : wanted.entrySet()) {
+            if (!ignored(entry.getValue()) && !disabled.contains(entry.getKey())) {
+              expected++;
+            }
+          }
+        }
+        return active < expected ? Reason.TARGET_INSTANCE_NOT_LIVE : null;
+      }
+      Integer asked = _in._expectedReplicas.get(_name);
+      if (asked == null) {
+        return null;
+      }
+      List<String> preference = preferenceList(partition);
+      int expected = asked;
+      int excused = 0;
+      if (preference != null) {
+        if (_in._semiAuto.contains(_name)) {
+          expected = Math.min(expected, preference.size());
+        }
+        for (String instance : preference) {
+          if (disabled.contains(instance)) {
+            excused++;
+          }
+        }
+      }
+      if (active < expected - excused) {
+        // Below min active the rebalancer drops the held node and does not wait, so a replica
+        // it could not place is missing, not held.
+        Integer minActive = _in._waitingForDelay.get(_name);
+        if (minActive != null && active >= minActive) {
+          return Reason.WAITING_FOR_DELAY;
+        }
+        return hasNonLive(preference) ? Reason.TARGET_INSTANCE_NOT_LIVE : Reason.UNDER_REPLICATED;
+      }
+      // A replica kept off the list because the new target is disabled is the operator's doing.
+      if (preference != null && !preference.isEmpty() && excused == 0) {
+        for (Map.Entry<String, String> entry : target.entrySet()) {
+          if (!ignored(entry.getValue()) && !preference.contains(entry.getKey())
+              && !_in._swapInstances.contains(entry.getKey())) {
+            return Reason.OUTSIDE_PREFERENCE_LIST;
+          }
+        }
+      }
+      return null;
+    }
+
+    /** Instances disabled as a whole, or for this partition. */
+    private Set<String> disabledFor(String partition) {
+      Map<String, Set<String>> byPartition = _in._disabledPartitions.get(_name);
+      Set<String> partitionDisabled = byPartition == null ? null : byPartition.get(partition);
+      if (partitionDisabled == null) {
+        return _in._disabledInstances;
+      }
+      Set<String> all = new HashSet<>(_in._disabledInstances);
+      all.addAll(partitionDisabled);
+      return all;
+    }
+
+    private boolean hasNonLive(List<String> instances) {
+      if (instances != null) {
+        for (String instance : instances) {
+          if (!_in._liveInstances.contains(instance)) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     private boolean hasNonLiveTarget(Map<String, String> target) {
@@ -449,12 +784,17 @@ public final class ConvergenceStatusCalculator {
     /** Compares assignments, ignoring DROPPED and initial state entries, without allocating. */
     private int compare(Map<String, String> current, Map<String, String> target) {
       int currentEffective = 0;
+      boolean errored = false;
       for (Map.Entry<String, String> entry : current.entrySet()) {
         if (isBlank(entry.getKey()) || isBlank(entry.getValue())) {
           return INVALID;
         }
         if (!ignored(entry.getValue())) {
           currentEffective++;
+        }
+        // The rebalancer keeps an ERROR replica in ERROR, so it would otherwise match the target.
+        if (HelixDefinedState.ERROR.name().equals(entry.getValue())) {
+          errored = true;
         }
       }
       int targetEffective = 0;
@@ -468,7 +808,7 @@ public final class ConvergenceStatusCalculator {
           same &= entry.getValue().equals(current.get(entry.getKey()));
         }
       }
-      return same && currentEffective == targetEffective ? SAME : DIFFERENT;
+      return same && !errored && currentEffective == targetEffective ? SAME : DIFFERENT;
     }
 
     private boolean ignored(String state) {
@@ -613,6 +953,8 @@ public final class ConvergenceStatusCalculator {
         return 3;
       case MESSAGE_DISPATCH_FAILED:
       case NO_PROGRESS_PATH:
+      case UNDER_REPLICATED:
+      case OUTSIDE_PREFERENCE_LIST:
         return 4;
       case TARGET_INSTANCE_NOT_LIVE:
         return 5;

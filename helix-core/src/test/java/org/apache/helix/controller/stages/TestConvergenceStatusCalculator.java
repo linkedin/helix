@@ -25,16 +25,26 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.apache.helix.HelixRebalanceException;
+import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
+import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalanceStatus;
+import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ConvergenceStatus.Reason;
 import org.apache.helix.model.ConvergenceStatus.Status;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.model.StateModelDefinition;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -107,11 +117,14 @@ public class TestConvergenceStatusCalculator {
     String[] none = {};
     partition("pending", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
     _current.setPendingMessage(DB, _resource.getPartition("pending"), "i1", message());
-    partition("error", new String[] {"i1", "ERROR"}, new String[] {"i1", "MASTER"});
+    // The controller keeps an ERROR replica in ERROR in its target.
+    partition("error", new String[] {"i1", "ERROR"}, new String[] {"i1", "ERROR"});
     partition("down", new String[] {"i1", "SLAVE"}, new String[] {"i1", "SLAVE", "i3", "MASTER"});
     partition("stuck", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
     partition("failed", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
     partition("fresh", none, new String[] {"i1", "MASTER"});
+    partition("throttled", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
+    partition("waiting", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
 
     MessageOutput all = new MessageOutput();
     MessageOutput selected = new MessageOutput();
@@ -120,6 +133,9 @@ public class TestConvergenceStatusCalculator {
     all.addMessage(DB, fresh, message());
     selected.addMessage(DB, fresh, message());
     throttled.addMessage(DB, fresh, message());
+    all.addMessage(DB, _resource.getPartition("throttled"), message());
+    selected.addMessage(DB, _resource.getPartition("throttled"), message());
+    all.addMessage(DB, _resource.getPartition("waiting"), message());
     Message failed = message();
     failed.setResourceName(DB);
     failed.setPartitionName("failed");
@@ -130,56 +146,37 @@ public class TestConvergenceStatusCalculator {
     Map<Reason, Integer> expected = new EnumMap<>(Reason.class);
     for (Reason reason : Arrays.asList(Reason.PENDING_TRANSITION, Reason.ERROR_STATE,
         Reason.TARGET_INSTANCE_NOT_LIVE, Reason.NO_PROGRESS_PATH, Reason.MESSAGE_DISPATCH_FAILED,
-        Reason.TRANSITION_DISPATCHED)) {
+        Reason.TRANSITION_DISPATCHED, Reason.MESSAGE_THROTTLED, Reason.STATE_CONSTRAINT_WAIT)) {
       expected.put(reason, 1);
     }
     Assert.assertEquals(report.getReasonCounts(), expected);
-    Assert.assertEquals(report.getStatusCounts().get(Status.IN_PROGRESS).intValue(), 2);
+    Assert.assertEquals(report.getStatusCounts().get(Status.IN_PROGRESS).intValue(), 4);
     Assert.assertEquals(report.getStatusCounts().get(Status.BLOCKED).intValue(), 4);
     Assert.assertEquals(report.getStatus(), Status.BLOCKED);
-    Assert.assertEquals(report.getAffectedPartitionCount(), 6);
+    Assert.assertEquals(report.getAffectedPartitionCount(), 8);
     // The most urgent reason among the BLOCKED partitions.
     Assert.assertEquals(report.getPrimaryReason(), Reason.ERROR_STATE);
   }
 
   @Test
-  public void testThrottledAndConstraintWait() {
-    partition("a", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
-    partition("b", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
-    MessageOutput all = new MessageOutput();
-    MessageOutput selected = new MessageOutput();
-    all.addMessage(DB, _resource.getPartition("a"), message());
-    selected.addMessage(DB, _resource.getPartition("a"), message());
-    all.addMessage(DB, _resource.getPartition("b"), message());
-
-    ConvergenceStatus report = run(inputs().messages(all, selected, new MessageOutput()));
-    Map<Reason, Integer> reasons = report.getReasonCounts();
-    Assert.assertEquals(reasons.get(Reason.MESSAGE_THROTTLED).intValue(), 1);
-    Assert.assertEquals(reasons.get(Reason.STATE_CONSTRAINT_WAIT).intValue(), 1);
-    Assert.assertEquals(report.getStatus(), Status.IN_PROGRESS);
-  }
-
-  @Test
-  public void testDelayedResourceWaitsInsteadOfBlocking() {
-    partition("db_0", new String[] {"i1", "SLAVE"}, new String[] {"i1", "SLAVE", "i3", "MASTER"});
-    ConvergenceStatus report =
-        run(inputs().delayedResources(Collections.singleton(DB)));
-    Assert.assertEquals(report.getStatus(), Status.IN_PROGRESS);
-    Assert.assertEquals(report.getPrimaryReason(), Reason.WAITING_FOR_DELAY);
-  }
-
-  @Test
   public void testDelayWindowNodeInPreferenceListIsNotConverged() {
+    // A target on an offline node waits for the delay instead of blocking.
+    partition("db_1", new String[] {"i1", "SLAVE"}, new String[] {"i1", "SLAVE", "i3", "MASTER"});
     partition("db_0", new String[] {"i1", "MASTER"}, new String[] {"i1", "MASTER"});
     _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i3"));
     ConvergenceStatus report = run(inputs().delayedResources(Collections.singleton(DB)));
     Assert.assertEquals(report.getStatus(), Status.IN_PROGRESS);
     Assert.assertEquals(report.getPrimaryReason(), Reason.WAITING_FOR_DELAY);
 
+    _target.setState(DB, _resource.getPartition("db_1"), Collections.singletonMap("i1", "SLAVE"));
     Assert.assertEquals(run(inputs()).getStatus(), Status.CONVERGED);
     _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i2"));
     Assert.assertEquals(run(inputs().delayedResources(Collections.singleton(DB))).getStatus(),
         Status.CONVERGED);
+    // A disabled node that is still live is held the same way.
+    Assert.assertEquals(run(inputs().delayedResources(Collections.singleton(DB))
+        .disabledInstances(Collections.singleton("i2"))).getReasonCounts()
+        .get(Reason.WAITING_FOR_DELAY).intValue(), 1);
   }
 
   @Test
@@ -236,6 +233,172 @@ public class TestConvergenceStatusCalculator {
     report = run(inputs().wagedResources(Collections.singleton(DB), fresh));
     Assert.assertEquals(report.getPrimaryReason(), Reason.TARGET_ASSIGNMENT_MISSING);
     Assert.assertEquals(report.getOptimizerStatus(), ConvergenceStatus.OptimizerStatus.UNKNOWN);
+  }
+
+  @Test
+  public void testErrorReplicaStaysBlockedWithoutATrustedTarget() {
+    partition("db_0", new String[] {"i1", "ERROR"}, new String[] {"i1", "ERROR"});
+    partition("db_1", new String[] {"i1", "MASTER"}, new String[] {"i1", "MASTER"});
+    ConvergenceStatus report = run(inputs().wagedResources(Collections.singleton(DB),
+        new WagedRebalanceStatus(false, false, false, null, false)));
+    Assert.assertEquals(report.getStatusCounts().toString(), "{BLOCKED=1, UNKNOWN=1}");
+    Assert.assertEquals(report.getReasonCounts().get(Reason.ERROR_STATE).intValue(), 1);
+  }
+
+  private ConvergenceStatusCalculator.Inputs expecting(int replicas, String... swap) {
+    return inputs().expectedReplicas(Collections.singletonMap(DB, replicas),
+        Collections.emptyMap(), new HashSet<>(Arrays.asList(swap)));
+  }
+
+  @Test
+  public void testMatchingATargetThatIsShortOfReplicasIsNotConverged() {
+    // i3 is dead, so the rebalancer leaves it out of the target and current matches it.
+    partition("db_0", new String[] {"i1", "MASTER", "i2", "SLAVE"},
+        new String[] {"i1", "MASTER", "i2", "SLAVE"});
+    _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i2", "i3"));
+    // Every listed node is dead: target and current are both empty.
+    partition("db_1", new String[] {}, new String[] {});
+    _target.setPreferenceList(DB, "db_1", Collections.emptyList());
+    ConvergenceStatus report = run(expecting(3));
+    Assert.assertEquals(report.getStatus(), Status.BLOCKED);
+    Assert.assertEquals(report.getReasonCounts().get(Reason.TARGET_INSTANCE_NOT_LIVE).intValue(),
+        1);
+    Assert.assertEquals(report.getReasonCounts().get(Reason.UNDER_REPLICATED).intValue(), 1);
+    Assert.assertEquals(run(expecting(2)).getStatusCounts().get(Status.CONVERGED).intValue(), 1);
+  }
+
+  @Test
+  public void testDisabledAndDelayedReplicasAreNotMissing() {
+    partition("db_0", new String[] {"i1", "MASTER", "i2", "SLAVE"},
+        new String[] {"i1", "MASTER", "i2", "SLAVE"});
+    _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i2", "i3"));
+    // i3 has db_0 disabled by an operator, so two replicas is all that is asked for.
+    Map<String, Set<String>> byPartition =
+        Collections.singletonMap("db_0", Collections.singleton("i3"));
+    Assert.assertEquals(run(expecting(3).placement(Collections.emptySet(), Collections.emptyMap(),
+        Collections.singletonMap(DB, byPartition))).getStatus(), Status.CONVERGED);
+    // A node of this resource is inside its delay window and min active is 2: the rebalancer
+    // keeps two replicas and waits, so the third is held, not missing.
+    ConvergenceStatus waiting = run(expecting(3).placement(Collections.emptySet(),
+        Collections.singletonMap(DB, 2), Collections.emptyMap()));
+    Assert.assertEquals(waiting.getStatus(), Status.IN_PROGRESS);
+    Assert.assertEquals(waiting.getPrimaryReason(), Reason.WAITING_FOR_DELAY);
+    // Below min active the rebalancer does not wait, so the replica it could not place is missing.
+    ConvergenceStatus missing = run(expecting(3).placement(Collections.emptySet(),
+        Collections.singletonMap(DB, 3), Collections.emptyMap()));
+    Assert.assertEquals(missing.getStatus(), Status.BLOCKED);
+    Assert.assertEquals(missing.getPrimaryReason(), Reason.TARGET_INSTANCE_NOT_LIVE);
+    // SEMI_AUTO places as many replicas as the list names.
+    _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i2"));
+    Assert.assertEquals(run(expecting(3).placement(Collections.singleton(DB),
+        Collections.emptyMap(), Collections.emptyMap())).getStatus(), Status.CONVERGED);
+  }
+
+  @Test
+  public void testOnlyANodeTheResourceCanUseHoldsItForTheDelay() {
+    long now = System.currentTimeMillis();
+    Map<String, InstanceConfig> configs = new HashMap<>();
+    for (String name : Arrays.asList("A", "B", "C", "D")) {
+      configs.put(name, new InstanceConfig(name));
+    }
+    BaseControllerDataProvider cache = Mockito.mock(BaseControllerDataProvider.class);
+    Mockito.when(cache.getClusterConfig()).thenReturn(new ClusterConfig("c"));
+    Mockito.when(cache.getInstanceConfigMap()).thenReturn(configs);
+    Map<String, LiveInstance> live = new HashMap<>();
+    live.put("A", new LiveInstance("A"));
+    live.put("B", new LiveInstance("B"));
+    Mockito.when(cache.getLiveInstances()).thenReturn(live);
+    // C left for good a minute ago; D, which only OTHER_DB can use, went down a second ago.
+    Map<String, Long> offline = new HashMap<>();
+    offline.put("C", now - 60_000L);
+    offline.put("D", now - 1_000L);
+    Mockito.when(cache.getInstanceOfflineTimeMap()).thenReturn(offline);
+    Mockito.when(cache.getAssignableInstancesWithTag("db"))
+        .thenReturn(new HashSet<>(Arrays.asList("A", "B", "C")));
+    Mockito.when(cache.getAssignableInstancesWithTag("other"))
+        .thenReturn(new HashSet<>(Arrays.asList("A", "D")));
+    Mockito.when(cache.getStateModelDef("MasterSlave"))
+        .thenReturn(BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition());
+    Map<String, Resource> resources = new HashMap<>();
+    for (String[] spec : new String[][] {{DB, "db"}, {"OTHER_DB", "other"}}) {
+      IdealState idealState = new IdealState(spec[0]);
+      idealState.setRebalanceMode(IdealState.RebalanceMode.FULL_AUTO);
+      idealState.setRebalancerClassName(DelayedAutoRebalancer.class.getName());
+      idealState.setStateModelDefRef("MasterSlave");
+      idealState.setReplicas("3");
+      idealState.setInstanceGroupTag(spec[1]);
+      idealState.setDelayRebalanceEnabled(true);
+      idealState.setRebalanceDelay(12_000L);
+      Mockito.when(cache.getIdealState(spec[0])).thenReturn(idealState);
+      Resource resource = new Resource(spec[0]);
+      resource.setStateModelDefRef("MasterSlave");
+      resources.put(spec[0], resource);
+    }
+    ClusterEvent event = new ClusterEvent("c", ClusterEventType.Unknown);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resources);
+
+    ConvergenceStatusCalculator.Inputs in =
+        ConvergenceStatusCalculator.Inputs.from(event, cache, "c");
+    Assert.assertEquals(in._waitingForDelay, Collections.singletonMap("OTHER_DB", 3));
+    Assert.assertEquals(in._expectedReplicas.get(DB).intValue(), 3);
+  }
+
+  @Test
+  public void testReplicaLeftOutsideThePreferenceListIsNotConverged() {
+    // WAGED moved db_0 to i3, which had no capacity, so i2 still holds it.
+    partition("db_0", new String[] {"i1", "MASTER", "i2", "SLAVE"},
+        new String[] {"i1", "MASTER", "i2", "SLAVE"});
+    _target.setPreferenceList(DB, "db_0", Arrays.asList("i1", "i3"));
+    ConvergenceStatus report = run(expecting(2));
+    Assert.assertEquals(report.getStatus(), Status.BLOCKED);
+    Assert.assertEquals(report.getPrimaryReason(), Reason.OUTSIDE_PREFERENCE_LIST);
+    // Not while i2 is being swapped out.
+    Assert.assertEquals(run(expecting(2, "i2", "i3")).getStatus(), Status.CONVERGED);
+  }
+
+  @Test
+  public void testCustomizedReplicaOnADeadNodeIsNotConverged() {
+    partition("db_0", new String[] {"i1", "MASTER"}, new String[] {"i1", "MASTER"});
+    IdealState idealState = new IdealState(DB);
+    idealState.setRebalanceMode(IdealState.RebalanceMode.CUSTOMIZED);
+    Map<String, String> wanted = new HashMap<>();
+    wanted.put("i1", "MASTER");
+    wanted.put("i3", "SLAVE");
+    idealState.setInstanceStateMap("db_0", wanted);
+    ConvergenceStatus report = run(inputs().expectedReplicas(Collections.emptyMap(),
+        Collections.singletonMap(DB, idealState), Collections.emptySet()));
+    Assert.assertEquals(report.getPrimaryReason(), Reason.TARGET_INSTANCE_NOT_LIVE);
+  }
+
+  @Test
+  public void testMessageSentThisRunMeansNotConverged() {
+    partition("db_0", new String[] {"i1", "OFFLINE"}, new String[] {"i1", "DROPPED"});
+    MessageOutput all = new MessageOutput();
+    all.addMessage(DB, _resource.getPartition("db_0"), message());
+    Assert.assertEquals(run(inputs().messages(all, new MessageOutput(), new MessageOutput()))
+        .getStatus(), Status.IN_PROGRESS);
+  }
+
+  @Test
+  public void testExpectedReplicasFollowTheStateModel() {
+    IdealState idealState = new IdealState(DB);
+    idealState.setReplicas("3");
+    StateModelDefinition masterSlave =
+        BuiltInStateModelDefinitions.MasterSlave.getStateModelDefinition();
+    Assert.assertEquals(
+        ConvergenceStatusCalculator.Inputs.expectedReplicas(idealState, masterSlave, 10, 10), 3);
+    // Capped by the instances it may be placed on, and by the fault zones.
+    Assert.assertEquals(
+        ConvergenceStatusCalculator.Inputs.expectedReplicas(idealState, masterSlave, 2, 10), 2);
+    Assert.assertEquals(
+        ConvergenceStatusCalculator.Inputs.expectedReplicas(idealState, masterSlave, 10, 2), 2);
+    // An unbounded state such as BOOTSTRAP takes nothing away.
+    Assert.assertEquals(ConvergenceStatusCalculator.Inputs.expectedReplicas(idealState,
+        BuiltInStateModelDefinitions.OnlineOfflineWithBootstrap.getStateModelDefinition(), 10, 10),
+        3);
+    idealState.setReplicas("ANY_LIVEINSTANCE");
+    Assert.assertEquals(
+        ConvergenceStatusCalculator.Inputs.expectedReplicas(idealState, masterSlave, 10, 10), -1);
   }
 
   @Test
