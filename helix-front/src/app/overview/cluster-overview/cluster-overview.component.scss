@@ -1,6 +1,9 @@
 @use '../../shared/diagnostics';
 
 .diagnostics {
+  .convergence {
+    margin-bottom: 14px;
+  }
   .verdict {
     font-size: 15px;
     font-weight: 500;
