@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { forkJoin, Observable, of, Subscription } from 'rxjs';
 import { catchError } from 'rxjs/operators';
@@ -11,11 +11,24 @@ import { InstanceService } from '../../instance/shared/instance.service';
 import { ResourceSummary } from '../../resource/shared/resource.model';
 import { ResourceService } from '../../resource/shared/resource.service';
 import {
+  ConvergenceReport,
+  convergenceConcern,
+} from '../../shared/convergence/convergence.model';
+import { ConvergencePanelComponent } from '../../shared/convergence/convergence-panel.component';
+import {
   DiagnosticIssue,
   diagnosticIssues,
 } from '../../diagnostics/shared/diagnostic-rules';
 
 type Source = 'snapshot' | 'instances' | 'resources';
+
+// instance operations as words, e.g. "2 evacuating"
+const OPERATION_WORDS: Record<string, string> = {
+  DISABLE: 'disabled',
+  EVACUATE: 'evacuating',
+  SWAP_IN: 'swapping in',
+  UNKNOWN: 'unknown',
+};
 
 const SOURCE_NAMES: Record<Source, string> = {
   snapshot: 'the capacity snapshot',
@@ -50,8 +63,14 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
   isLoading = true;
   updated: number | null = null;
   listsReadAt: number | null = null;
+  convergence: ConvergenceReport | null = null;
+  convergenceReadFailed = false;
+  private failed: string[] = [];
 
   private sub: Subscription;
+  // one refresh for the whole tab, so the panel and the cards are read together
+  @ViewChild(ConvergencePanelComponent)
+  private panel?: ConvergencePanelComponent;
 
   constructor(
     private route: ActivatedRoute,
@@ -73,6 +92,7 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
 
   load() {
     this.isLoading = true;
+    this.panel?.load();
     this.sub?.unsubscribe();
     const failed: string[] = [];
     // a failed read becomes null so the other two still render
@@ -102,10 +122,29 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
         ? Date.parse(snapshot.generatedAt) || Date.now()
         : null;
       this.listsReadAt = Date.now();
+      this.failed = failed;
       this.setVerdict(failed);
       this.cards = this.buildCards();
       this.isLoading = false;
     });
+  }
+
+  // the convergence panel reads on its own schedule; fold each read into the verdict
+  onConvergence(report: ConvergenceReport | null) {
+    this.convergence = report;
+    this.convergenceReadFailed = false;
+    if (this.issues) this.setVerdict(this.failed);
+  }
+
+  // keep the last report, so a blocked cluster stays blocked while a read fails
+  onConvergenceReadFailed() {
+    this.convergenceReadFailed = true;
+    if (this.issues) this.setVerdict(this.failed);
+  }
+
+  // a count such as 7 or 3 / 4, as opposed to a word such as Normal
+  isWord(value: string | number): boolean {
+    return !/^[\d\s/]+$/.test(String(value));
   }
 
   link(issue: DiagnosticIssue): string[] {
@@ -116,23 +155,38 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
     const count = (severity: string) =>
       this.issues.filter((issue) => issue.severity === severity).length;
     const [critical, warnings] = [count('critical'), count('warning')];
+    const convergence =
+      convergenceConcern(this.convergence) ??
+      (this.convergenceReadFailed
+        ? { tone: 'warning', text: 'convergence status could not be read' }
+        : null);
     const found =
       [
-        critical ? `${critical} critical` : '',
+        critical
+          ? `${critical} critical issue${critical === 1 ? '' : 's'}`
+          : '',
         warnings ? `${warnings} warning${warnings === 1 ? '' : 's'}` : '',
+        convergence?.text ?? '',
       ]
         .filter(Boolean)
         .join(', ') || 'nothing to act on';
-    this.tone = critical
-      ? 'error'
-      : warnings || failed.length
-        ? 'warning'
-        : 'ok';
+    // with convergence off we cannot tell whether replicas match the target, so do not say healthy
+    const unmonitored = this.convergence?.reportState === 'MONITORING_DISABLED';
+    this.tone =
+      critical || convergence?.tone === 'error'
+        ? 'error'
+        : warnings || failed.length || convergence
+          ? 'warning'
+          : unmonitored
+            ? ''
+            : 'ok';
     this.verdict = failed.length
       ? `Incomplete: could not read ${failed.join(', ')}, so this is not the full picture. Among what was read: ${found}.`
-      : critical || warnings
-        ? `Needs attention: ${found}.`
-        : 'Healthy: Helix reports nothing to act on.';
+      : critical || warnings || convergence
+        ? `Needs attention: ${found}`
+        : unmonitored
+          ? 'Convergence is not monitored, so this does not show whether replicas match the target.'
+          : 'Healthy: nothing to act on';
   }
 
   private buildCards(): OverviewCard[] {
@@ -143,15 +197,15 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
         return {
           value: `${list.length - down} / ${list.length}`,
           detail: down
-            ? `${down} with no live session.`
-            : 'All have a live session.',
+            ? `${down} without a live session`
+            : 'All have a live session',
           tone: down ? 'warn' : undefined,
         };
       }),
       card(
         instances,
         'instances',
-        'not enabled or under an operation',
+        'disabled or in an operation',
         '../instances',
         (list) => {
           const ops = _.countBy(
@@ -163,8 +217,11 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
             value: total,
             detail:
               Object.entries(ops)
-                .map(([op, n]) => `${n} ${op}`)
-                .join(', ') || 'All ENABLE.',
+                .map(
+                  ([op, n]) =>
+                    `${n} ${OPERATION_WORDS[op] || op.toLowerCase().replace(/_/g, ' ')}`,
+                )
+                .join(', ') || 'All enabled',
             tone: total ? 'warn' : undefined,
           };
         },
@@ -176,8 +233,16 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
           (r) => r.enabled && !r.hasExternalView,
         ).length;
         return {
+          label: list.length === 1 ? 'resource' : 'resources',
           value: list.length,
-          detail: `${waged} WAGED, ${list.length - waged} not WAGED. ${disabled} disabled, ${noView} enabled with no external view.`,
+          // the split always shows; the two problems only when there are any
+          detail: [
+            `${waged} WAGED, ${list.length - waged} non-WAGED`,
+            disabled ? `${disabled} disabled` : '',
+            noView ? `${noView} missing an external view` : '',
+          ]
+            .filter(Boolean)
+            .join(', '),
           tone: noView ? 'bad' : undefined,
         };
       }),
@@ -186,33 +251,40 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
         return {
           value: s.summary.totalErrorReplicas,
           detail: hosts
-            ? `On ${hosts} instance${hosts === 1 ? '' : 's'}.`
-            : 'None in the external view.',
+            ? `On ${hosts} instance${hosts === 1 ? '' : 's'}`
+            : 'None in the external view',
           tone: s.summary.totalErrorReplicas ? 'bad' : undefined,
         };
       }),
       card(snapshot, 'snapshot', 'over WAGED capacity', '../capacity', (s) => ({
         value: s.summary.instancesOverCapacity,
-        detail: `${s.summary.instancesWithUnknownCapacity} with unknown capacity. ${hottest(s)}`,
+        detail: [
+          hottest(s),
+          s.summary.instancesWithUnknownCapacity
+            ? `${s.summary.instancesWithUnknownCapacity} with unknown capacity`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(', '),
         tone: s.summary.instancesOverCapacity ? 'warn' : undefined,
       })),
       card(snapshot, 'snapshot', 'controller leader', '../controller', (s) => ({
-        value: s.controllerName || 'no leader',
+        value: s.controllerName || 'No leader',
         detail: s.controllerName
-          ? 'Holds leadership.'
-          : 'Nothing is rebalanced or recovered.',
+          ? 'Holds leadership'
+          : 'Nothing is rebalanced or recovered',
         tone: s.controllerName ? undefined : 'bad',
       })),
       card(snapshot, 'snapshot', 'cluster mode', '../controller', (s) => ({
         value:
-          [s.paused && 'paused', s.maintenance && 'maintenance']
+          [s.paused && 'Paused', s.maintenance && 'Maintenance']
             .filter(Boolean)
-            .join(', ') || 'normal',
+            .join(', ') || 'Normal',
         detail: s.maintenance
-          ? `Reason: ${s.maintenanceReason || 'none recorded'}.`
+          ? `Reason: ${s.maintenanceReason || 'none recorded'}`
           : s.paused
-            ? 'Assignments are not changed.'
-            : 'Not paused, not in maintenance.',
+            ? 'Assignments are not changed'
+            : 'Not paused or in maintenance',
         tone: s.paused || s.maintenance ? 'warn' : undefined,
       })),
     ];
@@ -225,7 +297,10 @@ function card<T>(
   source: Source,
   label: string,
   link: string,
-  fill: (data: T) => Pick<OverviewCard, 'value' | 'detail' | 'tone'>,
+  fill: (
+    data: T,
+  ) => Pick<OverviewCard, 'value' | 'detail' | 'tone'> &
+    Partial<Pick<OverviewCard, 'label'>>,
 ): OverviewCard {
   return {
     label,
@@ -233,8 +308,8 @@ function card<T>(
     ...(data
       ? fill(data)
       : {
-          value: 'unknown',
-          detail: `Could not read ${SOURCE_NAMES[source]}.`,
+          value: 'Unknown',
+          detail: `Could not read ${SOURCE_NAMES[source]}`,
         }),
   };
 }
@@ -255,6 +330,6 @@ function hottest(snapshot: CapacitySnapshot): string {
     'ratio',
   );
   return hot
-    ? `Hottest: ${hot.name} at ${Math.round(hot.ratio * 100)}% of ${hot.key}.`
-    : 'No instance has a known WAGED usage.';
+    ? `Hottest: ${hot.name} at ${Math.round(hot.ratio * 100)}% of ${hot.key}`
+    : 'No instances report WAGED usage';
 }

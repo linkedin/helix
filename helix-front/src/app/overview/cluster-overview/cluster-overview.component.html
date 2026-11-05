@@ -6,6 +6,13 @@
     (refresh)="load()"
   ></hi-list-status>
 
+  <hi-convergence-panel
+    class="convergence"
+    [cluster]="clusterName"
+    (reportChange)="onConvergence($event)"
+    (readFailed)="onConvergenceReadFailed()"
+  ></hi-convergence-panel>
+
   <ng-container *ngIf="issues">
     <p class="notice verdict" [ngClass]="tone" data-testid="verdict">
       {{ verdict }}
@@ -19,9 +26,7 @@
         [routerLink]="card.link"
         data-testid="card"
       >
-        <strong [class.long]="('' + card.value).length > 10">{{
-          card.value
-        }}</strong>
+        <strong [class.word]="isWord(card.value)">{{ card.value }}</strong>
         {{ card.label }}
         <div class="muted">{{ card.detail }}</div>
       </a>
@@ -69,8 +74,8 @@
       <ng-container *ngIf="snapshot">
         ERROR replicas, capacity, controller and cluster mode are from the
         sample taken at
-        {{ updated | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC, which can come
-        from the server cache.
+        {{ updated | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC, which may be
+        served from cache.
       </ng-container>
       <ng-container *ngIf="instances || resources">
         Instances and resources were read at

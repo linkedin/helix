@@ -12,9 +12,9 @@
 
   <p class="footnote" *ngIf="listsReadAt" data-testid="read-times">
     Capacity, live state and ERROR counts are from the sample taken at
-    {{ utc(updated) }}, which can come from the server cache. Instances and
-    resources were read at {{ utc(listsReadAt) }}. If something changed between
-    the two, an issue can describe a different moment than its neighbours.
+    {{ utc(updated) }}, which may be served from cache. Instances and resources
+    were read at {{ utc(listsReadAt) }}. If something changed between the two,
+    an issue can describe a different moment than its neighbours.
   </p>
 
   <ng-container *ngIf="issues?.length">
