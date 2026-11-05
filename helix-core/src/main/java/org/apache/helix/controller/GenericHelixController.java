@@ -80,6 +80,7 @@ import org.apache.helix.controller.stages.CompatibilityCheckStage;
 import org.apache.helix.controller.stages.CurrentStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedViewAggregationStage;
+import org.apache.helix.controller.stages.ConvergenceStatusPersistStage;
 import org.apache.helix.controller.stages.ExternalViewComputeStage;
 import org.apache.helix.controller.stages.IntermediateStateCalcStage;
 import org.apache.helix.controller.stages.MaintenanceRecoveryStage;
@@ -564,6 +565,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       rebalancePipeline.addStage(new PersistAssignmentStage());
       rebalancePipeline.addStage(new TargetExteralViewCalcStage());
       rebalancePipeline.addStage(new ParticipantDeregistrationStage());
+      rebalancePipeline.addStage(new ConvergenceStatusPersistStage());
 
       // external view generation
       Pipeline externalViewPipeline = new Pipeline(pipelineName);
