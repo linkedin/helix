@@ -26,17 +26,21 @@
 
 .footer {
   background-color: var(--hi-surface, #f5f5f5);
-  height: 50px;
+  height: 32px;
 
-  span {
-    font-weight: normal;
-    font-size: 14px;
+  a {
+    font-size: 12px;
     color: var(--hi-text-secondary, #666);
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
   }
 }
 
 .main-container {
-  height: calc(100vh - 64px - 50px);
+  height: calc(100vh - 64px - 32px);
   overflow-y: scroll;
 
   &.no-header {

@@ -30,9 +30,41 @@
         <mat-icon>add</mat-icon>
       </button>
     </div>
-    <h3 mat-subheader>Clusters in {{ service }} ({{ clusters.length }})</h3>
+    <div class="cluster-filter" *ngIf="clusters.length > 0">
+      <div class="cluster-filter-box">
+        <mat-icon class="cluster-filter-icon">search</mat-icon>
+        <input
+          #filterInput
+          type="search"
+          placeholder="Filter clusters"
+          aria-label="Filter clusters"
+          [(ngModel)]="filter"
+          (keydown.escape)="clearFilter($event)"
+          (keydown.enter)="openFirstMatch()"
+        />
+        <kbd *ngIf="!filter" aria-hidden="true">/</kbd>
+        <button
+          type="button"
+          class="match-case"
+          title="Match case"
+          aria-label="Match case"
+          [attr.aria-pressed]="matchCase"
+          [class.on]="matchCase"
+          (click)="matchCase = !matchCase; filterInput.focus()"
+        >
+          Aa
+        </button>
+      </div>
+    </div>
+    <h3 mat-subheader>
+      Clusters in {{ service }} ({{
+        filter
+          ? filteredClusters.length + ' of ' + clusters.length
+          : clusters.length
+      }})
+    </h3>
     <a
-      *ngFor="let cluster of clusters"
+      *ngFor="let cluster of filteredClusters"
       mat-list-item
       [routerLink]="[cluster.name]"
       routerLinkActive="cluster-list-item-selected"
@@ -40,6 +72,12 @@
       <mat-icon mat-list-icon>blur_circular</mat-icon>
       <h4 mat-line>{{ cluster.name }}</h4>
     </a>
+    <div
+      *ngIf="clusters.length > 0 && filteredClusters.length == 0"
+      class="empty"
+    >
+      No clusters match "{{ filter }}".
+    </div>
     <div *ngIf="clusters.length == 0" class="empty">
       There's no cluster here.
       <a mat-button *ngIf="can" (click)="createCluster()">Create one?</a>
