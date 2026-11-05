@@ -43,6 +43,17 @@
           (keydown.enter)="openFirstMatch()"
         />
         <kbd *ngIf="!filter" aria-hidden="true">/</kbd>
+        <button
+          type="button"
+          class="match-case"
+          title="Match case"
+          aria-label="Match case"
+          [attr.aria-pressed]="matchCase"
+          [class.on]="matchCase"
+          (click)="matchCase = !matchCase; filterInput.focus()"
+        >
+          Aa
+        </button>
       </div>
     </div>
     <h3 mat-subheader>

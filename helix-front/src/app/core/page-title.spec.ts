@@ -11,12 +11,24 @@ describe('pageTitle', () => {
     );
     expect(
       pageTitle('/helix.default/Demo/instances/localhost_22004/resources'),
-    ).toBe('localhost_22004 · Demo · Helix');
-    expect(pageTitle('/helix.default/Demo/resources/my%20db/partitions')).toBe(
+    ).toBe('localhost_22004 · Resources · Demo · Helix');
+    expect(pageTitle('/helix.default/Demo/resources/my%20db')).toBe(
       'my db · Demo · Helix',
     );
-    expect(pageTitle('/helix.default/Demo/controller/history')).toBe(
+    expect(pageTitle('/helix.default/Demo/controller')).toBe(
       'Demo · Controller · Helix',
+    );
+    expect(pageTitle('/helix.default/Demo/controller/history')).toBe(
+      'Demo · Controller · History · Helix',
+    );
+  });
+
+  it('names the child view so sibling tabs differ', () => {
+    expect(pageTitle('/helix.default/Demo/resources/db/idealState')).toBe(
+      'db · Ideal State · Demo · Helix',
+    );
+    expect(pageTitle('/helix.default/Demo/resources/db/externalView')).toBe(
+      'db · External View · Demo · Helix',
     );
   });
 

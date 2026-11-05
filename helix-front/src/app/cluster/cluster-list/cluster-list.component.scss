@@ -83,6 +83,29 @@
   }
 }
 
+.match-case {
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--hi-text-secondary, #666);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--hi-motion-fast, 120ms)
+    var(--hi-ease, ease-out);
+
+  &:hover {
+    background: var(--hi-hover, rgba(0, 0, 0, 0.06));
+  }
+
+  &.on {
+    border-color: var(--hi-focus, #1976d2);
+    color: var(--hi-focus, #1976d2);
+  }
+}
+
 .cluster-filter-icon {
   font-size: 20px;
   width: 20px;

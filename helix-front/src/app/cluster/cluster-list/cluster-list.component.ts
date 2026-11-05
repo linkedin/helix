@@ -27,13 +27,15 @@ export class ClusterListComponent implements OnInit {
   can = false;
   service = '';
   filter = '';
+  matchCase = false;
 
   @ViewChild('filterInput') filterInput?: ElementRef<HTMLInputElement>;
 
   get filteredClusters(): Cluster[] {
-    const query = this.filter.trim().toLowerCase();
+    const fold = (s: string) => (this.matchCase ? s : s.toLowerCase());
+    const query = fold(this.filter.trim());
     return query
-      ? this.clusters.filter((c) => c.name.toLowerCase().includes(query))
+      ? this.clusters.filter((c) => fold(c.name).includes(query))
       : this.clusters;
   }
 

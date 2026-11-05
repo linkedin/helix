@@ -67,6 +67,14 @@ describe('ClusterListComponent filter', () => {
     expect(navigate).toHaveBeenCalledWith(['helix.default', 'ATOMIC_E2E_G']);
   });
 
+  it('matches case exactly when Match case is on', () => {
+    component.matchCase = true;
+    component.filter = 'atomic';
+    expect(component.filteredClusters.map((c) => c.name)).toEqual([
+      'atomic_e2e_t',
+    ]);
+  });
+
   it('shows every cluster and opens nothing without a filter', () => {
     expect(component.filteredClusters.length).toBe(3);
     component.openFirstMatch();
