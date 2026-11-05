@@ -438,12 +438,17 @@ public final class ConvergenceStatusCalculator {
     /** Compares assignments, ignoring DROPPED and initial state entries, without allocating. */
     private int compare(Map<String, String> current, Map<String, String> target) {
       int currentEffective = 0;
+      boolean errored = false;
       for (Map.Entry<String, String> entry : current.entrySet()) {
         if (isBlank(entry.getKey()) || isBlank(entry.getValue())) {
           return INVALID;
         }
         if (!ignored(entry.getValue())) {
           currentEffective++;
+        }
+        // The rebalancer keeps an ERROR replica in ERROR, so it would otherwise match the target.
+        if (HelixDefinedState.ERROR.name().equals(entry.getValue())) {
+          errored = true;
         }
       }
       int targetEffective = 0;
@@ -457,7 +462,7 @@ public final class ConvergenceStatusCalculator {
           same &= entry.getValue().equals(current.get(entry.getKey()));
         }
       }
-      return same && currentEffective == targetEffective ? SAME : DIFFERENT;
+      return same && !errored && currentEffective == targetEffective ? SAME : DIFFERENT;
     }
 
     private boolean ignored(String state) {
