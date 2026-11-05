@@ -25,6 +25,7 @@ import { DataTableComponent } from './data-table/data-table.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
 import { DisabledLabelComponent } from './disabled-label/disabled-label.component';
 import { ListStatusComponent } from './list-status/list-status.component';
+import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
 
 @NgModule({
@@ -53,6 +54,7 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     DisabledLabelComponent,
     ListStatusComponent,
     ThemeToggleComponent,
+    CommandPaletteComponent,
   ],
   exports: [
     RouterModule,
@@ -69,6 +71,7 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     DisabledLabelComponent,
     ListStatusComponent,
     ThemeToggleComponent,
+    CommandPaletteComponent,
   ],
   providers: [HelperService],
 })
