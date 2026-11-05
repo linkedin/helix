@@ -1,0 +1,75 @@
+<div class="convergence" [ngClass]="tone" data-testid="convergence">
+  <div class="head">
+    <h2>{{ resource ? 'Resource convergence' : 'Convergence' }}</h2>
+    <span *ngIf="statusLabel" class="status" data-testid="convergence-status">{{
+      statusLabel
+    }}</span>
+    <span *ngIf="since" class="muted" data-testid="convergence-since"
+      >for {{ since }}</span
+    >
+    <span class="spacer"></span>
+    <span *ngIf="live" class="live muted" title="Read again every 10 seconds"
+      ><i></i>Live</span
+    >
+    <button
+      type="button"
+      class="refresh"
+      [disabled]="loading"
+      (click)="load()"
+      aria-label="Read convergence again"
+    >
+      <mat-icon [class.spin]="loading">refresh</mat-icon>
+    </button>
+  </div>
+
+  <p
+    *ngIf="headline; else waiting"
+    class="headline"
+    role="status"
+    data-testid="convergence-headline"
+  >
+    {{ headline }}
+  </p>
+  <ng-template #waiting>
+    <p class="headline muted">Reading convergence status.</p>
+  </ng-template>
+
+  <ng-container *ngIf="segments.length">
+    <div class="bar" role="img" [attr.aria-label]="barLabel">
+      <span
+        *ngFor="let s of segments"
+        [ngClass]="s.status"
+        [style.flex-grow]="s.count"
+        [title]="s.label + ': ' + s.count"
+      ></span>
+    </div>
+    <div class="legend" data-testid="convergence-legend">
+      <span *ngFor="let s of segments"
+        ><i [ngClass]="s.status"></i>{{ s.label }}
+        <strong>{{ s.count | number }}</strong></span
+      >
+    </div>
+  </ng-container>
+
+  <ul *ngIf="reasons.length" class="reasons" data-testid="convergence-reason">
+    <li *ngFor="let r of reasons" [class.primary]="r.primary">
+      <strong>{{ r.count | number }}</strong>
+      <span class="name"
+        >{{ r.label }}
+        <span *ngIf="r.primary && reasons.length > 1" class="tag"
+          >Most urgent</span
+        ></span
+      >
+      <span class="muted">{{ r.text }}</span>
+    </li>
+  </ul>
+
+  <div *ngIf="report?.reportState === 'FRESH'" class="meta muted">
+    <span *ngFor="let f of facts" [class.warn]="f.warn">{{ f.label }}</span>
+    <span>Published by {{ report.publishedBy }}</span>
+    <span *ngIf="report.generatedAt"
+      >Last changed
+      {{ report.generatedAt | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC</span
+    >
+  </div>
+</div>
