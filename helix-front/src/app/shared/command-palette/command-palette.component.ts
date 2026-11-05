@@ -6,7 +6,7 @@ import {
   ViewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
-import { Subscription } from 'rxjs';
+import { Observable, Subscription } from 'rxjs';
 
 import {
   CLUSTER_PAGES,
@@ -19,6 +19,7 @@ import {
 import { PaletteService } from './palette.service';
 
 const RECENT_KEY = 'hi-palette-recent';
+const DEEP_QUERY_MIN = 2;
 const ICONS: Record<PaletteKind, string> = {
   page: 'tab',
   cluster: 'device_hub',
@@ -47,6 +48,8 @@ export class CommandPaletteComponent implements OnDestroy {
   loading = 0;
 
   private items: PaletteItem[] = [];
+  private groups: PaletteItem[][] = [];
+  private deepLoaded = false;
   private recent: PaletteItem[] = [];
   private subs: Subscription[] = [];
   private returnFocus: HTMLElement | null = null;
@@ -80,6 +83,7 @@ export class CommandPaletteComponent implements OnDestroy {
     this.isOpen = false;
     this.subs.forEach((s) => s.unsubscribe());
     this.subs = [];
+    this.loading = 0;
     this.returnFocus?.focus?.();
   }
 
@@ -107,6 +111,7 @@ export class CommandPaletteComponent implements OnDestroy {
   onQuery(query: string) {
     this.query = query;
     this.active = 0;
+    this.loadDeep();
     this.refresh();
   }
 
@@ -145,42 +150,54 @@ export class CommandPaletteComponent implements OnDestroy {
           route: [helix, cluster, p.toLowerCase()],
         }))
       : [];
-    const groups: PaletteItem[][] = [pages, [], [], []];
+    this.groups = [pages, [], [], []];
+    this.deepLoaded = !cluster;
     this.items = pages;
     this.refresh();
     if (!helix) return;
-
-    const add = (slot: number, names$, make: (n: string) => PaletteItem) => {
-      this.loading++;
-      this.subs.push(
-        names$.subscribe((names: string[]) => {
-          this.loading--;
-          groups[slot] = names.map(make);
-          this.items = [].concat(...groups);
-          this.refresh();
-        }),
-      );
-    };
-    add(1, this.service.clusters(helix), (n) => ({
+    this.add(1, this.service.clusters(helix), (n) => ({
       kind: 'cluster',
       label: n,
       hint: 'Cluster',
       route: [helix, n],
     }));
-    if (cluster) {
-      add(2, this.service.resources(helix, cluster), (n) => ({
-        kind: 'resource',
-        label: n,
-        hint: `Resource in ${cluster}`,
-        route: [helix, cluster, 'resources', n],
-      }));
-      add(3, this.service.instances(helix, cluster), (n) => ({
-        kind: 'instance',
-        label: n,
-        hint: `Instance in ${cluster}`,
-        route: [helix, cluster, 'instances', n],
-      }));
-    }
+  }
+
+  // Resource and instance lists can be thousands of names, and helix-rest
+  // reads every InstanceConfig to build /instances, so fetch them only once
+  // the user is clearly searching rather than picking a page.
+  private loadDeep() {
+    if (this.deepLoaded || this.query.trim().length < DEEP_QUERY_MIN) return;
+    this.deepLoaded = true;
+    const { helix, cluster } = contextFromUrl(this.router.url);
+    this.add(2, this.service.resources(helix, cluster), (n) => ({
+      kind: 'resource',
+      label: n,
+      hint: `Resource in ${cluster}`,
+      route: [helix, cluster, 'resources', n],
+    }));
+    this.add(3, this.service.instances(helix, cluster), (n) => ({
+      kind: 'instance',
+      label: n,
+      hint: `Instance in ${cluster}`,
+      route: [helix, cluster, 'instances', n],
+    }));
+  }
+
+  private add(
+    slot: number,
+    names$: Observable<string[]>,
+    make: (n: string) => PaletteItem,
+  ) {
+    this.loading++;
+    this.subs.push(
+      names$.subscribe((names) => {
+        this.loading--;
+        this.groups[slot] = names.map(make);
+        this.items = [].concat(...this.groups);
+        this.refresh();
+      }),
+    );
   }
 
   private refresh() {

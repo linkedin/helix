@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { of } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 
 import {
   contextFromUrl,
@@ -9,6 +9,7 @@ import {
   PaletteItem,
 } from './palette';
 import { CommandPaletteComponent } from './command-palette.component';
+import { PaletteService } from './palette.service';
 
 const item = (label: string): PaletteItem => ({
   kind: 'cluster',
@@ -66,12 +67,13 @@ describe('CommandPaletteComponent', () => {
     localStorage.clear();
     const router = { url: '/helix.default/Demo/overview', navigate: jest.fn() };
     const service = {
-      clusters: () => of(['Demo', 'Other']),
-      resources: () => of(['db']),
-      instances: () => of(['host_1']),
+      clusters: jest.fn(() => of(['Demo', 'Other'])),
+      resources: jest.fn(() => of(['db'])),
+      instances: jest.fn(() => of(['host_1'])),
     };
     return {
       router,
+      service,
       c: new CommandPaletteComponent(router as any, service as any),
     };
   }
@@ -89,16 +91,30 @@ describe('CommandPaletteComponent', () => {
     expect(c.isOpen).toBe(false);
   });
 
-  it('loads pages, clusters, resources and instances for the current cluster', () => {
-    const { c } = create();
+  it('loads pages and clusters on open, resources and instances only after 2 characters', () => {
+    const { c, service } = create();
     c.open();
-    const kinds = new Set(c.results.map((r) => r.item.kind));
-    expect([...kinds].sort()).toEqual([
-      'cluster',
-      'instance',
-      'page',
-      'resource',
-    ]);
+    expect(new Set(c.results.map((r) => r.item.kind))).toEqual(
+      new Set(['page', 'cluster']),
+    );
+    expect(service.instances).not.toHaveBeenCalled();
+    c.onQuery('h');
+    expect(service.instances).not.toHaveBeenCalled();
+    c.onQuery('ho');
+    c.onQuery('hos');
+    expect(service.instances).toHaveBeenCalledTimes(1);
+    expect(service.resources).toHaveBeenCalledTimes(1);
+    expect(c.results.map((r) => r.item.label)).toContain('host_1');
+  });
+
+  it('clears the loading state when closed mid-fetch', () => {
+    const { c, service } = create();
+    service.clusters = jest.fn(() => new Subject<string[]>());
+    c.open();
+    expect(c.loading).toBe(1);
+    c.close();
+    c.open();
+    expect(c.loading).toBe(1);
   });
 
   it('moves with the arrows, wraps, and opens the active result on Enter', () => {
@@ -130,5 +146,29 @@ describe('CommandPaletteComponent', () => {
     expect(c.results[0].item.label).toBe('db');
     expect(c.isRecent(c.results[0])).toBe(true);
     expect(c.results.filter((r) => r.item.label === 'db').length).toBe(1);
+  });
+});
+
+describe('PaletteService', () => {
+  it('caches names for 5 minutes and refetches after expiry or an error', () => {
+    let now = 1000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const get = jest.fn(() => of({ clusters: ['b', 'a'] }));
+    const svc = new PaletteService({ url: '/' } as any, { get } as any);
+    let names: string[] = [];
+    svc.clusters('h').subscribe((n) => (names = n));
+    svc.clusters('h').subscribe();
+    expect(names).toEqual(['a', 'b']);
+    expect(get).toHaveBeenCalledTimes(1);
+    now += 5 * 60 * 1000;
+    svc.clusters('h').subscribe();
+    expect(get).toHaveBeenCalledTimes(2);
+    get.mockImplementationOnce(() => throwError(() => 'boom') as any);
+    svc.clusters('x').subscribe((n) => (names = n));
+    expect(names).toEqual([]);
+    svc.clusters('x').subscribe();
+    expect(get).toHaveBeenCalledTimes(4);
+    jest.restoreAllMocks();
   });
 });

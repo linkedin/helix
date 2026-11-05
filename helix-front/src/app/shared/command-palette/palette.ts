@@ -69,25 +69,26 @@ export function rank(
   limit = 50,
 ): Ranked[] {
   if (!query.trim()) {
-    return items
-      .slice(0, limit)
-      .map((item) => ({
-        item,
-        score: 0,
-        segments: toSegments(item.label, []),
-      }));
+    return items.slice(0, limit).map((item) => ({
+      item,
+      score: 0,
+      segments: toSegments(item.label, []),
+    }));
   }
-  const out: Ranked[] = [];
+  const out: { item: PaletteItem; score: number; hits: number[] }[] = [];
   for (const item of items) {
     const m = fuzzyMatch(query, item.label);
-    if (m)
-      out.push({
-        item,
-        score: m.score,
-        segments: toSegments(item.label, m.hits),
-      });
+    if (m) out.push({ item, score: m.score, hits: m.hits });
   }
-  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+  // Build highlight segments only for the rows that are shown.
+  return out
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ item, score, hits }) => ({
+      item,
+      score,
+      segments: toSegments(item.label, hits),
+    }));
 }
 
 // "/helix.default/Demo/instances" -> { helix: "helix.default", cluster: "Demo" }
