@@ -108,7 +108,8 @@ public class TestConvergenceStatusCalculator {
     String[] none = {};
     partition("pending", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
     _current.setPendingMessage(DB, _resource.getPartition("pending"), "i1", message());
-    partition("error", new String[] {"i1", "ERROR"}, new String[] {"i1", "MASTER"});
+    // The controller keeps an ERROR replica in ERROR in its target.
+    partition("error", new String[] {"i1", "ERROR"}, new String[] {"i1", "ERROR"});
     partition("down", new String[] {"i1", "SLAVE"}, new String[] {"i1", "SLAVE", "i3", "MASTER"});
     partition("stuck", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
     partition("failed", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
