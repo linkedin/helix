@@ -1,0 +1,240 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+$ok: var(--hi-success, #2f8a52);
+$info: var(--hi-info, #2f7dbf);
+$error: var(--hi-error, #c4372d);
+$warning: var(--hi-warning, #b7791f);
+$neutral: var(--hi-text-secondary, #7b8a98);
+
+.convergence {
+  --tone: #{$neutral};
+  background: var(--hi-surface, #fff);
+  border: 1px solid var(--hi-divider, #dbe3e9);
+  border-left: 4px solid var(--tone);
+  border-radius: 7px;
+  padding: 14px 16px;
+  color: var(--hi-text, #243343);
+  font-size: 13px;
+  transition: border-color 300ms ease;
+
+  &.ok {
+    --tone: #{$ok};
+  }
+  &.info {
+    --tone: #{$info};
+  }
+  &.error {
+    --tone: #{$error};
+  }
+  &.warning {
+    --tone: #{$warning};
+  }
+}
+
+.muted {
+  color: var(--hi-text-secondary, #596979);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  h2 {
+    font-size: 15px;
+    font-weight: 500;
+    margin: 0;
+  }
+  .spacer {
+    flex: 1;
+  }
+}
+
+.status {
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--tone);
+  background: var(--hi-surface-muted, #f2f5f8);
+  box-shadow: inset 0 0 0 1px var(--tone);
+}
+
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--tone);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+}
+
+.refresh {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--hi-text-secondary, #596979);
+  cursor: pointer;
+  mat-icon {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+  }
+  &:hover:not(:disabled) {
+    background: var(--hi-hover, #eef3f7);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--hi-focus, #0075ac);
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.headline {
+  margin: 8px 0 12px;
+  line-height: 1.5;
+  font-size: 14px;
+}
+
+.bar {
+  display: flex;
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  gap: 2px;
+  background: var(--hi-track, #e9eef2);
+  span {
+    flex-basis: 0;
+    min-width: 3px;
+    transition: flex-grow 600ms cubic-bezier(0.2, 0, 0, 1);
+  }
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 8px 0 4px;
+  font-size: 12px;
+  i {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 6px;
+  }
+  strong {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.CONVERGED {
+  background: $ok;
+}
+.IN_PROGRESS {
+  background: $info;
+}
+.BLOCKED {
+  background: $error;
+}
+.UNKNOWN {
+  background: $warning;
+}
+.PAUSED {
+  background: $neutral;
+}
+.reasons {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--hi-divider, #e6ebef);
+  // One grid for every row, so the descriptions line up even when a row carries the tag.
+  display: grid;
+  grid-template-columns: 56px max-content 1fr;
+  column-gap: 12px;
+  li {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--hi-divider, #eef2f5);
+    align-items: baseline;
+  }
+  strong {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .name {
+    font-weight: 500;
+  }
+  .tag {
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    color: var(--tone);
+    box-shadow: inset 0 0 0 1px var(--tone);
+  }
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin-top: 10px;
+  font-size: 12px;
+  .warn {
+    color: $warning;
+    font-weight: 600;
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live i,
+  .spin {
+    animation: none;
+  }
+  .bar span {
+    transition: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .reasons {
+    grid-template-columns: 44px 1fr;
+    .muted {
+      grid-column: 2;
+    }
+  }
+}

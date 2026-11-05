@@ -26,6 +26,8 @@ import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.c
 import { DisabledLabelComponent } from './disabled-label/disabled-label.component';
 import { ListStatusComponent } from './list-status/list-status.component';
 import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
+import { ConvergencePanelComponent } from './convergence/convergence-panel.component';
+import { ConvergenceService } from './convergence/convergence.service';
 
 @NgModule({
   imports: [
@@ -53,6 +55,7 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     DisabledLabelComponent,
     ListStatusComponent,
     ThemeToggleComponent,
+    ConvergencePanelComponent,
   ],
   exports: [
     RouterModule,
@@ -69,7 +72,8 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     DisabledLabelComponent,
     ListStatusComponent,
     ThemeToggleComponent,
+    ConvergencePanelComponent,
   ],
-  providers: [HelperService],
+  providers: [HelperService, ConvergenceService],
 })
 export class SharedModule {}
