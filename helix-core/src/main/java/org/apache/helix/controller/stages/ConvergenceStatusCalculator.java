@@ -38,10 +38,8 @@ import org.apache.helix.model.Resource;
 import org.apache.helix.task.TaskConstants;
 
 /**
- * Decides, partition by partition, whether the current assignment has reached the target.
- *
- * Built to run off the controller pipeline thread. The cost is one pass over the partitions with no
- * allocation per partition, and memory is bounded by the counters, whatever the partition count.
+ * Decides, partition by partition, whether the current assignment has reached the target: one
+ * pass with no allocation per partition, off the pipeline thread, memory bounded by the counters.
  */
 public final class ConvergenceStatusCalculator {
   private ConvergenceStatusCalculator() {
@@ -60,7 +58,6 @@ public final class ConvergenceStatusCalculator {
       return _cluster;
     }
 
-    /** Resource name to report. Task resources are not included. */
     public Map<String, ConvergenceStatus> getResources() {
       return _resources;
     }
@@ -134,6 +131,7 @@ public final class ConvergenceStatusCalculator {
     ConvergenceStatus cluster = new ConvergenceStatus(in._clusterName);
     fill(cluster, clusterTally, in._controllerName, controllerSessionId, now);
     cluster.setResourceCount(reports.size());
+    cluster.setCoveredThrough(in._coveredThrough);
     cluster.setTargetFreshness(clusterFreshness);
     cluster.setOptimizerStatus(clusterOptimizer);
     if (in._pausedReason != null) {
@@ -191,6 +189,8 @@ public final class ConvergenceStatusCalculator {
         return 3;
       case MESSAGE_DISPATCH_FAILED:
       case NO_PROGRESS_PATH:
+      case UNDER_REPLICATED:
+      case OUTSIDE_PREFERENCE_LIST:
         return 4;
       case TARGET_INSTANCE_NOT_LIVE:
         return 5;

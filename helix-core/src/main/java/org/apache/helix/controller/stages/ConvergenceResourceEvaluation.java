@@ -22,6 +22,7 @@ package org.apache.helix.controller.stages;
 import static org.apache.helix.controller.stages.ConvergenceStatusCalculator.key;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -29,9 +30,11 @@ import java.util.Set;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.model.ConvergenceStatus.Reason;
 import org.apache.helix.model.ConvergenceStatus.Status;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
+import org.apache.helix.model.ResourceConfig;
 
 /** The walk over one resource. */
 final class ConvergenceResourceEvaluation {
@@ -86,9 +89,11 @@ final class ConvergenceResourceEvaluation {
   }
 
   void overrideAllUnknown(Reason reason) {
+    int errors = _tally.count(Status.BLOCKED, Reason.ERROR_STATE);
     int total = _tally.total();
     _tally.reset();
-    _tally.record(Status.UNKNOWN, reason, total);
+    _tally.record(Status.BLOCKED, Reason.ERROR_STATE, errors);
+    _tally.record(Status.UNKNOWN, reason, total - errors);
   }
 
   private void visit(Partition partition) {
@@ -111,10 +116,17 @@ final class ConvergenceResourceEvaluation {
     int comparison = compare(current, target);
     if (comparison == INVALID) {
       _tally.record(Status.UNKNOWN, Reason.INVALID_STATE);
-    } else if (comparison == SAME && !active) {
-      boolean held = holdsOfflineNode(partition);
-      _tally.record(held ? Status.IN_PROGRESS : Status.CONVERGED,
-          held ? Reason.WAITING_FOR_DELAY : Reason.NONE);
+    } else if (comparison == SAME && !active && !hasMessages(_in._allMessages, partition)) {
+      if (holdsOfflineNode(partition)) {
+        _tally.record(Status.IN_PROGRESS, Reason.WAITING_FOR_DELAY);
+      } else {
+        // The target is what the rebalancer could do, which already leaves out dead nodes and
+        // full ones, so matching it is not enough.
+        Reason gap = placementGap(partition, target);
+        _tally.record(gap == null ? Status.CONVERGED
+                : gap == Reason.WAITING_FOR_DELAY ? Status.IN_PROGRESS : Status.BLOCKED,
+            gap == null ? Reason.NONE : gap);
+      }
     } else {
       classifyUnconverged(partition, current, target, pending, cancellations, relays);
     }
@@ -123,6 +135,11 @@ final class ConvergenceResourceEvaluation {
   private void classifyUnconverged(Partition partition, Map<String, String> current,
       Map<String, String> target, Map<String, Message> pending,
       Map<String, Message> cancellations, Map<String, Message> relays) {
+    // An ERROR replica needs a reset whatever else is in flight, so it comes first.
+    if (current.containsValue(HelixDefinedState.ERROR.name())) {
+      _tally.record(Status.BLOCKED, Reason.ERROR_STATE);
+      return;
+    }
     Reason progress = null;
     if (!cancellations.isEmpty()) {
       progress = Reason.CANCELLATION_PENDING;
@@ -146,9 +163,7 @@ final class ConvergenceResourceEvaluation {
       return;
     }
 
-    if (current.containsValue(HelixDefinedState.ERROR.name())) {
-      _tally.record(Status.BLOCKED, Reason.ERROR_STATE);
-    } else if (hasNonLiveTarget(target) || holdsOfflineNode(partition)) {
+    if (hasNonLiveTarget(target) || holdsOfflineNode(partition)) {
       _tally.record(_delayed ? Status.IN_PROGRESS : Status.BLOCKED,
           _delayed ? Reason.WAITING_FOR_DELAY : Reason.TARGET_INSTANCE_NOT_LIVE);
     } else {
@@ -156,11 +171,116 @@ final class ConvergenceResourceEvaluation {
     }
   }
 
-  /** Best possible lists live nodes only; a node held for the delay window is in the list. */
+  /** Best possible skips an offline or disabled node the preference list keeps for the delay. */
   private boolean holdsOfflineNode(Partition partition) {
-    List<String> held = _delayed && _in._bestPossible != null
-        ? _in._bestPossible.getPreferenceList(_name, partition.getPartitionName()) : null;
-    return held != null && !_in._liveInstances.containsAll(held);
+    return _delayed && hasUnavailable(preferenceList(partition));
+  }
+
+  /** Null when there is none or it is the ANY_LIVEINSTANCE placeholder. */
+  private List<String> preferenceList(Partition partition) {
+    List<String> list = _in._bestPossible == null ? null
+        : _in._bestPossible.getPreferenceList(_name, partition.getPartitionName());
+    return list == null || list.contains(ANY_LIVEINSTANCE) ? null : list;
+  }
+
+  private boolean hasUnavailable(List<String> instances) {
+    if (instances != null) {
+      for (String instance : instances) {
+        if (!_in._liveInstances.contains(instance)
+            || _in._disabledInstances.contains(instance)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Why a partition that matches its target is still short of what was asked for, or null:
+   * fewer active replicas than asked for, a CUSTOMIZED replica on a node that is down, or a
+   * replica left outside the preference list. Replicas an operator disabled are not asked for.
+   */
+  private Reason placementGap(Partition partition, Map<String, String> target) {
+    String name = partition.getPartitionName();
+    Set<String> disabled = disabledFor(name);
+    int active = 0;
+    for (String state : target.values()) {
+      if (!ignored(state)) {
+        active++;
+      }
+    }
+    IdealState custom = _in._customized.get(_name);
+    if (custom != null) {
+      Map<String, String> wanted = custom.getInstanceStateMap(name);
+      int expected = 0;
+      if (wanted != null) {
+        for (Map.Entry<String, String> entry : wanted.entrySet()) {
+          if (!ignored(entry.getValue()) && !disabled.contains(entry.getKey())) {
+            expected++;
+          }
+        }
+      }
+      return active < expected ? Reason.TARGET_INSTANCE_NOT_LIVE : null;
+    }
+    Integer asked = _in._expectedReplicas.get(_name);
+    if (asked == null) {
+      return null;
+    }
+    List<String> preference = preferenceList(partition);
+    int expected = asked;
+    int excused = 0;
+    if (preference != null) {
+      if (_in._semiAuto.contains(_name)) {
+        expected = Math.min(expected, preference.size());
+      }
+      for (String instance : preference) {
+        if (disabled.contains(instance)) {
+          excused++;
+        }
+      }
+    }
+    if (active < expected - excused) {
+      // Below min active the rebalancer drops the held node and does not wait, so a replica
+      // it could not place is missing, not held.
+      Integer minActive = _in._waitingForDelay.get(_name);
+      if (minActive != null && active >= minActive) {
+        return Reason.WAITING_FOR_DELAY;
+      }
+      return hasNonLive(preference) ? Reason.TARGET_INSTANCE_NOT_LIVE : Reason.UNDER_REPLICATED;
+    }
+    // A replica kept off the list because the new target is disabled is the operator's doing.
+    if (preference != null && !preference.isEmpty() && excused == 0) {
+      for (Map.Entry<String, String> entry : target.entrySet()) {
+        if (!ignored(entry.getValue()) && !preference.contains(entry.getKey())
+            && !_in._swapInstances.contains(entry.getKey())) {
+          return Reason.OUTSIDE_PREFERENCE_LIST;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Instances disabled as a whole, or for this partition. */
+  private Set<String> disabledFor(String partition) {
+    Map<String, Set<String>> byPartition = _in._disabledPartitions.get(_name);
+    Set<String> partitionDisabled = byPartition == null ? null : byPartition.get(partition);
+    if (partitionDisabled == null) {
+      return _in._disabledInstances;
+    }
+    Set<String> all = new HashSet<>(_in._disabledInstances);
+    all.addAll(partitionDisabled);
+    return all;
+  }
+
+  private boolean hasNonLive(List<String> instances) {
+    if (instances != null) {
+      for (String instance : instances) {
+        if (!_in._liveInstances.contains(instance)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private boolean hasNonLiveTarget(Map<String, String> target) {
@@ -183,12 +303,17 @@ final class ConvergenceResourceEvaluation {
   /** Compares assignments, ignoring DROPPED and initial state entries, without allocating. */
   private int compare(Map<String, String> current, Map<String, String> target) {
     int currentEffective = 0;
+    boolean errored = false;
     for (Map.Entry<String, String> entry : current.entrySet()) {
       if (isBlank(entry.getKey()) || isBlank(entry.getValue())) {
         return INVALID;
       }
       if (!ignored(entry.getValue())) {
         currentEffective++;
+      }
+      // The rebalancer keeps an ERROR replica in ERROR, so it would otherwise match the target.
+      if (HelixDefinedState.ERROR.name().equals(entry.getValue())) {
+        errored = true;
       }
     }
     int targetEffective = 0;
@@ -202,7 +327,7 @@ final class ConvergenceResourceEvaluation {
         same &= entry.getValue().equals(current.get(entry.getKey()));
       }
     }
-    return same && currentEffective == targetEffective ? SAME : DIFFERENT;
+    return same && !errored && currentEffective == targetEffective ? SAME : DIFFERENT;
   }
 
   private boolean ignored(String state) {
@@ -213,6 +338,9 @@ final class ConvergenceResourceEvaluation {
   private static boolean isBlank(String value) {
     return value == null || value.isEmpty();
   }
+
+  private static final String ANY_LIVEINSTANCE =
+      ResourceConfig.ResourceConfigConstants.ANY_LIVEINSTANCE.name();
 
   private static <K, V> Map<K, V> orEmpty(Map<K, V> map) {
     return map == null ? Collections.emptyMap() : map;

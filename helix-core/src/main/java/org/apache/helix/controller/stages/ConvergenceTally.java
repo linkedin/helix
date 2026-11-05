@@ -128,4 +128,8 @@ final class ConvergenceTally {
     }
     return sum;
   }
+
+  int count(Status status, Reason reason) {
+    return _counts[status.ordinal()][reason.ordinal()];
+  }
 }
