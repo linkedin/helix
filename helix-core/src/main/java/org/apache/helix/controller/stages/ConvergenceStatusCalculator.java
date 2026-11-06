@@ -290,6 +290,7 @@ public final class ConvergenceStatusCalculator {
     report.setStatusCounts(tally.statusCounts());
     report.setReasonCounts(tally.reasonCounts());
     report.setGeneratedAt(now);
+    report.setEvaluatedAt(now);
     report.setControllerSessionId(sessionId);
     report.setControllerName(controllerName);
   }

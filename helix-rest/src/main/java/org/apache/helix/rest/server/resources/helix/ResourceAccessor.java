@@ -264,12 +264,15 @@ public class ResourceAccessor extends AbstractHelixResource {
       return notFound("Resource " + resourceName + " does not exist in cluster " + clusterId);
     }
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
-    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
-        dataAccessor.getProperty(keyBuilder.convergenceStatus()),
-        dataAccessor.getProperty(keyBuilder.controllerLeader()),
-        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
-        ConvergenceStatusResponseMapper.isManagementMode(
-            getHelixAdmin().getClusterManagementMode(clusterId))));
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(
+        ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
+            dataAccessor.getProperty(keyBuilder.convergenceStatus()),
+            dataAccessor.getProperty(keyBuilder.controllerLeader()),
+            clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
+            ConvergenceStatusResponseMapper.isManagementMode(
+                getHelixAdmin().getClusterManagementMode(clusterId)),
+            System.currentTimeMillis()),
+        getRealmAwareZkClient(), clusterConfig, clusterId, resourceName));
   }
 
   /**

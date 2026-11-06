@@ -110,6 +110,11 @@ $neutral: var(--hi-text-secondary, #7b8a98);
   font-size: 14px;
 }
 
+.fallback {
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
 .bar {
   display: flex;
   height: 10px;

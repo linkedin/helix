@@ -153,6 +153,29 @@ describe('ConvergencePanelComponent', () => {
     fixture.destroy();
   });
 
+  it('shows what the one-off check found when the report is stale', () => {
+    const stale = (result: string) =>
+      of({
+        clusterId: 'Demo',
+        status: 'UNKNOWN',
+        primaryReason: 'NONE',
+        reportState: 'REPORT_STALE',
+        fallback: { source: 'VERIFIER', result, message: 'm', checkedAt: 1 },
+      });
+    get.mockReturnValue(stale('MISMATCH'));
+    const { fixture, text } = create();
+    expect(text('convergence-headline')).toContain('stopped updating');
+    expect(text('convergence-fallback')).toContain('different from');
+    expect(fixture.componentInstance.tone).toBe('error');
+
+    get.mockReturnValue(stale('UNAVAILABLE'));
+    fixture.componentInstance.load();
+    fixture.detectChanges();
+    expect(text('convergence-fallback')).toBe('m');
+    expect(fixture.componentInstance.tone).toBe('warning');
+    fixture.destroy();
+  });
+
   it('says when the REST server has no convergence endpoint', () => {
     get.mockReturnValue(throwError('Not Found'));
     const { fixture, text } = create();

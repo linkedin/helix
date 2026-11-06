@@ -45,6 +45,8 @@ public class TestConvergenceStatusResponseMapper {
     return report;
   }
 
+  private static final long NOW = 10_000_000L;
+
   private static LiveInstance leader(String session) {
     LiveInstance leader = new LiveInstance("controller");
     leader.setSessionId(session);
@@ -54,7 +56,7 @@ public class TestConvergenceStatusResponseMapper {
   @Test
   public void testFreshReportIsReturnedAsASummary() {
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION),
-        report(SESSION), leader(SESSION), true, false);
+        report(SESSION), leader(SESSION), true, false, NOW);
     Assert.assertEquals(response.path("status").asText(), "IN_PROGRESS");
     Assert.assertEquals(response.path("reportState").asText(), "FRESH");
     Assert.assertEquals(response.path("publishedBy").asText(), "controller_1");
@@ -73,15 +75,28 @@ public class TestConvergenceStatusResponseMapper {
     ConvergenceStatus anchor = report(SESSION);
     anchor.setControllerName("controller_2");
     ObjectNode adopted = ConvergenceStatusResponseMapper.map("c", "db", report("old"), anchor,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     Assert.assertEquals(adopted.path("reportState").asText(), "FRESH");
     Assert.assertEquals(adopted.path("publishedBy").asText(), "controller_2");
     Assert.assertEquals(adopted.path("controllerSessionId").asText(), SESSION);
     ObjectNode stale = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION),
-        report("old"), leader(SESSION), true, false);
+        report("old"), leader(SESSION), true, false, NOW);
     Assert.assertEquals(stale.path("status").asText(), "UNKNOWN");
     Assert.assertEquals(stale.path("reportState").asText(), "CONTROLLER_SESSION_MISMATCH");
     Assert.assertTrue(stale.path("partitionSummary").isMissingNode());
+  }
+
+  @Test
+  public void testReportFromAStuckPipelineIsStale() {
+    ConvergenceStatus cluster = report(SESSION);
+    cluster.setEvaluatedAt(NOW - ConvergenceStatusResponseMapper.STALE_AFTER_MS - 1);
+    ObjectNode stale = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION), cluster,
+        leader(SESSION), true, false, NOW);
+    Assert.assertEquals(stale.path("status").asText(), "UNKNOWN");
+    Assert.assertEquals(stale.path("reportState").asText(), "REPORT_STALE");
+    cluster.setEvaluatedAt(NOW - ConvergenceStatusResponseMapper.STALE_AFTER_MS);
+    Assert.assertEquals(ConvergenceStatusResponseMapper.map("c", "db", report(SESSION), cluster,
+        leader(SESSION), true, false, NOW).path("reportState").asText(), "FRESH");
   }
 
   @Test
@@ -91,7 +106,7 @@ public class TestConvergenceStatusResponseMapper {
     cluster.setPrimaryReason(Reason.MAINTENANCE_MODE);
     cluster.setGeneratedAt(42L);
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", "db", report("old"), cluster,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     Assert.assertEquals(response.path("status").asText(), "PAUSED");
     Assert.assertEquals(response.path("primaryReason").asText(), "MAINTENANCE_MODE");
     Assert.assertEquals(response.path("reportState").asText(), "FRESH");
@@ -108,13 +123,13 @@ public class TestConvergenceStatusResponseMapper {
   public void testNothingToTrust() {
     String[] states = {
         ConvergenceStatusResponseMapper.map("c", null, report(SESSION), report(SESSION),
-            leader(SESSION), false, false).path("reportState").asText(),
-        ConvergenceStatusResponseMapper.map("c", null, null, null, leader(SESSION), true, false)
+            leader(SESSION), false, false, NOW).path("reportState").asText(),
+        ConvergenceStatusResponseMapper.map("c", null, null, null, leader(SESSION), true, false, NOW)
             .path("reportState").asText(),
         ConvergenceStatusResponseMapper.map("c", "db", null, report(SESSION), leader(SESSION),
-            true, false).path("reportState").asText(),
+            true, false, NOW).path("reportState").asText(),
         ConvergenceStatusResponseMapper.map("c", null, report(SESSION), report(SESSION), null,
-            true, false).path("reportState").asText()};
+            true, false, NOW).path("reportState").asText()};
     Assert.assertEquals(states, new String[] {"MONITORING_DISABLED", "REPORT_MISSING",
         "REPORT_MISSING", "CONTROLLER_LEADER_MISSING"});
   }
@@ -122,7 +137,7 @@ public class TestConvergenceStatusResponseMapper {
   @Test
   public void testManagementModeIsPausedWhateverTheReportSays() {
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", null, report(SESSION),
-        report(SESSION), leader(SESSION), true, true);
+        report(SESSION), leader(SESSION), true, true, NOW);
     Assert.assertEquals(response.path("status").asText(), "PAUSED");
     Assert.assertEquals(response.path("primaryReason").asText(), "MANAGEMENT_MODE");
   }

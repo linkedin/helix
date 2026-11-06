@@ -7,6 +7,7 @@ import {
   duration,
   REASON_TEXT,
   reasonLabel,
+  FALLBACK_TEXT,
   REPORT_STATE_TEXT,
   STATUS_LABELS,
   STATUS_ORDER,
@@ -62,6 +63,8 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
   tone = '';
   statusLabel = '';
   headline = '';
+  fallbackText = '';
+  confirmed = '';
   since = '';
   segments: Segment[] = [];
   barLabel = '';
@@ -123,6 +126,8 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
     this.reasons = [];
     this.facts = [];
     this.since = '';
+    this.fallbackText = '';
+    this.confirmed = '';
     if (!r) {
       this.tone = 'warning';
       this.statusLabel = '';
@@ -133,9 +138,20 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
     if (r.reportState !== 'FRESH') {
       this.tone = r.reportState === 'MANAGEMENT_MODE' ? 'neutral' : 'warning';
       this.headline = REPORT_STATE_TEXT[r.reportState] || r.reportState;
+      if (r.reportState === 'REPORT_STALE' && r.evaluatedAt > 0) {
+        this.headline += ` Last confirmed ${duration(this.readAt - r.evaluatedAt)} ago.`;
+      }
+      if (r.fallback) {
+        this.fallbackText =
+          FALLBACK_TEXT[r.fallback.result] || r.fallback.message;
+        if (r.fallback.result === 'MISMATCH') this.tone = 'error';
+      }
       return;
     }
     this.tone = TONES[r.status] || 'warning';
+    if (r.evaluatedAt > 0) {
+      this.confirmed = duration(this.readAt - r.evaluatedAt);
+    }
     const summary = r.partitionSummary;
     const total = summary?.total ?? 0;
     const scope =
