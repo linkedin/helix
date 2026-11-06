@@ -8,7 +8,7 @@
 .header.mat-toolbar-single-row {
   height: 56px;
   padding: 0 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+  border-bottom: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.1));
 }
 
 .helix-logo {

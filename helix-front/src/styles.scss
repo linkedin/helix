@@ -9,6 +9,19 @@
 @import '~@swimlane/ngx-datatable/assets/icons.css';
 // with overrides
 .ngx-datatable.material {
+  // Flat, full-bleed table: hairlines in place of the stock drop shadow
+  box-shadow: none;
+  border: solid var(--hi-divider, rgba(0, 0, 0, 0.1));
+  border-width: 1px 0;
+
+  .datatable-header .datatable-header-cell {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+  }
+
   &.single-selection,
   &.multi-selection,
   &.multi-click-selection {
@@ -18,10 +31,10 @@
 
       &.active,
       &.active .datatable-row-group {
-        background-color: #0077b5 !important;
+        background-color: var(--hi-selected, rgba(0, 119, 181, 0.1)) !important;
 
         .datatable-body-cell {
-          color: #fff !important;
+          color: var(--hi-primary-text, #0064a5) !important;
         }
       }
     }
@@ -49,6 +62,8 @@ body {
 }
 
 :root {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
   --hi-motion-fast: 120ms;
   --hi-motion: 200ms;
   --hi-ease: cubic-bezier(0.2, 0, 0, 1);

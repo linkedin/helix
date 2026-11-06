@@ -112,13 +112,22 @@
     background: var(--hi-surface, white);
     border: 1px solid var(--hi-divider, #dbe3e9);
     border-radius: 7px;
-    color: inherit;
+    color: var(--hi-text-secondary, #596979);
+    font-size: 12px;
+    font-weight: 500;
     line-height: 1.4;
     strong {
       display: block;
-      font-size: 26px;
-      font-weight: 500;
-      margin-bottom: 4px;
+      font-size: 28px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+      margin-bottom: 6px;
+      color: var(--hi-text, #1f2933);
+    }
+    .muted {
+      font-weight: 400;
+      margin-top: 4px;
     }
     &.active {
       border-color: var(--hi-focus, #0075ac);
@@ -304,9 +313,9 @@
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
   &.active {
-    background: var(--hi-chip-active-bg, #1565c0);
-    border-color: var(--hi-chip-active-border, #1565c0);
-    color: var(--hi-chip-active-text, #fff);
+    background: var(--hi-chip-active-bg, rgba(0, 119, 181, 0.1));
+    border-color: var(--hi-chip-active-border, rgba(0, 119, 181, 0.5));
+    color: var(--hi-chip-active-text, #005a9d);
   }
 }
 

@@ -18,6 +18,19 @@
   }
 }
 
+// Neutral header in light mode too, as in dark: chrome stays quiet and the
+// brand lives in the logo and the accent
+.mat-toolbar.mat-primary.header {
+  background-color: #fff;
+  color: rgba(0, 0, 0, 0.87);
+}
+
+// Detail headers separate from the page with a hairline, not a shadow
+.mat-toolbar.mat-elevation-z1 {
+  box-shadow: none;
+  border-bottom: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.1));
+}
+
 // Tabs size to their label, so every cluster tab fits without paging arrows
 .mat-tab-nav-bar.mat-tab-header .mat-tab-link,
 .mat-tab-group .mat-tab-header .mat-tab-label {
@@ -65,6 +78,7 @@
 // App styles read the tokens below as var(--hi-token, <light value>), which
 // keeps light mode unchanged; only the dark values are defined here.
 .dark-theme {
+  scrollbar-color: rgba(201, 214, 227, 0.28) transparent;
   @include mat.all-component-colors($hi-dark-theme);
 
   // Surfaces step lighter with elevation: page, then cards, then menus.
