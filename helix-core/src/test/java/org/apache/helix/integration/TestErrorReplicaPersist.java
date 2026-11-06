@@ -87,7 +87,6 @@ public class TestErrorReplicaPersist extends ZkStandAloneCMTestBase {
       participant.syncStart();
       _participants[i] = participant;
     }
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     enableDelayRebalanceInCluster(_gZkClient, CLUSTER_NAME, true, 1800000);
 
     // start controller

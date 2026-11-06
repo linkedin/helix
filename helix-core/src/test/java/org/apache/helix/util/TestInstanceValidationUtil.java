@@ -174,7 +174,6 @@ public class TestInstanceValidationUtil {
     PropertyKey.Builder keyBuilder = mock.dataAccessor.keyBuilder();
     PropertyKey clusterProperty = keyBuilder.clusterConfig();
     ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setPersistIntermediateAssignment(true);
     when(mock.dataAccessor.getProperty(eq(clusterProperty)))
         .thenReturn(clusterConfig);
     PropertyKey instanceProperty = keyBuilder.instanceConfig(TEST_INSTANCE);
@@ -234,22 +233,11 @@ public class TestInstanceValidationUtil {
         InstanceValidationUtil.hasErrorPartitions(mock.dataAccessor, TEST_CLUSTER, TEST_INSTANCE));
   }
 
-  @Test
-  public void TestIsInstanceStable_NoException_whenPersistAssignmentOff() {
-    Mock mock = new Mock();
-    ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setPersistIntermediateAssignment(false);
-    when(mock.dataAccessor.getProperty(any(PropertyKey.class))).thenReturn(clusterConfig);
-
-    InstanceValidationUtil.isInstanceStable(mock.dataAccessor, TEST_INSTANCE);
-  }
-
   @Test(expectedExceptions = HelixException.class)
   public void TestIsInstanceStable_exception_whenExternalViewNull() {
     String resource = "db";
     Mock mock = new Mock();
     ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setPersistIntermediateAssignment(true);
     doReturn(clusterConfig).when(mock.dataAccessor)
         .getProperty(argThat(new PropertyKeyArgument(PropertyType.CONFIGS)));
     doReturn(ImmutableList.of(resource)).when(mock.dataAccessor)
@@ -273,7 +261,6 @@ public class TestInstanceValidationUtil {
     String resource = "db";
     Mock mock = new Mock();
     ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setPersistIntermediateAssignment(true);
     doReturn(clusterConfig).when(mock.dataAccessor)
         .getProperty(argThat(new PropertyKeyArgument(PropertyType.CONFIGS)));
     doReturn(ImmutableList.of(resource)).when(mock.dataAccessor)
@@ -300,7 +287,6 @@ public class TestInstanceValidationUtil {
     String resource = "db";
     Mock mock = new Mock();
     ClusterConfig clusterConfig = new ClusterConfig(TEST_CLUSTER);
-    clusterConfig.setPersistIntermediateAssignment(true);
     doReturn(clusterConfig).when(mock.dataAccessor)
         .getProperty(argThat(new PropertyKeyArgument(PropertyType.CONFIGS)));
     doReturn(ImmutableList.of(resource)).when(mock.dataAccessor)

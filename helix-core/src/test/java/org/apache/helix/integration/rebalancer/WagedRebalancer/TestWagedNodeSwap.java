@@ -113,7 +113,6 @@ public class TestWagedNodeSwap extends ZkTestBase {
     _controller = new ClusterControllerManager(ZK_ADDR, CLUSTER_NAME, controllerName);
     _controller.syncStart();
 
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
     enableTopologyAwareRebalance(_gZkClient, CLUSTER_NAME, true);
 
     int i = 0;

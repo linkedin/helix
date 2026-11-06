@@ -173,7 +173,6 @@ public class TestDelayedAutoRebalanceWithDisabledInstance extends TestDelayedAut
   @Test (dependsOnMethods = {"testMinimalActiveReplicaMaintain"})
   @Override
   public void testPartitionMovementAfterDelayTime() throws Exception {
-    enablePersistBestPossibleAssignment(_gZkClient, CLUSTER_NAME, true);
 
     long delay = 10000;
     setDelayTimeInCluster(_gZkClient, CLUSTER_NAME, delay);

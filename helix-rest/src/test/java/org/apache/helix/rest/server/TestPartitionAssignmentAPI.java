@@ -88,7 +88,6 @@ public class TestPartitionAssignmentAPI extends AbstractTestClass {
     // Setup cluster configs
     _configAccessor = new ConfigAccessor(_gZkClient);
     ClusterConfig clusterConfig = _configAccessor.getClusterConfig(CLUSTER_NAME);
-    clusterConfig.setPersistBestPossibleAssignment(true);
     clusterConfig.setDefaultInstanceCapacityMap(
         Collections.singletonMap(INSTANCE_CAPACITY_KEY, DEFAULT_INSTANCE_CAPACITY));
     clusterConfig.setInstanceCapacityKeys(ImmutableList.of(INSTANCE_CAPACITY_KEY));
