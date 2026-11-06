@@ -177,6 +177,53 @@ public class TestRebalancePipeline extends ZkUnitTestBase {
   }
 
   @Test
+  public void testSelectedMessageSnapshotSurvivesThrottling() throws Exception {
+    String clusterName = "CLUSTER_" + _className + "_snapshot";
+    new ZKHelixAdmin(_gZkClient).addCluster(clusterName);
+    HelixDataAccessor accessor =
+        new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient));
+    ClusterConfig config = new ClusterConfig(clusterName);
+    config.setConvergenceMonitoringEnabled(true);
+    accessor.setProperty(accessor.keyBuilder().clusterConfig(), config);
+    HelixManager manager = new DummyClusterManager(clusterName, accessor,
+        Long.toHexString(_gZkClient.getSessionId()));
+    ClusterEvent event = new ClusterEvent(ClusterEventType.Unknown);
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    ResourceControllerDataProvider dataCache = new ResourceControllerDataProvider();
+    ExecutorService executorService = Executors.newSingleThreadExecutor();
+    dataCache.setAsyncTasksThreadPool(executorService);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), dataCache);
+
+    String resourceName = "testResource_snapshot";
+    setupIdealState(clusterName, new int[] {0}, new String[] {resourceName}, 1, 1);
+    setupStateModel(clusterName);
+    setupInstances(clusterName, new int[] {0});
+    List<LiveInstance> liveInstances = setupLiveInstances(clusterName, new int[] {0});
+    setCurrentState(clusterName, "localhost_0", resourceName, resourceName + "_0",
+        liveInstances.get(0).getEphemeralOwner(), "OFFLINE");
+
+    Pipeline dataRefresh = new Pipeline();
+    dataRefresh.addStage(new ReadClusterDataStage());
+    Pipeline rebalancePipeline = new Pipeline();
+    rebalancePipeline.addStage(new ResourceComputationStage());
+    rebalancePipeline.addStage(new CurrentStateComputationStage());
+    rebalancePipeline.addStage(new BestPossibleStateCalcStage());
+    rebalancePipeline.addStage(new MessageGenerationPhase());
+    rebalancePipeline.addStage(new MessageSelectionStage());
+    runPipeline(event, dataRefresh, false);
+    runPipeline(event, rebalancePipeline, false);
+
+    MessageOutput selected = event.getAttribute(AttributeName.MESSAGES_SELECTED.name());
+    MessageOutput snapshot = event.getAttribute(AttributeName.MESSAGES_SELECTED_SNAPSHOT.name());
+    Partition partition = new Partition(resourceName + "_0");
+    // Throttling removes messages from the selected output in place.
+    selected.getMessages(resourceName, partition).clear();
+    Assert.assertEquals(snapshot.getMessages(resourceName, partition).size(), 1);
+    executorService.shutdownNow();
+    deleteCluster(clusterName);
+  }
+
+  @Test
   public void testMsgTriggeredRebalance() throws Exception {
     String clusterName = "CLUSTER_" + _className + "_msgTrigger";
     System.out.println("START " + clusterName + " at " + new Date(System.currentTimeMillis()));
