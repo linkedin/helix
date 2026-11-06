@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { isForceable, parseGuardrailVerdict } from './guardrail';
+import { isForceable, parseGuardrailVerdict, splitMessage } from './guardrail';
 
 describe('guardrail verdict', () => {
   const v = (ruleId: string) => ({ ruleId, message: 'm' });
@@ -28,5 +28,14 @@ describe('guardrail verdict', () => {
       ]),
     ).toBe(false);
     expect(isForceable([v('RETIRED_CLUSTER_CONFIG')])).toBe(false);
+  });
+
+  it('splits cause from advice and drops the force hint', () => {
+    const r = splitMessage(
+      'Resource R is in use. Disable it first, or retry with force=true to override.',
+    );
+    expect(r.cause).toBe('Resource R is in use.');
+    expect(r.advice).toContain('Disable it first');
+    expect(r.advice).not.toContain('force=true');
   });
 });

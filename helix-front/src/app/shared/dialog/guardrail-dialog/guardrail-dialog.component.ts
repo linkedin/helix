@@ -1,7 +1,12 @@
 import { Component, Inject } from '@angular/core';
 import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
 
-import { GuardrailViolation, isForceable } from '../../../core/guardrail';
+import {
+  GuardrailViolation,
+  isForceable,
+  ruleTitle,
+  splitMessage,
+} from '../../../core/guardrail';
 
 @Component({
   selector: 'hi-guardrail-dialog',
@@ -9,7 +14,14 @@ import { GuardrailViolation, isForceable } from '../../../core/guardrail';
   styleUrls: ['./guardrail-dialog.component.scss'],
 })
 export class GuardrailDialogComponent {
-  violations: GuardrailViolation[];
+  items: {
+    ruleId: string;
+    title: string;
+    cause: string;
+    advice: string;
+    resource?: string;
+    partition?: string;
+  }[];
   forceable: boolean;
   confirming = false;
 
@@ -17,12 +29,14 @@ export class GuardrailDialogComponent {
     @Inject(MAT_DIALOG_DATA) data: { violations: GuardrailViolation[] },
     private dialogRef: MatDialogRef<GuardrailDialogComponent>,
   ) {
-    this.violations = data.violations;
+    this.items = data.violations.map((v) => ({
+      ruleId: v.ruleId,
+      title: ruleTitle(v.ruleId),
+      resource: v.resourceName,
+      partition: v.partitionName,
+      ...splitMessage(v.message),
+    }));
     this.forceable = isForceable(data.violations);
-  }
-
-  target(v: GuardrailViolation) {
-    return [v.resourceName, v.partitionName].filter((s) => !!s).join(' / ');
   }
 
   close() {
