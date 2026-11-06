@@ -17,20 +17,29 @@
   ~ under the License.
   -->
 
-<mat-card *ngFor="let group of keys(groups)">
-  <mat-card-header>
-    <mat-card-title>{{ group | titlecase }}</mat-card-title>
-  </mat-card-header>
-  <mat-card-content>
-    <section *ngFor="let section of groups[group]" class="section">
-      <a
-        *ngFor="let helix of keys(section)"
-        mat-button
-        [routerLink]="['/', group + '.' + helix]"
-      >
-        <mat-icon>group_work</mat-icon>
-        {{ helix }}
-      </a>
-    </section>
-  </mat-card-content>
-</mat-card>
+<section class="landing">
+  <header>
+    <h1>Choose a service</h1>
+    <p>
+      Pick a Helix deployment to browse its clusters, or press
+      <kbd>{{ shortcut }}</kbd> to jump to any cluster, resource or instance.
+    </p>
+  </header>
+
+  <section *ngFor="let group of keys(groups)" class="group">
+    <h2>{{ group | titlecase }}</h2>
+    <div class="grid">
+      <ng-container *ngFor="let section of groups[group]">
+        <a
+          *ngFor="let helix of keys(section)"
+          class="tile"
+          [routerLink]="['/', group + '.' + helix]"
+        >
+          <mat-icon>group_work</mat-icon>
+          <span class="name">{{ helix }}</span>
+          <mat-icon class="go">arrow_forward</mat-icon>
+        </a>
+      </ng-container>
+    </div>
+  </section>
+</section>

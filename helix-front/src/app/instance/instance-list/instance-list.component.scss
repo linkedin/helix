@@ -1,53 +1,13 @@
-@use '@angular/material' as mat;
-
 .info {
   padding: 24px;
 }
 
 .status-healthy {
-  color: mat.get-color-from-palette(mat.define-palette(mat.$blue-palette));
+  color: var(--hi-success, #2e7d32);
 }
 
 .status-offline {
-  color: var(
-    --hi-text-secondary,
-    mat.get-color-from-palette(
-      mat.define-palette(mat.$grey-palette, 900, 900, 900)
-    )
-  );
-}
-
-::ng-deep .label-unknown .status-disabled {
-  border-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$amber-palette),
-    700
-  );
-  background-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$amber-palette),
-    700
-  );
-}
-
-::ng-deep .label-evacuate .status-disabled {
-  border-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$orange-palette),
-    700
-  );
-  background-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$orange-palette),
-    700
-  );
-}
-
-::ng-deep .label-swap-in .status-disabled {
-  border-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$purple-palette),
-    500
-  );
-  background-color: mat.get-color-from-palette(
-    mat.define-palette(mat.$purple-palette),
-    500
-  );
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.5));
 }
 
 .filter-bar {
@@ -68,9 +28,9 @@
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
   &.active {
-    background: var(--hi-chip-active-bg, #1565c0);
-    border-color: var(--hi-chip-active-border, #1565c0);
-    color: var(--hi-chip-active-text, #fff);
+    background: var(--hi-chip-active-bg, rgba(0, 119, 181, 0.1));
+    border-color: var(--hi-chip-active-border, rgba(0, 119, 181, 0.5));
+    color: var(--hi-chip-active-text, #005a9d);
   }
 }
 

@@ -9,9 +9,9 @@
   height: 34px;
   margin-right: 8px;
   padding: 0 8px 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.1);
+  background: color-mix(in srgb, currentColor 5%, transparent);
   color: inherit;
   font: inherit;
   font-size: 13px;
@@ -19,7 +19,7 @@
   transition: background-color var(--hi-motion-fast, 120ms) var(--hi-ease, ease);
 
   &:hover {
-    background: rgba(255, 255, 255, 0.18);
+    background: color-mix(in srgb, currentColor 10%, transparent);
   }
 
   &:focus-visible {
@@ -41,8 +41,8 @@
   }
 
   kbd {
-    border-color: rgba(255, 255, 255, 0.3);
-    background: rgba(255, 255, 255, 0.12);
+    border-color: color-mix(in srgb, currentColor 28%, transparent);
+    background: color-mix(in srgb, currentColor 8%, transparent);
     color: inherit;
   }
 }
