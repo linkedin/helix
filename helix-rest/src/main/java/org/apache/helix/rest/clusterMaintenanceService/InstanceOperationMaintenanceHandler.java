@@ -75,10 +75,10 @@ import org.slf4j.LoggerFactory;
  * with a live marker keeps it as is and takes no new budget, so a marker is written once and a
  * later request never extends or shortens it. With no cap configured, any number may take one.
  * Clearing a marker needs no room under the cap.
- * Only AUTOMATION may set an operation, since the marker is automation's budget: a USER ENABLE
- * here would clear it while an AUTOMATION drain still runs, and an ADMIN operation would clear
- * every other source's operation. Users and admins set operations per instance, which never
- * touches the marker. SWAP_IN and UNKNOWN never count as offline, so a marker would exempt nothing.
+ * Any source may set an operation, as on the per-instance path, since only the caller knows whose
+ * operation it is. ENABLE clears the marker whatever its source, and an ADMIN operation clears
+ * every other source's operation. SWAP_IN and UNKNOWN never count as offline, so a marker would
+ * exempt nothing.
  *
  * <p>The expiry set at admission is a hard bound on how long the instance is exempt from
  * MAX_OFFLINE_INSTANCES_ALLOWED; resending cannot stretch it. A drain that outlives its marker
@@ -109,9 +109,11 @@ import org.slf4j.LoggerFactory;
  * is. Messages never carry Java exception text; the server log has it.
  *
  * <p>An operation its source already holds is not set again, so repeating a request never
- * reorders the operation stack, and a request that changes nothing writes nothing. Repeating a
- * request is always safe. A held operation still goes through the transition and topology checks
- * of {@link InstanceUtil#setInstanceOperation}, so both paths accept exactly the same requests.
+ * reorders the operation stack, and a request that changes nothing writes nothing. An ADMIN
+ * operation is held only while it is the only one and in effect, since setting it again clears the
+ * rest. Repeating a request is always safe. A held operation still goes through the transition and
+ * topology checks of {@link InstanceUtil#setInstanceOperation}, so both paths accept exactly the
+ * same requests.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -131,8 +133,6 @@ public class InstanceOperationMaintenanceHandler {
   private static final Set<InstanceConstants.InstanceOperation> OPERATIONS = EnumSet.of(
       InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE,
       InstanceConstants.InstanceOperation.EVACUATE);
-  private static final Set<InstanceConstants.InstanceOperationSource> SOURCES =
-      EnumSet.of(InstanceConstants.InstanceOperationSource.AUTOMATION);
 
   /** Per-instance status, each with the action it asks of the caller. */
   public enum Status {
@@ -282,8 +282,7 @@ public class InstanceOperationMaintenanceHandler {
    */
   public Map<String, Outcome> apply(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
-    if (operation != null && (!OPERATIONS.contains(operation.getOperation())
-        || !SOURCES.contains(operation.getSource()))) {
+    if (operation != null && !OPERATIONS.contains(operation.getOperation())) {
       throw new BadRequestException(
           unsupportedOperation(operation.getOperation(), operation.getSource()));
     }
@@ -404,11 +403,14 @@ public class InstanceOperationMaintenanceHandler {
       InstanceConfig.InstanceOperation held =
           operation == null ? null : config.getInstanceOperation(operation.getSource());
       // A legacy enable can override a held DISABLE; setting it again restores it, as the
-      // legacy setInstanceOperation path does.
+      // legacy setInstanceOperation path does. Setting an ADMIN operation again clears the rest.
       boolean holds = operation == null || (held != null
           && held.getOperation() == operation.getOperation()
-          && !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
-              && config.getInstanceEnabled()));
+          && (held.getSource() == InstanceConstants.InstanceOperationSource.ADMIN
+              ? config.getInstanceOperationList().size() == 1
+                  && config.getInstanceOperation().getOperation() == held.getOperation()
+              : !(held.getOperation() == InstanceConstants.InstanceOperation.DISABLE
+                  && config.getInstanceEnabled())));
       // The same checks as the legacy setInstanceOperation path, which runs them on every call,
       // so a held operation is checked too.
       if (operation != null) {
@@ -575,7 +577,8 @@ public class InstanceOperationMaintenanceHandler {
   /** Why the given operation and source cannot be requested together. */
   public static String unsupportedOperation(Object operation, Object source) {
     return "instanceOperation must be one of " + OPERATIONS + " and instanceOperationSource one of "
-        + SOURCES + ", given together; got " + operation + " and " + source + ".";
+        + Arrays.toString(InstanceConstants.InstanceOperationSource.values()) + "; got " + operation
+        + " and " + source + ".";
   }
 
   /**
