@@ -22,6 +22,7 @@ import { StateLabelComponent } from './state-label/state-label.component';
 import { NodeViewerComponent } from './node-viewer/node-viewer.component';
 import { InputInlineComponent } from './input-inline/input-inline.component';
 import { DataTableComponent } from './data-table/data-table.component';
+import { GuardrailDialogComponent } from './dialog/guardrail-dialog/guardrail-dialog.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
 import { DisabledLabelComponent } from './disabled-label/disabled-label.component';
 import { ListStatusComponent } from './list-status/list-status.component';
@@ -50,6 +51,7 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     InputInlineComponent,
     DataTableComponent,
     ConfirmDialogComponent,
+    GuardrailDialogComponent,
     DisabledLabelComponent,
     ListStatusComponent,
     ThemeToggleComponent,

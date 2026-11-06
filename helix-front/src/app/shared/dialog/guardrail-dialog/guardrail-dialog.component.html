@@ -1,0 +1,43 @@
+<h1 mat-dialog-title>Change blocked by guardrail</h1>
+<div mat-dialog-content class="guardrail">
+  <p *ngIf="!confirming">
+    This change was not applied because it would cause the following:
+  </p>
+  <ul *ngIf="!confirming">
+    <li *ngFor="let v of violations" class="violation">
+      <code>{{ v.ruleId }}</code>
+      <span *ngIf="target(v)" class="target">{{ target(v) }}</span>
+      <div class="msg">{{ v.message }}</div>
+    </li>
+  </ul>
+  <p *ngIf="!forceable && !confirming" class="hint">
+    This check cannot be overridden. Fix the input and try again.
+  </p>
+  <p *ngIf="confirming" class="warn">
+    Forcing skips the checks above and applies the change anyway. The problems
+    listed can then happen on the live cluster. Apply it with force?
+  </p>
+</div>
+<div mat-dialog-actions>
+  <button mat-button type="button" (click)="close()">Close</button>
+  <button
+    *ngIf="forceable && !confirming"
+    mat-button
+    type="button"
+    color="warn"
+    class="force"
+    (click)="confirming = true"
+  >
+    Force anyway
+  </button>
+  <button
+    *ngIf="confirming"
+    mat-button
+    type="button"
+    color="warn"
+    class="confirm-force"
+    (click)="force()"
+  >
+    Yes, force it
+  </button>
+</div>
