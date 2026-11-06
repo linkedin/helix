@@ -1318,9 +1318,9 @@ public class TestInstancesAccessor extends AbstractTestClass {
       Assert.assertEquals(blocked.getInstanceOperationMaintenanceUntilMs(),
           InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
 
-      // ENABLE releases the marker and needs no expiry.
+      // ENABLE releases the marker and needs no expiry. The source defaults to AUTOMATION.
       outcomes = postInstanceOperationMaintenance(cluster, "{\"instances\":[\"" + first
-          + "\"],\"instanceOperation\":\"ENABLE\",\"instanceOperationSource\":\"AUTOMATION\"}");
+          + "\"],\"instanceOperation\":\"ENABLE\"}");
       Assert.assertEquals(outcomes.get(first),
           applied("ENABLE is now set by AUTOMATION. Cleared the maintenance marker.", null));
       Assert.assertEquals(_configAccessor.getInstanceConfig(cluster, first)
@@ -1342,15 +1342,14 @@ public class TestInstancesAccessor extends AbstractTestClass {
           .getInstanceOperationMaintenanceUntilMs(),
           InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET);
 
-      // The operation and source come together: a defaulted source could leave another source's
-      // operation active, and dropping a lone one would write the marker alone. Only AUTOMATION
-      // spends the marker. The expiry must be a JSON integer that fits a long.
+      // A source needs an operation, since dropping a lone one would write the marker alone. The
+      // expiry must be a JSON integer that fits a long.
       String toSecond = "{\"instances\":[\"" + second + "\"],\"expiresAtMillis\":";
       String evacuateSecond = toSecond + expiresAt + ",\"instanceOperation\":";
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
           evacuateSecond + "\"DRAIN\",\"instanceOperationSource\":\"AUTOMATION\"}"),
           "instanceOperation must be one of [ENABLE, DISABLE, EVACUATE] and "
-              + "instanceOperationSource one of [AUTOMATION], given together; got DRAIN and "
+              + "instanceOperationSource one of [ADMIN, USER, AUTOMATION, DEFAULT]; got DRAIN and "
               + "AUTOMATION.");
       String noInstances = "The request body must have \"instances\", a list of instance names.";
       for (String instancesField : Arrays.asList("", "\"instances\":\"" + second + "\",",
@@ -1373,8 +1372,8 @@ public class TestInstancesAccessor extends AbstractTestClass {
           toSecond + expiresAt + ",\"fitInstances\":[\"" + first + "\"]}"), "fitInstances names ["
           + first + "], not in instances. It may only name instances of this request.");
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
-          toSecond + expiresAt + ",\"reason\":\"drain\"}"), "reason is recorded with an "
-          + "operation, so it needs instanceOperation and instanceOperationSource.");
+          toSecond + expiresAt + ",\"reason\":\"drain\"}"), "instanceOperationSource and reason "
+          + "are recorded with an operation, so they need instanceOperation.");
       Assert.assertEquals(postBadInstanceOperationMaintenance(cluster,
           toSecond + "-1,\"instanceOperation\":\"EVACUATE\","
               + "\"instanceOperationSource\":\"AUTOMATION\"}"), "expiresAtMillis -1 clears the "
@@ -1394,11 +1393,10 @@ public class TestInstancesAccessor extends AbstractTestClass {
         Assert.assertEquals(postBadInstanceOperationMaintenance(cluster, empty),
             "The request body is empty. It must be a JSON object with \"instances\".");
       }
-      for (String badBody : Arrays.asList(evacuateSecond + "\"EVACUATE\"}",
+      for (String badBody : Arrays.asList(
           toSecond + expiresAt + ",\"instanceOperationSource\":\"AUTOMATION\"}",
           evacuateSecond + "\"DRAIN\",\"instanceOperationSource\":\"AUTOMATION\"}",
-          evacuateSecond + "\"EVACUATE\",\"instanceOperationSource\":\"ADMIN\"}",
-          evacuateSecond + "\"DISABLE\",\"instanceOperationSource\":\"USER\"}",
+          evacuateSecond + "\"EVACUATE\",\"instanceOperationSource\":\"OPERATOR\"}",
           toSecond + "\"" + expiresAt + "\"}", toSecond + expiresAt + ".5}",
           toSecond + "99999999999999999999}", toSecond + "-5}",
           "{\"instances\":[\"" + second + "\"]}",

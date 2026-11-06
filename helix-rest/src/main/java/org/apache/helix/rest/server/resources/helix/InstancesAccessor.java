@@ -670,15 +670,15 @@ public class InstancesAccessor extends AbstractHelixResource {
    * check, in one commit. The marker cap fails closed. See
    * {@link InstanceOperationMaintenanceHandler}.
    *
-   * <p>Request body. {@code instanceOperation} and {@code instanceOperationSource} come together,
-   * and the source must be AUTOMATION; without them only the marker is written. {@code reason} is
-   * optional. {@code expiresAtMillis} defaults to 0, the cluster's default marker duration, and
-   * may be at most 7 days away. Without an operation, -1 clears the marker. ENABLE ignores it and
-   * clears the marker. A live marker is never extended or shortened; it runs until the expiry it
-   * was taken with. {@code fitInstances}, optional, names the FITS instances of a request that ran
-   * out of time, resent among {@code instances} to resume its search for the instances that fit.
-   * Send it on every such resend, empty if there were no FITS instances: present, it makes the
-   * search start past them.
+   * <p>Request body. {@code instanceOperationSource} and {@code reason} go with
+   * {@code instanceOperation}, and the source defaults to AUTOMATION; without an operation only the
+   * marker is written. {@code reason} is optional. {@code expiresAtMillis} defaults to 0, the
+   * cluster's default marker duration, and may be at most 7 days away. Without an operation, -1
+   * clears the marker. ENABLE ignores it and clears the marker. A live marker is never extended or
+   * shortened; it runs until the expiry it was taken with. {@code fitInstances}, optional, names
+   * the FITS instances of a request that ran out of time, resent among {@code instances} to resume
+   * its search for the instances that fit. Send it on every such resend, empty if there were no
+   * FITS instances: present, it makes the search start past them.
    * <pre>{@code
    * { "instances": ["h1", "h2"], "instanceOperation": "EVACUATE",
    *   "instanceOperationSource": "AUTOMATION", "reason": "...", "expiresAtMillis": 1776385800000 }
@@ -731,9 +731,10 @@ public class InstancesAccessor extends AbstractHelixResource {
       }
     }
     InstanceConfig.InstanceOperation operation = null;
-    if (node.has("instanceOperation") || node.has("instanceOperationSource")) {
+    if (node.has("instanceOperation")) {
       String operationName = node.path("instanceOperation").asText("");
-      String sourceName = node.path("instanceOperationSource").asText("");
+      String sourceName = node.path("instanceOperationSource")
+          .asText(InstanceConstants.InstanceOperationSource.AUTOMATION.name());
       try {
         operation = new InstanceConfig.InstanceOperation.Builder()
             .setOperation(InstanceConstants.InstanceOperation.valueOf(operationName))
@@ -745,9 +746,9 @@ public class InstancesAccessor extends AbstractHelixResource {
             operationName.isEmpty() ? "none" : operationName,
             sourceName.isEmpty() ? "none" : sourceName));
       }
-    } else if (node.has("reason")) {
-      return badRequest("reason is recorded with an operation, so it needs instanceOperation and "
-          + "instanceOperationSource.");
+    } else if (node.has("instanceOperationSource") || node.has("reason")) {
+      return badRequest("instanceOperationSource and reason are recorded with an operation, so "
+          + "they need instanceOperation.");
     }
     InstanceConstants.InstanceOperation proposed =
         operation == null ? null : operation.getOperation();
