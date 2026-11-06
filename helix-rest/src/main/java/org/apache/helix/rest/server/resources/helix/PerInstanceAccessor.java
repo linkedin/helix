@@ -540,8 +540,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           if (dryRun || !force) {
             // The batch setInstanceOperationMaintenance command runs the same guardrails.
             GuardrailContext.Builder setInstanceOperationContextBuilder = instanceOperationContext(
-                clusterId, Collections.singletonList(instanceName), instanceOperation)
-                .instanceName(instanceName);
+                clusterId, Collections.singletonList(instanceName), instanceOperation,
+                wagedAssignmentProvider()).instanceName(instanceName);
             Optional<Response> setInstanceOperationPreflight = preflight(
                 instanceOperationGuardrails(clusterId, setInstanceOperationContextBuilder,
                     instanceOperation), setInstanceOperationContextBuilder.build(), force, dryRun);
