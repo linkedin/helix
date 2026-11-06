@@ -35,6 +35,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import com.codahale.metrics.Histogram;
+import com.codahale.metrics.MetricRegistry;
 import org.apache.helix.AccessOption;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
@@ -956,12 +958,31 @@ public class TestInstanceOperationMaintenanceHandler {
   }
 
   @Test
+  public void testRecordsBatchAndCommitSizes() {
+    MetricRegistry metrics = new MetricRegistry();
+    InstanceOperationMaintenanceHandler handler =
+        new InstanceOperationMaintenanceHandler(_zkClient, SAFE, metrics);
+    handler.apply(CLUSTER, Arrays.asList(instance(0), instance(1), instance(1)),
+        operation(InstanceOperation.EVACUATE), _expiresAt);
+    // A repeat writes nothing, so it records a batch but no commit.
+    handler.apply(CLUSTER, Collections.singletonList(instance(0)),
+        operation(InstanceOperation.EVACUATE), _expiresAt);
+
+    Histogram batches = metrics.histogram(InstanceOperationMaintenanceHandler.BATCH_SIZE_METRIC);
+    Assert.assertEquals(batches.getCount(), 2);
+    Assert.assertEquals(batches.getSnapshot().getMax(), 2);
+    Histogram commits = metrics.histogram(InstanceOperationMaintenanceHandler.COMMIT_BYTES_METRIC);
+    Assert.assertEquals(commits.getCount(), 1);
+    Assert.assertEquals(commits.getSnapshot().getMax(), dataLength(0) + dataLength(1));
+  }
+
+  @Test
   public void testFailureAfterACommitWasSentIsUnknown() {
     RealmAwareZkClient failingMulti = withMulti(ops -> {
       throw new ZkException(KeeperException.create(KeeperException.Code.CONNECTIONLOSS));
     });
-    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(failingMulti, SAFE)
-        .apply(CLUSTER, Collections.singletonList(instance(0)),
+    Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(failingMulti, SAFE,
+        null).apply(CLUSTER, Collections.singletonList(instance(0)),
             operation(InstanceOperation.EVACUATE), _expiresAt);
     assertStatuses(outcomes, Status.ERROR);
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Failed after the commit was sent "
@@ -1000,7 +1021,7 @@ public class TestInstanceOperationMaintenanceHandler {
             throw e.getCause();
           }
         });
-    outcomes = new InstanceOperationMaintenanceHandler(unreadable, SAFE).apply(CLUSTER,
+    outcomes = new InstanceOperationMaintenanceHandler(unreadable, SAFE, null).apply(CLUSTER,
         Collections.singletonList(instance(0)), operation(InstanceOperation.EVACUATE), _expiresAt);
     Assert.assertEquals(outcomes.get(instance(0)).getMessage(), "Failed after the commit was sent "
         + "(ZooKeeper error CONNECTIONLOSS), so whether it was written is unknown. Resend the "
@@ -1020,7 +1041,7 @@ public class TestInstanceOperationMaintenanceHandler {
     int before = version(instance(0));
 
     Map<String, Outcome> outcomes = new InstanceOperationMaintenanceHandler(landsThenConflicts,
-        SAFE).apply(CLUSTER, Collections.singletonList(instance(0)),
+        SAFE, null).apply(CLUSTER, Collections.singletonList(instance(0)),
         operation(InstanceOperation.EVACUATE), _expiresAt);
 
     // Found to have landed, so it is not judged again and nothing more is written.
@@ -1121,13 +1142,13 @@ public class TestInstanceOperationMaintenanceHandler {
 
   private Map<String, Outcome> marker(RealmAwareZkClient zkClient, long expiresAt,
       String... instances) {
-    return new InstanceOperationMaintenanceHandler(zkClient, SAFE).apply(CLUSTER,
+    return new InstanceOperationMaintenanceHandler(zkClient, SAFE, null).apply(CLUSTER,
         Arrays.asList(instances), null, expiresAt);
   }
 
   private InstanceOperationMaintenanceHandler handler(
       Function<Collection<String>, ValidationResult> guardrail) {
-    return new InstanceOperationMaintenanceHandler(_zkClient, guardrail);
+    return new InstanceOperationMaintenanceHandler(_zkClient, guardrail, null);
   }
 
   private static InstanceConfig.InstanceOperation operation(InstanceOperation operation) {
@@ -1198,6 +1219,10 @@ public class TestInstanceOperationMaintenanceHandler {
 
   private InstanceConfig read(int i) {
     return new InstanceConfig(_accessor.get(path(i), null, AccessOption.PERSISTENT));
+  }
+
+  private long dataLength(int i) {
+    return _accessor.getStat(path(i), AccessOption.PERSISTENT).getDataLength();
   }
 
   private int version(String instance) {

@@ -19,6 +19,8 @@
 
 package org.apache.helix.guardrail;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.helix.HelixDataAccessor;
@@ -44,6 +46,7 @@ public class GuardrailContext {
   private final ReadOnlyDataAccessor dataAccessor;
   private final String instanceName;
   private final String resourceName;
+  private final Collection<String> instanceNames;
   private final ResourceConfig proposedResourceConfig;
   private final IdealState proposedIdealState;
   private final InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -60,6 +63,7 @@ public class GuardrailContext {
     this.dataAccessor = builder.dataAccessor;
     this.instanceName = builder.instanceName;
     this.resourceName = builder.resourceName;
+    this.instanceNames = builder.instanceNames;
     this.proposedResourceConfig = builder.proposedResourceConfig;
     this.proposedIdealState = builder.proposedIdealState;
     this.proposedInstanceOperation = builder.proposedInstanceOperation;
@@ -88,6 +92,19 @@ public class GuardrailContext {
   /** The resource targeted by a resource-scoped mutation, or {@code null} if not applicable. */
   public String getResourceName() {
     return resourceName;
+  }
+
+  /**
+   * Every instance a batched mutation targets, judged together; defaults to the single
+   * {@link #getInstanceName()}, or empty when there is none. Only rules that read this method
+   * support a batch.
+   */
+  public Collection<String> getInstanceNames() {
+    if (instanceNames != null) {
+      return instanceNames;
+    }
+    return instanceName == null ? Collections.emptyList()
+        : Collections.singletonList(instanceName);
   }
 
   /**
@@ -192,6 +209,7 @@ public class GuardrailContext {
     private ReadOnlyDataAccessor dataAccessor;
     private String instanceName;
     private String resourceName;
+    private Collection<String> instanceNames;
     private ResourceConfig proposedResourceConfig;
     private IdealState proposedIdealState;
     private InstanceConstants.InstanceOperation proposedInstanceOperation;
@@ -219,6 +237,11 @@ public class GuardrailContext {
 
     public Builder resourceName(String resourceName) {
       this.resourceName = resourceName;
+      return this;
+    }
+
+    public Builder instanceNames(Collection<String> instanceNames) {
+      this.instanceNames = instanceNames;
       return this;
     }
 
