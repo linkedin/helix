@@ -19,6 +19,8 @@
 
 package org.apache.helix.guardrail.rules;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -145,5 +147,28 @@ public class TestInstanceDisableMinActiveReplicaGuardrailRule {
     Assert.assertNotNull(capturedStopped.get());
     Assert.assertTrue(capturedStopped.get().isEmpty(),
         "single-instance disable must presume no other instance stopped");
+  }
+
+  @Test
+  public void testBatchChecksEachInstanceWithTheOthersStopped() {
+    // A partition that can lose one of the two instances, but not both.
+    GuardrailContext.Builder context = GuardrailContext.newBuilder(CLUSTER)
+        .dataAccessor(mock(HelixDataAccessor.class))
+        .minActiveReplicaChecker((instanceName, toBeStoppedInstances) ->
+            toBeStoppedInstances.isEmpty() ? MinActiveReplicaCheckResult.passed()
+                : MinActiveReplicaCheckResult.failed(RESOURCE, PARTITION, 1, 2));
+
+    Assert.assertTrue(
+        rule.validate(context.instanceNames(Collections.singletonList(INSTANCE)).build())
+            .isFeasible());
+    ValidationResult result =
+        rule.validate(context.instanceNames(Arrays.asList(INSTANCE, "instance1")).build());
+
+    Assert.assertFalse(result.isFeasible());
+    Violation violation = result.getViolations().get(0);
+    Assert.assertEquals(violation.getPartitionName(), PARTITION);
+    Assert.assertTrue(violation.getMessage().startsWith(
+        "Draining instance instance0 together with [instance1] would leave resource testResource "
+            + "partition testResource_3 with 1 active replica(s)"), violation.getMessage());
   }
 }

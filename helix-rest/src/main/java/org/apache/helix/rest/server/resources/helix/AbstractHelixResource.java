@@ -20,6 +20,8 @@ package org.apache.helix.rest.server.resources.helix;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,10 +36,21 @@ import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
+import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.ValidationResult;
+import org.apache.helix.guardrail.WagedAssignmentProvider;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
+import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.manager.zk.ZkBucketDataAccessor;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
+import org.apache.helix.model.ResourceAssignment;
+import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.rest.common.ContextPropertyKeys;
 import org.apache.helix.rest.server.ServerContext;
 import org.apache.helix.rest.server.guardrail.GuardrailValidationEvent;
@@ -45,6 +58,8 @@ import org.apache.helix.rest.server.guardrail.GuardrailValidationListener;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.task.TaskDriver;
 import org.apache.helix.tools.ClusterSetup;
+import org.apache.helix.util.HelixUtil;
+import org.apache.helix.util.InstanceValidationUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.impl.client.ZkClient;
@@ -147,13 +162,7 @@ public class AbstractHelixResource extends AbstractResource {
    */
   protected Optional<Response> preflight(GuardrailPipeline pipeline, GuardrailContext context,
       boolean force, boolean dryRun) {
-    Map<String, Long> ruleDurationNanos = new LinkedHashMap<>();
-    ValidationResult result = pipeline.validate(context,
-        (ruleId, nanos) -> ruleDurationNanos.merge(ruleId, nanos, Long::sum));
-    GuardrailValidationEvent event = new GuardrailValidationEvent(getNamespace(),
-        pipeline.getRuleIds(), ruleDurationNanos, result, force, dryRun);
-    recordGuardrailMetrics(event);
-    notifyGuardrailValidationListeners(event);
+    ValidationResult result = validateAndRecord(pipeline, context, force, dryRun);
     if (dryRun) {
       return Optional.of(verdictResponse(result, Response.Status.OK));
     }
@@ -166,6 +175,86 @@ public class AbstractHelixResource extends AbstractResource {
       return Optional.empty();
     }
     return Optional.of(verdictResponse(result, Response.Status.BAD_REQUEST));
+  }
+
+  /**
+   * Whether setting {@code operation} on every instance at once passes the guardrails
+   * setInstanceOperation runs, for callers that report the verdict in their own response.
+   */
+  protected ValidationResult validateInstanceOperation(String clusterId,
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
+    GuardrailContext.Builder context = instanceOperationContext(clusterId, instanceNames,
+        operation);
+    return validateAndRecord(instanceOperationGuardrails(clusterId, context, operation),
+        context.build(), false, false);
+  }
+
+  /**
+   * The guardrails for setting {@code operation}, shared by the single and batch paths. DISABLE and
+   * UNKNOWN drain replicas in place, so they must keep every partition at its minimum active
+   * replicas; wires that check into {@code context}. Every operation but DISABLE must leave WAGED
+   * partitions able to place all their replicas.
+   */
+  protected GuardrailPipeline instanceOperationGuardrails(String clusterId,
+      GuardrailContext.Builder context, InstanceConstants.InstanceOperation operation) {
+    List<GuardrailRule> rules = new ArrayList<>();
+    if (operation == InstanceConstants.InstanceOperation.DISABLE
+        || operation == InstanceConstants.InstanceOperation.UNKNOWN) {
+      HelixDataAccessor accessor = getDataAccssor(clusterId);
+      context.minActiveReplicaChecker((instance, stopped) -> InstanceValidationUtil
+          .siblingNodesActiveReplicaCheckWithDetails(accessor, instance, stopped, true));
+      rules.add(new InstanceDisableMinActiveReplicaGuardrailRule());
+    }
+    if (operation != InstanceConstants.InstanceOperation.DISABLE) {
+      rules.add(new InstanceOperationRebalanceFeasibilityGuardrailRule());
+    }
+    return new GuardrailPipeline(rules);
+  }
+
+  private ValidationResult validateAndRecord(GuardrailPipeline pipeline, GuardrailContext context,
+      boolean force, boolean dryRun) {
+    Map<String, Long> ruleDurationNanos = new LinkedHashMap<>();
+    ValidationResult result = pipeline.validate(context,
+        (ruleId, nanos) -> ruleDurationNanos.merge(ruleId, nanos, Long::sum));
+    GuardrailValidationEvent event = new GuardrailValidationEvent(getNamespace(),
+        pipeline.getRuleIds(), ruleDurationNanos, result, force, dryRun);
+    recordGuardrailMetrics(event);
+    notifyGuardrailValidationListeners(event);
+    return result;
+  }
+
+  /**
+   * The guardrail context for setting {@code operation} on {@code instanceNames}, with the WAGED
+   * what-if wired to this cluster's metadata store.
+   */
+  protected GuardrailContext.Builder instanceOperationContext(String clusterId,
+      Collection<String> instanceNames, InstanceConstants.InstanceOperation operation) {
+    WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
+      @Override
+      public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
+          List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+        return HelixUtil.getTargetAssignmentForWagedFullAutoOrThrow(getZkBucketDataAccessor(),
+            new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+            liveInstances, idealStates, resourceConfigs);
+      }
+
+      @Override
+      public DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig cfg,
+          List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+          List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
+          String drainedInstanceName) {
+        return HelixUtil.isDrainFeasibleViaPartialRebalance(getZkBucketDataAccessor(),
+            new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
+            liveInstances, idealStates, resourceConfigs, drainedInstanceName)
+            ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
+      }
+    };
+    return GuardrailContext.newBuilder(clusterId)
+        .dataAccessor(getDataAccssor(clusterId))
+        .instanceNames(instanceNames)
+        .proposedInstanceOperation(operation)
+        .wagedAssignmentProvider(wagedAssignmentProvider);
   }
 
   /**

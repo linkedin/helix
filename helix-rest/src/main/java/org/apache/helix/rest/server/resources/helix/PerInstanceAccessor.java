@@ -55,32 +55,26 @@ import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
 import org.apache.helix.guardrail.GuardrailPipeline;
-import org.apache.helix.guardrail.GuardrailRule;
 import org.apache.helix.guardrail.MinActiveReplicaChecker;
 import org.apache.helix.guardrail.WagedAssignmentProvider;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
-import org.apache.helix.guardrail.rules.InstanceOperationRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.InstanceTagRebalanceFeasibilityGuardrailRule;
 import org.apache.helix.guardrail.rules.LiveInstanceGuardrailRule;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
-import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.Error;
 import org.apache.helix.model.EvacuationInfo;
 import org.apache.helix.model.HealthStat;
 import org.apache.helix.model.HelixConfigScope;
-import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.InstanceReplicaStatus;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.OperationCheckResult;
 import org.apache.helix.model.ParticipantHistory;
-import org.apache.helix.model.ResourceAssignment;
-import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.clusterMaintenanceService.HealthCheck;
 import org.apache.helix.rest.clusterMaintenanceService.InstanceOperationMaintenanceWriteHandler;
@@ -615,56 +609,13 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           boolean runsFeasibilityRule =
               instanceOperation != InstanceConstants.InstanceOperation.DISABLE;
           if (dryRun || !force) {
-            HelixDataAccessor setInstanceOperationDataAccessor = getDataAccssor(clusterId);
-            GuardrailContext.Builder setInstanceOperationContextBuilder =
-                GuardrailContext.newBuilder(clusterId)
-                    .dataAccessor(setInstanceOperationDataAccessor)
-                    .instanceName(instanceName);
-            List<GuardrailRule> setInstanceOperationRules = new ArrayList<>();
-            if (drainsInPlace) {
-              // Same read-only ExternalView min-active-replica what-if as command=disable; DISABLE
-              // and UNKNOWN share it because both drain this instance's replicas in place.
-              MinActiveReplicaChecker minActiveReplicaChecker =
-                  (targetInstance, toBeStoppedInstances) -> InstanceValidationUtil
-                      .siblingNodesActiveReplicaCheckWithDetails(setInstanceOperationDataAccessor,
-                          targetInstance, toBeStoppedInstances, true);
-              setInstanceOperationContextBuilder.minActiveReplicaChecker(minActiveReplicaChecker);
-              setInstanceOperationRules.add(new InstanceDisableMinActiveReplicaGuardrailRule());
-            }
-            if (runsFeasibilityRule) {
-              // The provider keeps the ZK-accessor plumbing for the read-only WAGED what-if here in
-              // the REST layer. An accept-only partial-rebalance fast path short-circuits the full
-              // double what-if when it can constructively prove the drain is feasible.
-              WagedAssignmentProvider wagedAssignmentProvider = new WagedAssignmentProvider() {
-                @Override
-                public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
-                    List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-                    List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
-                  return HelixUtil.getTargetAssignmentForWagedFullAutoOrThrow(
-                      getZkBucketDataAccessor(),
-                      new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                      liveInstances, idealStates, resourceConfigs);
-                }
-
-                @Override
-                public DrainFeasibility attemptDrainFeasibilityShortCircuit(ClusterConfig cfg,
-                    List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-                    List<IdealState> idealStates, List<ResourceConfig> resourceConfigs,
-                    String drainedInstanceName) {
-                  return HelixUtil.isDrainFeasibleViaPartialRebalance(getZkBucketDataAccessor(),
-                      new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
-                      liveInstances, idealStates, resourceConfigs, drainedInstanceName)
-                      ? DrainFeasibility.FEASIBLE : DrainFeasibility.INCONCLUSIVE;
-                }
-              };
-              setInstanceOperationContextBuilder.proposedInstanceOperation(instanceOperation)
-                  .wagedAssignmentProvider(wagedAssignmentProvider);
-              setInstanceOperationRules.add(
-                  new InstanceOperationRebalanceFeasibilityGuardrailRule());
-            }
-            Optional<Response> setInstanceOperationPreflight =
-                preflight(new GuardrailPipeline(setInstanceOperationRules),
-                    setInstanceOperationContextBuilder.build(), force, dryRun);
+            // The batch setInstanceOperationMaintenance command runs the same guardrails.
+            GuardrailContext.Builder setInstanceOperationContextBuilder = instanceOperationContext(
+                clusterId, Collections.singletonList(instanceName), instanceOperation)
+                .instanceName(instanceName);
+            Optional<Response> setInstanceOperationPreflight = preflight(
+                instanceOperationGuardrails(clusterId, setInstanceOperationContextBuilder,
+                    instanceOperation), setInstanceOperationContextBuilder.build(), force, dryRun);
             if (setInstanceOperationPreflight.isPresent()) {
               return setInstanceOperationPreflight.get();
             }
