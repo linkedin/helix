@@ -185,14 +185,14 @@ public class TestWagedRebalance extends ZkTestBase {
    * verify that it matches with the result from the original WAGED rebalancer's algorithm result.
    */
   @Test(dependsOnMethods = "test")
-  public void testRebalanceTool() throws InterruptedException {
-    // Create resources for testing
-    // It is important to let controller to use sync mode the same as getTargetAssignmentForWagedFullAuto
-    // to make the test correct and stable.
+  public void testRebalanceTool() throws Exception {
+    // A legacy false value must not switch the controller out of async mode.
     HelixDataAccessor dataAccessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
     ClusterConfig clusterConfigGlobal =
         dataAccessor.getProperty(dataAccessor.keyBuilder().clusterConfig());
-    clusterConfigGlobal.setGlobalRebalanceAsyncMode(false);
+    String originalMode =
+        clusterConfigGlobal.getRecord().getSimpleField("GLOBAL_REBALANCE_ASYNC_MODE");
+    clusterConfigGlobal.getRecord().setSimpleField("GLOBAL_REBALANCE_ASYNC_MODE", "false");
     dataAccessor.setProperty(dataAccessor.keyBuilder().clusterConfig(), clusterConfigGlobal);
     try {
       int i = 0;
@@ -204,11 +204,16 @@ public class TestWagedRebalance extends ZkTestBase {
         _allDBs.add(db);
       }
 
+      Assert.assertTrue(TestHelper.verify(
+          () -> _assignmentMetadataStore.getBaseline().keySet().containsAll(_allDBs), 5000),
+          "Wait for the asynchronous baseline before comparing completed assignments");
       validate(_replica);
 
       // Read cluster parameters from ZK
       dataAccessor = new ZKHelixDataAccessor(CLUSTER_NAME, _baseAccessor);
       ClusterConfig clusterConfig = dataAccessor.getProperty(dataAccessor.keyBuilder().clusterConfig());
+      // Even a legacy true value cannot make the read-only utilities asynchronous.
+      clusterConfig.getRecord().setSimpleField("GLOBAL_REBALANCE_ASYNC_MODE", "true");
       List<InstanceConfig> instanceConfigs = dataAccessor.getChildValues(dataAccessor.keyBuilder().instanceConfigs(), true);
       List<String> liveInstances = dataAccessor.getChildNames(dataAccessor.keyBuilder().liveInstances());
       List<IdealState> idealStates = dataAccessor.getChildValues(dataAccessor.keyBuilder().idealStates(), true);
@@ -236,6 +241,9 @@ public class TestWagedRebalance extends ZkTestBase {
           .getImmediateAssignmentForWagedFullAuto(ZK_ADDR, clusterConfig, instanceConfigs,
               liveInstances, idealStates, resourceConfigs);
       Assert.assertNotNull(paritionMappingBasedResult);
+      Assert.assertEquals(
+          clusterConfig.getRecord().getSimpleField("GLOBAL_REBALANCE_ASYNC_MODE"), "true",
+          "Assignment utilities must preserve the caller's legacy metadata");
       Assert.assertEquals(paritionMappingBasedResult.size(), idealStates.size());
       for (IdealState idealState : idealStates) {
         Assert.assertTrue(paritionMappingBasedResult.containsKey(idealState.getResourceName()));
@@ -318,10 +326,13 @@ public class TestWagedRebalance extends ZkTestBase {
             "Unexpected exception message: " + e.getMessage());
       }
     } finally {
-      // restore the config with async mode
       clusterConfigGlobal =
           dataAccessor.getProperty(dataAccessor.keyBuilder().clusterConfig());
-      clusterConfigGlobal.setGlobalRebalanceAsyncMode(true);
+      if (originalMode == null) {
+        clusterConfigGlobal.getRecord().getSimpleFields().remove("GLOBAL_REBALANCE_ASYNC_MODE");
+      } else {
+        clusterConfigGlobal.getRecord().setSimpleField("GLOBAL_REBALANCE_ASYNC_MODE", originalMode);
+      }
       dataAccessor.setProperty(dataAccessor.keyBuilder().clusterConfig(), clusterConfigGlobal);
     }
   }

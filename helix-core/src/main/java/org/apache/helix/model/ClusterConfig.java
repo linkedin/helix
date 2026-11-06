@@ -149,18 +149,6 @@ public class ClusterConfig extends HelixProperty {
     // LESS_MOVEMENT - the tendency of keeping the current assignment instead of moving the partition for optimal assignment.
     // TOP_STATE_EVENNESS - an additional multiplier for the evenness of the top state usage only.
     REBALANCE_PREFERENCE,
-    // Specify if the WAGED rebalancer should asynchronously perform the global rebalance, which is
-    // in general slower than the partial rebalance.
-    // Note that asynchronous global rebalance calculation will reduce the controller rebalance
-    // delay. But it may cause more partition movements. This is because the partial rebalance will
-    // be performed with a stale baseline. The rebalance result would be an intermediate one and
-    // could be changed again when a new baseline is calculated.
-    // For more details, please refer to
-    // https://github.com/apache/helix/wiki/Weight-aware-Globally-Evenly-distributed-Rebalancer#rebalance-coordinator
-    //
-    // Default to be true.
-    GLOBAL_REBALANCE_ASYNC_MODE,
-
     // The target size of task thread pools for each participant. If participants specify their
     // individual pool sizes in their InstanceConfig's, this value will NOT be used; if participants
     // don't specify their individual pool sizes, this value will be used for all participants; if
@@ -236,7 +224,6 @@ public class ClusterConfig extends HelixProperty {
           .put(GlobalRebalancePreferenceKey.TOP_STATE_EVENNESS, 1).build();
   private final static int MAX_REBALANCE_PREFERENCE = 1000;
   private final static int MIN_REBALANCE_PREFERENCE = 0;
-  public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   public final static boolean DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   private static final int GLOBAL_TARGET_TASK_THREAD_POOL_SIZE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
@@ -1316,19 +1303,6 @@ public class ClusterConfig extends HelixProperty {
       return clamped;
     }
     return preference;
-  }
-
-  /**
-   * Set the asynchronous global rebalance mode.
-   * @param isAsync true if the global rebalance should be performed asynchronously
-   */
-  public void setGlobalRebalanceAsyncMode(boolean isAsync) {
-    _record.setBooleanField(ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(), isAsync);
-  }
-
-  public boolean isGlobalRebalanceAsyncModeEnabled() {
-    return _record.getBooleanField(ClusterConfigProperty.GLOBAL_REBALANCE_ASYNC_MODE.name(),
-        DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED);
   }
 
   /**

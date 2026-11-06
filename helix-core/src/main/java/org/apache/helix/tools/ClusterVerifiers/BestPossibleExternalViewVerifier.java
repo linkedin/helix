@@ -460,6 +460,8 @@ public class BestPossibleExternalViewVerifier extends ZkHelixClusterVerifier {
             _zkClient.getServers());
         DryrunWagedRebalancer dryrunWagedRebalancer = new DryrunWagedRebalancer(zkBucketDataAccessor,
             cache.getClusterName(), cache.getClusterConfig().getGlobalRebalancePreference())) {
+      // Verify against the controller's baseline, not a newly optimized independent baseline.
+      dryrunWagedRebalancer.updateChangeDetectorSnapshots(cache);
       event.addAttribute(AttributeName.STATEFUL_REBALANCER.name(), dryrunWagedRebalancer);
       RebalanceUtil.runStage(event, new BestPossibleStateCalcStage());
     }

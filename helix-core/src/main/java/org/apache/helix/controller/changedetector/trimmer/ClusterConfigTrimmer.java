@@ -51,7 +51,6 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
    * ERROR_OR_RECOVERY_PARTITION_THRESHOLD_FOR_LOAD_BALANCE,
    * DELAY_REBALANCE_ENABLED,
    * DELAY_REBALANCE_TIME,
-   * GLOBAL_REBALANCE_ASYNC_MODE,
    * P2P_MESSAGE_ENABLED,
    * All StateTransitionTimeoutConfig,
    * All StateTransitionThrottleConfig

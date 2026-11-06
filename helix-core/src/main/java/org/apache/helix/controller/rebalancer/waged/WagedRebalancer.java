@@ -149,7 +149,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
         // cluster has converged.
         helixManager == null ? new WagedRebalancerMetricCollector()
             : new WagedRebalancerMetricCollector(helixManager.getClusterName()),
-        ClusterConfig.DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED,
+        // Controller baseline calculation is always asynchronous.
+        true,
         ClusterConfig.DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED);
     _preference = ImmutableMap.copyOf(ClusterConfig.DEFAULT_GLOBAL_REBALANCE_PREFERENCE);
   }
@@ -157,6 +158,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   /**
    * This constructor will use null for HelixManager. With null HelixManager, the rebalancer will
    * not schedule for a future delayed rebalance.
+   * Global and partial assignment calculations complete synchronously.
    * @param assignmentMetadataStore
    * @param algorithm
    * @param metricCollectorOptional
@@ -427,11 +429,6 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (monitor != null) {
       monitor.resetWagedFailureRollupGauges();
     }
-  }
-
-  // Update the global rebalance mode to be asynchronous or synchronous
-  public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {
-    _globalRebalanceRunner.setGlobalRebalanceAsyncMode(isAsyncGlobalRebalanceEnabled);
   }
 
   // Update the partial rebalance mode to be asynchronous or synchronous

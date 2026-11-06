@@ -20,6 +20,7 @@ package org.apache.helix.controller.rebalancer.waged;
  */
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.MoreExecutors;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -29,6 +30,12 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
@@ -40,6 +47,10 @@ import org.apache.helix.controller.rebalancer.waged.model.AbstractTestClusterMod
 import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
+import org.apache.helix.controller.stages.AttributeName;
+import org.apache.helix.controller.stages.BestPossibleStateCalcStage;
+import org.apache.helix.controller.stages.ClusterEvent;
+import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
@@ -53,6 +64,7 @@ import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
 import org.apache.helix.monitoring.metrics.model.LatencyMetric;
+import org.apache.helix.util.StageThreadPoolHelper;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -60,6 +72,7 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -127,6 +140,119 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     }
 
     return testCache;
+  }
+
+  @DataProvider
+  public Object[][] globalRebalanceExecutionModes() {
+    return new Object[][] {
+        {true, null}, {true, "true"}, {true, "false"},
+        {false, null}, {false, "true"}, {false, "false"}
+    };
+  }
+
+  @Test(dataProvider = "globalRebalanceExecutionModes")
+  public void testPipelinePreservesGlobalRebalanceExecutionMode(boolean asynchronous,
+      String legacyValue) throws Exception {
+    ResourceControllerDataProvider cache = setupClusterDataCache();
+    ClusterConfig config = cache.getClusterConfig();
+    if (legacyValue != null) {
+      config.getRecord().setSimpleField("GLOBAL_REBALANCE_ASYNC_MODE", legacyValue);
+    }
+    Map<String, String> originalFields = new HashMap<>(config.getRecord().getSimpleFields());
+    when(cache.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    Map<String, Resource> resources = cache.getIdealStates().entrySet().stream()
+        .collect(Collectors.toMap(Map.Entry::getKey, entry -> {
+          Resource resource = new Resource(entry.getKey());
+          entry.getValue().getPartitionSet().forEach(resource::addPartition);
+          return resource;
+        }));
+    CountDownLatch baselineStarted = new CountDownLatch(1);
+    CountDownLatch releaseBaseline = new CountDownLatch(1);
+    RebalanceAlgorithm algorithm = model -> {
+      baselineStarted.countDown();
+      try {
+        if (!releaseBaseline.await(30, TimeUnit.SECONDS)) {
+          throw new HelixRebalanceException("Test baseline was not released",
+              HelixRebalanceException.Type.FAILED_TO_CALCULATE);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new HelixRebalanceException("Test baseline interrupted",
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE, e);
+      }
+      return new MockRebalanceAlgorithm().calculate(model);
+    };
+    WagedRebalancer rebalancer = asynchronous ? new GlobalOnlyRebalancer(algorithm)
+        : new GlobalOnlyRebalancer(new MockAssignmentMetadataStore(), algorithm);
+    ExecutorService pipelineExecutor = Executors.newSingleThreadExecutor();
+    ExecutorService metricsExecutor = MoreExecutors.newDirectExecutorService();
+    when(cache.getAsyncTasksThreadPool()).thenReturn(metricsExecutor);
+    ClusterEvent event = new ClusterEvent(ClusterEventType.Unknown);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resources);
+    event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), new CurrentStateOutput());
+    event.addAttribute(AttributeName.STATEFUL_REBALANCER.name(), rebalancer);
+    try {
+      Future<?> pipeline = pipelineExecutor.submit(() -> {
+        new BestPossibleStateCalcStage().process(event);
+        return null;
+      });
+      Assert.assertTrue(baselineStarted.await(5, TimeUnit.SECONDS),
+          "The global baseline calculation must run");
+      if (asynchronous) {
+        pipeline.get(5, TimeUnit.SECONDS);
+      } else {
+        boolean completed = true;
+        try {
+          pipeline.get(1, TimeUnit.SECONDS);
+        } catch (TimeoutException expected) {
+          completed = false;
+        }
+        Assert.assertFalse(completed, "Synchronous calculation must wait for the baseline");
+      }
+      releaseBaseline.countDown();
+      pipeline.get(5, TimeUnit.SECONDS);
+      Assert.assertEquals(config.getRecord().getSimpleFields(), originalFields,
+          "The pipeline must neither rewrite nor remove legacy metadata");
+    } finally {
+      releaseBaseline.countDown();
+      pipelineExecutor.shutdownNow();
+      rebalancer.close();
+      metricsExecutor.shutdownNow();
+      StageThreadPoolHelper.shutdown();
+    }
+  }
+
+  private static class GlobalOnlyRebalancer extends WagedRebalancer {
+    private final RebalanceAlgorithm _algorithm;
+
+    GlobalOnlyRebalancer(RebalanceAlgorithm algorithm) {
+      super(null);
+      _algorithm = algorithm;
+    }
+
+    GlobalOnlyRebalancer(AssignmentMetadataStore store, RebalanceAlgorithm algorithm) {
+      super(store, algorithm, Optional.empty());
+      _algorithm = algorithm;
+    }
+
+    @Override
+    public Map<String, IdealState> computeNewIdealStates(ResourceControllerDataProvider cache,
+        Map<String, Resource> resources, CurrentStateOutput currentState)
+        throws HelixRebalanceException {
+      computeBestPossibleAssignment(cache, resources, cache.getEnabledLiveInstances(), currentState,
+          _algorithm);
+      return Collections.emptyMap();
+    }
+
+    @Override
+    protected Map<String, ResourceAssignment> emergencyRebalance(ResourceControllerDataProvider cache,
+        Map<String, Resource> resources, Set<String> activeNodes, CurrentStateOutput currentState,
+        RebalanceAlgorithm algorithm) {
+      // Isolate global execution mode from partial/emergency assignment work.
+      return Collections.emptyMap();
+    }
   }
 
   @Test
