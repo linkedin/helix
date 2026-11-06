@@ -750,6 +750,12 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
       updateNotificationTime(System.nanoTime());
       if (parentPath != null && parentPath.startsWith(_path)) {
         if (currentChilds == null && parentPath.equals(_path)) {
+          if (!isReady()) {
+            // A reset handler must not remove the live handler that now owns the same path.
+            logger.info("CallbackHandler {} is in reset state, skip removing listener on {}", _uid,
+                _path);
+            return;
+          }
           // _path has been removed, remove this listener
           // removeListener will call handler.reset(), which in turn call invoke() on FINALIZE type
           boolean rt = _manager.removeListener(_propertyKey, _listener);
