@@ -484,13 +484,13 @@ public class TestConfigAccessor extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    cloudConfigInitBuilder.setCloudID("TestCloudID");
     List<String> sourceList = new ArrayList<String>();
     sourceList.add("TestURL");
     cloudConfigInitBuilder.setCloudInfoSources(sourceList);
     cloudConfigInitBuilder.setCloudInfoProcessorName("TestProcessor");
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
+    cloudConfigInit.getRecord().setSimpleField("CLOUD_ID", "TestCloudID");
 
     _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
 
@@ -498,7 +498,7 @@ public class TestConfigAccessor extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessor");
@@ -512,7 +512,7 @@ public class TestConfigAccessor extends ZkUnitTestBase {
 
     cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessor2");
@@ -528,13 +528,13 @@ public class TestConfigAccessor extends ZkUnitTestBase {
 
     CloudConfig.Builder cloudConfigInitBuilder = new CloudConfig.Builder();
     cloudConfigInitBuilder.setCloudEnabled(true);
-    cloudConfigInitBuilder.setCloudID("TestCloudID");
     List<String> sourceList = new ArrayList<String>();
     sourceList.add("TestURL");
     cloudConfigInitBuilder.setCloudInfoSources(sourceList);
     cloudConfigInitBuilder.setCloudInfoProcessorName("TestProcessor");
     cloudConfigInitBuilder.setCloudProvider(CloudProvider.AZURE);
     CloudConfig cloudConfigInit = cloudConfigInitBuilder.build();
+    cloudConfigInit.getRecord().setSimpleField("CLOUD_ID", "TestCloudID");
 
     _clusterSetup.addCluster(clusterName, false, cloudConfigInit);
 
@@ -542,7 +542,7 @@ public class TestConfigAccessor extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessor");
@@ -551,14 +551,14 @@ public class TestConfigAccessor extends ZkUnitTestBase {
     // Change the processor name and check if processor name has been changed in Zookeeper.
     CloudConfig.Builder cloudConfigBuilderToDelete = new CloudConfig.Builder();
     cloudConfigBuilderToDelete.setCloudInfoProcessorName("TestProcessor");
-    cloudConfigBuilderToDelete.setCloudID("TestCloudID");
     CloudConfig cloudConfigToDelete = cloudConfigBuilderToDelete.build();
+    cloudConfigToDelete.getRecord().setSimpleField("CLOUD_ID", "TestCloudID");
 
     _configAccessor.deleteCloudConfigFields(clusterName, cloudConfigToDelete);
 
     cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertNull(cloudConfigFromZk.getCloudID());
+    Assert.assertNull(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"));
     listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertNull(cloudConfigFromZk.getCloudInfoProcessorName());

@@ -43,7 +43,6 @@ public class TestAzureCloudInstanceInformationProcessor extends MockHttpClient {
     CloudConfig.Builder cloudConfigBuilder = new CloudConfig.Builder();
     cloudConfigBuilder.setCloudEnabled(true);
     cloudConfigBuilder.setCloudProvider(CloudProvider.AZURE);
-    cloudConfigBuilder.setCloudID("TestID");
     HelixCloudProperty helixCloudProperty = new HelixCloudProperty(cloudConfigBuilder.build());
     AzureCloudInstanceInformationProcessor processor = new AzureCloudInstanceInformationProcessor(
         helixCloudProperty, createMockHttpClient(responseFile));

@@ -394,7 +394,6 @@ public class TestMultiZkConnectionConfig extends MultiZkTestBase {
     // Set to Customized so CloudInfoSources and CloudInfoProcessorName will be read from cloud config
     // instead of properties
     cloudConfigBuilder.setCloudProvider(CloudProvider.CUSTOMIZED);
-    cloudConfigBuilder.setCloudID("TestID");
     List<String> infoURL = new ArrayList<String>();
     infoURL.add("TestURL");
     cloudConfigBuilder.setCloudInfoSources(infoURL);
@@ -433,7 +432,6 @@ public class TestMultiZkConnectionConfig extends MultiZkTestBase {
 
     // Test reading from zk cloud config overwrite property fields included in cloud config
     Assert.assertFalse(newCloudProperty.getCloudEnabled());
-    Assert.assertNull(newCloudProperty.getCloudId());
     Assert.assertNull(newCloudProperty.getCloudProvider());
 
     // Test non-cloud config fields are not overwritten after reading cloud config from zk
