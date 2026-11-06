@@ -80,10 +80,23 @@ export class InputInlineComponent implements ControlValueAccessor, OnInit {
     return false;
   }
 
+  // Only one field may be edited at a time, so a change is always a single,
+  // reviewable key.
+  private static active: InputInlineComponent = null;
+
+  isChanged() {
+    return this.value !== this.lastValue;
+  }
+
   edit(value) {
-    if (this.disabled) {
+    if (this.disabled || this.editing) {
       return;
     }
+
+    if (InputInlineComponent.active && InputInlineComponent.active !== this) {
+      InputInlineComponent.active.cancel();
+    }
+    InputInlineComponent.active = this;
 
     this.lastValue = value;
     this.editing = true;
@@ -92,18 +105,29 @@ export class InputInlineComponent implements ControlValueAccessor, OnInit {
     });
   }
 
-  onBlur($event: Event) {
+  save() {
     if (this.hasError()) {
-      return false;
+      return;
     }
 
-    // this.blur();
     this.editing = false;
-    this.change.emit(this.value);
+    this.release();
+    if (this.isChanged()) {
+      this.change.emit(this.value);
+      // the parent confirms and reloads; show the old value until it does
+      this.value = this.lastValue;
+    }
   }
 
   cancel() {
-    this._value = this.lastValue;
+    this.value = this.lastValue;
     this.editing = false;
+    this.release();
+  }
+
+  private release() {
+    if (InputInlineComponent.active === this) {
+      InputInlineComponent.active = null;
+    }
   }
 }
