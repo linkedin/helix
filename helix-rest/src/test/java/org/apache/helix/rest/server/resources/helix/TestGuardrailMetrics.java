@@ -198,6 +198,20 @@ public class TestGuardrailMetrics {
   }
 
   @Test
+  public void testIndeterminateCountedOnTopOfTheOutcome() {
+    MetricRegistry metrics = new MetricRegistry();
+    record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(), ValidationResult.of(
+        Arrays.asList(Violation.newBuilder("A").indeterminate().build(),
+            Violation.newBuilder("A").indeterminate().build(),
+            Violation.newBuilder("B").message("nope").build())), false, false);
+
+    Assert.assertEquals(count(metrics, "A", GuardrailMetrics.INDETERMINATE), 1);
+    Assert.assertEquals(count(metrics, "A", GuardrailMetrics.BLOCKED), 1);
+    Assert.assertEquals(evaluatedCount(metrics, "A"), 1);
+    Assert.assertEquals(count(metrics, "B", GuardrailMetrics.INDETERMINATE), 0);
+  }
+
+  @Test
   public void testDistinctViolatingRulesEachCounted() {
     MetricRegistry metrics = new MetricRegistry();
     record(metrics, Arrays.asList("A", "B"), Collections.emptyMap(),

@@ -37,6 +37,7 @@ import com.google.common.base.Joiner;
 import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.PropertyType;
 import org.apache.helix.controller.common.PartitionStateMap;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -196,7 +197,7 @@ public final class HelixUtil {
     Map<String, ResourceAssignment> result =
         getAssignmentForWagedFullAutoImpl(new ZkBucketDataAccessor(metadataStoreAddress),
             baseDataAccessor, clusterConfig, instanceConfigs, liveInstances, idealStates,
-            resourceConfigs, false);
+            resourceConfigs, false, false);
     baseDataAccessor.close();
     return result;
   }
@@ -219,7 +220,21 @@ public final class HelixUtil {
       ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
       List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
     return getAssignmentForWagedFullAutoImpl(zkBucketDataAccessor, baseDataAccessor, clusterConfig,
-        instanceConfigs, liveInstances, idealStates, resourceConfigs, true);
+        instanceConfigs, liveInstances, idealStates, resourceConfigs, true, false);
+  }
+
+  /**
+   * Same as {@link #getTargetAssignmentForWagedFullAuto(ZkBucketDataAccessor, BaseDataAccessor,
+   * ClusterConfig, List, List, List, List)}, but throws a HelixException when WAGED cannot compute
+   * one of the given resources, instead of returning it with empty replica maps. Use it where an
+   * empty result must not read as a valid assignment, such as a guardrail what-if.
+   */
+  public static Map<String, ResourceAssignment> getTargetAssignmentForWagedFullAutoOrThrow(
+      ZkBucketDataAccessor zkBucketDataAccessor, BaseDataAccessor<ZNRecord> baseDataAccessor,
+      ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
+      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
+    return getAssignmentForWagedFullAutoImpl(zkBucketDataAccessor, baseDataAccessor, clusterConfig,
+        instanceConfigs, liveInstances, idealStates, resourceConfigs, true, true);
   }
 
   /**
@@ -244,7 +259,7 @@ public final class HelixUtil {
     Map<String, ResourceAssignment> result =
         getAssignmentForWagedFullAutoImpl(new ZkBucketDataAccessor(metadataStoreAddress),
             baseDataAccessor, clusterConfig, instanceConfigs, liveInstances, idealStates,
-            resourceConfigs, false);
+            resourceConfigs, false, false);
     baseDataAccessor.close();
     return result;
   }
@@ -252,12 +267,14 @@ public final class HelixUtil {
   /*
    * If usePrefLists is set to true, the returned assignment is based on preference lists; if
    * false, the returned assignment is based on partition state mapping, which may differ from
-   * preference lists.
+   * preference lists. If failOnUncomputed is set, a resource the stage could not compute throws
+   * instead of coming back with empty replica maps.
    */
   private static Map<String, ResourceAssignment> getAssignmentForWagedFullAutoImpl(
       ZkBucketDataAccessor zkBucketDataAccessor, BaseDataAccessor<ZNRecord> baseDataAccessor,
       ClusterConfig clusterConfig, List<InstanceConfig> instanceConfigs, List<String> liveInstances,
-      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs, boolean usePrefLists) {
+      List<IdealState> idealStates, List<ResourceConfig> resourceConfigs, boolean usePrefLists,
+      boolean failOnUncomputed) {
 
     // Copy the cluster config and make globalRebalance happen synchronously
     // Otherwise, globalRebalance may not complete and this util might end up returning
@@ -270,9 +287,18 @@ public final class HelixUtil {
         new ZKHelixDataAccessor(globalSyncClusterConfig.getClusterName(), baseDataAccessor);
 
     // Create an instance of read-only WAGED rebalancer
-    ReadOnlyWagedRebalancer readOnlyWagedRebalancer =
-        new ReadOnlyWagedRebalancer(zkBucketDataAccessor, globalSyncClusterConfig.getClusterName(),
-            globalSyncClusterConfig.getGlobalRebalancePreference());
+    String clusterName = globalSyncClusterConfig.getClusterName();
+    Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> preference =
+        globalSyncClusterConfig.getGlobalRebalancePreference();
+    ReadOnlyWagedRebalancer readOnlyWagedRebalancer = !failOnUncomputed
+        ? new ReadOnlyWagedRebalancer(zkBucketDataAccessor, clusterName, preference)
+        : new ReadOnlyWagedRebalancer(zkBucketDataAccessor, clusterName, preference) {
+          // Never fall back to the persisted assignment, which would hide what cannot compute.
+          @Override
+          protected List<HelixRebalanceException.Type> failureTypesToPropagate() {
+            return Arrays.asList(HelixRebalanceException.Type.values());
+          }
+        };
 
     // Use a dummy event to run the required stages for BestPossibleState calculation
     // Attributes RESOURCES and RESOURCES_TO_REBALANCE are populated in ResourceComputationStage
@@ -340,6 +366,14 @@ public final class HelixUtil {
         .isEmpty())) {
       throw new HelixException(
           "getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed to compute BestPossibleState!");
+    }
+    // The stage leaves out a resource it failed to compute, which would read as no replicas.
+    List<String> failed = idealStates.stream().map(IdealState::getResourceName)
+        .filter(resource -> output.getPreferenceLists(resource) == null)
+        .collect(Collectors.toList());
+    if (failOnUncomputed && !failed.isEmpty()) {
+      throw new HelixException("getIdealAssignmentForWagedFullAuto(): Calculation failed: Failed "
+          + "to compute BestPossibleState for " + failed);
     }
     for (IdealState idealState : idealStates) {
       String resourceName = idealState.getResourceName();

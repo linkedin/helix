@@ -640,7 +640,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
                 public Map<String, ResourceAssignment> computeTargetAssignment(ClusterConfig cfg,
                     List<InstanceConfig> instanceConfigs, List<String> liveInstances,
                     List<IdealState> idealStates, List<ResourceConfig> resourceConfigs) {
-                  return HelixUtil.getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                  return HelixUtil.getTargetAssignmentForWagedFullAutoOrThrow(
+                      getZkBucketDataAccessor(),
                       new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
                       liveInstances, idealStates, resourceConfigs);
                 }
@@ -731,7 +732,7 @@ public class PerInstanceAccessor extends AbstractHelixResource {
           if (dryRun || !force) {
             WagedAssignmentProvider wagedAssignmentProvider =
                 (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> HelixUtil
-                    .getTargetAssignmentForWagedFullAuto(getZkBucketDataAccessor(),
+                    .getTargetAssignmentForWagedFullAutoOrThrow(getZkBucketDataAccessor(),
                         new ZkBaseDataAccessor<>(getRealmAwareZkClient()), cfg, instanceConfigs,
                         liveInstances, idealStates, resourceConfigs);
             GuardrailContext removeTagContext = GuardrailContext.newBuilder(clusterId)

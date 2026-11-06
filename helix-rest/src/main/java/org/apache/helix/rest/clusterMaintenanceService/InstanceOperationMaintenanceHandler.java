@@ -46,6 +46,7 @@ import org.apache.helix.api.exceptions.HelixMetaDataAccessException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.ValidationResult;
 import org.apache.helix.guardrail.Violation;
+import org.apache.helix.guardrail.rules.InstanceDisableMinActiveReplicaGuardrailRule;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
@@ -55,6 +56,8 @@ import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.common.PathUtils;
 import org.apache.zookeeper.data.Stat;
@@ -111,9 +114,9 @@ import org.slf4j.LoggerFactory;
  * <p>An operation its source already holds is not set again, so repeating a request never
  * reorders the operation stack, and a request that changes nothing writes nothing. An ADMIN
  * operation is held only while it is the only one and in effect, since setting it again clears the
- * rest. Repeating a request is always safe. A held operation still goes through the transition and
- * topology checks of {@link InstanceUtil#setInstanceOperation}, so both paths accept exactly the
- * same requests.
+ * rest. Repeating a request is always safe, and is how a caller settles an unknown outcome. A held
+ * operation still goes through the transition and topology checks of
+ * {@link InstanceUtil#setInstanceOperation}, so both paths accept exactly the same requests.
  */
 public class InstanceOperationMaintenanceHandler {
   private static final Logger LOG =
@@ -121,15 +124,17 @@ public class InstanceOperationMaintenanceHandler {
 
   private static final int MAX_QUOTED_LENGTH = 200;
   static final int MAX_ATTEMPTS = 5;
+  /**
+   * Half the default jute.maxbuffer. ZooKeeper drops a larger multi together with the connection,
+   * and the client resends it until its retry timeout.
+   */
+  static final int MAX_COMMIT_BYTES = 512 * 1024;
   /** Expiry that takes the cluster's default marker duration. */
   public static final long DEFAULT_EXPIRY = 0L;
   /** Expiry that clears the marker when no operation is given. */
   public static final long CLEAR_MARKER = -1L;
   /** The longest a marker may run, so a wrong expiry cannot exempt an instance for good. */
   static final long MAX_DURATION_MS = 7 * 24 * 3_600_000L;
-  /** How {@link org.apache.helix.guardrail.GuardrailPipeline} reports a rule that failed. */
-  private static final String RULE_FAILED = "Rule evaluation failed: ";
-  private static final String RULE_RETURNED_NOTHING = "Rule returned no result.";
   private static final Set<InstanceConstants.InstanceOperation> OPERATIONS = EnumSet.of(
       InstanceConstants.InstanceOperation.ENABLE, InstanceConstants.InstanceOperation.DISABLE,
       InstanceConstants.InstanceOperation.EVACUATE);
@@ -151,11 +156,16 @@ public class InstanceOperationMaintenanceHandler {
      */
     DUPLICATE_LOGICAL_ID,
     /**
-     * The rebalance-feasibility guardrail judged the instances this request changes unsafe
-     * together, or cannot judge them because the cluster's own WAGED assignment fails. Needs an
-     * operator; the message says whether to change fewer instances or fix the cluster.
+     * A guardrail judged the instances this request changes unsafe together: they leave
+     * partitions unable to place all their replicas, or, for DISABLE, below their minimum active
+     * replicas. Change fewer instances at once; the message says what else to do.
      */
     GUARDRAIL_REJECTED,
+    /**
+     * The guardrail could not judge the instances this request changes, so nothing was written.
+     * Resend once; if it comes back, the message says what an operator must fix.
+     */
+    GUARDRAIL_INDETERMINATE,
     /**
      * The marker cap has no room for this instance. Retry once markers are cleared or expire. A
      * cap of 0 admits none, and the message says it must be raised.
@@ -168,13 +178,18 @@ public class InstanceOperationMaintenanceHandler {
     NOT_APPLIED,
     /** Lost the race to concurrent writers on every attempt. Resend. */
     CONFLICT,
-    /** The guardrail could not be evaluated, so this instance was not written. Resend. */
+    /**
+     * Failed on an unexpected error, such as a ZooKeeper failure. The message says whether the
+     * commit may have landed. Resend to settle it.
+     */
     ERROR
   }
 
   /**
    * Per-instance result. Every {@link Status#APPLIED} instance was written in one commit, and no
-   * other instance was. Every outcome carries a message, written to be shown to an operator as is.
+   * other instance was. A CONFLICT or ERROR normally wrote nothing, but after a ZooKeeper
+   * connection loss the commit may have landed; repeating the request settles it. Every outcome
+   * carries a message, written to be shown to an operator as is.
    */
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public static final class Outcome {
@@ -216,6 +231,13 @@ public class InstanceOperationMaintenanceHandler {
   public static class BadRequestException extends RuntimeException {
     public BadRequestException(String message) {
       super(message);
+    }
+  }
+
+  /** A commit was sent and something failed after it, so whether it landed is unknown. */
+  private static final class UnknownCommitException extends RuntimeException {
+    private UnknownCommitException(RuntimeException cause) {
+      super(cause);
     }
   }
 
@@ -276,9 +298,9 @@ public class InstanceOperationMaintenanceHandler {
    * @param expiresAtMillis marker expiry: a future epoch time, {@link #DEFAULT_EXPIRY}, or with no
    *     operation {@link #CLEAR_MARKER}. Ignored for ENABLE.
    * @throws BadRequestException if the operation or source is not supported, the instance list
-   *     is empty or has a name that is not a valid znode name, the cluster does not exist, or the
+   *     is empty or has a name that is not a valid znode name, the cluster does not exist, the
    *     expiry is in the past, more than {@link #MAX_DURATION_MS} away, or the default with no
-   *     cluster default in that range.
+   *     cluster default in that range, or the configs to write exceed {@link #MAX_COMMIT_BYTES}.
    */
   public Map<String, Outcome> apply(String clusterId, List<String> instances,
       InstanceConfig.InstanceOperation operation, long expiresAtMillis) {
@@ -303,11 +325,12 @@ public class InstanceOperationMaintenanceHandler {
       throw new BadRequestException("Cluster " + clusterId + " does not exist.");
     }
     long expiresAt = expiresAtMillis;
+    long defaultDurationMs = -1L;
     if (operation == null ? expiresAtMillis == CLEAR_MARKER
         : operation.getOperation() == InstanceConstants.InstanceOperation.ENABLE) {
       expiresAt = InstanceConfig.INSTANCE_OPERATION_MAINTENANCE_NOT_SET;
     } else if (expiresAtMillis == DEFAULT_EXPIRY) {
-      long defaultDurationMs = new ClusterConfig(clusterRecord)
+      defaultDurationMs = new ClusterConfig(clusterRecord)
           .getDefaultInstanceOperationMaintenanceDurationMs();
       if (defaultDurationMs <= 0L) {
         throw new BadRequestException("expiresAtMillis is missing or 0, which asks for the "
@@ -340,7 +363,18 @@ public class InstanceOperationMaintenanceHandler {
 
     List<String> names = new ArrayList<>(new LinkedHashSet<>(instances));
     String requestId = UUID.randomUUID().toString();
-    Map<String, Outcome> outcomes = commit(clusterId, names, operation, expiresAt, requestId);
+    Map<String, Outcome> outcomes;
+    try {
+      outcomes = commit(clusterId, names, operation, expiresAt, defaultDurationMs, requestId);
+    } catch (BadRequestException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      boolean unknown = e instanceof UnknownCommitException;
+      Throwable failure = unknown ? e.getCause() : e;
+      LOG.warn("Request {} failed to apply to {} in cluster {}", requestId, names, clusterId,
+          failure);
+      outcomes = all(names, new Outcome(Status.ERROR, failureMessage(failure, unknown)));
+    }
     LOG.info("Instance operation maintenance request {} in cluster {}, operation {}, marker "
             + "expiry {}: {} {}", requestId, clusterId,
         operation == null ? "none" : operation.getOperation() + " by " + operation.getSource(),
@@ -348,10 +382,48 @@ public class InstanceOperationMaintenanceHandler {
     return outcomes;
   }
 
+  /**
+   * The message for a request that failed on an unexpected error. It names the ZooKeeper error
+   * when there is one and never carries Java exception text, which the server log keeps.
+   *
+   * @param unknown whether a commit was sent before the failure, so it may have landed.
+   */
+  public static String failureMessage(Throwable failure, boolean unknown) {
+    String cause = zooKeeperCause(failure);
+    String detail = cause == null ? "" : " (" + cause + ")";
+    return unknown
+        ? "Failed after the commit was sent" + detail + ", so whether it was written is unknown. "
+            + "Resend the request to settle it."
+        : "Nothing was written: the request failed" + detail + ". Resend the request; if it "
+            + "keeps failing, check the Helix REST server log.";
+  }
+
+  private static String zooKeeperCause(Throwable failure) {
+    Throwable cause = failure;
+    for (int depth = 0; cause != null && depth < 20; depth++, cause = cause.getCause()) {
+      if (cause instanceof KeeperException) {
+        return "ZooKeeper error " + ((KeeperException) cause).code();
+      }
+      if (cause instanceof ZkTimeoutException) {
+        return "ZooKeeper timed out";
+      }
+    }
+    return null;
+  }
+
   private Map<String, Outcome> commit(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAt, String requestId) {
+      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs,
+      String requestId) {
     for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      Map<String, Outcome> outcomes = tryCommit(clusterId, instances, operation, expiresAt);
+      Map<String, Outcome> outcomes;
+      try {
+        outcomes = tryCommit(clusterId, instances, operation, expiresAt, defaultDurationMs);
+      } catch (BadRequestException | UnknownCommitException e) {
+        throw e;
+      } catch (RuntimeException e) {
+        // A commit that lost a race may still have landed before a connection loss.
+        throw attempt == 1 ? e : new UnknownCommitException(e);
+      }
       if (outcomes != null) {
         return outcomes;
       }
@@ -364,7 +436,7 @@ public class InstanceOperationMaintenanceHandler {
 
   /** Reads, judges and commits the request once. Returns null when the commit lost a race. */
   private Map<String, Outcome> tryCommit(String clusterId, List<String> instances,
-      InstanceConfig.InstanceOperation operation, long expiresAt) {
+      InstanceConfig.InstanceOperation operation, long expiresAt, long defaultDurationMs) {
     List<String> paths = instances.stream()
         .map(instance -> PropertyPathBuilder.instanceConfig(clusterId, instance))
         .collect(Collectors.toList());
@@ -388,6 +460,8 @@ public class InstanceOperationMaintenanceHandler {
     Map<String, Outcome> outcomes = new LinkedHashMap<>();
     // Each instance's write, or its version check when held as is; sent only if it stays APPLIED.
     Map<String, Op> staged = new LinkedHashMap<>();
+    int writes = 0;
+    long bytes = 0L;
     Map<Integer, ZNRecord> written = new LinkedHashMap<>();
     for (int i = 0; i < instances.size(); i++) {
       String instance = instances.get(i);
@@ -469,34 +543,32 @@ public class InstanceOperationMaintenanceHandler {
           config.isUnderInstanceOperationMaintenance(nowMs) ? until : null));
       if (!holds || until != before) {
         written.put(i, config.getRecord());
-        staged.put(instance, Op.setData(paths.get(i),
-            _zkClient.serialize(config.getRecord(), paths.get(i)), stats.get(i).getVersion()));
+        byte[] data = _zkClient.serialize(config.getRecord(), paths.get(i));
+        writes++;
+        bytes += data.length;
+        staged.put(instance, Op.setData(paths.get(i), data, stats.get(i).getVersion()));
       } else {
         // Held as is, so the commit fails if it changed since it was judged.
         staged.put(instance, Op.check(paths.get(i), stats.get(i).getVersion()));
       }
     }
 
+    if (bytes > MAX_COMMIT_BYTES) {
+      throw new BadRequestException(String.format("The %d instance configs to write take %d "
+          + "bytes, over the %d byte limit of one commit. Send fewer instances per request.",
+          writes, bytes, MAX_COMMIT_BYTES));
+    }
     if (!changingByLogicalId.isEmpty()) {
-      Collection<String> changing = changingByLogicalId.values();
+      List<String> changing = new ArrayList<>(changingByLogicalId.values());
       ValidationResult verdict = _guardrail.apply(changing);
-      List<Violation> judged = verdict.isFeasible() ? new ArrayList<>()
-          : verdict.getViolations().stream()
-              .filter(violation -> !failedToEvaluate(violation)).collect(Collectors.toList());
-      if (!verdict.isFeasible() && judged.isEmpty()) {
-        LOG.warn("The guardrail failed to evaluate {} on {} in cluster {}: {}",
-            operation.getOperation(), changing, clusterId, verdict.getViolations());
-        Outcome error = new Outcome(Status.ERROR, "Not written: the rebalance-feasibility "
-            + "guardrail failed to evaluate " + operation.getOperation() + " on the "
-            + plural(changing.size(), "instance") + " this request changes. Resend it; if it "
-            + "keeps failing, check the Helix REST server log.");
-        changing.forEach(instance -> outcomes.put(instance, error));
-      } else if (!judged.isEmpty()) {
+      List<Violation> rejection = verdict.isFeasible() ? null : judged(verdict);
+      if (!verdict.isFeasible() && rejection == null) {
+        outcomes.putAll(cannotJudge(clusterId, changing, operation.getOperation(), verdict));
+      } else if (rejection != null) {
         LOG.warn("The guardrail rejected {} on {} in cluster {}: {}", operation.getOperation(),
             changing, clusterId, verdict.getViolations());
-        Outcome outcome = new Outcome(Status.GUARDRAIL_REJECTED,
-            guardrailMessage(judged, operation.getOperation(), changing.size()));
-        changing.forEach(instance -> outcomes.put(instance, outcome));
+        outcomes.putAll(all(changing, new Outcome(Status.GUARDRAIL_REJECTED, guardrailMessage(
+            rejection, changes(operation.getOperation(), changing.size()), advice(rejection)))));
       }
     }
     if (cap != null) {
@@ -522,6 +594,18 @@ public class InstanceOperationMaintenanceHandler {
     if (ops.isEmpty()) {
       return outcomes;
     }
+    if (expiresAt > 0L && expiresAt <= System.currentTimeMillis()) {
+      Outcome error = new Outcome(Status.ERROR, defaultDurationMs > 0L
+          ? "Nothing was written: the cluster default marker duration of " + defaultDurationMs
+              + " ms ran out before the commit. Give an expiry, or raise "
+              + "DEFAULT_INSTANCE_OPERATION_MAINTENANCE_DURATION_MS for cluster " + clusterId + "."
+          : "Nothing was written: the marker expiry " + Instant.ofEpochMilli(expiresAt)
+              + " passed before the commit. Resend with a later expiry.");
+      outcomes.replaceAll((instance, outcome) ->
+          outcome.getStatus() == Status.APPLIED ? error : outcome);
+      return outcomes;
+    }
+
     written.keySet().removeIf(i -> outcomes.get(instances.get(i)).getStatus() != Status.APPLIED);
     ops.addAll(checks);
     ops.add(Op.check(clusterConfigPath, clusterStat.getVersion()));
@@ -529,8 +613,37 @@ public class InstanceOperationMaintenanceHandler {
       _zkClient.multi(ops);
       return outcomes;
     } catch (ZkBadVersionException | ZkNoNodeException e) {
-      return landed(paths, stats, written) ? outcomes : null;
+      try {
+        return landed(paths, stats, written) ? outcomes : null;
+      } catch (RuntimeException r) {
+        throw new UnknownCommitException(r);
+      }
+    } catch (RuntimeException e) {
+      throw new UnknownCommitException(e);
     }
+  }
+
+  /**
+   * The verdict's violations that judge the change unsafe, or null when it holds none: every
+   * violation is indeterminate.
+   */
+  private static List<Violation> judged(ValidationResult verdict) {
+    List<Violation> judged = verdict.getViolations().stream()
+        .filter(violation -> !violation.isIndeterminate()).collect(Collectors.toList());
+    return judged.isEmpty() ? null : judged;
+  }
+
+  /** Outcomes for a check that cannot judge: every changing instance fails alike. */
+  private static Map<String, Outcome> cannotJudge(String clusterId, List<String> changing,
+      InstanceConstants.InstanceOperation operation, ValidationResult verdict) {
+    LOG.warn("The guardrail could not judge {} on {} in cluster {}: {}", operation, changing,
+        clusterId, verdict.getViolations());
+    boolean minActive = isMinActive(verdict.getViolations().get(0));
+    return all(changing, new Outcome(Status.GUARDRAIL_INDETERMINATE, "Not written: the "
+        + (minActive ? "min-active-replica" : "rebalance-feasibility") + " guardrail could not "
+        + "judge " + changes(operation, changing.size()) + ". Resend it once; if it comes back, "
+        + (minActive ? "the server log says why it could not read the cluster's ExternalViews."
+            : "the cluster's WAGED rebalance must be fixed.")));
   }
 
   /**
@@ -680,41 +793,44 @@ public class InstanceOperationMaintenanceHandler {
   }
 
   /**
-   * Says why the guardrail rejected the batch, from its structured violations. The violations' own
-   * text is written for endpoints that accept force=true, which this one does not, so only an
+   * Says why the guardrail rejected the change, from its structured violations. The violations'
+   * own text is written for endpoints that accept force=true, which this one does not, so only an
    * unrecognized violation is quoted.
    */
-  private static String guardrailMessage(List<Violation> violations,
-      InstanceConstants.InstanceOperation operation, int changing) {
+  private static String guardrailMessage(List<Violation> violations, String subject,
+      String advice) {
     Violation first = violations.get(0);
     String head = "Rejected by guardrail " + first.getRuleId() + ": ";
-    String subject = operation + " on the " + plural(changing, "instance")
-        + " this request changes";
+    if (isMinActive(first)) {
+      return head + subject + " would leave partition " + first.getPartitionName() + " of "
+          + "resource " + first.getResourceName() + " below its minActiveReplicas." + advice;
+    }
     List<String> partitions = violations.stream().map(Violation::getPartitionName)
         .filter(Objects::nonNull).collect(Collectors.toList());
     if (!partitions.isEmpty()) {
       boolean more = partitions.size() > 3 || partitions.size() < violations.size();
       return head + subject + " would leave partitions unable to place all their replicas, "
           + "including " + listed(partitions.subList(0, Math.min(3, partitions.size())), more)
-          + ". Change fewer instances at once, or add assignable capacity.";
+          + "." + advice;
     }
     String text = String.valueOf(first.getMessage());
-    if (text.startsWith("Could not compute a baseline WAGED assignment")) {
-      return head + "the cluster's current WAGED assignment cannot be computed, so " + subject
-          + " cannot be shown safe. Fix the cluster's WAGED rebalance first.";
-    }
     if (text.startsWith("Applying ")
         && text.contains("makes the WAGED rebalancer unable to compute")) {
       return head + subject + " would leave WAGED unable to compute any assignment for the "
-          + "cluster. Change fewer instances at once, or add assignable capacity.";
+          + "cluster." + advice;
     }
-    return head + clip(oneLine(text), 500);
+    return head + clip(oneLine(text), 500) + advice;
   }
 
-  /** Whether the guardrail failed to judge rather than judged the change unsafe. */
-  private static boolean failedToEvaluate(Violation violation) {
-    String text = String.valueOf(violation.getMessage());
-    return text.startsWith(RULE_FAILED) || text.equals(RULE_RETURNED_NOTHING);
+  private static boolean isMinActive(Violation violation) {
+    return InstanceDisableMinActiveReplicaGuardrailRule.RULE_ID.equals(violation.getRuleId());
+  }
+
+  /** What to do about a change the violations reject. */
+  private static String advice(List<Violation> violations) {
+    return isMinActive(violations.get(0))
+        ? " Wait for its other replicas to recover, or change fewer instances at once."
+        : " Change fewer instances at once, or add assignable capacity.";
   }
 
   /** "a", "a and b", "a, b and c", or with more left out, "a, b, c and more". */
@@ -730,6 +846,10 @@ public class InstanceOperationMaintenanceHandler {
 
   private static String plural(long count, String noun) {
     return count + " " + noun + (count == 1 ? "" : "s");
+  }
+
+  private static String changes(InstanceConstants.InstanceOperation operation, int changing) {
+    return operation + " on the " + plural(changing, "instance") + " this request changes";
   }
 
   /** The marker cap and its live markers; unlimited when no cap is set. */

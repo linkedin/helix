@@ -95,7 +95,7 @@ public class GuardrailPipeline {
           LOG.warn("Guard rail rule {} returned null for cluster {}; failing closed.", rule.getId(),
               context.getClusterName());
           violations.add(Violation.newBuilder(rule.getId())
-              .message("Rule returned no result.").build());
+              .message("Rule returned no result.").indeterminate().build());
         } else if (!result.isFeasible()) {
           violations.addAll(result.getViolations());
         }
@@ -103,7 +103,7 @@ public class GuardrailPipeline {
         LOG.warn("Guard rail rule {} failed to evaluate for cluster {}; failing closed.",
             rule.getId(), context.getClusterName(), e);
         violations.add(Violation.newBuilder(rule.getId())
-            .message("Rule evaluation failed: " + e.getMessage()).build());
+            .message("Rule evaluation failed: " + e.getMessage()).indeterminate().build());
       } finally {
         if (ruleDurationNanosObserver != null) {
           ruleDurationNanosObserver.accept(rule.getId(), System.nanoTime() - startNanos);
