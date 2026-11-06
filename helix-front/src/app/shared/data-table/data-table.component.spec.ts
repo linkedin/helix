@@ -1,38 +1,47 @@
-import 'zone.js';
-import 'zone.js/dist/zone-testing';
-import { ComponentFixture, TestBed, getTestBed } from '@angular/core/testing';
-import {
-  BrowserDynamicTestingModule,
-  platformBrowserDynamicTesting,
-} from '@angular/platform-browser-dynamic/testing';
-import { NO_ERRORS_SCHEMA } from '@angular/core';
-import { beforeEach, describe, expect, it } from '@jest/globals';
+import { describe, expect, it, jest } from '@jest/globals';
+import { MatDialog } from '@angular/material/dialog';
+import { of } from 'rxjs';
 
-import { TestingModule } from '../../../testing/testing.module';
 import { DataTableComponent } from './data-table.component';
 
 describe('DataTableComponent', () => {
-  let component: DataTableComponent;
-  let fixture: ComponentFixture<DataTableComponent>;
+  function table(answer: boolean) {
+    const open = jest.fn(() => ({ afterClosed: () => of(answer) }));
+    const component = new DataTableComponent({ open } as unknown as MatDialog);
+    const updates = [];
+    component.update.subscribe((e) => updates.push(e));
+    const editor = { confirmed: jest.fn(), declined: jest.fn() };
+    return { component, open, updates, editor };
+  }
+  const row = { name: 'MAX_OFFLINE', value: '5' };
+  const column = { name: 'Value' };
 
-  beforeEach(() => {
-    TestBed.configureTestingModule({
-      imports: [TestingModule],
-      declarations: [DataTableComponent],
-      schemas: [
-        /* avoid importing modules */
-        NO_ERRORS_SCHEMA,
-      ],
-    }).compileComponents();
+  it('writes only after the change is confirmed', () => {
+    const { component, open, updates, editor } = table(true);
+    component.onEdited(row, column, '6', editor);
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect((open.mock.calls[0] as any)[1].data.message).toBe(
+      'Change "MAX_OFFLINE" from "5" to "6"?',
+    );
+    expect(updates).toEqual([{ row, column, value: '6' }]);
+    expect(editor.confirmed).toHaveBeenCalled();
   });
 
-  beforeEach(() => {
-    fixture = TestBed.createComponent(DataTableComponent);
-    component = fixture.componentInstance;
-    fixture.detectChanges();
+  it('writes nothing when the confirmation is dismissed', () => {
+    const { component, updates, editor } = table(false);
+    component.onEdited(row, column, '6', editor);
+
+    expect(updates).toEqual([]);
+    expect(editor.declined).toHaveBeenCalled();
+    expect(editor.confirmed).not.toHaveBeenCalled();
   });
 
-  it('should be created', () => {
-    expect(component).toBeTruthy();
+  it('asks nothing for an unchanged value', () => {
+    const { component, open, updates } = table(true);
+    component.onEdited(row, column, '5');
+
+    expect(open).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 });

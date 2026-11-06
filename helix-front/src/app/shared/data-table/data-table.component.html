@@ -53,10 +53,11 @@
     <ng-template ngx-datatable-cell-template let-value="value" let-row="row">
       <span *ngIf="!column.editable" [title]="value">{{ value }}</span>
       <hi-input-inline
+        #editor
         *ngIf="column.editable"
         [value]="value"
         label="new value"
-        (update)="onEdited(row, column, $event)"
+        (update)="onEdited(row, column, $event, editor)"
       >
       </hi-input-inline>
     </ng-template>
