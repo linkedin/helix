@@ -122,8 +122,10 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
 
     int before = version("a");
     Mockito.clearInvocations(accessor, manager);
+    long beat = ConvergenceStatusPersistStage.HEARTBEAT_MS;
     Assert.assertEquals(persist(manager,
-        result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 3, "a", "b"), T0 + 60_000L), -1L);
+        result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 3, "a", "b"), T0 + 30_000L),
+        beat - 30_000L);
     Mockito.verify(manager, Mockito.never()).isLeader();
     Mockito.verify(accessor, Mockito.atMost(1)).keyBuilder();
     Mockito.verifyNoMoreInteractions(accessor);
@@ -159,6 +161,27 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
   }
 
   @Test
+  public void testUnchangedClusterRecordIsRewrittenAsAHeartbeat() {
+    persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0);
+    int resource = version("a");
+    int cluster = clusterVersion();
+    long beat = ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    ConvergenceStatusCalculator.Result idle = result(Status.CONVERGED, Reason.NONE, 0, "a");
+    idle.getCluster().setEvaluatedAt(T0 + beat - 1);
+    Assert.assertEquals(persist(_manager, idle, T0 + beat - 1), 1L);
+    Assert.assertEquals(clusterVersion(), cluster);
+
+    idle.getCluster().setEvaluatedAt(T0 + beat);
+    idle.getCluster().setGeneratedAt(T0 + beat);
+    Assert.assertEquals(persist(_manager, idle, T0 + beat), beat);
+    Assert.assertEquals(clusterVersion(), cluster + 1);
+    Assert.assertEquals(version("a"), resource);
+    ConvergenceStatus beating = _accessor.getProperty(_keys.convergenceStatus());
+    Assert.assertEquals(beating.getEvaluatedAt(), T0 + beat);
+    Assert.assertEquals(beating.getGeneratedAt(), T0);
+  }
+
+  @Test
   public void testDroppedResourceIsRemoved() {
     persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a", "b", "c"), T0);
     persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a", "c"), T0 + 1);
@@ -168,7 +191,8 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
     // A report someone else already deleted counts as removed, so nothing is retried.
     _gZkClient.delete(_keys.convergenceStatus("c").getPath());
     Assert.assertEquals(
-        persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0 + 2), -1L);
+        persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0 + 2),
+        ConvergenceStatusPersistStage.HEARTBEAT_MS - 2);
   }
 
   @Test
@@ -178,7 +202,7 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
       names[i] = String.format("r%04d", i);
     }
     Assert.assertEquals(persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, names), T0),
-        -1L);
+        ConvergenceStatusPersistStage.HEARTBEAT_MS);
     Assert.assertEquals(_accessor.getChildNames(_keys.convergenceStatus()).size(), names.length);
   }
 
@@ -243,7 +267,8 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
     Assert.assertEquals(persist(manager, result, T0 + 2),
         4 * ConvergenceStatusPersistStage.RETRY_MIN_MS);
 
-    Assert.assertEquals(persist(_manager, result, T0 + 3), -1L);
+    Assert.assertEquals(persist(_manager, result, T0 + 3),
+        ConvergenceStatusPersistStage.HEARTBEAT_MS);
     Assert.assertNotNull(_accessor.getProperty(_keys.convergenceStatus("a")));
     Assert.assertNotNull(_accessor.getProperty(_keys.convergenceStatus()));
   }

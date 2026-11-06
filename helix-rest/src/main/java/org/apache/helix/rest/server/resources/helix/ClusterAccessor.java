@@ -187,11 +187,14 @@ public class ClusterAccessor extends AbstractHelixResource {
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     ConvergenceStatus report = dataAccessor.getProperty(keyBuilder.convergenceStatus());
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
-    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
-        dataAccessor.getProperty(keyBuilder.controllerLeader()),
-        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
-        ConvergenceStatusResponseMapper.isManagementMode(
-            getHelixAdmin().getClusterManagementMode(clusterId))));
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(
+        ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
+            dataAccessor.getProperty(keyBuilder.controllerLeader()),
+            clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
+            ConvergenceStatusResponseMapper.isManagementMode(
+                getHelixAdmin().getClusterManagementMode(clusterId)),
+            System.currentTimeMillis()),
+        getRealmAwareZkClient(), clusterConfig, clusterId, null));
   }
 
   /**

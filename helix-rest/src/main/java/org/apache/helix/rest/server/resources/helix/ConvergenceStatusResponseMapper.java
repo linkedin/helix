@@ -35,12 +35,15 @@ import org.apache.helix.model.LiveInstance;
  * Turns a stored convergence report into the REST response. Reports are only trusted while the
  * cluster record carries the session of the controller that currently leads the cluster: the
  * controller takes that record over only once every resource report agrees with what it computed,
- * so a report left by an earlier leader is trusted only after the new one has confirmed it. Age is
- * deliberately not used: the controller only writes when something changes, so a healthy idle
- * cluster has old reports.
+ * so a report left by an earlier leader is trusted only after the new one has confirmed it. The
+ * age of a report is deliberately not used: the controller only writes when something changes, so a
+ * healthy idle cluster has old reports. Liveness comes from the heartbeat on the cluster record.
  */
 final class ConvergenceStatusResponseMapper {
   static final String FRESH = "FRESH";
+  static final String REPORT_STALE = "REPORT_STALE";
+  // Five missed heartbeats of the controller; see ConvergenceStatusPersistStage.HEARTBEAT_MS.
+  static final long STALE_AFTER_MS = 5 * 60_000L;
 
   private ConvergenceStatusResponseMapper() {
   }
@@ -51,7 +54,7 @@ final class ConvergenceStatusResponseMapper {
    */
   static ObjectNode map(String clusterId, String resourceName, ConvergenceStatus report,
       ConvergenceStatus clusterReport, LiveInstance leader, boolean monitoringEnabled,
-      boolean managementMode) {
+      boolean managementMode, long now) {
     ObjectNode response = JsonNodeFactory.instance.objectNode();
     response.put("clusterId", clusterId);
     if (resourceName != null) {
@@ -60,7 +63,11 @@ final class ConvergenceStatusResponseMapper {
     if (managementMode) {
       return unavailable(response, Status.PAUSED, Reason.MANAGEMENT_MODE, "MANAGEMENT_MODE");
     }
-    String problem = problem(report, clusterReport, leader, monitoringEnabled);
+    if (clusterReport != null && clusterReport.getEvaluatedAt() > 0) {
+      // When the controller last ran its pipeline, as opposed to when the content last changed.
+      response.put("evaluatedAt", clusterReport.getEvaluatedAt());
+    }
+    String problem = problem(report, clusterReport, leader, monitoringEnabled, now);
     if (problem != null) {
       return unavailable(response, Status.UNKNOWN, Reason.NONE, problem);
     }
@@ -98,7 +105,7 @@ final class ConvergenceStatusResponseMapper {
   }
 
   private static String problem(ConvergenceStatus report, ConvergenceStatus clusterReport,
-      LiveInstance leader, boolean monitoringEnabled) {
+      LiveInstance leader, boolean monitoringEnabled, long now) {
     if (!monitoringEnabled) {
       return "MONITORING_DISABLED";
     }
@@ -114,6 +121,12 @@ final class ConvergenceStatusResponseMapper {
     String session = leader.getEphemeralOwner();
     if (session == null || !session.equals(clusterReport.getControllerSessionId())) {
       return "CONTROLLER_SESSION_MISMATCH";
+    }
+    // A session only proves the leader is alive, not that its pipeline is still running. Reports
+    // from a controller without the heartbeat have no timestamp and are taken as they are.
+    long evaluatedAt = clusterReport.getEvaluatedAt();
+    if (evaluatedAt > 0 && now - evaluatedAt > STALE_AFTER_MS) {
+      return REPORT_STALE;
     }
     return null;
   }

@@ -54,6 +54,9 @@ import org.slf4j.LoggerFactory;
  * <li>The cluster record is the trust anchor: readers trust any report only while the cluster
  * record carries the leader's session. A new leader therefore rewrites that one znode, plus the
  * reports whose content changed, instead of every report.</li>
+ * <li>The cluster record also carries when the pipeline last ran. An unchanged record is
+ * rewritten once per {@link #HEARTBEAT_MS}, and an on-demand run is scheduled for it, so an idle
+ * cluster keeps beating while a stuck pipeline or worker stops, which readers see as stale.</li>
  * <li>While the cluster is in maintenance mode only the cluster record says so; resource reports
  * are left as they are, so entering and leaving maintenance costs one write each.</li>
  * <li>Writes and deletes go out in batches of {@link #BATCH_SIZE}, one batch at a time. A held
@@ -65,6 +68,7 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
   private static final Logger LOG = LoggerFactory.getLogger(ConvergenceStatusPersistStage.class);
   static final long STATUS_MIN_INTERVAL_MS = 1_000L;
   static final long MIN_REWRITE_MS = 30_000L;
+  static final long HEARTBEAT_MS = 60_000L;
   static final int BATCH_SIZE = 500;
   static final long RETRY_MIN_MS = 1_000L;
   static final long RETRY_MAX_MS = 300_000L;
@@ -199,6 +203,12 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     boolean anchorStale = _cluster == null
         || !session.equals(_cluster._report.getControllerSessionId());
     long clusterWait = anchorStale ? 0L : writeDelay(cluster, _cluster, now);
+    if (clusterWait < 0) {
+      // Same content: a beat moves only the evaluation time, not when the content last changed.
+      cluster.setGeneratedAt(_cluster._report.getGeneratedAt());
+      long beatIn = _cluster._writtenAt + HEARTBEAT_MS - now;
+      clusterWait = Math.max(0L, beatIn);
+    }
     if (clusterWait > 0) {
       followUp = soonest(followUp, clusterWait);
     }
@@ -258,6 +268,7 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     if (clusterWait == 0 && !(failed && anchorStale)) {
       if (accessor.setProperty(keys.convergenceStatus(), cluster)) {
         _cluster = new Written(cluster, now);
+        followUp = soonest(followUp, HEARTBEAT_MS);
       } else {
         failed = true;
         LOG.warn("Failed to persist the convergence report of cluster {}",

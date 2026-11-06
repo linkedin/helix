@@ -15,10 +15,19 @@ export interface ConvergenceReport {
   // FRESH, or why the report cannot be trusted; only FRESH carries the fields below
   reportState: string;
   generatedAt?: number;
+  // when the controller last ran its pipeline; it moves even when nothing changed
+  evaluatedAt?: number;
   publishedBy?: string;
   unconvergedSince?: number;
   targetFreshness?: string;
   optimizerStatus?: string;
+  // only with REPORT_STALE: a one-off check of the external view by the REST server
+  fallback?: {
+    source: string;
+    result: 'MATCH' | 'MISMATCH' | 'UNAVAILABLE' | 'VERIFYING';
+    message: string;
+    checkedAt: number;
+  };
   resourceCount?: number;
   partitionSummary?: {
     total: number;
@@ -87,7 +96,18 @@ export const REPORT_STATE_TEXT: Record<string, string> = {
     'There is no controller leader, so no report can be trusted.',
   CONTROLLER_SESSION_MISMATCH:
     'The report is from an earlier leader and the current one has not confirmed it yet.',
+  REPORT_STALE:
+    'The controller has stopped updating its report. Its pipeline may be stuck, so the status below is not shown.',
   MANAGEMENT_MODE: REASON_TEXT.MANAGEMENT_MODE,
+};
+
+// what the one-off external view check says, by fallback.result
+export const FALLBACK_TEXT: Record<string, string> = {
+  MATCH:
+    'A one-off check found the external view equal to the assignment the controller last persisted. This is weak evidence: a stuck controller leaves that assignment behind too.',
+  MISMATCH:
+    'A one-off check found the external view different from the assignment the controller last persisted, so the cluster is not at its target.',
+  VERIFYING: 'Checking the external view against the persisted assignment.',
 };
 
 // PENDING_TRANSITION -> "Pending transition", WAGED_LAST_KNOWN_GOOD -> "WAGED last known good"
