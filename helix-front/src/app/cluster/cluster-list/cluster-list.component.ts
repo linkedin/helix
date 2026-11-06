@@ -135,7 +135,7 @@ export class ClusterListComponent implements OnInit {
               title: "What's Next",
               message:
                 'New cluster is created yet not activated. When you are ready to activate this cluster,' +
-                ' please select "Activate this Cluster" menu in the cluster operations to continue.',
+                ' please select "Activate cluster" menu in the cluster operations to continue.',
             },
           });
           this.loadClusters();
