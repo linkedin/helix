@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.MetricRegistry;
@@ -78,6 +79,8 @@ public class TestInstanceOperationMaintenanceHandler {
   private static final String ZK_ADDR = "localhost:2197";
   private static final String CLUSTER = "AtomicMaintenanceCluster";
   private static final long HOUR_MS = 3_600_000L;
+  private static final InstanceOperationSource[] SOURCES = {InstanceOperationSource.AUTOMATION,
+      InstanceOperationSource.USER, InstanceOperationSource.ADMIN};
   private static final Function<Collection<String>, ValidationResult> SAFE =
       instances -> ValidationResult.feasible();
 
@@ -601,8 +604,8 @@ public class TestInstanceOperationMaintenanceHandler {
     config.setTopology("/zone/host");
     config.setFaultZoneType("zone");
     _configAccessor.setClusterConfig(CLUSTER, config);
-    // Every current operation and requested one, held by the request's own source (so the same
-    // operation is already held) or by another, with and without a DOMAIN.
+    // Every current operation and requested one, from every source, held by the request's own
+    // source (so the same operation is already held) or by another, with and without a DOMAIN.
     Map<String, Boolean> accepted = new HashMap<>();
     for (boolean domain : new boolean[] {false, true}) {
       for (int i = 0; domain && i < 2; i++) {
@@ -610,13 +613,15 @@ public class TestInstanceOperationMaintenanceHandler {
         instance.setDomain("zone=z0,host=h" + i);
         _accessor.set(path(i), instance.getRecord(), AccessOption.PERSISTENT);
       }
-      for (InstanceOperationSource holder : new InstanceOperationSource[] {
-          InstanceOperationSource.AUTOMATION, InstanceOperationSource.USER}) {
+      for (InstanceOperationSource holder : SOURCES) {
         for (InstanceOperation current : InstanceOperation.values()) {
           for (InstanceOperation requested : new InstanceOperation[] {InstanceOperation.ENABLE,
               InstanceOperation.DISABLE, InstanceOperation.EVACUATE}) {
-            String label = (domain ? "domain " : "") + holder + " " + current + " to " + requested;
-            accepted.put(label, assertBothPaths(holder, current, requested, label));
+            for (InstanceOperationSource source : SOURCES) {
+              String label = (domain ? "domain " : "") + holder + " " + current + " to " + requested
+                  + (source == InstanceOperationSource.AUTOMATION ? "" : " by " + source);
+              accepted.put(label, assertBothPaths(holder, current, requested, source, label));
+            }
           }
         }
       }
@@ -629,6 +634,7 @@ public class TestInstanceOperationMaintenanceHandler {
     Assert.assertTrue(accepted.get("AUTOMATION DISABLE to DISABLE"));
     Assert.assertTrue(accepted.get("domain AUTOMATION ENABLE to ENABLE"));
     Assert.assertTrue(accepted.get("domain USER UNKNOWN to DISABLE"));
+    Assert.assertTrue(accepted.get("domain AUTOMATION EVACUATE to ENABLE by ADMIN"));
   }
 
   @Test
@@ -648,10 +654,11 @@ public class TestInstanceOperationMaintenanceHandler {
 
   /**
    * Puts the same starting operation on instances 0 and 1, requests the change on instance 0
-   * through the legacy path and on instance 1 through the handler, and checks both agree.
+   * through the legacy path and on instance 1 through the handler, and checks both agree on the
+   * outcome and the operations left.
    */
   private boolean assertBothPaths(InstanceOperationSource holder, InstanceOperation current,
-      InstanceOperation requested, String label) {
+      InstanceOperation requested, InstanceOperationSource source, String label) {
     for (int i = 0; i < 2; i++) {
       // An ADMIN operation clears every other source's.
       writeOperation(i, InstanceOperation.ENABLE, InstanceOperationSource.ADMIN);
@@ -660,12 +667,14 @@ public class TestInstanceOperationMaintenanceHandler {
     boolean legacy = true;
     try {
       InstanceUtil.setInstanceOperation(_configAccessor, _accessor, CLUSTER, instance(0),
-          operation(requested));
+          operation(requested, source));
     } catch (RuntimeException e) {
       legacy = false;
     }
-    Status status = apply(SAFE, requested, instance(1)).get(instance(1)).getStatus();
+    Status status = handler(SAFE).apply(CLUSTER, Collections.singletonList(instance(1)),
+        operation(requested, source), _expiresAt).get(instance(1)).getStatus();
     Assert.assertEquals(status, legacy ? Status.APPLIED : Status.INVALID_TRANSITION, label);
+    Assert.assertEquals(stack(1), stack(0), label);
     return legacy;
   }
 
@@ -683,6 +692,22 @@ public class TestInstanceOperationMaintenanceHandler {
         + "AUTOMATION. Kept its live maintenance marker, which runs until " + at(_expiresAt) + ".");
 
     Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.DISABLE);
+  }
+
+  @Test
+  public void testRepeatedAdminEnableUndoesALegacyDisable() {
+    InstanceConfig.InstanceOperation enable =
+        operation(InstanceOperation.ENABLE, InstanceOperationSource.ADMIN);
+    List<String> one = Collections.singletonList(instance(0));
+    handler(SAFE).apply(CLUSTER, one, enable, _expiresAt);
+    InstanceConfig legacyDisabled = read(0);
+    legacyDisabled.setInstanceEnabled(false);
+    _accessor.set(path(0), legacyDisabled.getRecord(), AccessOption.PERSISTENT);
+    Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.DISABLE);
+
+    Assert.assertEquals(handler(SAFE).apply(CLUSTER, one, enable, _expiresAt).get(instance(0))
+        .getMessage(), "ENABLE is now set by ADMIN.");
+    Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.ENABLE);
   }
 
   @Test
@@ -892,16 +917,10 @@ public class TestInstanceOperationMaintenanceHandler {
         + "so it cannot go with EVACUATE. Give a future expiry, or 0 for the cluster default.");
     assertBadRequest(() -> handler.apply(CLUSTER, one, operation(InstanceOperation.SWAP_IN),
         _expiresAt), "instanceOperation must be one of [ENABLE, DISABLE, EVACUATE] and "
-        + "instanceOperationSource one of [AUTOMATION], given together; got SWAP_IN and "
+        + "instanceOperationSource one of [ADMIN, USER, AUTOMATION, DEFAULT]; got SWAP_IN and "
         + "AUTOMATION.");
     assertBadRequest(() -> handler.apply(CLUSTER, one, operation(InstanceOperation.UNKNOWN),
         _expiresAt));
-    for (InstanceOperationSource unsupported : Arrays.asList(InstanceOperationSource.USER,
-        InstanceOperationSource.ADMIN, InstanceOperationSource.DEFAULT)) {
-      assertBadRequest(() -> handler.apply(CLUSTER, one, new InstanceConfig.InstanceOperation
-          .Builder().setOperation(InstanceOperation.EVACUATE).setSource(unsupported).build(),
-          _expiresAt));
-    }
     Assert.assertEquals(read(0).getInstanceOperation().getOperation(), InstanceOperation.ENABLE);
   }
 
@@ -1133,8 +1152,19 @@ public class TestInstanceOperationMaintenanceHandler {
   }
 
   private static InstanceConfig.InstanceOperation operation(InstanceOperation operation) {
+    return operation(operation, InstanceOperationSource.AUTOMATION);
+  }
+
+  private static InstanceConfig.InstanceOperation operation(InstanceOperation operation,
+      InstanceOperationSource source) {
     return new InstanceConfig.InstanceOperation.Builder().setOperation(operation)
-        .setSource(InstanceOperationSource.AUTOMATION).build();
+        .setSource(source).build();
+  }
+
+  /** The instance's operations, in order, as operation and source. */
+  private List<String> stack(int i) {
+    return read(i).getInstanceOperationList().stream()
+        .map(op -> op.getOperation() + " by " + op.getSource()).collect(Collectors.toList());
   }
 
   private void writeOperation(int i, InstanceOperation operation, InstanceOperationSource source) {
