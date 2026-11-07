@@ -1,0 +1,68 @@
+<div class="head" [class.danger]="confirming">
+  <mat-icon class="icon">{{ confirming ? 'warning' : 'block' }}</mat-icon>
+  <div>
+    <h1 mat-dialog-title>
+      {{ confirming ? 'Force this change?' : 'Change blocked' }}
+    </h1>
+    <div class="sub">
+      {{
+        confirming
+          ? 'The checks below will be skipped.'
+          : 'Nothing was changed. Helix guardrails rejected this request.'
+      }}
+    </div>
+  </div>
+</div>
+
+<div mat-dialog-content class="guardrail">
+  <div class="card" *ngFor="let it of items" [class.danger]="confirming">
+    <div class="title">
+      {{ it.title }}
+      <span class="chip" *ngIf="it.resource">{{ it.resource }}</span>
+      <span class="chip" *ngIf="it.partition">{{ it.partition }}</span>
+    </div>
+    <div class="cause">{{ it.cause }}</div>
+    <div class="advice" *ngIf="it.advice && !confirming">
+      <mat-icon>lightbulb_outline</mat-icon><span>{{ it.advice }}</span>
+    </div>
+    <code class="rule">{{ it.ruleId }}</code>
+  </div>
+
+  <div class="banner warn" *ngIf="confirming">
+    <mat-icon>warning</mat-icon>
+    <span>
+      The problems above can then happen on the live cluster. This cannot be
+      undone automatically.
+    </span>
+  </div>
+  <div class="banner info" *ngIf="!forceable && !confirming">
+    <mat-icon>lock</mat-icon>
+    <span>This check cannot be overridden. Fix the input and try again.</span>
+  </div>
+</div>
+
+<div mat-dialog-actions align="end">
+  <button mat-button type="button" (click)="close()">
+    {{ confirming ? 'Cancel' : 'Close' }}
+  </button>
+  <button
+    *ngIf="forceable && !confirming"
+    mat-stroked-button
+    type="button"
+    color="warn"
+    class="force"
+    (click)="confirming = true"
+  >
+    Force anyway
+  </button>
+  <button
+    *ngIf="confirming"
+    mat-flat-button
+    type="button"
+    color="warn"
+    class="confirm-force"
+    (click)="force()"
+  >
+    Yes, force it
+  </button>
+</div>
