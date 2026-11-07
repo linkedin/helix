@@ -30,14 +30,30 @@ export class DataTableComponent implements OnInit {
   onEdited(row, column, value) {
     const prop = this.getPropName(column);
 
-    // only emit when value changes
-    if (row[prop] !== value) {
-      this.update.emit({
-        row,
-        column,
-        value,
-      });
+    // only emit when value changes, and only after the user confirms it
+    if (row[prop] === value) {
+      return;
     }
+
+    const name = row.name !== undefined ? row.name : column.name;
+    this.dialog
+      .open(ConfirmDialogComponent, {
+        data: {
+          title: 'Save change?',
+          message: `Change "${name}" from "${row[prop]}" to "${value}"?`,
+          confirmButtonText: 'Save',
+        },
+      })
+      .afterClosed()
+      .subscribe((result) => {
+        if (result) {
+          this.update.emit({
+            row,
+            column,
+            value,
+          });
+        }
+      });
   }
 
   onCreate() {
