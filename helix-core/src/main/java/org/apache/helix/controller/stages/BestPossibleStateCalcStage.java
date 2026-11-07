@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -405,10 +406,11 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         validateInstancesUnableToAcceptOnlineReplicasLimit(cache, event.getAttribute(AttributeName.helixmanager.name()));
 
     final List<String> failureResources = Collections.synchronizedList(new ArrayList<>());
+    final AtomicBoolean wagedFallback = new AtomicBoolean(false);
 
     Map<String, Resource> calculatedResourceMap =
         computeResourceBestPossibleStateWithWagedRebalancer(wagedRebalancer, cache,
-            currentStateOutput, resourceMap, output, failureResources);
+            currentStateOutput, resourceMap, output, failureResources, wagedFallback);
 
     Map<String, Resource> remainingResourceMap = new HashMap<>(resourceMap);
     remainingResourceMap.keySet().removeAll(calculatedResourceMap.keySet());
@@ -437,11 +439,16 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       Thread.currentThread().interrupt();
     }
 
-    // Check and report if resource rebalance has failure
-    updateRebalanceStatus(!isValid || !failureResources.isEmpty(), failureResources, helixManager,
-        cache, clusterStatusMonitor, String
-            .format("Failed to calculate best possible states for %d resources.",
-                failureResources.size()));
+    // Check and report if resource rebalance has failure. A WAGED fallback still assigns the WAGED
+    // resources, so it is not a resource failure, but the rebalance itself failed.
+    String errorMessage = String.format(
+        "Failed to calculate best possible states for %d resources.", failureResources.size());
+    if (wagedFallback.get()) {
+      errorMessage = "The WAGED rebalancer failed and is serving its last known-good assignment. "
+          + errorMessage;
+    }
+    updateRebalanceStatus(!isValid || !failureResources.isEmpty() || wagedFallback.get(),
+        failureResources, helixManager, cache, clusterStatusMonitor, errorMessage);
 
     return output;
   }
@@ -561,12 +568,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
    * @param resourceMap        The complete resource map. The method will filter the map for the compatible resources.
    * @param output             The best possible state output.
    * @param failureResources   The failure records that will be updated if any resource cannot be computed.
+   * @param wagedFallback      Set to true if WAGED served its last known-good assignment.
    * @return The map of all the calculated resources.
    */
   private Map<String, Resource> computeResourceBestPossibleStateWithWagedRebalancer(
       WagedRebalancer wagedRebalancer, ResourceControllerDataProvider cache,
       CurrentStateOutput currentStateOutput, Map<String, Resource> resourceMap,
-      BestPossibleStateOutput output, List<String> failureResources) {
+      BestPossibleStateOutput output, List<String> failureResources,
+      AtomicBoolean wagedFallback) {
     // Allow calculation for readOnlyWagedRebalancer as it is used by partitionAssignment API
     if (cache.isMaintenanceModeEnabled() && !(wagedRebalancer instanceof ReadOnlyWagedRebalancer)) {
       // The WAGED rebalancer won't be used while maintenance mode is enabled.
@@ -586,6 +595,7 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       try {
         newIdealStates.putAll(wagedRebalancer
             .computeNewIdealStates(cache, wagedRebalancedResourceMap, currentStateOutput));
+        wagedFallback.set(wagedRebalancer.isLastComputationFallback());
       } catch (HelixRebalanceException ex) {
         // Note that unlike the legacy rebalancer, the WAGED rebalance won't return partial result.
         // Since it calculates for all the eligible resources globally, a partial result is invalid.

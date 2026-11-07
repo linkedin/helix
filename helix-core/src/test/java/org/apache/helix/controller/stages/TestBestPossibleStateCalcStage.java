@@ -40,6 +40,7 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.DelayedAutoRebalancer;
 import org.apache.helix.controller.rebalancer.TestAbstractRebalancer;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
@@ -52,6 +53,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.mbeans.ResourceMonitor;
 import org.apache.helix.util.StageThreadPoolHelper;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
@@ -696,6 +698,49 @@ public class TestBestPossibleStateCalcStage extends BaseStageTest {
     gate.countDown();
     awaitPool(pool);
     Assert.assertNull(monitor.getResourceMonitor(GAUGE_RESOURCE));
+  }
+
+  /**
+   * A WAGED fallback still assigns the resource, but the rebalance failed, so the rebalance failure
+   * gauge must report it. A flag left from an earlier call must not count when WAGED is not called.
+   */
+  @Test
+  public void testWagedFallbackSetsRebalanceFailureGauge() throws Exception {
+    String[] resources = new String[]{GAUGE_RESOURCE};
+    IdealState wagedAssignment = setupIdealState(3, resources, 1, 1, RebalanceMode.FULL_AUTO,
+        BuiltInStateModelDefinitions.MasterSlave.name(), WagedRebalancer.class.getName()).get(0);
+    wagedAssignment.setInstanceStateMap(GAUGE_RESOURCE + "_0",
+        Collections.singletonMap(HOSTNAME_PREFIX + 1, "MASTER"));
+    setupLiveInstances(3);
+    setupStateModel();
+    setupInstances(3);
+    Map<String, Resource> resourceMap =
+        getResourceMap(resources, 1, BuiltInStateModelDefinitions.MasterSlave.name());
+    ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor(_clusterName);
+    WagedRebalancer wagedRebalancer = Mockito.mock(WagedRebalancer.class);
+    Mockito.when(wagedRebalancer.computeNewIdealStates(Mockito.any(), Mockito.any(),
+        Mockito.any())).thenReturn(Collections.singletonMap(GAUGE_RESOURCE, wagedAssignment));
+    event.addAttribute(AttributeName.RESOURCES.name(), resourceMap);
+    event.addAttribute(AttributeName.RESOURCES_TO_REBALANCE.name(), resourceMap);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    event.addAttribute(AttributeName.clusterStatusMonitor.name(), monitor);
+    event.addAttribute(AttributeName.STATEFUL_REBALANCER.name(), wagedRebalancer);
+    runStage(event, new ReadClusterDataStage());
+    BestPossibleStateCalcStage stage = new BestPossibleStateCalcStage();
+
+    for (boolean fallback : new boolean[]{false, true, false}) {
+      Mockito.when(wagedRebalancer.isLastComputationFallback()).thenReturn(fallback);
+      runGaugePass(stage, "MASTER", MoreExecutors.newDirectExecutorService());
+      Assert.assertEquals(monitor.getRebalanceFailureGauge(), fallback ? 1L : 0L);
+      Assert.assertFalse(monitor.getResourceMonitor(GAUGE_RESOURCE).getRebalanceState()
+          .equals(ResourceMonitor.RebalanceStatus.BEST_POSSIBLE_STATE_CAL_FAILED.name()));
+    }
+    // WAGED is not called in maintenance mode.
+    Mockito.when(wagedRebalancer.isLastComputationFallback()).thenReturn(true);
+    cache.enableMaintenanceMode();
+    runGaugePass(stage, "MASTER", MoreExecutors.newDirectExecutorService());
+    Assert.assertEquals(monitor.getRebalanceFailureGauge(), 0L);
   }
 
   /**
