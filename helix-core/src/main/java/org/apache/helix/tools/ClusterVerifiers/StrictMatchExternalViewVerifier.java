@@ -28,11 +28,13 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
-import org.apache.helix.ConfigAccessor;
+import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.AbstractRebalancer;
 import org.apache.helix.model.ClusterConfig;
@@ -241,17 +243,6 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       ResourceControllerDataProvider cache = new ResourceControllerDataProvider();
       cache.refresh(_accessor);
 
-      Map<String, IdealState> idealStates = new HashMap<>(cache.getIdealStates());
-
-      // filter out all resources that use Task state model
-      Iterator<Map.Entry<String, IdealState>> it = idealStates.entrySet().iterator();
-      while (it.hasNext()) {
-        Map.Entry<String, IdealState> pair = it.next();
-        if (pair.getValue().getStateModelDefRef().equals(TaskConstants.STATE_MODEL_NAME)) {
-          it.remove();
-        }
-      }
-
       // verify live instances.
       if (_expectLiveInstances != null && !_expectLiveInstances.isEmpty()) {
         Set<String> actualLiveNodes = cache.getLiveInstances().keySet();
@@ -260,6 +251,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
         }
       }
 
+      Map<String, IdealState> idealStates = new HashMap<>(cache.getIdealStates());
       Map<String, ExternalView> extViews =
           _accessor.getChildValuesMap(keyBuilder.externalViews(), true);
       if (extViews == null) {
@@ -272,46 +264,96 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
         extViews.keySet().retainAll(_resources);
       }
 
-      // if externalView is not empty and idealState doesn't exist
-      // add empty idealState for the resource
-      for (String resource : extViews.keySet()) {
-        if (!idealStates.containsKey(resource)) {
-          idealStates.put(resource, new IdealState(resource));
-        }
-      }
-
-      for (String resourceName : idealStates.keySet()) {
-        ExternalView extView = extViews.get(resourceName);
-        IdealState idealState = idealStates.get(resourceName);
-        if (extView == null) {
-          if (idealState.isExternalViewDisabled()) {
-            continue;
-          } else {
-            LOG.debug("externalView for " + resourceName + " is not available");
-            return false;
-          }
-        }
-
-        boolean result = verifyExternalView(cache, extView, idealState);
-        if (!result) {
-          return false;
-        }
-      }
-      return true;
+      return getUnconvergedResources(cache, idealStates, extViews, _isLenientMatch,
+          _isDeactivatedNodeAware).isEmpty();
     } catch (Exception e) {
       LOG.error("exception in verification", e);
       return false;
     }
   }
 
-  private boolean verifyExternalView(ResourceControllerDataProvider dataCache, ExternalView externalView,
-      IdealState idealState) {
+  /**
+   * Returns the resources of a cluster whose external view does not match the mapping computed
+   * from their ideal state, in name order. The comparison is the one this verifier makes with its
+   * default settings, with or without lenient match. Unlike the verifier, it reads only the
+   * cluster config, ideal states, state model definitions, live instances, instance configs and
+   * external views, so it skips the current states and messages of every participant, and it
+   * writes nothing.
+   *
+   * @param accessor the data accessor of the cluster
+   * @param isLenientMatch whether to ignore replicas in the initial state or DROPPED, as
+   *     {@link Builder#setLenientMatch(boolean)} does
+   * @return the names of the resources that have not converged, or an empty list if all have
+   * @throws HelixException if the cluster config does not exist, a read fails, or a Full-Auto
+   *     resource cannot be compared because its best possible assignment is not persisted
+   */
+  public static List<String> getUnconvergedResources(HelixDataAccessor accessor,
+      boolean isLenientMatch) {
+    PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    ClusterConfig clusterConfig = accessor.getProperty(keyBuilder.clusterConfig());
+    if (clusterConfig == null) {
+      throw new HelixException("The cluster config does not exist");
+    }
+    BaseControllerDataProvider cache = new BaseControllerDataProvider();
+    cache.setClusterConfig(clusterConfig);
+    cache.setIdealStates(accessor.getChildValues(keyBuilder.idealStates(), true));
+    cache.setStateModelDefMap(accessor.getChildValuesMap(keyBuilder.stateModelDefs(), true));
+    cache.setLiveInstances(accessor.getChildValues(keyBuilder.liveInstances(), true));
+    cache.setInstanceConfigMap(accessor.getChildValuesMap(keyBuilder.instanceConfigs(), true));
+    return getUnconvergedResources(cache, cache.getIdealStates(),
+        accessor.getChildValuesMap(keyBuilder.externalViews(), true), isLenientMatch, false);
+  }
+
+  private static List<String> getUnconvergedResources(BaseControllerDataProvider cache,
+      Map<String, IdealState> idealStates, Map<String, ExternalView> extViews,
+      boolean isLenientMatch, boolean isDeactivatedNodeAware) {
+    Map<String, IdealState> resourceIdealStates = new TreeMap<>(idealStates);
+
+    // filter out all resources that use Task state model
+    Iterator<Map.Entry<String, IdealState>> it = resourceIdealStates.entrySet().iterator();
+    while (it.hasNext()) {
+      Map.Entry<String, IdealState> pair = it.next();
+      if (pair.getValue().getStateModelDefRef().equals(TaskConstants.STATE_MODEL_NAME)) {
+        it.remove();
+      }
+    }
+
+    Map<String, ExternalView> resourceExtViews =
+        extViews == null ? Collections.emptyMap() : extViews;
+    // if externalView is not empty and idealState doesn't exist
+    // add empty idealState for the resource
+    for (String resource : resourceExtViews.keySet()) {
+      if (!resourceIdealStates.containsKey(resource)) {
+        resourceIdealStates.put(resource, new IdealState(resource));
+      }
+    }
+
+    List<String> unconvergedResources = new ArrayList<>();
+    for (String resourceName : resourceIdealStates.keySet()) {
+      ExternalView extView = resourceExtViews.get(resourceName);
+      IdealState idealState = resourceIdealStates.get(resourceName);
+      if (extView == null) {
+        if (!idealState.isExternalViewDisabled()) {
+          LOG.debug("externalView for " + resourceName + " is not available");
+          unconvergedResources.add(resourceName);
+        }
+      } else if (!verifyExternalView(cache, extView, idealState, isLenientMatch,
+          isDeactivatedNodeAware)) {
+        unconvergedResources.add(resourceName);
+      }
+    }
+    return unconvergedResources;
+  }
+
+  private static boolean verifyExternalView(BaseControllerDataProvider dataCache,
+      ExternalView externalView, IdealState idealState, boolean isLenientMatch,
+      boolean isDeactivatedNodeAware) {
     Map<String, Map<String, String>> mappingInExternalView = externalView.getRecord().getMapFields();
     Map<String, Map<String, String>> idealPartitionState;
 
     switch (idealState.getRebalanceMode()) {
     case FULL_AUTO:
-      ClusterConfig clusterConfig = new ConfigAccessor(_zkClient).getClusterConfig(dataCache.getClusterName());
+      ClusterConfig clusterConfig = dataCache.getClusterConfig();
       if (!clusterConfig.isPersistBestPossibleAssignment() && !clusterConfig.isPersistIntermediateAssignment()) {
         throw new HelixException(String.format("Full-Auto IdealState verifier requires "
             + "ClusterConfig.PERSIST_BEST_POSSIBLE_ASSIGNMENT or ClusterConfig.PERSIST_INTERMEDIATE_ASSIGNMENT "
@@ -322,11 +364,13 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
           return false;
         }
       }
-      idealPartitionState = computeIdealPartitionState(dataCache, idealState);
+      idealPartitionState =
+          computeIdealPartitionState(dataCache, idealState, isDeactivatedNodeAware);
       break;
     case SEMI_AUTO:
     case USER_DEFINED:
-      idealPartitionState = computeIdealPartitionState(dataCache, idealState);
+      idealPartitionState =
+          computeIdealPartitionState(dataCache, idealState, isDeactivatedNodeAware);
       break;
     case CUSTOMIZED:
       idealPartitionState = idealState.getRecord().getMapFields();
@@ -337,7 +381,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       return true;
     }
 
-    if (!_isLenientMatch) {
+    if (!isLenientMatch) {
       return mappingInExternalView.equals(idealPartitionState);
     }
 
@@ -346,9 +390,10 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
     return compareMappings(mappingInExternalView, idealPartitionState, stateModelDef);
   }
 
-  private boolean compareMappings(Map<String, Map<String, String>> actualMappings,
+  // Lenient comparison; an unknown state model falls back to an exact match.
+  private static boolean compareMappings(Map<String, Map<String, String>> actualMappings,
       Map<String, Map<String, String>> expectedMappings, StateModelDefinition stateModelDef) {
-    if (!_isLenientMatch || stateModelDef == null) {
+    if (stateModelDef == null) {
       return actualMappings.equals(expectedMappings);
     }
 
@@ -393,8 +438,8 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
     }
   }
 
-  private Map<String, Map<String, String>> computeIdealPartitionState(
-      ResourceControllerDataProvider cache, IdealState idealState) {
+  private static Map<String, Map<String, String>> computeIdealPartitionState(
+      BaseControllerDataProvider cache, IdealState idealState, boolean isDeactivatedNodeAware) {
     String stateModelDefName = idealState.getStateModelDefRef();
     StateModelDefinition stateModelDef = cache.getStateModelDef(stateModelDefName);
 
@@ -404,7 +449,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       List<String> preferenceList = AbstractRebalancer.getPreferenceList(new Partition(partition),
           idealState, cache.getEnabledLiveInstances());
       Map<String, String> idealMapping;
-      if (_isDeactivatedNodeAware) {
+      if (isDeactivatedNodeAware) {
         idealMapping = HelixUtil.computeIdealMapping(preferenceList, stateModelDef,
             cache.getAssignableLiveInstances().keySet(),
                 cache.getDisabledInstancesForPartition(idealState.getResourceName(), partition));
