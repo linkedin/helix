@@ -144,8 +144,10 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
 
   // Caches the bucket size of each watched child path so repeated child-change callbacks do not
   // re-read and deserialize every child ZNRecord just to decide bucketization. A node's bucket
-  // size is fixed for its lifetime (changing it requires delete+recreate, which triggers eviction
-  // in subscribeForChanges), so a cached value matches a fresh HelixProperty#getBucketSize read.
+  // size is fixed for its lifetime (changing it requires delete+recreate); the delete evicts the
+  // entry in handleDataDeleted, with a retainAll safety net in subscribeForChanges, so even a quick
+  // delete+recreate with a different bucket size cannot be served stale. Failed reads are not cached
+  // (see subscribeForChanges), so a transient read failure cannot pin a wrong classification.
   private final Map<String, Integer> _childPathBucketSize = new ConcurrentHashMap<>();
 
   /**
@@ -615,9 +617,15 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
                   BaseDataAccessor<ZNRecord> baseAccessor = new ZkBaseDataAccessor<>(_zkClient);
                   List<ZNRecord> records = baseAccessor.get(uncachedChildPaths, null, 0, false);
                   for (int i = 0; i < uncachedChildPaths.size(); i++) {
-                    ZNRecord record = records.get(i);
-                    int bucketSize = record == null ? 0 : new HelixProperty(record).getBucketSize();
-                    _childPathBucketSize.put(uncachedChildPaths.get(i), bucketSize);
+                    ZNRecord record = records == null ? null : records.get(i);
+                    // A null record means the child could not be read (a transient ZK failure, or a
+                    // delete in a delete+recreate race). Do not cache it: caching 0 would
+                    // misclassify a bucketized resource as non-bucketized for the node's lifetime.
+                    // Leaving it uncached lets the next callback retry the read.
+                    if (record != null) {
+                      _childPathBucketSize.put(uncachedChildPaths.get(i),
+                          new HelixProperty(record).getBucketSize());
+                    }
                   }
                 }
 
@@ -761,6 +769,12 @@ public class CallbackHandler implements IZkChildListener, IZkDataListener {
         logger.info("CallbackHandler {}, {} unsubscribe child-change. path: {}, listener: {}",
             _uid, _manager.getInstanceName(), dataPath, _listener);
         _zkClient.unsubscribeChildChanges(dataPath, this);
+
+        // Drop the deleted node's cached bucket size so a later recreate of the same path (even a
+        // quick delete+recreate with a different bucket size) is re-read rather than served stale.
+        // retainAll in subscribeForChanges cannot catch this on its own: if the recreate lands
+        // before the parent child-change is processed, the path still exists and is never evicted.
+        _childPathBucketSize.remove(dataPath);
         // No need to invoke() since this event will handled by child-change on parent-node
       }
     } catch (Exception e) {
