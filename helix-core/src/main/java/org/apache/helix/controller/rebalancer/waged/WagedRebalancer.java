@@ -300,6 +300,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
           this::reportHardConstraintFailure);
       ((ConstraintBasedAlgorithm) algorithm).setBlockingSnapshotReporter(
           this::reportHardConstraintBlockingSnapshot);
+      ((ConstraintBasedAlgorithm) algorithm).setContainedFailureReporter(
+          this::reportContainedFailure);
+      ((ConstraintBasedAlgorithm) algorithm).setShareBlocksReporter(this::reportShareBlocks);
     }
   }
 
@@ -384,6 +387,26 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.incrementWagedFailureCategoryCount(category);
+    }
+  }
+
+  /**
+   * Counts a failure instance tag isolation contained in the per-FailureCategory counters, the way
+   * the default mode counts it when the whole calculation fails. The calculation succeeded, so it
+   * ticks neither RebalanceFailureCounter nor the reversible serving gauges.
+   */
+  void reportContainedFailure(HelixRebalanceException.FailureCategory category) {
+    _failureCategoryMetrics.get(category).increment(1L);
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.incrementWagedFailureCategoryCount(category);
+    }
+  }
+
+  void reportShareBlocks(int blocks) {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.updateWagedInstanceTagIsolationShareBlocks(blocks);
     }
   }
 

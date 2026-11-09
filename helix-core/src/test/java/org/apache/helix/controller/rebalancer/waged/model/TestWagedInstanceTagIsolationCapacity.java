@@ -177,6 +177,35 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     }
   }
 
+  /**
+   * Once a run succeeds, isolation reports the category of each failure it contained, here a
+   * deficit clique 3 causes and a partition of clique 5 no node can hold, and a baseline reports
+   * the share blocks it found. The default mode reports neither.
+   */
+  @Test
+  public void testContainedFailuresAndShareBlocksAreReported() throws Exception {
+    ConstraintBasedAlgorithm algorithm = (ConstraintBasedAlgorithm) createAlgorithm();
+    List<HelixRebalanceException.FailureCategory> contained = new ArrayList<>();
+    List<Integer> blocks = new ArrayList<>();
+    algorithm.setContainedFailureReporter(contained::add);
+    algorithm.setShareBlocksReporter(blocks::add);
+    Map<Integer, CliqueSpec> specs = allHealthy();
+    specs.put(3, CliqueSpec.healthy().withPartitionWeight(CLUSTER_OVERFLOWING_PARTITION_WEIGHT));
+    specs.put(5, CliqueSpec.healthy().withPartitionWeight(UNPLACEABLE_PARTITION_WEIGHT)
+        .withPartitionCount(1));
+
+    Assert.assertEquals(algorithm.calculate(createClusterModel(createClusterConfig(true), specs))
+        .getSkippedResources(), set(resourceName(3), resourceName(5)));
+    Assert.assertEquals(contained,
+        Arrays.asList(HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT,
+            HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE));
+    Assert.assertEquals(blocks, Collections.singletonList(CLIQUE_COUNT));
+
+    algorithm.calculate(createClusterModel(createClusterConfig(false), allHealthy()));
+    Assert.assertEquals(contained.size(), 2);
+    Assert.assertEquals(blocks.size(), 1);
+  }
+
   /** A cluster asked for exactly what it holds is not short, with the flag off or on. */
   @Test
   public void testExactlyFullClusterIsNotADeficit() throws HelixRebalanceException, IOException {

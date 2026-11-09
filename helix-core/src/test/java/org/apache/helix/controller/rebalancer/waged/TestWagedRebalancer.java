@@ -1254,6 +1254,58 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
   }
 
+  /**
+   * With the real algorithm a baseline reports the share blocks isolation found: one while the
+   * untagged resources reach every instance, two once each has its own clique. A failure isolation
+   * contains still counts in its failure category, while the calculation itself succeeds.
+   */
+  @Test
+  public void testIsolationReportsShareBlocksAndContainedFailures() throws Exception {
+    for (boolean cliques : new boolean[] {false, true}) {
+      WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+          ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
+      ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+      ResourceControllerDataProvider clusterData = setupClusterDataCache();
+      if (cliques) {
+        splitIntoTwoCliques(clusterData);
+      }
+      clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+      when(clusterData.getRefreshedChangeTypes())
+          .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+      rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+          new CurrentStateOutput());
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), cliques ? 2 : 1);
+      if (cliques) {
+        makePartitionUnplaceable(clusterData, _resourceNames.get(0));
+        rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+            new CurrentStateOutput());
+        Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+        Assert.assertTrue(monitor.getWagedFailureNoCandidateNodeCounter() > 0);
+        Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+        // Counted like a failure of the default mode, without lighting the serving gauges.
+        rebalancer.reportContainedFailure(HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+        Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 1L);
+        Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+      }
+    }
+  }
+
+  /**
+   * Gives the first resource a clique of the first two instances and the second resource one of
+   * the third, with one replica per partition.
+   * @return the first clique's tag.
+   */
+  private String splitIntoTwoCliques(ResourceControllerDataProvider clusterData) {
+    String cliqueA = _testInstanceTags.get(0);
+    InstanceConfig nodeB = clusterData.getAssignableInstanceConfigMap().get(_testInstanceId + 2);
+    nodeB.removeTag(cliqueA);
+    nodeB.addTag("CliqueB");
+    clusterData.getIdealStates().values().forEach(idealState -> idealState.setReplicas("1"));
+    clusterData.getIdealState(_resourceNames.get(0)).setInstanceGroupTag(cliqueA);
+    clusterData.getIdealState(_resourceNames.get(1)).setInstanceGroupTag("CliqueB");
+    return cliqueA;
+  }
+
   private static ClusterStatusMonitor attachMonitor(WagedRebalancer rebalancer) {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedIsolationGauge");
     rebalancer.setClusterStatusMonitor(monitor);
@@ -1374,14 +1426,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
         ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
     ResourceControllerDataProvider clusterData = setupClusterDataCache();
-    String cliqueA = _testInstanceTags.get(0);
-    String cliqueB = "CliqueB";
-    InstanceConfig nodeB = clusterData.getAssignableInstanceConfigMap().get(_testInstanceId + 2);
-    nodeB.removeTag(cliqueA);
-    nodeB.addTag(cliqueB);
-    clusterData.getIdealStates().values().forEach(idealState -> idealState.setReplicas("1"));
-    clusterData.getIdealState(_resourceNames.get(0)).setInstanceGroupTag(cliqueA);
-    clusterData.getIdealState(_resourceNames.get(1)).setInstanceGroupTag(cliqueB);
+    String cliqueA = splitIntoTwoCliques(clusterData);
     clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(isolation);
     when(clusterData.getRefreshedChangeTypes())
         .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));

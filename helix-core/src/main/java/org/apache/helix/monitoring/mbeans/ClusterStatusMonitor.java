@@ -155,7 +155,10 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private Set<String> _wagedIsolationResources = Collections.emptySet();
   private boolean _wagedIsolationEnabled = false;
   private long _wagedIsolationGeneration = 0L;
+  // The union of the reports, which each resource monitor's own gauge follows.
+  private Set<String> _wagedIsolationSkipped = Collections.emptySet();
   private volatile long _wagedIsolationSkippedResources = 0L;
+  private volatile long _wagedIsolationShareBlocks = 0L;
 
   // Cluster-wide estimated max capacity utilization for WAGED resources (see
   // ClusterStatusMonitorMBean#getEstimatedMaxClusterCapacityUsageGauge). Refreshed every pipeline
@@ -1065,6 +1068,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   private ResourceMonitor getOrCreateResourceMonitor(String resourceName) {
+    ResourceMonitor created = null;
     try {
       if (!_resourceMonitorMap.containsKey(resourceName)) {
         synchronized (_resourceMonitorMap) {
@@ -1073,11 +1077,16 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
             ResourceMonitor bean =
                 new ResourceMonitor(_clusterName, resourceName, getObjectName(beanName));
             _resourceMonitorMap.put(resourceName, bean);
+            created = bean;
           }
         }
       }
     } catch (JMException ex) {
       LOG.error("Fail to register resource mbean, resource: " + resourceName);
+    }
+    if (created != null) {
+      // Outside the map's lock, since reset() takes that lock while holding this monitor's.
+      initWagedIsolationSkipped(resourceName, created);
     }
 
     return _resourceMonitorMap.get(resourceName);
@@ -1677,7 +1686,8 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   public synchronized void resetWagedInstanceTagIsolation() {
     _wagedIsolationGeneration++;
     _wagedIsolationSkippedByScope.clear();
-    _wagedIsolationSkippedResources = 0L;
+    _wagedIsolationShareBlocks = 0L;
+    refreshWagedIsolationSkippedResources();
   }
 
   /**
@@ -1699,7 +1709,30 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   private void refreshWagedIsolationSkippedResources() {
     Set<String> skipped = new HashSet<>();
     _wagedIsolationSkippedByScope.values().forEach(skipped::addAll);
+    // Only the resources whose state changed, so a cluster with isolation off pays nothing.
+    for (String resource : Sets.symmetricDifference(skipped, _wagedIsolationSkipped)) {
+      ResourceMonitor monitor = _resourceMonitorMap.get(resource);
+      if (monitor != null) {
+        monitor.updateInstanceTagIsolationSkipped(skipped.contains(resource));
+      }
+    }
+    _wagedIsolationSkipped = skipped;
     _wagedIsolationSkippedResources = skipped.size();
+  }
+
+  /** Sets a new resource monitor's isolation gauge, which the changes above may have missed. */
+  private synchronized void initWagedIsolationSkipped(String resource, ResourceMonitor monitor) {
+    monitor.updateInstanceTagIsolationSkipped(_wagedIsolationSkipped.contains(resource));
+  }
+
+  /**
+   * Records how many share blocks instance tag isolation found in the last baseline. Ignored while
+   * isolation is off.
+   */
+  public synchronized void updateWagedInstanceTagIsolationShareBlocks(int blocks) {
+    if (_wagedIsolationEnabled) {
+      _wagedIsolationShareBlocks = blocks;
+    }
   }
 
   /**
@@ -1867,6 +1900,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedInstanceTagIsolationSkippedResourcesGauge() {
     return _wagedIsolationSkippedResources;
+  }
+
+  @Override
+  public long getWagedInstanceTagIsolationShareBlocksGauge() {
+    return _wagedIsolationShareBlocks;
   }
 
   @Override

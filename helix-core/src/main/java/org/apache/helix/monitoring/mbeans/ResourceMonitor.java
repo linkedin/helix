@@ -69,6 +69,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
   private SimpleDynamicMetric<Long> _numLoadRebalanceThrottledReplicas;
   private SimpleDynamicMetric<Long> _numPendingStateTransitions;
   private SimpleDynamicMetric<Long> _rebalanceThrottledByErrorPartitionGauge;
+  // 1 while WAGED instance tag isolation is skipping this resource in any rebalance scope.
+  private SimpleDynamicMetric<Long> _instanceTagIsolationSkippedGauge;
 
   // Counters
   private SimpleDynamicMetric<Long> _successfulTopStateHandoffDurationCounter;
@@ -155,6 +157,8 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     _numPendingStateTransitions = new SimpleDynamicMetric("PendingStateTransitionGauge", 0L);
     _rebalanceThrottledByErrorPartitionGauge =
         new SimpleDynamicMetric("RebalanceThrottledByErrorPartitionGauge", 0L);
+    _instanceTagIsolationSkippedGauge =
+        new SimpleDynamicMetric<>("InstanceTagIsolationSkippedGauge", 0L);
 
     _partitionTopStateHandoffDurationGauge =
         new HistogramDynamicMetric("PartitionTopStateHandoffDurationGauge", new Histogram(
@@ -570,6 +574,14 @@ public class ResourceMonitor extends DynamicMBeanProvider {
     return _rebalanceThrottledByErrorPartitionGauge.getValue();
   }
 
+  public long getInstanceTagIsolationSkippedGauge() {
+    return _instanceTagIsolationSkippedGauge.getValue();
+  }
+
+  public void updateInstanceTagIsolationSkipped(boolean skipped) {
+    _instanceTagIsolationSkippedGauge.updateValue(skipped ? 1L : 0L);
+  }
+
   public void resetMaxTopStateHandoffGauge() {
     if (_lastResetTime + DEFAULT_RESET_INTERVAL_MS <= System.currentTimeMillis()) {
       _maxSinglePartitionTopStateHandoffDuration.updateValue(0L);
@@ -650,6 +662,7 @@ public class ResourceMonitor extends DynamicMBeanProvider {
         _numPendingStateTransitions,
         _rebalanceState,
         _rebalanceThrottledByErrorPartitionGauge,
+        _instanceTagIsolationSkippedGauge,
         _mappingCapacityRejectionCounter);
 
     attributeList.addAll(_dynamicCapacityMetricsMap.values());

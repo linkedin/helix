@@ -1422,6 +1422,33 @@ public class TestClusterStatusMonitor {
   }
 
   @Test
+  public void testWagedInstanceTagIsolationResourceAndShareBlockGauges() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedIsolationResourceCluster");
+    Set<String> resources = ImmutableSet.of("R0", "R1");
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateRebalancerStats("R0", 0L, 0L, 0L, 0L, false);
+
+    // Each resource's own gauge follows the reports, also on a monitor created after them.
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.PARTIAL, resources);
+    monitor.updateRebalancerStats("R1", 0L, 0L, 0L, 0L, false);
+    Assert.assertEquals(monitor.getResourceMonitor("R0").getInstanceTagIsolationSkippedGauge(), 1L);
+    Assert.assertEquals(monitor.getResourceMonitor("R1").getInstanceTagIsolationSkippedGauge(), 1L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.PARTIAL, ImmutableSet.of("R1"));
+    Assert.assertEquals(monitor.getResourceMonitor("R0").getInstanceTagIsolationSkippedGauge(), 0L);
+
+    // The share blocks follow the last baseline, and read 0 while isolation is off.
+    monitor.updateWagedInstanceTagIsolationShareBlocks(1);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 1L);
+    monitor.configureWagedInstanceTagIsolation(false, resources);
+    Assert.assertEquals(monitor.getResourceMonitor("R1").getInstanceTagIsolationSkippedGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
+    monitor.updateWagedInstanceTagIsolationShareBlocks(2);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
+  }
+
+  @Test
   public void testIncrementWagedFailureCategoryCountDoesNotLightRollupGauge() {
     ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedBaselineScopeCluster");
 
