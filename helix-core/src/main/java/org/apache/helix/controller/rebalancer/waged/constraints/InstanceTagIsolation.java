@@ -294,13 +294,13 @@ class InstanceTagIsolation {
    * or those of a resource added since the last assignment, so they count first on no key, then
    * only on the short keys, then on every key. A block only the parked replicas push over is
    * skipped only while the rest still does not fit, largest overflow first or, if that never fits
-   * with several keys, in the order skipUntilFit picks them. Any such block the rest then fits
-   * without is not skipped. A rest with a replica to assign is always held to the full totals, as
-   * the default check would hold a cluster made of the rest alone, and is scored as that cluster.
-   * If no set fits, every block with resources is over, and every block with a replica to assign
-   * in this scope is skipped as well, as long as a block with resources is left: the run then
-   * places nothing for the rest, which keeps what it holds on this scope's nodes. Only called
-   * where the default mode throws.
+   * with several keys, in the order skipUntilFit picks them, a search that can miss a set that
+   * fits. Any such block the rest then fits without is not skipped. A rest with a replica to assign
+   * is always held to the full totals, as the default check would hold a cluster made of the rest
+   * alone, and is scored as that cluster. If no fitting set is found, every block with resources
+   * is over, and every block with a replica to assign in this scope is skipped as well, as long as
+   * a block with resources is left: the run then places nothing for the rest, which keeps what it
+   * holds on this scope's nodes. Only called where the default mode throws.
    *
    * A block over on any key is skipped, even when only a node already above its capacity, such as
    * after a capacity cut, puts it over. Like any tolerated failure, the run does not fail with this
@@ -345,9 +345,9 @@ class InstanceTagIsolation {
       }
     }
     if (residualScoringCap == null) {
-      // No set leaves a rest that fits, so every block with resources is over. Skipping the ones
-      // with a replica to assign leaves a rest this run places nothing for: it keeps what it holds
-      // on this scope's nodes, and is not failed for what only the skipped blocks need.
+      // No fitting set was found, so every block with resources is over. Skipping the ones with a
+      // replica to assign leaves a rest this run places nothing for: it keeps what it holds on
+      // this scope's nodes, and is not failed for what only the skipped blocks need.
       atFault = totals.withBlocksToAssign(atFault);
       if (atFault == null || Collections.disjoint(atFault, totals._resourceBlocks)
           || atFault.containsAll(totals._resourceBlocks)) {
@@ -586,12 +586,14 @@ class InstanceTagIsolation {
      * a block with resources, adds its overflow to the room, so the first prefix that fits is a
      * smallest fitting set, and if none fits no set does, so this stops there. With several keys
      * that order can skip a block the rest fits without, or never fit while another set does, and
-     * finding a smallest fitting set is as hard as subset sum. So if the order never fits, this
-     * adds one candidate at a time: one the rest then fits with, else one that frees room at no
-     * cost on any key, else the one leaving the rest least short. Then each added block the rest
-     * still fits without is un-skipped, last added first. Each step is one pass over the keys.
+     * even finding a set that fits is as hard as subset sum. So if the order never fits, this adds
+     * one candidate at a time: one the rest then fits with, else one that frees room at no cost on
+     * any key, else the one leaving the rest least short. Then each added block the rest still
+     * fits without is un-skipped, last added first. Each step is one pass over the keys. Like the
+     * order, this search is best effort and can miss a set that fits, since it never swaps a block
+     * it added for another.
      *
-     * @return the blocks to skip, or null when none of these fits.
+     * @return the blocks to skip, or null when no fitting set was found.
      */
     private Set<Integer> skipUntilFit(Set<Integer> atFault, List<Integer> candidates) {
       Room room = new Room(atFault);
