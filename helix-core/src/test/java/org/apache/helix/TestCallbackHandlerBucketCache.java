@@ -122,6 +122,47 @@ public class TestCallbackHandlerBucketCache extends ZkUnitTestBase {
         "Newly added resource must be read and cached on a callback");
   }
 
+  /**
+   * Reproduces the delete+recreate (ABA) scenario: a resource is dropped and immediately recreated
+   * with a different bucket size, with no wait in between. {@code retainAll} alone cannot evict a
+   * path that still exists once the recreate lands, so the cache would otherwise serve the stale
+   * bucket size. The entry is instead evicted on the delete callback (handleDataDeleted) and re-read
+   * on the recreate, so the cached value must converge to the new bucket size.
+   */
+  @Test
+  public void testCacheRefreshesOnQuickDeleteRecreate() throws Exception {
+    final IdealStateChangeListener listener = (idealStates, context) -> {
+    };
+    _spectator.addIdealStateChangeListener(listener);
+
+    CallbackHandler handler = findHandler(_spectator, listener);
+    Assert.assertNotNull(handler, "Expected a CallbackHandler for the IdealState listener");
+    Map<String, Integer> cache = getBucketSizeCache(handler);
+
+    final String abaDb = "AbaDB";
+    final String abaPath = _idealStatesPath + "/" + abaDb;
+    final PropertyKey.Builder keyBuilder = _accessor.keyBuilder();
+
+    // Start non-bucketized. Waiting for the cached 0 also guarantees the per-child data watch is
+    // installed, so the delete below is delivered to handleDataDeleted.
+    _accessor.setProperty(keyBuilder.idealStates(abaDb), newIdealState(abaDb, 0));
+    Assert.assertTrue(
+        TestHelper.verify(() -> Integer.valueOf(0).equals(cache.get(abaPath)), 10000),
+        "Non-bucketized resource must first be cached as bucket size 0");
+
+    // Quick delete + recreate with a DIFFERENT bucket size, with no wait in between.
+    _accessor.removeProperty(keyBuilder.idealStates(abaDb));
+    _accessor.setProperty(keyBuilder.idealStates(abaDb), newIdealState(abaDb, BUCKET_SIZE));
+
+    // The cache must converge to the recreated resource's new bucket size, never stay stale at 0.
+    Assert.assertTrue(
+        TestHelper.verify(() -> Integer.valueOf(BUCKET_SIZE).equals(cache.get(abaPath)), 10000),
+        "Cache must refresh to the recreated resource's bucket size (no ABA staleness)");
+
+    // Cleanup so the resource does not leak into the other test.
+    _accessor.removeProperty(keyBuilder.idealStates(abaDb));
+  }
+
   private static IdealState newIdealState(String dbName, int bucketSize) {
     // calculateIdealState sorts its instance list in place, so pass a mutable copy.
     ZNRecord record = DefaultIdealStateCalculator.calculateIdealState(new ArrayList<>(INSTANCES), 4,
