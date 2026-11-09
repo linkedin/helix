@@ -48,6 +48,7 @@ import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedA
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModelProvider;
+import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
@@ -427,6 +428,46 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     }
   }
 
+  /**
+   * Starts this pipeline's instance tag isolation reporting, and with isolation on wraps the
+   * algorithm so every scope the pipeline calculates, its asynchronous ones included, reports what
+   * isolation skipped with the generation the pipeline started with.
+   */
+  private RebalanceAlgorithm withIsolationReporting(ResourceControllerDataProvider clusterData,
+      Set<String> resources) {
+    RebalanceAlgorithm algorithm = _rebalanceAlgorithm;
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor == null) {
+      return algorithm;
+    }
+    ClusterConfig clusterConfig = clusterData.getClusterConfig();
+    boolean enabled = clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
+    long generation = monitor.configureWagedInstanceTagIsolation(enabled, resources);
+    if (!enabled) {
+      return algorithm;
+    }
+    return new RebalanceAlgorithm() {
+      @Override
+      public OptimalAssignment calculate(ClusterModel clusterModel)
+          throws HelixRebalanceException {
+        return algorithm.calculate(clusterModel);
+      }
+
+      @Override
+      public String getName() {
+        return algorithm.getName();
+      }
+
+      @Override
+      public void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
+          Set<String> evaluatedResources, Set<String> skippedResources) {
+        algorithm.onAssignmentComputed(scope, evaluatedResources, skippedResources);
+        monitor.updateWagedInstanceTagIsolationSkippedResources(generation, scope,
+            skippedResources);
+      }
+    };
+  }
+
   // Update the global rebalance mode to be asynchronous or synchronous
   public void setGlobalRebalanceAsyncMode(boolean isAsyncGlobalRebalanceEnabled) {
     _globalRebalanceRunner.setGlobalRebalanceAsyncMode(isAsyncGlobalRebalanceEnabled);
@@ -453,10 +494,14 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
 
   @Override
   public void reset() {
-    if (_assignmentMetadataStore != null) {
-      _assignmentMetadataStore.reset();
+    try {
+      if (_assignmentMetadataStore != null) {
+        _assignmentMetadataStore.reset();
+      }
+      _globalRebalanceRunner.resetChangeDetector();
+    } finally {
+      resetIsolationReporting();
     }
-    _globalRebalanceRunner.resetChangeDetector();
   }
 
   // TODO the rebalancer should reject any other computing request after being closed.
@@ -464,10 +509,18 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   public void close() {
     _partialRebalanceRunner.close();
     _globalRebalanceRunner.close();
+    resetIsolationReporting();
     if (_assignmentMetadataStore != null) {
       _assignmentMetadataStore.close();
     }
     _metricCollector.unregister();
+  }
+
+  private void resetIsolationReporting() {
+    ClusterStatusMonitor monitor = _clusterStatusMonitor;
+    if (monitor != null) {
+      monitor.resetWagedInstanceTagIsolation();
+    }
   }
 
   @Override
@@ -475,6 +528,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       Map<String, Resource> resourceMap, final CurrentStateOutput currentStateOutput)
       throws HelixRebalanceException {
     LOG.info("Start computing new ideal states for resources: {}", resourceMap.keySet().toString());
+    // Before validation, so turning isolation off clears its reports even when the input is bad.
+    RebalanceAlgorithm algorithm = withIsolationReporting(clusterData, resourceMap.keySet());
     try {
       validateInput(clusterData, resourceMap);
     } catch (HelixRebalanceException ex) {
@@ -490,7 +545,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     try {
       // Calculate the target assignment based on the current cluster status.
       newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
-          _rebalanceAlgorithm);
+          algorithm);
     } catch (HelixRebalanceException ex) {
       LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
           ex.getFailureCategory(), ex.isCustomerActionable(), ex);
@@ -668,6 +723,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (activeNodes.equals(enabledLiveInstances) || !requireRebalanceOverwrite(clusterData, currentResourceAssignment)) {
       // no need for additional process -- the overwrite phase is not failing, so clear its gauge.
       reportOverwriteComputeStatus(true);
+      algorithm.onAssignmentComputed(ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES,
+          Collections.emptySet(), Collections.emptySet());
       return currentResourceAssignment;
     }
     _rebalanceOverwriteCounter.increment(1L);
@@ -760,6 +817,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
           .calculateAssignment(clusterModel, algorithm, currentBestPossibleAssignment);
     } else {
       newAssignment = currentBestPossibleAssignment;
+      algorithm.onAssignmentComputed(ClusterModel.RebalanceScopeType.EMERGENCY,
+          Collections.emptySet(), Collections.emptySet());
     }
 
     // Step 3: persist result to metadata store

@@ -23,6 +23,7 @@ import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -44,6 +45,7 @@ import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterModel.RebalanceScopeType;
 import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.model.ExternalView;
@@ -145,6 +147,15 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   // phase -- its only dedicated reversible signal (it otherwise shares the fallback gauge with
   // emergency). This is the temporary min-active-replica top-up applied during the delayed window.
   private volatile boolean _wagedRebalanceOverwriteFailing = false;
+  // The resources WAGED instance tag isolation is skipping, as each rebalance scope last reported
+  // them. Guarded by this. A report carries the generation its pipeline started with, so one still
+  // in flight across a reset or a flag flip is dropped.
+  private final Map<RebalanceScopeType, Set<String>> _wagedIsolationSkippedByScope =
+      new EnumMap<>(RebalanceScopeType.class);
+  private Set<String> _wagedIsolationResources = Collections.emptySet();
+  private boolean _wagedIsolationEnabled = false;
+  private long _wagedIsolationGeneration = 0L;
+  private volatile long _wagedIsolationSkippedResources = 0L;
 
   // Cluster-wide estimated max capacity utilization for WAGED resources (see
   // ClusterStatusMonitorMBean#getEstimatedMaxClusterCapacityUsageGauge). Refreshed every pipeline
@@ -1130,6 +1141,7 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
       _wagedInternalFailure = false;
       _wagedBaselineComputeFailing = false;
       _wagedRebalanceOverwriteFailing = false;
+      resetWagedInstanceTagIsolation();
       // Zero the DEFAULT controller-event pipeline backlog gauge on leadership change, for the
       // same reason as the counters above: the ClusterStatusMonitor instance is reused across
       // leadership periods, so a stale depth from a prior leader must not be re-reported by the
@@ -1644,6 +1656,53 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
+   * Starts a pipeline's instance tag isolation reporting. Drops the reports of resources that are
+   * gone, and every report when the flag flips.
+   * @return the generation the pipeline's calculations report with.
+   */
+  public synchronized long configureWagedInstanceTagIsolation(boolean enabled,
+      Set<String> resources) {
+    if (_wagedIsolationEnabled != enabled) {
+      resetWagedInstanceTagIsolation();
+      _wagedIsolationEnabled = enabled;
+    }
+    _wagedIsolationResources = enabled ? new HashSet<>(resources) : Collections.emptySet();
+    _wagedIsolationSkippedByScope.values()
+        .forEach(skipped -> skipped.retainAll(_wagedIsolationResources));
+    refreshWagedIsolationSkippedResources();
+    return _wagedIsolationGeneration;
+  }
+
+  /** Drops every instance tag isolation report, and any report still in flight. */
+  public synchronized void resetWagedInstanceTagIsolation() {
+    _wagedIsolationGeneration++;
+    _wagedIsolationSkippedByScope.clear();
+    _wagedIsolationSkippedResources = 0L;
+  }
+
+  /**
+   * Replaces what one scope last reported isolation skipping. A baseline reports every resource it
+   * still retries, so an incremental one keeps the ones it left alone. Dropped if the generation is
+   * no longer current.
+   */
+  public synchronized void updateWagedInstanceTagIsolationSkippedResources(long generation,
+      RebalanceScopeType scope, Set<String> skippedResources) {
+    if (!_wagedIsolationEnabled || generation != _wagedIsolationGeneration) {
+      return;
+    }
+    Set<String> skipped = new HashSet<>(skippedResources);
+    skipped.retainAll(_wagedIsolationResources);
+    _wagedIsolationSkippedByScope.put(scope, skipped);
+    refreshWagedIsolationSkippedResources();
+  }
+
+  private void refreshWagedIsolationSkippedResources() {
+    Set<String> skipped = new HashSet<>();
+    _wagedIsolationSkippedByScope.values().forEach(skipped::addAll);
+    _wagedIsolationSkippedResources = skipped.size();
+  }
+
+  /**
    * Record that a partition failed placement because at least one candidate node was rejected
    * by a hard constraint of the given type. Called once per partition per distinct constraint
    * type that contributed to the failure (set-union across nodes, not summed).
@@ -1803,6 +1862,11 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   @Override
   public long getWagedRebalanceOverwriteFailingGauge() {
     return _wagedRebalanceOverwriteFailing ? 1L : 0L;
+  }
+
+  @Override
+  public long getWagedInstanceTagIsolationSkippedResourcesGauge() {
+    return _wagedIsolationSkippedResources;
   }
 
   @Override

@@ -216,6 +216,18 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    */
   long getWagedRebalanceOverwriteFailingGauge();
 
+  /**
+   * Reversible gauge: the distinct resources WAGED instance tag isolation is skipping in any
+   * rebalance scope, the ones carried forward after a collision included. Each scope owns its
+   * report, so a healthy scope never clears another one's, and a resource a baseline skipped counts
+   * until a later baseline places it. A skipped resource keeps its previous assignment and the
+   * calculation still succeeds, so the failure gauges above never see it. Alert on {@code > 0}; the
+   * WARN logs name the scope, groups and resources. Reads 0 while isolation is off, holds its last
+   * value while maintenance mode pauses WAGED, and resets with the monitor.
+   * @return the number of distinct resources instance tag isolation is skipping.
+   */
+  long getWagedInstanceTagIsolationSkippedResourcesGauge();
+
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least
   // one candidate gets its counter incremented once for that partition. These sub-dimensions let

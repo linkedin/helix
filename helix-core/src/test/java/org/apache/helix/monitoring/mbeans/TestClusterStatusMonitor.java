@@ -43,10 +43,12 @@ import javax.management.ReflectionException;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.caches.TaskDataCache;
 import org.apache.helix.controller.rebalancer.waged.constraints.HardConstraint;
+import org.apache.helix.controller.rebalancer.waged.model.ClusterModel.RebalanceScopeType;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.task.AssignableInstanceManager;
@@ -1366,6 +1368,57 @@ public class TestClusterStatusMonitor {
     // A later successful (or not-needed) overwrite computation resets it to 0.
     monitor.updateWagedRebalanceOverwriteFailing(false);
     Assert.assertEquals(monitor.getWagedRebalanceOverwriteFailingGauge(), 0L);
+  }
+
+  @Test
+  public void testWagedInstanceTagIsolationSkippedResourcesGauge() {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedIsolationGaugeCluster");
+    Set<String> resources = ImmutableSet.of("R0", "R1", "R2");
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resources);
+
+    // A resource two scopes skip counts once, and a healthy scope clears only its own report.
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.GLOBAL_BASELINE, ImmutableSet.of("R0"));
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.EMERGENCY, ImmutableSet.of("R0", "R1"));
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.PARTIAL, Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.EMERGENCY, Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+
+    // A removed resource stops counting, and a report that started before the removal cannot add
+    // it back.
+    Assert.assertEquals(
+        monitor.configureWagedInstanceTagIsolation(true, ImmutableSet.of("R1", "R2")), generation);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.GLOBAL_BASELINE, ImmutableSet.of("R0", "R2"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+
+    // A reset, as on a leadership change, drops every report and any still in flight.
+    monitor.reset();
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    long next = monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(generation,
+        RebalanceScopeType.PARTIAL, ImmutableSet.of("R1"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+
+    // Turning isolation off clears it too. Nothing is reported while it is off, nor once it is
+    // back on by a calculation that started before.
+    monitor.updateWagedInstanceTagIsolationSkippedResources(next, RebalanceScopeType.PARTIAL,
+        ImmutableSet.of("R1"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+    monitor.configureWagedInstanceTagIsolation(false, resources);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(next, RebalanceScopeType.PARTIAL,
+        ImmutableSet.of("R1"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    monitor.configureWagedInstanceTagIsolation(true, resources);
+    monitor.updateWagedInstanceTagIsolationSkippedResources(next, RebalanceScopeType.PARTIAL,
+        ImmutableSet.of("R1"));
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
   }
 
   @Test
