@@ -42,16 +42,17 @@ import org.slf4j.LoggerFactory;
  */
 public class ClusterContext {
   private static final Logger LOG = LoggerFactory.getLogger(ClusterContext.class.getName());
+  // The estimations below are only reset by scopeEstimates, before anything is placed.
   // This estimation helps to ensure global partition count evenness
-  private final int _estimatedMaxPartitionCount;
+  private int _estimatedMaxPartitionCount;
   // This estimation helps to ensure global top state replica count evenness
-  private final int _estimatedMaxTopStateCount;
+  private int _estimatedMaxTopStateCount;
   // This estimation helps to ensure per-resource partition count evenness
   private final Map<String, Integer> _estimatedMaxPartitionByResource = new HashMap<>();
   // This estimation helps to ensure global resource usage evenness.
-  private final float _estimatedMaxUtilization;
+  private float _estimatedMaxUtilization;
   // This estimation helps to ensure global resource top state usage evenness.
-  private final float _estimatedTopStateMaxUtilization;
+  private float _estimatedTopStateMaxUtilization;
 
   // map{zoneName : map{resourceName : set(partitionNames)}}
   private Map<String, Map<String, Set<String>>> _assignmentForFaultZoneMap = new HashMap<>();
@@ -79,6 +80,9 @@ public class ClusterContext {
   // failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
   private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
+  // The replicas the totals below are summed over. Kept only when instance tag isolation is on and
+  // a capacity key is short, so the deficit can be split across the groups that own them.
+  private final Set<AssignableReplica> _managedReplicas;
   /**
    * Construct the cluster context based on the current instance status.
    * @param replicaSet All the partition replicas that are managed by the rebalancer
@@ -144,6 +148,9 @@ public class ClusterContext {
       _estimateUtilizationMap = estimateUtilization(totalCapacity, totalUsage);
       _clusterCapacityMap = Collections.unmodifiableMap(totalCapacity);
     }
+    _managedReplicas = _instanceTagIsolationEnabled
+        && _estimateUtilizationMap.values().stream().anyMatch(left -> left < 0)
+        ? Collections.unmodifiableSet(replicaSet) : Collections.<AssignableReplica>emptySet();
     LOG.info(
         "clusterName: {}, preferredScoringKeys: {}, estimatedMaxUtilization: {}, estimatedTopStateMaxUtilization: {}",
         _clusterName, _preferredScoringKeys, _estimatedMaxUtilization,
@@ -179,6 +186,38 @@ public class ClusterContext {
    */
   public Map<String, String> getResourceInstanceGroupTags() {
     return Collections.unmodifiableMap(_resourceInstanceGroupTags);
+  }
+
+  /**
+   * Every replica the cluster wide totals are summed over, including ones on nodes outside the
+   * model. Empty unless instance tag isolation is on and a capacity key is short.
+   */
+  public Set<AssignableReplica> getManagedReplicas() {
+    return _managedReplicas;
+  }
+
+  /**
+   * Resets the scoring estimations to what the constructor computes for a cluster made of the
+   * given replica and node totals alone. Instance tag isolation calls it before anything is placed,
+   * once it skips the groups behind a capacity deficit, so they do not change how the rest is
+   * scored.
+   */
+  public void scopeEstimates(Map<String, Long> usage, Map<String, Long> topStateUsage,
+      Map<String, Long> capacity, Map<String, Integer> replicasByResource, int topStateReplicas,
+      int nodes) {
+    int replicas = 0;
+    for (Map.Entry<String, Integer> entry : replicasByResource.entrySet()) {
+      replicas += entry.getValue();
+      _estimatedMaxPartitionByResource.put(entry.getKey(),
+          Math.max(1, estimateAvgReplicaCount(entry.getValue(), nodes)));
+    }
+    if (!capacity.isEmpty()) {
+      _estimatedMaxUtilization = estimateMaxUtilization(capacity, usage, _preferredScoringKeys);
+      _estimatedTopStateMaxUtilization =
+          estimateMaxUtilization(capacity, topStateUsage, _preferredScoringKeys);
+    }
+    _estimatedMaxPartitionCount = estimateAvgReplicaCount(replicas, nodes);
+    _estimatedMaxTopStateCount = estimateAvgReplicaCount(topStateReplicas, nodes);
   }
 
   public Map<String, ResourceAssignment> getBaselineAssignment() {
