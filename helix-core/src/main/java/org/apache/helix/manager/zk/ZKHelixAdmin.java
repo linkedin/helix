@@ -227,7 +227,8 @@ public class ZKHelixAdmin implements HelixAdmin {
     // config means a drop is partial or still in flight; re-adding would inherit its stale state.
     String instancePath = PropertyPathBuilder.instance(clusterName, nodeId);
     if (_zkClient.exists(instancePath)) {
-      throw new HelixException("Node " + nodeId + " has a residual subtree at " + instancePath
+      throw new HelixConflictException("Node " + nodeId + " has a residual subtree at "
+          + instancePath
           + " without an InstanceConfig. Indicates a partial or in-flight dropInstance."
           + " Run dropInstance to complete cleanup, then retry.");
     }
@@ -1978,13 +1979,17 @@ public class ZKHelixAdmin implements HelixAdmin {
   @Override
   public List<String> getInstancesInCluster(String clusterName) {
     String memberInstancesPath = PropertyPathBuilder.instance(clusterName);
-    return _zkClient.getChildren(memberInstancesPath);
+    // A subtree without an InstanceConfig is left by a dropInstance that failed partway, so its
+    // instance is no longer part of the cluster.
+    Set<String> configuredInstances =
+        new HashSet<>(_zkClient.getChildren(PropertyPathBuilder.instanceConfig(clusterName)));
+    return _zkClient.getChildren(memberInstancesPath).stream()
+        .filter(configuredInstances::contains).collect(Collectors.toList());
   }
 
   @Override
   public List<String> getInstancesInClusterWithTag(String clusterName, String tag) {
-    String memberInstancesPath = PropertyPathBuilder.instance(clusterName);
-    List<String> instances = _zkClient.getChildren(memberInstancesPath);
+    List<String> instances = getInstancesInCluster(clusterName);
     List<String> result = new ArrayList<String>();
 
     HelixDataAccessor accessor = new ZKHelixDataAccessor(clusterName, _baseDataAccessor);
@@ -1993,9 +1998,8 @@ public class ZKHelixAdmin implements HelixAdmin {
     for (String instanceName : instances) {
       InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceName));
       if (config == null) {
-        throw new IllegalStateException(String
-            .format("Instance %s does not have a config, cluster might be in bad state",
-                instanceName));
+        // Dropped after the instance list was read.
+        continue;
       }
       if (config.containsTag(tag)) {
         result.add(instanceName);

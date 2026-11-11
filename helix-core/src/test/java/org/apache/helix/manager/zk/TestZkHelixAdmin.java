@@ -2423,7 +2423,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     try {
       admin.addInstance(clusterName, new InstanceConfig(instanceName));
       Assert.fail("addInstance should reject an instance with a residual subtree");
-    } catch (HelixException expected) {
+    } catch (HelixConflictException expected) {
       Assert.assertTrue(expected.getMessage().contains("residual subtree"), expected.getMessage());
     }
     // The rejected add must not recreate the config or touch the residual subtree.
@@ -2456,6 +2456,30 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     Assert.assertTrue(
         _gZkClient.exists(PropertyPathBuilder.instanceCurrentState(clusterName, instanceName)));
     Assert.assertFalse(_gZkClient.exists(staleCurrentStatePath));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // An instance whose drop failed partway has a subtree but no InstanceConfig. It must not be
+  // listed as a cluster member, so e.g. rebalance doesn't assign partitions to it, and tag lookup
+  // must skip it instead of throwing.
+  @Test
+  public void testInstanceListsExcludeResidualSubtree() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestInstanceListsExcludeResidualSubtree";
+    final String tag = "tagA";
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    InstanceConfig tagged = new InstanceConfig("host_tagged");
+    tagged.addTag(tag);
+    admin.addInstance(clusterName, tagged);
+    createResidualInstanceSubtree(admin, clusterName, "host_residual");
+
+    Assert.assertEquals(admin.getInstancesInCluster(clusterName),
+        Collections.singletonList("host_tagged"));
+    Assert.assertEquals(admin.getInstancesInClusterWithTag(clusterName, tag),
+        Collections.singletonList("host_tagged"));
 
     _gSetupTool.deleteCluster(clusterName);
     System.out.println("End test :" + TestHelper.getTestMethodName());

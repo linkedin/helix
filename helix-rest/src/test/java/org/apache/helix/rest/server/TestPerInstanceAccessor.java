@@ -601,8 +601,9 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   // A dropInstance that fails after deleting the InstanceConfig leaves the instance subtree behind.
-  // A retried DELETE must finish that cleanup instead of rejecting the missing config, and a DELETE
-  // after the instance is fully removed must still fail.
+  // Re-adding the instance must return 409 until the drop is finished, a retried DELETE must finish
+  // it instead of rejecting the missing config, and once the instance is fully removed DELETE
+  // returns 404 and the instance can be added again.
   @Test(dependsOnMethods = "testDeleteInstance")
   public void testDeleteInstanceResumesPartialDrop() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -610,18 +611,23 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     InstanceConfig instanceConfig = new InstanceConfig(instanceName);
     Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(instanceConfig.getRecord()),
         MediaType.APPLICATION_JSON_TYPE);
-    new JerseyUriRequestBuilder("clusters/{}/instances/{}").format(CLUSTER_NAME, instanceName)
-        .put(this, entity);
+    String instanceUri = "clusters/" + CLUSTER_NAME + "/instances/" + instanceName;
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
     String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
     _gZkClient.delete(PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName));
     Assert.assertTrue(_gZkClient.exists(instancePath));
 
-    delete("clusters/" + CLUSTER_NAME + "/instances/" + instanceName,
-        Response.Status.OK.getStatusCode());
-    Assert.assertFalse(_gZkClient.exists(instancePath));
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.CONFLICT.getStatusCode());
 
-    delete("clusters/" + CLUSTER_NAME + "/instances/" + instanceName,
-        Response.Status.BAD_REQUEST.getStatusCode());
+    delete(instanceUri, Response.Status.OK.getStatusCode());
+    Assert.assertFalse(_gZkClient.exists(instancePath));
+    delete(instanceUri, Response.Status.NOT_FOUND.getStatusCode());
+
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
+    delete(instanceUri, Response.Status.OK.getStatusCode());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

@@ -47,10 +47,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.AccessOption;
+import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
+import org.apache.helix.PropertyPathBuilder;
+import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.constants.InstanceDrainExclusionType;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.guardrail.GuardrailContext;
@@ -398,6 +402,9 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
     try {
       admin.addInstance(clusterId, new InstanceConfig(record));
+    } catch (HelixConflictException ex) {
+      LOG.warn("Conflict adding instance {}: {}", instanceName, ex.getMessage());
+      return Response.status(Response.Status.CONFLICT).entity(ex.getMessage()).build();
     } catch (Exception ex) {
       LOG.error("Error in adding an instance: " + instanceName, ex);
       return serverError(ex);
@@ -760,10 +767,18 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
 
     HelixAdmin admin = getHelixAdmin();
+    // Not finding the instance is reported as 404, so callers retrying a drop can treat it as done.
+    // A missing InstanceConfig alone doesn't mean the instance is gone: dropInstance deletes the
+    // config before the instance subtree, so a failed drop can leave the subtree behind, and a
+    // retried DELETE must reach dropInstance to finish that cleanup.
+    BaseDataAccessor<ZNRecord> baseAccessor = getDataAccssor(clusterId).getBaseDataAccessor();
+    if (!baseAccessor.exists(PropertyPathBuilder.instanceConfig(clusterId, instanceName),
+        AccessOption.PERSISTENT) && !baseAccessor.exists(
+        PropertyPathBuilder.instance(clusterId, instanceName), AccessOption.PERSISTENT)) {
+      return notFound(String.format("Instance %s does not exist in cluster %s.", instanceName,
+          clusterId));
+    }
     try {
-      // dropInstance deletes the InstanceConfig before the instance subtree, so a failed drop can
-      // leave the subtree without a config. Don't require the config here, so a retry can finish
-      // that cleanup. dropInstance only needs the name and still rejects a fully removed instance.
       admin.dropInstance(clusterId, new InstanceConfig(instanceName));
     } catch (HelixException e) {
       return badRequest(e.getMessage());
