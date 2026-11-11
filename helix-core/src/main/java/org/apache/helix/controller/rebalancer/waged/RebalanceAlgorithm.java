@@ -53,6 +53,11 @@ public interface RebalanceAlgorithm {
    * Called after a successful calculation, once skipped resources are carried forward.
    * evaluatedResources are the resources this run recalculated. skippedResources are the ones
    * isolation skipped, plus the ones carried forward after a collision. Both sets are read-only.
+   * With instance tag isolation on, a global baseline calls it once its result is persisted, with
+   * every resource it still retries as skipped, and not at all if the write fails or a reset races
+   * it. Until a failed baseline or a reset replaces that list, a pipeline with no baseline due
+   * repeats a non-empty one with no evaluated resources. The emergency and delayed rebalance
+   * overwrite phases call it with empty sets when they have nothing to calculate.
    */
   default void onAssignmentComputed(ClusterModel.RebalanceScopeType scope,
       Set<String> evaluatedResources, Set<String> skippedResources) {

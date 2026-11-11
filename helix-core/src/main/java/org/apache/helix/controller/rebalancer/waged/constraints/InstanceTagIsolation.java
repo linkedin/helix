@@ -125,7 +125,11 @@ class InstanceTagIsolation {
   private OptimalAssignment _failureSink;
   private HelixRebalanceException _firstFailure;
   private boolean _placementFailureTolerated;
-  // Computed on the first failure only, so the happy path stays identical to the default mode.
+  // The category of each failure this run contained, counted only once the run succeeds.
+  private final List<HelixRebalanceException.FailureCategory> _containedFailures =
+      new ArrayList<>();
+  // Computed on the first failure, or once per baseline for its report, so no other happy path
+  // does extra work.
   private List<Set<String>> _shareBlocks;
   private Map<String, Set<String>> _blockByGroup;
   private Map<String, String> _tagByGroup;
@@ -168,6 +172,19 @@ class InstanceTagIsolation {
    */
   boolean hasToleratedPlacementFailure() {
     return _placementFailureTolerated;
+  }
+
+  /** The category of each failure this run contained so far. */
+  List<HelixRebalanceException.FailureCategory> containedFailures() {
+    return _containedFailures;
+  }
+
+  /**
+   * The share blocks, the units isolation skips on their own. Fewer than two means it cannot
+   * contain any failure. 0 while isolation is off.
+   */
+  int shareBlockCount() {
+    return _enabled ? shareBlocks().size() : 0;
   }
 
   /**
@@ -235,13 +252,14 @@ class InstanceTagIsolation {
     }
     _skippedResources.add(replica.getResourceName());
     _placementFailureTolerated = true;
+    _containedFailures.add(failure.getFailureCategory());
     if (_firstFailure == null) {
       _firstFailure = failure;
     }
     LOG.warn("Instance tag isolation rolled back and skipped share block {} after group {} failed "
-            + "in the {} rebalance of cluster {}. Released {} replica(s) placed in this run.",
+            + "in the {} rebalance of cluster {}. Released {} replica(s) placed in this run. {}",
         closure, group, _clusterModel.getRebalanceScopeType(),
-        _clusterModel.getContext().getClusterName(), released, failure);
+        _clusterModel.getContext().getClusterName(), released, failure.getMessage());
     return true;
   }
 
@@ -367,16 +385,17 @@ class InstanceTagIsolation {
     carried.retainAll(tagByGroup().keySet());
     _failedGroups.addAll(carried);
     _firstFailure = deficit;
+    _containedFailures.add(deficit.getFailureCategory());
     if (carried.isEmpty()) {
       LOG.warn("Instance tag isolation found the {} rebalance of cluster {} over capacity only on "
-              + "nodes no resource can use: {}. No group is skipped.",
+              + "nodes no resource can use: {}. No group is skipped. {}",
           _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
-          deficitGroups, deficit);
+          deficitGroups, deficit.getMessage());
     } else {
       LOG.warn("Instance tag isolation skipped group(s) {} in the {} rebalance of cluster {}, "
-              + "since their replicas do not fit on their own nodes.", carried,
+              + "since their replicas do not fit on their own nodes. {}", carried,
           _clusterModel.getRebalanceScopeType(), _clusterModel.getContext().getClusterName(),
-          deficit);
+          deficit.getMessage());
     }
     return residualScoringCap;
   }

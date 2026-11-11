@@ -78,6 +78,10 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
       _blockingSnapshotReporter;
+  // Optional listeners for instance tag isolation: the category of each failure a successful run
+  // contained, and the share blocks a global baseline found. May be null.
+  private volatile Consumer<HelixRebalanceException.FailureCategory> _containedFailureReporter;
+  private volatile Consumer<Integer> _shareBlocksReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -108,6 +112,23 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     _blockingSnapshotReporter = reporter;
   }
 
+  /**
+   * Attach a reporter that, once a run with instance tag isolation succeeds, gets the category of
+   * every failure isolation contained in it. Null disables it.
+   */
+  public void setContainedFailureReporter(
+      Consumer<HelixRebalanceException.FailureCategory> reporter) {
+    _containedFailureReporter = reporter;
+  }
+
+  /**
+   * Attach a reporter that gets the number of share blocks instance tag isolation finds in each
+   * global baseline. Null disables it.
+   */
+  public void setShareBlocksReporter(Consumer<Integer> reporter) {
+    _shareBlocksReporter = reporter;
+  }
+
   @Override
   public OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException {
     // Track every HardConstraint.Type that blocks placement during this run, then publish the
@@ -132,6 +153,13 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
         getBusyInstances(clusterModel.getContext().getBestPossibleAssignment().values());
     // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
     InstanceTagIsolation isolation = new InstanceTagIsolation(clusterModel, nodes);
+    Consumer<Integer> shareBlocksReporter = _shareBlocksReporter;
+    // Only a baseline covers every assignable node, and every tag change triggers one.
+    if (shareBlocksReporter != null
+        && clusterModel.getRebalanceScopeType() == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE
+        && clusterModel.getContext().isInstanceTagIsolationEnabled()) {
+      shareBlocksReporter.accept(isolation.shareBlockCount());
+    }
 
     Map<String, Float> positiveEstimateClusterRemainCap =
         computeScoringCapacities(clusterModel, isolation);
@@ -182,6 +210,11 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     }
 
     isolation.finish(optimalAssignment);
+    Consumer<HelixRebalanceException.FailureCategory> containedFailureReporter =
+        _containedFailureReporter;
+    if (containedFailureReporter != null) {
+      isolation.containedFailures().forEach(containedFailureReporter);
+    }
     optimalAssignment.updateAssignments(clusterModel);
     return optimalAssignment;
   }

@@ -60,6 +60,7 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.metrics.WagedRebalancerMetricCollector;
 import org.apache.helix.monitoring.metrics.model.CountMetric;
 import org.apache.helix.monitoring.metrics.model.LatencyMetric;
@@ -1060,13 +1061,14 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
 
   /**
    * A reset makes the next baseline recalculate every resource, so a baseline still running when
-   * the rebalancer is reset must not write its retries back.
+   * the rebalancer is reset must not write its retries back, nor report what it skipped.
    */
   @Test
   public void testIsolationResetDropsTheRetriesOfARunningBaseline() throws Exception {
     BaselineRecorder algorithm = new BaselineRecorder();
     WagedRebalancer rebalancer =
         new WagedRebalancer(new MockAssignmentMetadataStore(), algorithm, Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
     ResourceControllerDataProvider clusterData = setupClusterDataCache();
     clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
     Map<String, Resource> resourceMap = toResourceMap(clusterData);
@@ -1100,6 +1102,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertEquals(
         ((AtomicReference<?>) field(globalRebalanceRunner(rebalancer),
             "_isolationResourcesToRetry")).get(), Collections.emptySet());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
   }
 
   /** With instance tag isolation on, asynchronous baselines retry what the previous one skipped. */
@@ -1123,6 +1126,238 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
     awaitBaselines(rebalancer);
     Assert.assertEquals(algorithm.lastEvaluated(), new HashSet<>(_resourceNames));
+  }
+
+  /**
+   * The isolation gauge counts a resource the baseline skipped, through pipelines that run no
+   * baseline too, until a later baseline places it.
+   */
+  @Test
+  public void testIsolationGaugeCountsASkippedResourceUntilABaselinePlacesIt() throws Exception {
+    BaselineRecorder algorithm = new BaselineRecorder();
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(new MockAssignmentMetadataStore(), algorithm, Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    skipInIsolatedBaseline(rebalancer, algorithm, clusterData, resourceMap, _resourceNames.get(0));
+    // Both resources share every instance here, so the other one yields to the skipped one.
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+
+    when(clusterData.getRefreshedChangeTypes()).thenReturn(Collections.emptySet());
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+
+    // A monitor reset no rebalancer reset follows, as when a controller loses and regains
+    // leadership in one session, is healed by the next pipeline even with no baseline due.
+    monitor.reset();
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+
+    // An incremental baseline for one of them retries both, and places them.
+    changeResourceConfig(clusterData, _resourceNames.get(1), 1);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+  }
+
+  /**
+   * A reset, as on a leadership change, and turning isolation off both clear the gauge. A
+   * baseline that fails after the reset leaves nothing from before it to report again.
+   */
+  @Test
+  public void testIsolationGaugeClearsOnResetAndWhenIsolationTurnsOff() throws Exception {
+    BaselineRecorder algorithm = new BaselineRecorder();
+    WagedRebalancer rebalancer =
+        new WagedRebalancer(new MockAssignmentMetadataStore(), algorithm, Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    skipInIsolatedBaseline(rebalancer, algorithm, clusterData, resourceMap, _resourceNames.get(0));
+
+    rebalancer.reset();
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+    algorithm._failures = 1;
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+
+    // The next baseline recalculates what the failed one did, and skips the resource again.
+    algorithm._skip = Collections.singleton(_resourceNames.get(0));
+    changeResourceConfig(clusterData, _resourceNames.get(1), 1);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(false);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+  }
+
+  /** A baseline whose write fails reports nothing, so the gauge only counts persisted skips. */
+  @Test
+  public void testIsolationGaugeIgnoresABaselineThatFailedToPersist() throws Exception {
+    BaselineRecorder algorithm = new BaselineRecorder();
+    AtomicBoolean persistFails = new AtomicBoolean(true);
+    MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore() {
+      @Override
+      public void persistBaseline(Map<String, ResourceAssignment> globalBaseline) {
+        if (persistFails.get()) {
+          throw new IllegalStateException("Injected baseline write failure");
+        }
+        super.persistBaseline(globalBaseline);
+      }
+    };
+    WagedRebalancer rebalancer = new WagedRebalancer(metadataStore, algorithm, Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    algorithm._skip = Collections.singleton(_resourceNames.get(0));
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+
+    persistFails.set(false);
+    changeResourceConfig(clusterData, _resourceNames.get(1), 1);
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+  }
+
+  /**
+   * Each scope that runs clears its own report, also with nothing to calculate, and a pipeline
+   * that runs no baseline keeps the baseline's until the rebalancer is closed.
+   */
+  @Test
+  public void testIsolationGaugeClearsTheScopesThatSkipNothing() throws Exception {
+    WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+        new BaselineRecorder(), Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    Map<String, Resource> resourceMap = toResourceMap(clusterData);
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+
+    long generation = monitor.configureWagedInstanceTagIsolation(true, resourceMap.keySet());
+    for (ClusterModel.RebalanceScopeType scope : ClusterModel.RebalanceScopeType.values()) {
+      monitor.updateWagedInstanceTagIsolationSkippedResources(generation, scope,
+          Collections.singleton(_resourceNames.get(
+              scope == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE ? 0 : 1)));
+    }
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 2L);
+    when(clusterData.getRefreshedChangeTypes()).thenReturn(Collections.emptySet());
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+    rebalancer.close();
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+  }
+
+  /**
+   * With the real algorithm a baseline reports the share blocks isolation found: one while the
+   * untagged resources reach every instance, two once each has its own clique. A failure isolation
+   * contains still counts in its failure category, while the calculation itself succeeds.
+   */
+  @Test
+  public void testIsolationReportsShareBlocksAndContainedFailures() throws Exception {
+    for (boolean cliques : new boolean[] {false, true}) {
+      WagedRebalancer rebalancer = new WagedRebalancer(new MockAssignmentMetadataStore(),
+          ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
+      ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+      ResourceControllerDataProvider clusterData = setupClusterDataCache();
+      if (cliques) {
+        splitIntoTwoCliques(clusterData);
+      }
+      clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+      when(clusterData.getRefreshedChangeTypes())
+          .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+      rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+          new CurrentStateOutput());
+      Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), cliques ? 2 : 1);
+      if (cliques) {
+        makePartitionUnplaceable(clusterData, _resourceNames.get(0));
+        rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+            new CurrentStateOutput());
+        Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
+        Assert.assertTrue(monitor.getWagedFailureNoCandidateNodeCounter() > 0);
+        Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
+      }
+    }
+  }
+
+  /**
+   * A baseline still running when the monitor resets, as on a leadership change, reports neither
+   * its share blocks nor the failures it contained afterwards.
+   */
+  @Test
+  public void testIsolationSignalsOfABaselineRunningAcrossAMonitorResetAreDropped()
+      throws Exception {
+    CountDownLatch started = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicBoolean pause = new AtomicBoolean(true);
+    MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore() {
+      @Override
+      public Map<String, ResourceAssignment> getBaseline() {
+        // The first read is the baseline's, before it calculates.
+        if (pause.getAndSet(false)) {
+          started.countDown();
+          Uninterruptibles.awaitUninterruptibly(release);
+        }
+        return super.getBaseline();
+      }
+    };
+    WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
+        ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    splitIntoTwoCliques(clusterData);
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    makePartitionUnplaceable(clusterData, _resourceNames.get(0));
+    AtomicReference<Throwable> pipelineFailure = new AtomicReference<>();
+    Thread pipeline = new Thread(() -> {
+      try {
+        rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+            new CurrentStateOutput());
+      } catch (Throwable t) {
+        pipelineFailure.set(t);
+      }
+    });
+    pipeline.start();
+    try {
+      Assert.assertTrue(started.await(30, TimeUnit.SECONDS));
+      monitor.reset();
+    } finally {
+      release.countDown();
+    }
+    pipeline.join(TimeUnit.SECONDS.toMillis(30));
+    Assert.assertFalse(pipeline.isAlive(), "The pipeline did not finish");
+    Assert.assertNull(pipelineFailure.get());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureNoCandidateNodeCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
+  }
+
+  /**
+   * Gives the first resource a clique of the first two instances and the second resource one of
+   * the third, with one replica per partition.
+   * @return the first clique's tag.
+   */
+  private String splitIntoTwoCliques(ResourceControllerDataProvider clusterData) {
+    String cliqueA = _testInstanceTags.get(0);
+    InstanceConfig nodeB = clusterData.getAssignableInstanceConfigMap().get(_testInstanceId + 2);
+    nodeB.removeTag(cliqueA);
+    nodeB.addTag("CliqueB");
+    clusterData.getIdealStates().values().forEach(idealState -> idealState.setReplicas("1"));
+    clusterData.getIdealState(_resourceNames.get(0)).setInstanceGroupTag(cliqueA);
+    clusterData.getIdealState(_resourceNames.get(1)).setInstanceGroupTag("CliqueB");
+    return cliqueA;
+  }
+
+  private static ClusterStatusMonitor attachMonitor(WagedRebalancer rebalancer) {
+    ClusterStatusMonitor monitor = new ClusterStatusMonitor("TestWagedIsolationGauge");
+    rebalancer.setClusterStatusMonitor(monitor);
+    return monitor;
   }
 
   /** Runs a full baseline, then one with isolation on that skips the given resource. */
@@ -1239,14 +1474,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
         ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
     ResourceControllerDataProvider clusterData = setupClusterDataCache();
-    String cliqueA = _testInstanceTags.get(0);
-    String cliqueB = "CliqueB";
-    InstanceConfig nodeB = clusterData.getAssignableInstanceConfigMap().get(_testInstanceId + 2);
-    nodeB.removeTag(cliqueA);
-    nodeB.addTag(cliqueB);
-    clusterData.getIdealStates().values().forEach(idealState -> idealState.setReplicas("1"));
-    clusterData.getIdealState(_resourceNames.get(0)).setInstanceGroupTag(cliqueA);
-    clusterData.getIdealState(_resourceNames.get(1)).setInstanceGroupTag(cliqueB);
+    String cliqueA = splitIntoTwoCliques(clusterData);
     clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(isolation);
     when(clusterData.getRefreshedChangeTypes())
         .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
