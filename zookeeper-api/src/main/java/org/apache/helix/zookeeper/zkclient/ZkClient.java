@@ -2060,6 +2060,12 @@ public class ZkClient implements Watcher {
       orderedPaths = collectSubtreeChildrenFirst(path);
     } catch (ZkNoNodeException e) {
       return;
+    } catch (Exception e) {
+      // Wrapped like batch failures so callers handle a failed walk the same way, e.g. a child list
+      // too large to read.
+      LOG.error("zkclient {}, Failed to list subtree of {} for recursive delete, exception {}",
+          _uid, path, e);
+      throw new ZkClientException("Failed to delete " + path, e);
     }
     if (orderedPaths.isEmpty()) {
       return;

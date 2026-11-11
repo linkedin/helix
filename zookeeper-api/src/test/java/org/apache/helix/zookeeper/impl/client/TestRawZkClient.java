@@ -1332,6 +1332,37 @@ public class TestRawZkClient extends ZkTestBase {
     }
   }
 
+  // A failure while walking the subtree is wrapped in ZkClientException, like a failed batch, so
+  // callers handle both the same way.
+  @Test
+  void testDeleteRecursivelyWrapsListingFailure() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyListingFailure";
+    ZkClient zkClient = new ZkClient(ZkTestBase.ZK_ADDR) {
+      @Override
+      protected List<String> getChildren(String path, boolean watch) {
+        if (path.equals(root + "/child-0")) {
+          throw new ZkException("simulated oversized child list at " + path);
+        }
+        return super.getChildren(path, watch);
+      }
+    };
+    try {
+      zkClient.createPersistent(root + "/child-0", true);
+      try {
+        zkClient.deleteRecursively(root);
+        Assert.fail("deleteRecursively should fail when listing the subtree fails");
+      } catch (ZkClientException expected) {
+        Assert.assertTrue(expected.getCause() instanceof ZkException,
+            "Unexpected cause: " + expected.getCause());
+      }
+      Assert.assertTrue(zkClient.exists(root + "/child-0"));
+    } finally {
+      _zkClient.deleteRecursively(root);
+      zkClient.close();
+    }
+  }
+
   // Returns a ZkClient that runs the given action once, just before its first multi() call, to
   // simulate another agent changing the subtree between the walk and the batched delete.
   private ZkClient createZkClientRacingFirstMulti(Consumer<ZkClient> concurrentChange) {

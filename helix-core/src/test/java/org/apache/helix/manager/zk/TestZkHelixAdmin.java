@@ -2656,6 +2656,46 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  // A failure while listing the subtree (e.g. a child list too large to read) must surface as a
+  // HelixException, which REST reports as a retryable 400, not escape as a raw ZkException.
+  // Retrying once the listing succeeds finishes the partial drop.
+  @Test
+  public void testDropInstanceReportsSubtreeListingFailure() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceListingFailure";
+    final String instanceName = "host_listing_failure";
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    String messagesPath = PropertyPathBuilder.instanceMessage(clusterName, instanceName);
+
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
+        new org.apache.helix.zookeeper.impl.client.ZkClient(ZK_ADDR) {
+          @Override
+          protected List<String> getChildren(String path, boolean watch) {
+            if (path.equals(messagesPath)) {
+              throw new ZkException("simulated oversized child list at " + path);
+            }
+            return super.getChildren(path, watch);
+          }
+        };
+    try {
+      new ZKHelixAdmin(zkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      Assert.assertEquals(expected.getMessage(),
+          "Failed to drop instance: " + instanceName + ". Retry times: 0");
+    } finally {
+      zkClient.close();
+    }
+    Assert.assertTrue(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+
+    setupAdmin.dropInstance(clusterName, new InstanceConfig(instanceName));
+    Assert.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
   // Mock ZK client for an instance that has a config and a subtree but is not live.
   private RealmAwareZkClient mockZkClientForOfflineInstance(String clusterName,
       String instanceName) {
