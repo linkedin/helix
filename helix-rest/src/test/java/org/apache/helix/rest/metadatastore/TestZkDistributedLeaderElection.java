@@ -186,6 +186,36 @@ public class TestZkDistributedLeaderElection extends ZkUnitTestBase {
   }
 
   @Test(timeOut = 20000)
+  public void testClosedLeaderWithOpenClientHandsOver() throws Exception {
+    ZkDistributedLeaderElection first = join("first");
+    ZkDistributedLeaderElection second = join("second");
+    Assert.assertTrue(TestHelper.verify(first::isLeader, 5000));
+    first.close();
+    Assert.assertFalse(_clients.get(0).isClosed());
+    Assert.assertTrue(TestHelper.verify(() -> second.isLeader()
+        && _gZkClient.getChildren(_path).size() == 1, 10000));
+  }
+
+  @Test(timeOut = 20000)
+  public void testChildChangeWithLiveCandidateOnlyRefreshesLeader() throws Exception {
+    HelixZkClient realClient = newClient();
+    HelixZkClient client =
+        Mockito.mock(HelixZkClient.class, AdditionalAnswers.delegatesTo(realClient));
+    ZkDistributedLeaderElection first =
+        new ZkDistributedLeaderElection(client, _path, new ZNRecord("first"));
+    _elections.add(first);
+    Assert.assertTrue(TestHelper.verify(first::isLeader, 5000));
+    Mockito.clearInvocations(client);
+    ZkDistributedLeaderElection second = join("second");
+    Assert.assertTrue(TestHelper.verify(() -> second.getCurrentLeaderInfo() != null, 5000));
+    first.handleChildChange(_path, _gZkClient.getChildren(_path));
+    Assert.assertTrue(first.isLeader());
+    Mockito.verify(client, Mockito.never()).createPersistent(Mockito.anyString(), Mockito.anyBoolean());
+    Mockito.verify(client, Mockito.never())
+        .createEphemeralSequential(Mockito.anyString(), Mockito.any(), Mockito.anyString());
+  }
+
+  @Test(timeOut = 20000)
   public void testThirdParticipantRefreshesLeader() throws Exception {
     join("first");
     ZkDistributedLeaderElection second = join("second");

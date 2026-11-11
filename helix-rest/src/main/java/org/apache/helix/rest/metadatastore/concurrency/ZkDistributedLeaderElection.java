@@ -198,12 +198,22 @@ public class ZkDistributedLeaderElection implements IZkStateListener, IZkChildLi
   }
 
   public void close() {
+    String candidate = _myEphemeralSequentialPath;
+    boolean ownsCandidate = candidate != null && isCurrentSession(_sessionId);
     _closed = true;
     _isLeader = false;
     _currentLeaderInfo = null;
     _zkClient.unsubscribeStateChanges(this);
     if (!_zkClient.isClosed()) {
       _zkClient.unsubscribeChildChanges(_basePath, this);
+      if (ownsCandidate) {
+        // A client that outlives the election must not keep holding the lowest sequence.
+        try {
+          _zkClient.delete(candidate);
+        } catch (RuntimeException e) {
+          LOG.warn("Failed to delete election candidate {} on close", candidate, e);
+        }
+      }
     }
   }
 
@@ -243,6 +253,14 @@ public class ZkDistributedLeaderElection implements IZkStateListener, IZkChildLi
 
   @Override
   public void handleChildChange(String path, List<String> children) {
-    refreshSession(Long.toHexString(_zkClient.getSessionId()));
+    String sessionId = Long.toHexString(_zkClient.getSessionId());
+    String candidate = _myEphemeralSequentialPath;
+    if (children != null && candidate != null && sessionId.equals(_sessionId)
+        && children.contains(candidate.substring(_basePath.length() + 1))) {
+      // Same session and our candidate is still there: only the head can have changed.
+      tryAcquiringLeadership();
+      return;
+    }
+    refreshSession(sessionId);
   }
 }
