@@ -194,14 +194,14 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
    *       transition is confirmed against the previously published ExternalView so that a partition
    *       coming up from nothing (a brand-new resource, partition expansion, or the first run after
    *       {@code clearMonitoringRecords()} on a leadership change) is not mistaken for a drop.</li>
-   *   <li>degraded -&gt; degraded: keep participant execution timing needed for the calculation.</li>
+   *   <li>degraded -&gt; degraded: wait for the minimum active replica count to be restored.</li>
    *   <li>degraded -&gt; recovered: emit the end-to-end recovery duration and clear the record.</li>
    * </ul>
    * The active replica count is computed from {@code currentStateOutput} (ExternalView is not yet
    * available at this stage), mirroring {@code ResourceMonitor#updateResourceState}. Helix-only
    * latency uses the replica that brings the active count back to the minimum and excludes
-   * participant execution on its recovery path. Work on other replicas must not hide controller
-   * delay. If the data cannot determine the path, pass -1 so the monitor skips the latency sample.
+   * participant execution on its final transition into an active state. If its timing no longer
+   * matches the observed state, pass -1 so the monitor skips the Helix-only sample.
    *
    * @param cache cluster data cache
    * @param clusterStatusMonitor monitor object
@@ -223,7 +223,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
           cache.getMissingMinActiveReplicaMap().get(resourceName);
       if (records != null && records.containsKey(partition.getPartitionName())) {
         records.get(partition.getPartitionName())
-            .invalidateAttribution("recovery observation was suspended");
+            .invalidateAttribution();
       }
       // Skip resources with no IdealState or that are disabled. A disabled resource is not
       // expected to maintain its replicas, so a drop below min while disabled is not a real
@@ -264,32 +264,26 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
             .put(partitionName, record);
       }
       if (record != null && clusterStatusMonitor != null) {
-        record.observeConfiguration(minActiveReplica, stateModelDef.getId(),
-            stateModelDef.getInitialState(), getActiveStates(stateModelDef));
-        observeRecoveryExecution(cache, currentStateOutput, currentStateMemo, resourceName,
-            partition, record);
+        record.observeInitialState(currentStateOutput.getCurrentStateMap(resourceName, partition),
+            getActiveStates(stateModelDef), minActiveReplica);
       }
       // Still degraded: keep waiting. The breach is counted once at recovery (below), not while in
       // flight, so the monotonic counter reliably captures it even across scrape gaps.
     } else if (record != null) {
       // Edge: degraded -> recovered. Emit the end-to-end recovery duration and clear the record.
       missingMinActiveReplicaMap.get(resourceName).remove(partitionName);
-      long recoveryEnd = System.currentTimeMillis();
+      long now = System.currentTimeMillis();
+      String restoringInstance = record.findRestoringInstance(currentStateOutput, resourceName,
+          partition, getActiveStates(stateModelDef), minActiveReplica);
+      long restoredAt = restoringInstance == null ? TIMESTAMP_NOT_RECORDED
+          : currentStateOutput.getEndTime(resourceName, partition, restoringInstance);
+      // Preserve the existing total-duration fallback when participant timing is unavailable.
+      long recoveryEnd = restoredAt >= record.getStartTimeStamp() && restoredAt <= now
+          ? restoredAt : now;
       long totalDuration = recoveryEnd - record.getStartTimeStamp();
       if (clusterStatusMonitor != null) {
-        if (!record.hasObservation()) {
-          record.invalidateAttribution("recovery has no degraded-state observation");
-        }
-        record.observeConfiguration(minActiveReplica, stateModelDef.getId(),
-            stateModelDef.getInitialState(), getActiveStates(stateModelDef));
-        observeRecoveryExecution(cache, currentStateOutput, currentStateMemo, resourceName,
-            partition, record);
-        long helixLatency = record.getHelixLatency(recoveryEnd);
-        if (helixLatency < 0) {
-          LogUtil.logDebug(LOG, _eventId, String.format(
-              "Helix recovery latency unavailable for %s/%s: %s",
-              resourceName, partitionName, record.getUnavailableReason()));
-        }
+        long helixLatency = getRecoveryHelixLatency(cache, currentStateOutput, currentStateMemo,
+            resourceName, partition, record, restoringInstance, restoredAt, now);
         clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration,
             helixLatency, true);
         if (totalDuration > recoveryDurationThreshold) {
@@ -303,72 +297,34 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
     }
   }
 
-  private void observeRecoveryExecution(ResourceControllerDataProvider cache,
+  private long getRecoveryHelixLatency(ResourceControllerDataProvider cache,
       CurrentStateOutput currentStateOutput,
       Map<String, Map<String, CurrentState>> currentStateMemo, String resourceName,
-      Partition partition, MissingMinActiveReplicaRecord record) {
-    if (record.isAttributionInvalid()) {
-      return;
+      Partition partition, MissingMinActiveReplicaRecord record, String instance,
+      long restoredAt, long now) {
+    if (record.isAttributionInvalid() || instance == null
+        || restoredAt < record.getStartTimeStamp() || restoredAt > now) {
+      return TIMESTAMP_NOT_RECORDED;
     }
-    long epoch = currentStateOutput.getRecoveryObservationEpoch();
-    if (epoch != cache.getRecoveryObservationEpoch()) {
-      record.invalidateAttribution("controller monitoring epoch changed");
-      return;
+    LiveInstance liveInstance = cache.getLiveInstances().get(instance);
+    String session = currentStateOutput.getParticipantSession(instance);
+    if (liveInstance == null || session == null || !session.equals(liveInstance.getEphemeralOwner())) {
+      return TIMESTAMP_NOT_RECORDED;
     }
-    long sequence = currentStateOutput.getRecoveryObservationSequence(record);
-    long matchingSequence =
-        record.matchingObservation(currentStateOutput, resourceName, partition, cache);
-    if (sequence < 0 && !record.hasObservation()) {
-      sequence = matchingSequence;
+    CurrentState currentState =
+        resolveCurrentStates(cache, currentStateMemo, instance, session).get(resourceName);
+    String partitionName = partition.getPartitionName();
+    if (currentState == null
+        || !currentStateOutput.getCurrentStateMap(resourceName, partition).get(instance)
+            .equals(currentState.getState(partitionName))
+        || currentState.getEndTime(partitionName) != restoredAt) {
+      return TIMESTAMP_NOT_RECORDED;
     }
-    if (sequence < 0 || sequence != matchingSequence) {
-      record.invalidateAttribution("partition transition snapshot is stale");
-      return;
+    long transitionStart = currentState.getStartTime(partitionName);
+    if (transitionStart < 0 || transitionStart > restoredAt) {
+      return TIMESTAMP_NOT_RECORDED;
     }
-    // Count changes to this recovery's data, not unrelated pipeline runs.
-    record.observeSequence(sequence);
-    if (record.isAttributionInvalid()) {
-      return;
-    }
-    for (Map.Entry<String, String> entry :
-        currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet()) {
-      String instance = entry.getKey();
-      if (entry.getValue() == null) {
-        record.invalidateAttribution("participant current state is unavailable");
-        return;
-      }
-      LiveInstance liveInstance = cache.getLiveInstances().get(instance);
-      if (liveInstance == null) {
-        record.invalidateAttribution("participant is no longer live");
-        return;
-      }
-      String session = currentStateOutput.getParticipantSession(instance);
-      if (session == null || !session.equals(liveInstance.getEphemeralOwner())) {
-        record.invalidateAttribution("participant session changed since the snapshot");
-        return;
-      }
-      CurrentState currentState =
-          resolveCurrentStates(cache, currentStateMemo, instance, session).get(resourceName);
-      if (currentState == null
-          || !entry.getValue().equals(currentState.getState(partition.getPartitionName()))
-          || currentState.getEndTime(partition.getPartitionName())
-              != currentStateOutput.getEndTime(resourceName, partition, instance)) {
-        record.invalidateAttribution("participant current state no longer matches the observation");
-        return;
-      }
-      String partitionName = partition.getPartitionName();
-      record.observeParticipant(instance, session, entry.getValue(),
-          currentState.getPreviousState(partitionName), currentState.getStartTime(partitionName),
-          currentState.getEndTime(partitionName));
-      if (record.isAttributionInvalid()) {
-        return;
-      }
-    }
-    if (epoch != cache.getRecoveryObservationEpoch()
-        || sequence != record.matchingObservation(currentStateOutput, resourceName, partition, cache)) {
-      record.invalidateAttribution("partition transition snapshot changed during recovery observation");
-    }
-    record.finishObservation(currentStateOutput.getCurrentStateMap(resourceName, partition).keySet());
+    return Math.max(record.getStartTimeStamp(), transitionStart) - record.getStartTimeStamp();
   }
 
   /**

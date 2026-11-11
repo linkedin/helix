@@ -92,11 +92,6 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
     Map<String, LiveInstance> liveInstances = cache.getLiveInstances();
     final CurrentStateOutput currentStateOutput = new CurrentStateOutput();
     final CurrentStateOutput currentStateExcludingUnknown = new CurrentStateOutput();
-    if (cache instanceof ResourceControllerDataProvider) {
-      long epoch = ((ResourceControllerDataProvider) cache).getRecoveryObservationEpoch();
-      currentStateOutput.setRecoveryObservationEpoch(epoch);
-      currentStateExcludingUnknown.setRecoveryObservationEpoch(epoch);
-    }
 
     for (LiveInstance instance : liveInstances.values()) {
       String instanceName = instance.getInstanceName();
@@ -123,16 +118,6 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
       updateCurrentStates(instance, currentStates, currentStateOutput, secondaryOutput, resourceMap);
       updatePendingMessages(instance, cache, messages.values(), relayMessages.values(),
           existingStaleMessages, currentStateOutput, secondaryOutput, resourceMap);
-    }
-    if (cache instanceof ResourceControllerDataProvider) {
-      ResourceControllerDataProvider provider = (ResourceControllerDataProvider) cache;
-      provider.getMissingMinActiveReplicaMap().forEach((resource, records) ->
-          records.forEach((partition, record) -> {
-            if (!record.isAttributionInvalid()) {
-              currentStateOutput.captureRecoveryObservation(record, resource,
-                  new Partition(partition), provider);
-            }
-          }));
     }
     event.addAttribute(AttributeName.CURRENT_STATE.name(), currentStateOutput);
     event.addAttribute(AttributeName.CURRENT_STATE_EXCLUDING_UNKNOWN.name(), currentStateExcludingUnknown);

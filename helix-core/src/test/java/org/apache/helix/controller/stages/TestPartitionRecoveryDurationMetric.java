@@ -339,7 +339,8 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     long helix = monitor.getPartitionRecoveryHelixLatencyGauge()
         .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue();
     Assert.assertEquals(total - helix, 5000L);
-    Assert.assertTrue(helix > 0, "Valid controller latency must populate the previously empty histogram");
+    Assert.assertEquals(total, 7000L, "Observation delay after END_TIME must not inflate recovery");
+    Assert.assertEquals(helix, 2000L);
     Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
     Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
     Assert.assertFalse(hasRecord());
@@ -347,6 +348,101 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     runTimedPipeline(recovered, null);
     Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
     Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
+  }
+
+  @Test
+  public void testAdditionalRecoveryAndActiveStateChangeStillEmitHelixLatency() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("SLAVE", "SLAVE", "MASTER"), start);
+    setExecution(recovered, 0, "MASTER", start + 8000L, start + 9000L);
+    setExecution(recovered, 1, "OFFLINE", start + 2000L, start + 5000L);
+    setExecution(recovered, 2, "OFFLINE", start + 4000L, start + 7000L);
+
+    runTimedPipeline(recovered, null);
+
+    ResourceMonitor monitor = getResourceMonitor();
+    Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+        .getAttributeValue(RECOVERY_DURATION_MAX).longValue(), 5000L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+        .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue(), 2000L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
+  }
+
+  @Test
+  public void testRestoringReplicaChangedSinceObservationSkipsHelixLatency() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("MASTER", "SLAVE", "OFFLINE"), start);
+    setExecution(recovered, 1, "OFFLINE", start + 2000L, start + 5000L);
+    prepareTimedPipeline(recovered, null);
+    CurrentStateOutput observed = event.getAttribute(AttributeName.CURRENT_STATE.name());
+    recovered.get(HOSTNAME_PREFIX + 1).setState(PARTITION, "MASTER");
+    setExecution(recovered, 1, "SLAVE", start + 6000L, start + 7000L);
+    prepareTimedPipeline(recovered, null);
+    event.addAttribute(AttributeName.CURRENT_STATE.name(), observed);
+
+    new TopStateHandoffReportStage().execute(event);
+
+    ResourceMonitor monitor = getResourceMonitor();
+    Assert.assertEquals(monitor.getPartitionRecoveryDurationGauge()
+        .getAttributeValue(RECOVERY_DURATION_MAX).longValue(), 5000L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L);
+  }
+
+  @Test
+  public void testLateObservationDoesNotIncrementBeyondThresholdCounter() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    ClusterConfig clusterConfig = new ClusterConfig(_clusterName);
+    clusterConfig.setPartitionRecoveryDurationThreshold(5000L);
+    setClusterConfig(clusterConfig);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("MASTER", "SLAVE", "OFFLINE"), start);
+    setExecution(recovered, 1, "OFFLINE", start + 1000L, start + 3000L);
+
+    runTimedPipeline(recovered, null);
+
+    Assert.assertEquals(getResourceMonitor().getPartitionsRecoveryDurationBeyondThresholdCounter(), 0L);
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryDurationGauge()
+        .getAttributeValue(RECOVERY_DURATION_MAX).longValue(), 3000L);
+  }
+
+  @Test
+  public void testZeroHelixLatencyStillCountsAsSample() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("MASTER", "SLAVE", "OFFLINE"), start);
+    setExecution(recovered, 1, "OFFLINE", start - 1000L, start + 3000L);
+
+    runTimedPipeline(recovered, null);
+
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencyGauge()
+        .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue(), 0L);
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 1L);
+  }
+
+  @Test
+  public void testInvalidRestoringTransitionDoesNotEmitHelixLatency() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("MASTER", "SLAVE", "OFFLINE"), start);
+    setExecution(recovered, 1, "OFFLINE", start + 6000L, start + 3000L);
+
+    runTimedPipeline(recovered, null);
+
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 0L);
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryDurationGauge()
+        .getAttributeValue(RECOVERY_DURATION_MAX).longValue(), 3000L);
   }
 
   @Test
@@ -373,7 +469,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
-  public void testRecoveryRetainsExecutionAcrossRetries() throws Exception {
+  public void testRecoveryUsesFinalTransitionAfterRetries() throws Exception {
     preSetup(MIN_ACTIVE_REPLICAS);
     long start = System.currentTimeMillis() - 10000L;
     runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
@@ -398,7 +494,8 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
         .getAttributeValue(RECOVERY_DURATION_MAX).longValue();
     long helix = monitor.getPartitionRecoveryHelixLatencyGauge()
         .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue();
-    Assert.assertEquals(total - helix, 2000L);
+    Assert.assertEquals(total, 5000L);
+    Assert.assertEquals(helix, 4000L);
     Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
   }
 
@@ -448,7 +545,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
-  public void testSkippedTransitionObservationStaysUnavailable() throws Exception {
+  public void testSkippedEarlierTransitionsDoNotDiscardFinalTiming() throws Exception {
     preSetup(MIN_ACTIVE_REPLICAS);
     long start = System.currentTimeMillis() - 10000L;
     runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
@@ -464,11 +561,11 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     runTimedPipeline(recovered, null);
 
     Assert.assertEquals(getResourceMonitor().getSucceededPartitionRecoveryCounter(), 1L);
-    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 0L);
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 1L);
   }
 
   @Test
-  public void testSkippedConfigurationChangeIsNotTreatedAsANoop() throws Exception {
+  public void testUnobservedConfigurationChangesDoNotRequireSnapshots() throws Exception {
     preSetup(MIN_ACTIVE_REPLICAS);
     long start = System.currentTimeMillis() - 10000L;
     Map<String, CurrentState> degraded =
@@ -481,7 +578,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     runTimedPipeline(recovered, null);
 
     Assert.assertEquals(getResourceMonitor().getSucceededPartitionRecoveryCounter(), 1L);
-    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 0L);
+    Assert.assertEquals(getResourceMonitor().getPartitionRecoveryHelixLatencySampleCounter(), 1L);
   }
 
   @Test
@@ -580,7 +677,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
-  public void testStaleCurrentStateSnapshotIsNotUsedForAttribution() throws Exception {
+  public void testEarlierStaleObservationDoesNotDiscardCurrentRestoringTiming() throws Exception {
     preSetup(MIN_ACTIVE_REPLICAS);
     long start = System.currentTimeMillis() - 10000L;
     runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
@@ -602,7 +699,7 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     ResourceMonitor monitor = getResourceMonitor();
     Assert.assertNotNull(monitor);
     Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
-    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
   }
 
   @Test
