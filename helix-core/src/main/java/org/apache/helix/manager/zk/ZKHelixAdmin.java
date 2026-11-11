@@ -329,11 +329,11 @@ public class ZKHelixAdmin implements HelixAdmin {
         _zkClient.deleteRecursively(instancePath);
         return;
       } catch (ZkClientException e) {
-        if (retryCnt < 3 && e.getCause() instanceof ZkException && e.getCause()
-            .getCause() instanceof KeeperException.NotEmptyException) {
-          // Racing condition with controller's persisting node history, retryable.
-          // We don't need to backoff here as this racing condition only happens once (controller
-          // does not repeatedly write instance history)
+        if (retryCnt < 3 && isRetryableDropFailure(e)) {
+          // NotEmpty: racing with the controller persisting node history. NoNode: a znode was
+          // deleted after deleteRecursively walked the subtree, either concurrently or by a multi()
+          // that committed before a connection loss and was then resent. Both are resolved by
+          // walking the subtree again, so no backoff is needed.
           logger.warn("Retrying dropping instance {} with exception {}", instanceName,
               e.getCause().getMessage());
           retryCnt++;
@@ -345,6 +345,12 @@ public class ZKHelixAdmin implements HelixAdmin {
         }
       }
     }
+  }
+
+  private static boolean isRetryableDropFailure(ZkClientException e) {
+    Throwable cause = e.getCause();
+    return cause instanceof ZkNoNodeException || (cause instanceof ZkException
+        && cause.getCause() instanceof KeeperException.NotEmptyException);
   }
 
   /**

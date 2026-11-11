@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
@@ -93,6 +94,8 @@ import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.OpResult;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
@@ -2526,8 +2529,8 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     Mockito.when(mockZkClient.exists(instanceConfigPath)).thenReturn(true);
     Mockito.when(mockZkClient.exists(instancePath)).thenReturn(true);
     Mockito.when(mockZkClient.exists(liveInstancePath)).thenReturn(false);
-    // Simulate an unrecoverable error (no NotEmpty cause chain, so the
-    // outer NotEmpty retry loop must NOT retry).
+    // Simulate an unrecoverable error (neither a NotEmpty nor a NoNode cause, so the
+    // dropInstance retry loop must NOT retry).
     Mockito.doThrow(new ZkClientException("simulated unrecoverable ZK error"))
         .when(mockZkClient).deleteRecursively(instancePath);
 
@@ -2539,12 +2542,106 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     } catch (HelixException expected) {
       Assert.assertEquals(expected.getMessage(),
           "Failed to drop instance: " + instanceName + ". Retry times: 0",
-          "Non-NotEmpty errors must not trigger the 3-retry loop");
+          "Errors other than NotEmpty and NoNode must not trigger the 3-retry loop");
     }
     long elapsed = System.currentTimeMillis() - start;
     AssertJUnit.assertTrue("dropInstance should fail fast (took " + elapsed + " ms)", elapsed < 2000);
 
     Mockito.verify(mockZkClient, Mockito.times(1)).deleteRecursively(instancePath);
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // deleteRecursively fails with NoNode when a znode disappears after the subtree walk, e.g. when
+  // a multi() batch commits but its response is lost and the resend finds the znodes gone.
+  // dropInstance retries, re-walking only the znodes that remain.
+  @Test
+  public void testDropInstanceRetriesOnNoNode() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceRetriesOnNoNode";
+    final String instanceName = "host_nonode";
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    RealmAwareZkClient mockZkClient = mockZkClientForOfflineInstance(clusterName, instanceName);
+    ZkClientException noNode = new ZkClientException("Failed to delete " + instancePath,
+        new ZkNoNodeException(new KeeperException.NoNodeException(instancePath + "/MESSAGES/m1")));
+    Mockito.doThrow(noNode).doNothing().when(mockZkClient).deleteRecursively(instancePath);
+
+    new ZKHelixAdmin(mockZkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+
+    Mockito.verify(mockZkClient, Mockito.times(2)).deleteRecursively(instancePath);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  @Test
+  public void testDropInstanceGivesUpAfterRepeatedNoNode() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceRepeatedNoNode";
+    final String instanceName = "host_nonode_repeated";
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    RealmAwareZkClient mockZkClient = mockZkClientForOfflineInstance(clusterName, instanceName);
+    Mockito.doThrow(new ZkClientException("Failed to delete " + instancePath,
+            new ZkNoNodeException(new KeeperException.NoNodeException(instancePath))))
+        .when(mockZkClient).deleteRecursively(instancePath);
+
+    try {
+      new ZKHelixAdmin(mockZkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("Should throw HelixException");
+    } catch (HelixException expected) {
+      Assert.assertEquals(expected.getMessage(),
+          "Failed to drop instance: " + instanceName + ". Retry times: 3");
+    }
+    Mockito.verify(mockZkClient, Mockito.times(4)).deleteRecursively(instancePath);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // End to end against real ZK: a message znode is deleted after the subtree walk but before the
+  // first multi() batch, so the batch fails with NoNode. dropInstance retries and completes.
+  @Test
+  public void testDropInstanceCompletesWhenZnodeDeletedMidDrop() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceZnodeDeletedMidDrop";
+    final String instanceName = "host_mid_drop";
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    String messagePath =
+        PropertyPathBuilder.instanceMessage(clusterName, instanceName) + "/processed-msg";
+    _gZkClient.createPersistent(messagePath);
+
+    AtomicBoolean raced = new AtomicBoolean(false);
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
+        new org.apache.helix.zookeeper.impl.client.ZkClient(ZK_ADDR) {
+          @Override
+          public List<OpResult> multi(Iterable<Op> ops) {
+            if (raced.compareAndSet(false, true)) {
+              _gZkClient.delete(messagePath);
+            }
+            return super.multi(ops);
+          }
+        };
+    try {
+      new ZKHelixAdmin(zkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.assertTrue(raced.get());
+      Assert.assertFalse(
+          _gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+      Assert.assertFalse(
+          _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    } finally {
+      zkClient.close();
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Mock ZK client for an instance that has a config and a subtree but is not live.
+  private RealmAwareZkClient mockZkClientForOfflineInstance(String clusterName,
+      String instanceName) {
+    RealmAwareZkClient mockZkClient = Mockito.mock(RealmAwareZkClient.class);
+    Mockito.when(mockZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)))
+        .thenReturn(true);
+    Mockito.when(mockZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)))
+        .thenReturn(true);
+    Mockito.when(mockZkClient.exists(PropertyPathBuilder.liveInstance(clusterName, instanceName)))
+        .thenReturn(false);
+    return mockZkClient;
   }
 }
