@@ -528,9 +528,10 @@ public class ZKHelixAdmin implements HelixAdmin {
    *
    * The state is NOT_LIVE when the instance exists but is not live, and MULTIPLE_SESSIONS while
    * it is carrying over current states from a previous session, which may still describe serving
-   * replicas. Otherwise it is IN_PROGRESS while messages are pending or a replica is neither
-   * offline nor in ERROR, BLOCKED_BY_ERROR when only replicas in ERROR are left, and
-   * REPLICAS_OFFLINE when every replica is offline.
+   * replicas. Otherwise it is IN_PROGRESS while a replica is neither offline nor in ERROR,
+   * BLOCKED_BY_ERROR when only replicas in ERROR are left, and REPLICAS_OFFLINE when every replica
+   * is offline. The state comes from the current states alone: pending state transition and
+   * cancellation messages for the live session are counted, but do not change the state.
    *
    * This is used by the Helix REST {@code areReplicasOffline} command.
    *
@@ -570,10 +571,8 @@ public class ZKHelixAdmin implements HelixAdmin {
       return replicaStatus;
     }
 
-    // Read the messages before the current states. A participant writes the new current state
-    // before it deletes the message, so a transition that finishes between the two reads still
-    // shows up in one of them.
-    int pendingMessageCount = accessor.getChildNames(keyBuilder.messages(instanceName)).size();
+    int pendingMessageCount =
+        countPendingStateTransitionMessages(accessor, instanceName, sessionId);
     List<CurrentState> currentStates =
         accessor.getChildValues(keyBuilder.currentStates(instanceName, sessionId), true);
     Map<String, StateModelDefinition> stateModelDefs = new HashMap<>();
@@ -617,7 +616,7 @@ public class ZKHelixAdmin implements HelixAdmin {
     errorPartitionsByResource.values().forEach(Collections::sort);
 
     InstanceReplicaStatus.State state;
-    if (pendingMessageCount > 0 || offlineReplicaCount + errorReplicaCount < replicaCount) {
+    if (offlineReplicaCount + errorReplicaCount < replicaCount) {
       state = InstanceReplicaStatus.State.IN_PROGRESS;
     } else if (errorReplicaCount > 0
         && !exclusionTypes.contains(InstanceDrainExclusionType.ERROR_PARTITIONS)) {
@@ -638,6 +637,26 @@ public class ZKHelixAdmin implements HelixAdmin {
         .filter(modifiedTime -> modifiedTime > 0)
         .ifPresent(replicaStatus::setLastActivityTimestamp);
     return replicaStatus;
+  }
+
+  /**
+   * Counts the state transition and cancellation messages sent to the given session of the
+   * instance, the only messages the controller can treat as pending. Other messages are not
+   * counted: a participant never picks up a message again once it has read it, so a message that
+   * was read but not handled is never deleted. A participant discards a message sent to another
+   * session without handling it.
+   */
+  private static int countPendingStateTransitionMessages(HelixDataAccessor accessor,
+      String instanceName, String sessionId) {
+    List<Message> messages =
+        accessor.getChildValues(accessor.keyBuilder().messages(instanceName), true);
+    return (int) messages.stream()
+        .filter(message -> (MessageType.STATE_TRANSITION.name()
+            .equalsIgnoreCase(message.getMsgType())
+            || MessageType.STATE_TRANSITION_CANCELLATION.name()
+            .equalsIgnoreCase(message.getMsgType()))
+            && sessionId.equals(message.getTgtSessionId()))
+        .count();
   }
 
   /**

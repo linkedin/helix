@@ -39,7 +39,7 @@ public class InstanceReplicaStatus {
   public enum State {
     NOT_LIVE,          // The instance is not live, so none of its replicas are serving.
     MULTIPLE_SESSIONS, // The instance is carrying over current states from a previous session.
-    IN_PROGRESS,       // Messages are pending, or a replica is neither offline nor in ERROR.
+    IN_PROGRESS,       // A replica is neither offline nor in ERROR.
     BLOCKED_BY_ERROR,  // Only replicas in ERROR are left, and ERROR is not excluded.
     REPLICAS_OFFLINE   // Every replica is offline.
   }
@@ -109,7 +109,8 @@ public class InstanceReplicaStatus {
   }
 
   /**
-   * Returns the number of messages pending for the instance.
+   * Returns the number of state transition and cancellation messages pending for the live session
+   * of the instance. The count does not affect the state.
    */
   public Integer getPendingMessageCount() {
     return pendingMessageCount;
