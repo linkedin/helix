@@ -101,6 +101,24 @@ public class TestZkRoutingDataWriterRecovery extends AbstractTestClass {
     }
   }
 
+  @Test(timeOut = 15000)
+  public void testAddShardingKeyToExistingNullRealm() throws Exception {
+    ZkRoutingDataWriter writer = null;
+    try {
+      writer = new ZkRoutingDataWriter(TEST_NAMESPACE, _zkAddrTestNS + _root);
+      String path = _root + MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + DUMMY_REALM;
+      _gZkClientTestNS.createPersistent(path);
+      Assert.assertTrue(writer.addShardingKey(DUMMY_REALM, DUMMY_SHARDING_KEY));
+      ZNRecord record = _gZkClientTestNS.readData(path);
+      Assert.assertEquals(record.getListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY),
+          Collections.singletonList(DUMMY_SHARDING_KEY));
+    } finally {
+      if (writer != null) {
+        writer.close();
+      }
+    }
+  }
+
   @DataProvider(name = "realmCreationModes")
   public Object[][] realmCreationModes() {
     return new Object[][] {{false}, {true}};

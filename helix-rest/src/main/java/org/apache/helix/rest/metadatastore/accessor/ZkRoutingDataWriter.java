@@ -393,6 +393,10 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
           _namespace, realm, shardingKey, e);
       return false;
     }
+    if (znRecord == null) {
+      // Older interrupted creates can leave a realm node without data.
+      znRecord = new ZNRecord(realm);
+    }
     List<String> shardingKeys =
         znRecord.getListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY);
     if (shardingKeys == null || shardingKeys.isEmpty()) {
