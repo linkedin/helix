@@ -76,7 +76,8 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   private final CloseableHttpClient _forwardHttpClient;
   private final String _myHostName;
   private final String _protocolPrefix;
-  // Public mutation methods are synchronized; retain their admission candidate across retries.
+  // Leader candidate admitted for the current write only. Set by beginWrite() and cleared by
+  // endWrite(); public mutation methods are synchronized, so writes never share it.
   private String _writeLeaderPath;
 
   /**
@@ -194,10 +195,14 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   @Override
   public synchronized boolean addMetadataStoreRealm(String realm) {
     if (beginWrite()) {
-      if (_zkClient.isClosed()) {
-        throw new IllegalStateException("ZkClient is closed!");
+      try {
+        if (_zkClient.isClosed()) {
+          throw new IllegalStateException("ZkClient is closed!");
+        }
+        return createZkRealm(realm);
+      } finally {
+        endWrite();
       }
-      return createZkRealm(realm);
     }
 
     String urlSuffix =
@@ -209,10 +214,14 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   @Override
   public synchronized boolean deleteMetadataStoreRealm(String realm) {
     if (beginWrite()) {
-      if (_zkClient.isClosed()) {
-        throw new IllegalStateException("ZkClient is closed!");
+      try {
+        if (_zkClient.isClosed()) {
+          throw new IllegalStateException("ZkClient is closed!");
+        }
+        return deleteZkRealm(realm);
+      } finally {
+        endWrite();
       }
-      return deleteZkRealm(realm);
     }
 
     String urlSuffix =
@@ -224,10 +233,14 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   @Override
   public synchronized boolean addShardingKey(String realm, String shardingKey) {
     if (beginWrite()) {
-      if (_zkClient.isClosed()) {
-        throw new IllegalStateException("ZkClient is closed!");
+      try {
+        if (_zkClient.isClosed()) {
+          throw new IllegalStateException("ZkClient is closed!");
+        }
+        return createZkShardingKey(realm, shardingKey);
+      } finally {
+        endWrite();
       }
-      return createZkShardingKey(realm, shardingKey);
     }
 
     String urlSuffix =
@@ -240,10 +253,14 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   @Override
   public synchronized boolean deleteShardingKey(String realm, String shardingKey) {
     if (beginWrite()) {
-      if (_zkClient.isClosed()) {
-        throw new IllegalStateException("ZkClient is closed!");
+      try {
+        if (_zkClient.isClosed()) {
+          throw new IllegalStateException("ZkClient is closed!");
+        }
+        return deleteZkShardingKey(realm, shardingKey);
+      } finally {
+        endWrite();
       }
-      return deleteZkShardingKey(realm, shardingKey);
     }
 
     String urlSuffix =
@@ -256,47 +273,51 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   @Override
   public synchronized boolean setRoutingData(Map<String, List<String>> routingData) {
     if (beginWrite()) {
-      if (_zkClient.isClosed()) {
-        throw new IllegalStateException("ZkClient is closed!");
-      }
-      if (routingData == null) {
-        throw new IllegalArgumentException("routingData given is null!");
-      }
-
-      // Remove existing routing data
-      for (String zkRealm : _zkClient
-          .getChildren(MetadataStoreRoutingConstants.ROUTING_DATA_PATH)) {
-        if (!deletePath(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + zkRealm)) {
-          LOG.error(
-              "Failed to delete existing routing data in setRoutingData()! Namespace: {}, Realm: {}",
-              _namespace, zkRealm);
-          return false;
+      try {
+        if (_zkClient.isClosed()) {
+          throw new IllegalStateException("ZkClient is closed!");
         }
-      }
+        if (routingData == null) {
+          throw new IllegalArgumentException("routingData given is null!");
+        }
 
-      // For each ZkRealm, write the given routing data to ZooKeeper
-      for (Map.Entry<String, List<String>> routingDataEntry : routingData.entrySet()) {
-        String zkRealm = routingDataEntry.getKey();
-        List<String> shardingKeyList = routingDataEntry.getValue();
-
-        ZNRecord znRecord = new ZNRecord(zkRealm);
-        znRecord
-            .setListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY, shardingKeyList);
-
-        String realmPath = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + zkRealm;
-        try {
-          if (!_zkClient.exists(realmPath)) {
-            createPersistent(realmPath, znRecord);
-          } else {
-            writeData(realmPath, znRecord);
+        // Remove existing routing data
+        for (String zkRealm : _zkClient
+            .getChildren(MetadataStoreRoutingConstants.ROUTING_DATA_PATH)) {
+          if (!deletePath(MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + zkRealm)) {
+            LOG.error(
+                "Failed to delete existing routing data in setRoutingData()! Namespace: {}, Realm: {}",
+                _namespace, zkRealm);
+            return false;
           }
-        } catch (Exception e) {
-          LOG.error("Failed to write data in setRoutingData()! Namespace: {}, Realm: {}",
-              _namespace, zkRealm, e);
-          return false;
         }
+
+        // For each ZkRealm, write the given routing data to ZooKeeper
+        for (Map.Entry<String, List<String>> routingDataEntry : routingData.entrySet()) {
+          String zkRealm = routingDataEntry.getKey();
+          List<String> shardingKeyList = routingDataEntry.getValue();
+
+          ZNRecord znRecord = new ZNRecord(zkRealm);
+          znRecord
+              .setListField(MetadataStoreRoutingConstants.ZNRECORD_LIST_FIELD_KEY, shardingKeyList);
+
+          String realmPath = MetadataStoreRoutingConstants.ROUTING_DATA_PATH + "/" + zkRealm;
+          try {
+            if (!_zkClient.exists(realmPath)) {
+              createPersistent(realmPath, znRecord);
+            } else {
+              writeData(realmPath, znRecord);
+            }
+          } catch (Exception e) {
+            LOG.error("Failed to write data in setRoutingData()! Namespace: {}, Realm: {}",
+                _namespace, zkRealm, e);
+            return false;
+          }
+        }
+        return true;
+      } finally {
+        endWrite();
       }
-      return true;
     }
 
     ZNRecord leaderInfo = _leaderElection.getCurrentLeaderInfo();
@@ -453,6 +474,10 @@ public class ZkRoutingDataWriter implements MetadataStoreRoutingDataWriter {
   private boolean beginWrite() {
     _writeLeaderPath = _leaderElection.getLeaderPath();
     return _writeLeaderPath != null;
+  }
+
+  private void endWrite() {
+    _writeLeaderPath = null;
   }
 
   private void guardedWrite(Op operation) {
