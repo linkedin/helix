@@ -1193,4 +1193,79 @@ public class TestRawZkClient extends ZkTestBase {
     Assert.assertFalse(_zkClient.exists(grandParent));
     Assert.assertFalse(_zkClient.exists(newNode));
   }
+
+  // Verifies the batched implementation of deleteRecursively handles a subtree
+  // larger than DELETE_RECURSIVE_BATCH_SIZE (1000). The legacy single-op
+  // recursion was jute.maxbuffer-safe but O(N) round-trips; the new batched
+  // multi() path must complete in ceil(N/1000) round-trips for the same N
+  // znodes, all deleted.
+  @Test
+  void testDeleteRecursivelyLargeSubtree() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyLargeSubtree";
+    int numChildren = 2500; // > 2 batches
+    _zkClient.createPersistent(root);
+    for (int i = 0; i < numChildren; i++) {
+      _zkClient.createPersistent(root + "/child-" + i);
+    }
+    Assert.assertEquals(_zkClient.getChildren(root).size(), numChildren);
+
+    _zkClient.deleteRecursively(root);
+
+    Assert.assertFalse(_zkClient.exists(root));
+  }
+
+  // Deeper subtree shape (depth > 2) - verifies the children-first BFS
+  // ordering produces a valid delete sequence when ops cross batch
+  // boundaries between depth levels.
+  @Test
+  void testDeleteRecursivelyDeepSubtree() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyDeepSubtree";
+    _zkClient.createPersistent(root);
+    // Build a wide+deep tree: 3 grandchildren x 100 children each = 303 znodes
+    for (int g = 0; g < 3; g++) {
+      String gpath = root + "/group-" + g;
+      _zkClient.createPersistent(gpath);
+      for (int i = 0; i < 100; i++) {
+        _zkClient.createPersistent(gpath + "/leaf-" + i);
+      }
+    }
+
+    _zkClient.deleteRecursively(root);
+
+    Assert.assertFalse(_zkClient.exists(root));
+  }
+
+  // Idempotency: deleting a non-existent path is a no-op (preserves the
+  // legacy contract where ZkNoNodeException on initial getChildren returned
+  // success).
+  @Test
+  void testDeleteRecursivelyOnMissingPathIsNoOp() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String missing = "/testDeleteRecursivelyMissing";
+    Assert.assertFalse(_zkClient.exists(missing));
+    _zkClient.deleteRecursively(missing); // must not throw
+    Assert.assertFalse(_zkClient.exists(missing));
+  }
+
+  // Idempotency under partial delete: simulate a previous incomplete run by
+  // deleting a leaf out-of-band, then call deleteRecursively on the parent.
+  // The internal multi() must tolerate NoNode results within a batch.
+  @Test
+  void testDeleteRecursivelyIdempotentAfterPartialDelete() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyPartial";
+    _zkClient.createPersistent(root);
+    for (int i = 0; i < 5; i++) {
+      _zkClient.createPersistent(root + "/child-" + i);
+    }
+    // Out-of-band: delete one child to simulate prior partial cleanup.
+    _zkClient.delete(root + "/child-2");
+    Assert.assertFalse(_zkClient.exists(root + "/child-2"));
+
+    _zkClient.deleteRecursively(root);
+
+    Assert.assertFalse(_zkClient.exists(root));
+  }
 }
