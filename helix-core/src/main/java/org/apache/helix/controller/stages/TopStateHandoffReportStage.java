@@ -283,7 +283,8 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       long totalDuration = recoveryEnd - record.getStartTimeStamp();
       if (clusterStatusMonitor != null) {
         long helixLatency = getRecoveryHelixLatency(cache, currentStateOutput, currentStateMemo,
-            resourceName, partition, record, restoringInstance, restoredAt, now);
+            resourceName, partition, record, restoringInstance, restoredAt, now,
+            getActiveStates(stateModelDef));
         clusterStatusMonitor.updatePartitionRecoveryDurationStats(resourceName, totalDuration,
             helixLatency, true);
         if (totalDuration > recoveryDurationThreshold) {
@@ -301,7 +302,7 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
       CurrentStateOutput currentStateOutput,
       Map<String, Map<String, CurrentState>> currentStateMemo, String resourceName,
       Partition partition, MissingMinActiveReplicaRecord record, String instance,
-      long restoredAt, long now) {
+      long restoredAt, long now, Set<String> activeStates) {
     if (record.isAttributionInvalid() || instance == null
         || restoredAt < record.getStartTimeStamp() || restoredAt > now) {
       return TIMESTAMP_NOT_RECORDED;
@@ -318,6 +319,11 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         || !currentStateOutput.getCurrentStateMap(resourceName, partition).get(instance)
             .equals(currentState.getState(partitionName))
         || currentState.getEndTime(partitionName) != restoredAt) {
+      return TIMESTAMP_NOT_RECORDED;
+    }
+    String previousState = currentState.getPreviousState(partitionName);
+    // A later active-to-active transition overwrites the original recovery timestamps.
+    if (previousState == null || activeStates.contains(previousState)) {
       return TIMESTAMP_NOT_RECORDED;
     }
     long transitionStart = currentState.getStartTime(partitionName);

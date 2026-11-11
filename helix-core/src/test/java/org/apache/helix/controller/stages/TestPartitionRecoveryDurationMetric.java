@@ -39,6 +39,7 @@ import org.apache.helix.model.Resource;
 import org.apache.helix.monitoring.mbeans.ClusterStatusMonitor;
 import org.apache.helix.monitoring.mbeans.ResourceMonitor;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -369,6 +370,34 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
     Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
         .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue(), 2000L);
     Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 1L);
+  }
+
+  @DataProvider(name = "unusableRecoveryPreviousStates")
+  public Object[][] unusableRecoveryPreviousStates() {
+    return new Object[][] {{"SLAVE", "MASTER"}, {"MASTER", "SLAVE"}, {null, "SLAVE"}};
+  }
+
+  @Test(dataProvider = "unusableRecoveryPreviousStates")
+  public void testRestoringReplicaAlreadyMovedAgainSkipsHelixLatency(
+      String previousState, String currentState) throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered =
+        timedStates(statesOf("SLAVE", currentState, "OFFLINE"), start);
+    // Only the later transition is visible when the controller observes recovery.
+    setExecution(recovered, 1, previousState, start + 6000L, start + 7000L);
+
+    runTimedPipeline(recovered, null);
+
+    ResourceMonitor monitor = getResourceMonitor();
+    Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L,
+        "Active-to-active or unknown prior states do not identify the recovery transition");
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencyGauge()
+        .getAttributeValue(HELIX_RECOVERY_LATENCY_MAX).longValue(), 0L);
+    Assert.assertFalse(hasRecord());
   }
 
   @Test
