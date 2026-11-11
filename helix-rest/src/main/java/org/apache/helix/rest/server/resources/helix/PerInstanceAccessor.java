@@ -761,8 +761,10 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
     HelixAdmin admin = getHelixAdmin();
     try {
-      InstanceConfig instanceConfig = admin.getInstanceConfig(clusterId, instanceName);
-      admin.dropInstance(clusterId, instanceConfig);
+      // dropInstance deletes the InstanceConfig before the instance subtree, so a failed drop can
+      // leave the subtree without a config. Don't require the config here, so a retry can finish
+      // that cleanup. dropInstance only needs the name and still rejects a fully removed instance.
+      admin.dropInstance(clusterId, new InstanceConfig(instanceName));
     } catch (HelixException e) {
       return badRequest(e.getMessage());
     }
