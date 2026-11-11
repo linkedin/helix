@@ -1965,7 +1965,6 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
-    builder.setCloudID("TestID");
     builder.addCloudInfoSource("TestURL");
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
     builder.setCloudInfoProcessorName("TestProcessor");
@@ -1977,7 +1976,6 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(_gZkClient);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
@@ -1996,7 +1994,6 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
-    builder.setCloudID("TestID");
     builder.addCloudInfoSource("TestURL");
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
     builder.setCloudInfoProcessorName("TestProcessor");
@@ -2008,7 +2005,6 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     ConfigAccessor _configAccessor = new ConfigAccessor(_gZkClient);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");

@@ -792,7 +792,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     HelixDataAccessor helixDataAccessor = new ZKHelixDataAccessor(clusterName, _baseAccessor);
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(), CloudProvider.AZURE.name());
     CloudConfig cloudConfig = new CloudConfig.Builder(record).build();
     _gSetupTool.addCluster(clusterName, true, cloudConfig);
@@ -1505,7 +1504,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
 
@@ -1520,7 +1518,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.AZURE.name());
 
     ClusterConfig clusterConfigFromZk = _configAccessor.getClusterConfig(clusterName);
@@ -1537,7 +1534,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
 
     Map<String, String> map = new HashMap<>();
     map.put("addCloudConfig", "true");
@@ -1556,7 +1552,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
 
@@ -1578,7 +1573,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
     List<String> sourceList = new ArrayList<String>();
@@ -1600,7 +1594,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessorName");
@@ -1615,7 +1608,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), false);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
 
@@ -1630,7 +1622,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertFalse(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.AZURE.name());
   }
 
@@ -1643,7 +1634,6 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     List<String> testList = new ArrayList<String>();
     testList.add("TestURL");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
@@ -1667,7 +1657,8 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
+    // Retired fields remain opaque metadata in generic config operations.
+    record.setSimpleField("CLOUD_ID", "TestCloudID");
     List<String> testList = new ArrayList<String>();
     testList.add("TestURL");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
@@ -1689,7 +1680,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     ConfigAccessor _configAccessor = new ConfigAccessor(ZK_ADDR);
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig("TestCloud");
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL");
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessorName");
@@ -1707,7 +1698,7 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     // Check the fields individually
     Assert.assertTrue(cloudConfigRest.isCloudEnabled());
-    Assert.assertEquals(cloudConfigRest.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigRest.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     Assert.assertEquals(cloudConfigRest.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
     List<String> listUrlFromRest = cloudConfigRest.getCloudInfoSources();
     Assert.assertEquals(listUrlFromRest.get(0), "TestURL");
@@ -1781,7 +1772,6 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("testZnode");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
 
@@ -1818,7 +1808,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
+    record.setSimpleField("CLOUD_ID", "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(), "TestProcessor");
     _gSetupTool.addCluster(clusterName, true, new CloudConfig.Builder(record).build());
 
@@ -1836,7 +1826,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     record = new ZNRecord(clusterName);
     Map<String, String> map1 = new HashMap<>();
     map1.put("command",  Command.delete.name());
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
+    record.setSimpleField("CLOUD_ID", "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(), CloudProvider.AZURE.name());
     post(urlBase, map1, Entity.entity(OBJECT_MAPPER.writeValueAsString(record), MediaType.APPLICATION_JSON_TYPE),
         Response.Status.OK.getStatusCode());
@@ -1844,7 +1834,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     // Read CloudConfig from Zookeeper and make sure it has been removed
     _configAccessor = new ConfigAccessor(ZK_ADDR);
     cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
-    Assert.assertNull(cloudConfigFromZk.getCloudID());
+    Assert.assertNull(cloudConfigFromZk.getRecord().getSimpleField("CLOUD_ID"));
     Assert.assertNull(cloudConfigFromZk.getCloudProvider());
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(),"TestProcessor");
@@ -1860,7 +1850,7 @@ public class TestClusterAccessor extends AbstractTestClass {
 
     ZNRecord record = new ZNRecord("TestCloud");
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudID");
+    record.setSimpleField("CLOUD_ID", "TestCloudID");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.AZURE.name());
 
@@ -1875,14 +1865,14 @@ public class TestClusterAccessor extends AbstractTestClass {
     ZNRecord recordFromRest = toZNRecord(body);
     CloudConfig cloudConfigRest = new CloudConfig.Builder(recordFromRest).build();
     Assert.assertTrue(cloudConfigRest.isCloudEnabled());
-    Assert.assertEquals(cloudConfigRest.getCloudID(), "TestCloudID");
+    Assert.assertEquals(cloudConfigRest.getRecord().getSimpleField("CLOUD_ID"), "TestCloudID");
     Assert.assertEquals(cloudConfigRest.getCloudProvider(), CloudProvider.AZURE.name());
 
     // Now put new information in the ZNRecord
     record.setBooleanField(CloudConfig.CloudConfigProperty.CLOUD_ENABLED.name(), true);
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
-    record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_ID.name(), "TestCloudIdNew");
+    record.setSimpleField("CLOUD_ID", "TestCloudIdNew");
     List<String> testList = new ArrayList<String>();
     testList.add("TestURL");
     record.setListField(CloudConfig.CloudConfigProperty.CLOUD_INFO_SOURCE.name(), testList);
@@ -1902,7 +1892,7 @@ public class TestClusterAccessor extends AbstractTestClass {
     recordFromRest = toZNRecord(body);
     cloudConfigRest = new CloudConfig.Builder(recordFromRest).build();
     Assert.assertTrue(cloudConfigRest.isCloudEnabled());
-    Assert.assertEquals(cloudConfigRest.getCloudID(), "TestCloudIdNew");
+    Assert.assertEquals(cloudConfigRest.getRecord().getSimpleField("CLOUD_ID"), "TestCloudIdNew");
     Assert.assertEquals(cloudConfigRest.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
     List<String> listUrlFromRest = cloudConfigRest.getCloudInfoSources();
     Assert.assertEquals(listUrlFromRest.get(0), "TestURL");

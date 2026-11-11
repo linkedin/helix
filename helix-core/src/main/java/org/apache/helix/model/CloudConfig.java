@@ -43,7 +43,6 @@ public class CloudConfig extends HelixProperty {
   public enum CloudConfigProperty {
     CLOUD_ENABLED, // determine whether the cluster is inside cloud environment.
     CLOUD_PROVIDER, // the environment the cluster is in, e.g. Azure, AWS, or Customized
-    CLOUD_ID, // the cloud Id that belongs to this cluster.
 
     // If user uses Helix supported default provider, the below entries will not be shown in
     // CloudConfig.
@@ -80,15 +79,13 @@ public class CloudConfig extends HelixProperty {
    * Users should use CloudConfig.Builder to create CloudConfig.
    * @param cluster
    * @param enabled
-   * @param cloudID
    */
-  public CloudConfig(String cluster, boolean enabled, CloudProvider cloudProvider, String cloudID,
+  public CloudConfig(String cluster, boolean enabled, CloudProvider cloudProvider,
       List<String> cloudInfoSource, String cloudProcessorName) {
     super(cluster);
     _record.setBooleanField(CloudConfigProperty.CLOUD_ENABLED.name(), enabled);
     if (enabled == true) {
       _record.setSimpleField(CloudConfigProperty.CLOUD_PROVIDER.name(), cloudProvider.name());
-      _record.setSimpleField(CloudConfigProperty.CLOUD_ID.name(), cloudID);
       if (cloudProvider.equals(CloudProvider.CUSTOMIZED)) {
         _record.setSimpleField(CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(), cloudProcessorName);
         _record.setListField(CloudConfigProperty.CLOUD_INFO_SOURCE.name(), cloudInfoSource);
@@ -110,22 +107,6 @@ public class CloudConfig extends HelixProperty {
    */
   public boolean isCloudEnabled() {
     return _record.getBooleanField(CloudConfigProperty.CLOUD_ENABLED.name(), false);
-  }
-
-  /**
-   * Set the cloudID field.
-   * @param cloudID
-   */
-  public void setCloudID(String cloudID) {
-    _record.setSimpleField(CloudConfigProperty.CLOUD_ID.name(), cloudID);
-  }
-
-  /**
-   * Get the CloudID field.
-   * @return CloudID
-   */
-  public String getCloudID() {
-    return _record.getSimpleField(CloudConfigProperty.CLOUD_ID.name());
   }
 
   /**
@@ -210,11 +191,6 @@ public class CloudConfig extends HelixProperty {
       return this;
     }
 
-    public Builder setCloudID(String cloudID) {
-      _record.setSimpleField(CloudConfigProperty.CLOUD_ID.name(), cloudID);
-      return this;
-    }
-
     public Builder setCloudInfoSources(List<String> cloudInfoSources) {
       _record.setListField(CloudConfigProperty.CLOUD_INFO_SOURCE.name(), cloudInfoSources);
       return this;
@@ -255,10 +231,6 @@ public class CloudConfig extends HelixProperty {
     public boolean getCloudEnabled() {
       return _record.getBooleanField(CloudConfigProperty.CLOUD_ENABLED.name(),
           DEFAULT_CLOUD_ENABLED);
-    }
-
-    public String getCloudID() {
-      return _record.getSimpleField(CloudConfigProperty.CLOUD_ID.name());
     }
 
     public List<String> getCloudInfoSources() {

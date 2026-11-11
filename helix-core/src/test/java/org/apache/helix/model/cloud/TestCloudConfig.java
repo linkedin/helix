@@ -70,7 +70,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig.Builder cloudConfigBuilder = new CloudConfig.Builder();
     cloudConfigBuilder.setCloudEnabled(true);
     cloudConfigBuilder.setCloudProvider(CloudProvider.AZURE);
-    cloudConfigBuilder.setCloudID("TestID");
     List<String> infoURL = new ArrayList<String>();
     infoURL.add("TestURL");
     cloudConfigBuilder.setCloudInfoSources(infoURL);
@@ -89,7 +88,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.AZURE.name());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
 
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoSources().size(), 1);
     Assert.assertEquals(cloudConfigFromZk.getCloudInfoProcessorName(), "TestProcessor");
@@ -112,7 +110,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
-    builder.setCloudID("TestID");
     List<String> emptyList = new ArrayList<String>();
     builder.setCloudInfoSources(emptyList);
     builder.setCloudInfoProcessorName("TestProcessor");
@@ -125,7 +122,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
-    builder.setCloudID("TestID");
     List<String> testList = new ArrayList<String>();
     builder.setCloudInfoSources(testList);
     builder.addCloudInfoSource("TestURL");
@@ -156,6 +152,7 @@ public class TestCloudConfig extends ZkUnitTestBase {
 
   @Test(dataProvider = "cloudConfigBuilderInputs")
   public void testBuilderDoesNotMutateInput(ZNRecord record, CloudConfig.Builder builder) {
+    record.setSimpleField("CLOUD_ID", "legacy-id");
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_PROVIDER.name(),
         CloudProvider.CUSTOMIZED.name());
     record.setSimpleField(CloudConfig.CloudConfigProperty.CLOUD_INFO_PROCESSOR_NAME.name(),
@@ -192,7 +189,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.CUSTOMIZED);
-    builder.setCloudID("TestID");
     builder.addCloudInfoSource("TestURL0");
     builder.addCloudInfoSource("TestURL1");
     builder.setCloudInfoProcessorName("TestProcessor");
@@ -201,7 +197,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     // Check builder getter methods
     Assert.assertTrue(builder.getCloudEnabled());
     Assert.assertEquals(builder.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
-    Assert.assertEquals(builder.getCloudID(), "TestID");
     List<String> listUrlFromBuilder = builder.getCloudInfoSources();
     Assert.assertEquals(listUrlFromBuilder.size(), 2);
     Assert.assertEquals(listUrlFromBuilder.get(0), "TestURL0");
@@ -220,7 +215,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL0");
     Assert.assertEquals(listUrlFromZk.get(1), "TestURL1");
@@ -236,7 +230,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     CloudConfig.Builder builder = new CloudConfig.Builder();
     builder.setCloudEnabled(true);
     builder.setCloudProvider(CloudProvider.AZURE);
-    builder.setCloudID("TestID");
 
     // Check builder getter methods
     Assert.assertTrue(builder.getCloudEnabled());
@@ -265,7 +258,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     Assert.assertFalse(cloudConfigFromZk.isCloudEnabled());
 
     cloudConfig.setCloudEnabled(true);
-    cloudConfig.setCloudID("TestID2");
     List<String> sourceList = new ArrayList<String>();
     sourceList.add("TestURL0");
     sourceList.add("TestURL1");
@@ -275,7 +267,6 @@ public class TestCloudConfig extends ZkUnitTestBase {
     cloudConfigFromZk = _configAccessor.getCloudConfig(clusterName);
     Assert.assertTrue(cloudConfigFromZk.isCloudEnabled());
     Assert.assertEquals(cloudConfigFromZk.getCloudProvider(), CloudProvider.AZURE.name());
-    Assert.assertEquals(cloudConfigFromZk.getCloudID(), "TestID2");
     List<String> listUrlFromZk = cloudConfigFromZk.getCloudInfoSources();
     Assert.assertEquals(listUrlFromZk.get(0), "TestURL0");
     Assert.assertEquals(listUrlFromZk.get(1), "TestURL1");

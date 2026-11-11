@@ -26,19 +26,29 @@ import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class TestHelixCloudProperty {
-  @Test
-  public void testHelixCloudPropertyAzure() {
+  @DataProvider
+  public Object[][] legacyCloudIds() {
+    return new Object[][]{{null}, {""}, {"legacy-id"}};
+  }
+
+  @Test(dataProvider = "legacyCloudIds")
+  public void testHelixCloudPropertyAzure(String legacyCloudId) {
     CloudConfig azureCloudConfig =
-        new CloudConfig.Builder().setCloudEnabled(true).setCloudID("AzureTestId1")
+        new CloudConfig.Builder().setCloudEnabled(true)
             .setCloudProvider(CloudProvider.AZURE).build();
+    if (legacyCloudId != null) {
+      azureCloudConfig.getRecord().setSimpleField("CLOUD_ID", legacyCloudId);
+    }
+    ZNRecord original = new ZNRecord(azureCloudConfig.getRecord());
 
     HelixCloudProperty azureCloudProperty = new HelixCloudProperty(azureCloudConfig);
 
+    Assert.assertEquals(azureCloudConfig.getRecord(), original);
     Assert.assertTrue(azureCloudProperty.getCloudEnabled());
-    Assert.assertEquals(azureCloudProperty.getCloudId(), "AzureTestId1");
     Assert.assertEquals(azureCloudProperty.getCloudProvider(), CloudProvider.AZURE.name());
     Assert.assertEquals(azureCloudProperty.getCloudInfoSources(), Collections.singletonList(
         "http://169.254.169.254/metadata/instance?api-version=2019-06-04"));
@@ -53,16 +63,21 @@ public class TestHelixCloudProperty {
         "org.apache.helix.cloud.azure.AzureCloudInstanceInformationProcessor");
   }
 
-  @Test
-  public void testHelixCloudPropertyCustomizedFullyQualified() {
+  @Test(dataProvider = "legacyCloudIds")
+  public void testHelixCloudPropertyCustomizedFullyQualified(String legacyCloudId) {
     CloudConfig customCloudConfig =
         new CloudConfig.Builder().setCloudEnabled(true).setCloudProvider(CloudProvider.CUSTOMIZED)
             .setCloudInfoProcessorPackageName("org.apache.foo.bar")
             .setCloudInfoProcessorName("CustomCloudInstanceInfoProcessor")
             .setCloudInfoSources(Collections.singletonList("https://custom-cloud.com")).build();
+    if (legacyCloudId != null) {
+      customCloudConfig.getRecord().setSimpleField("CLOUD_ID", legacyCloudId);
+    }
+    ZNRecord original = new ZNRecord(customCloudConfig.getRecord());
 
     HelixCloudProperty customCloudProperty = new HelixCloudProperty(customCloudConfig);
 
+    Assert.assertEquals(customCloudConfig.getRecord(), original);
     Assert.assertTrue(customCloudProperty.getCloudEnabled());
     Assert.assertEquals(customCloudProperty.getCloudProvider(), CloudProvider.CUSTOMIZED.name());
     Assert.assertEquals(customCloudProperty.getCloudInfoSources(),
@@ -76,10 +91,9 @@ public class TestHelixCloudProperty {
 
   @Test
   public void testHelixCloudPropertyClassNameOnly() {
-    CloudConfig customCloudConfig =
-        new CloudConfig.Builder().setCloudEnabled(true).setCloudProvider(CloudProvider.CUSTOMIZED)
-            .setCloudInfoProcessorName("CustomCloudInstanceInfoProcessor")
-            .setCloudInfoSources(Collections.singletonList("https://custom-cloud.com")).build();
+    CloudConfig customCloudConfig = new CloudConfig(CloudConfig.CLOUD_CONFIG_KW, true,
+        CloudProvider.CUSTOMIZED, Collections.singletonList("https://custom-cloud.com"),
+        "CustomCloudInstanceInfoProcessor");
 
     HelixCloudProperty customCloudProperty = new HelixCloudProperty(customCloudConfig);
 
