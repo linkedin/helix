@@ -810,8 +810,8 @@ public class ClusterConfig extends HelixProperty {
 
   /**
   /**
-   * Set the wedged-controller stall threshold: a non-empty controller event queue that has not
-   * completed a pipeline run within this many ms is reported as stalled by
+   * Set the wedged-controller stall threshold: a controller pipeline run that lasts longer than
+   * this many ms while events wait behind it is reported as stalled by
    * ControllerPipelineStalledGauge.
    * @param thresholdMs threshold in milliseconds; must be positive
    * @throws IllegalArgumentException if {@code thresholdMs <= 0}. Rejecting non-positive values at

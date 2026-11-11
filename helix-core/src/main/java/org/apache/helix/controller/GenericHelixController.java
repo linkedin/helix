@@ -171,6 +171,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   // TODO This flag should be inside ClusterStatusMonitor. When false, no MBean registering.
   private boolean _isMonitoring = false;
   private final ClusterStatusMonitor _clusterStatusMonitor;
+  // Set at the start of shutdown(). A shut-down controller is never reused (the manager drops it),
+  // so it must not register its monitor again if a late leader-election callback still reaches it.
+  private volatile boolean _isShutdown = false;
+  // Makes the queue-size gauge's read-then-set atomic, so a thread holding an older size cannot
+  // overwrite a newer one and leave a stale backlog behind.
+  private final Object _eventQueueSizeGaugeLock = new Object();
 
   /**
    * A queue for controller events and a thread that will consume it
@@ -1005,9 +1011,6 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _clusterStatusMonitor
             .updateClusterEventDuration(ClusterEventMonitor.PhaseName.TotalProcessed.name(),
                 _lastPipelineEndTimestamp - startTime);
-        // Report DEFAULT-pipeline progress so ControllerPipelineStalledGauge can tell a wedged
-        // controller (queue not draining) apart from an idle or busy-but-progressing one.
-        _clusterStatusMonitor.setLastPipelineEndTimestamp(_lastPipelineEndTimestamp);
         // Keep the stall threshold in sync with ClusterConfig so it can be tuned without a redeploy.
         ClusterConfig stallThresholdConfig = dataProvider.getClusterConfig();
         if (stallThresholdConfig != null) {
@@ -1385,13 +1388,26 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
    * surfaces a controller that still holds leadership but has stopped processing ("zombie leader").
    */
   private void updateControllerEventQueueSizeGauge() {
-    if (_isMonitoring && _clusterStatusMonitor != null && _eventQueue != null) {
-      _clusterStatusMonitor.setControllerEventQueueSizeGauge(_eventQueue.size());
+    if (_clusterStatusMonitor == null || _eventQueue == null) {
+      return;
+    }
+    synchronized (_eventQueueSizeGaugeLock) {
+      if (_isMonitoring && !_isShutdown) {
+        _clusterStatusMonitor.setControllerEventQueueSizeGauge(_eventQueue.size());
+      }
     }
   }
 
   @Override
   public void onControllerChange(NotificationContext changeContext) {
+    if (_isShutdown) {
+      // A leader-election callback that was already in flight can reach this controller after it
+      // was shut down. Its pipelines no longer run, so it must neither register its monitor nor
+      // enqueue work, whatever the leader znode says.
+      logger.warn("Ignore onControllerChange() for cluster {}: the controller is shut down",
+          _clusterName);
+      return;
+    }
     logger.info("START: GenericClusterController.onControllerChange() for cluster " + _clusterName);
 
     requestDataProvidersFullRefresh();
@@ -1547,6 +1563,24 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   }
 
   public void shutdown() throws InterruptedException {
+    // Set first, so nothing below or racing with it can re-register the monitor or publish a
+    // backlog for pipelines that are being stopped.
+    _isShutdown = true;
+    try {
+      stopControllerThreads();
+    } finally {
+      // Unregister the monitor even if interrupted while stopping the pipelines; otherwise the
+      // beans of a controller that no longer runs stay registered.
+      enableClusterStatusMonitor(false);
+    }
+
+    _rebalancerRef.closeRebalancer();
+
+    // TODO controller shouldn't be used in anyway after shutdown.
+    // Need to throw Exception if the controller is used again.
+  }
+
+  private void stopControllerThreads() throws InterruptedException {
     removeController(this);
 
     stopPeriodRebalance();
@@ -1576,17 +1610,16 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
 
     // NOTE: StageThreadPoolHelper is a JVM-wide shared pool. Do not shutdown here to avoid
     // cross-cluster interference when a single controller shuts down.
-
-    enableClusterStatusMonitor(false);
-
-    _rebalancerRef.closeRebalancer();
-
-    // TODO controller shouldn't be used in anyway after shutdown.
-    // Need to record shutdown and throw Exception if the controller is used again.
   }
 
   private void enableClusterStatusMonitor(boolean enable) {
     synchronized (_clusterStatusMonitor) {
+      if (enable && _isShutdown) {
+        // Checked under the monitor lock so it cannot interleave with shutdown()'s own disable.
+        logger.warn("Skip enabling clusterStatusMonitor for cluster {}: the controller is shut down",
+            _clusterName);
+        return;
+      }
       if (_isMonitoring != enable) {
         // monitoring state changed
         if (enable) {
@@ -1597,16 +1630,16 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             _resourceControlDataProvider.clearMonitoringRecords();
           }
           _clusterStatusMonitor.active();
-          // Seed the pipeline-progress baseline at monitoring-enable (leadership acquisition) so a
-          // controller that wedges before completing its very first pipeline run is still caught:
-          // with a 0 baseline the stalled gauge cannot fire. Cold-start slowness that briefly reads
-          // as stalled is covered by the EKG warm-up window and the configurable stall threshold.
-          _clusterStatusMonitor.setLastPipelineEndTimestamp(System.currentTimeMillis());
         } else {
           logger.info("Disable clusterStatusMonitor for cluster " + _clusterName);
           // Reset will be done if (_isMonitoring = false) later, no matter if the state is changed or not.
         }
         _isMonitoring = enable;
+        if (enable) {
+          // Publish the live backlog now: a size written while monitoring was being disabled can
+          // survive the reset and would otherwise be re-exported by the new bean.
+          updateControllerEventQueueSizeGauge();
+        }
       }
       // Due to multithreads processing, async thread may write to monitor even it is closed.
       // So when it is disabled, always try to clear the monitor.
@@ -1634,6 +1667,14 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         thread.join(EVENT_THREAD_JOIN_TIMEOUT);
       }
     }
+
+    if (queue != null && queue == _eventQueue) {
+      // Cleared only once the thread is gone: a pipeline that cannot be stopped keeps leadership
+      // and must keep reading as stalled. _isShutdown blocks further updates, so this 0 is final.
+      synchronized (_eventQueueSizeGaugeLock) {
+        _clusterStatusMonitor.setControllerEventQueueSizeGauge(0L);
+      }
+    }
   }
 
   // TODO: refactor this to use common/ClusterEventProcessor.
@@ -1655,10 +1696,18 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       logger.info(
           "START ClusterEventProcessor thread  for cluster " + _clusterName + ", processor name: "
               + _processorName);
+      boolean isDefaultPipeline = _eventBlockingQueue == _eventQueue;
       while (!isInterrupted()) {
         try {
+          if (isDefaultPipeline) {
+            // Not in a run while waiting for the next event: an idle pipeline is never stalled.
+            _clusterStatusMonitor.setPipelineRunStartTimestamp(0L);
+          }
           ClusterEvent newClusterEvent = _eventBlockingQueue.take();
-          if (_eventBlockingQueue == _eventQueue) {
+          if (isDefaultPipeline) {
+            // Stamped regardless of leadership: it describes this thread, and a run already in
+            // progress when the controller becomes leader must still count toward a stall.
+            _clusterStatusMonitor.setPipelineRunStartTimestamp(System.currentTimeMillis());
             updateControllerEventQueueSizeGauge();
           }
           String threadName = String.format(
