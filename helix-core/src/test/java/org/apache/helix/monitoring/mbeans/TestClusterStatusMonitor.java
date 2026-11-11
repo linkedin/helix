@@ -70,6 +70,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 import org.testng.collections.Sets;
 
+import static org.apache.helix.HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT;
 import static org.mockito.Mockito.when;
 
 
@@ -1438,13 +1439,23 @@ public class TestClusterStatusMonitor {
         RebalanceScopeType.PARTIAL, ImmutableSet.of("R1"));
     Assert.assertEquals(monitor.getResourceMonitor("R0").getInstanceTagIsolationSkippedGauge(), 0L);
 
-    // The share blocks follow the last baseline, and read 0 while isolation is off.
-    monitor.updateWagedInstanceTagIsolationShareBlocks(1);
+    // The share blocks follow the last baseline. A failure isolation contained counts in its
+    // category, without lighting the serving gauges.
+    monitor.updateWagedInstanceTagIsolationShareBlocks(generation, 1);
+    Assert.assertTrue(monitor.countWagedContainedFailure(generation, CAPACITY_DEFICIT));
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 1L);
-    monitor.configureWagedInstanceTagIsolation(false, resources);
-    Assert.assertEquals(monitor.getResourceMonitor("R1").getInstanceTagIsolationSkippedGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 1L);
+    Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
+
+    // Neither counts for a calculation that started before a reset, nor while isolation is off.
+    monitor.reset();
+    monitor.updateWagedInstanceTagIsolationShareBlocks(generation, 2);
+    Assert.assertFalse(monitor.countWagedContainedFailure(generation, CAPACITY_DEFICIT));
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
-    monitor.updateWagedInstanceTagIsolationShareBlocks(2);
+    Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 0L);
+    long off = monitor.configureWagedInstanceTagIsolation(false, resources);
+    monitor.updateWagedInstanceTagIsolationShareBlocks(off, 2);
+    Assert.assertFalse(monitor.countWagedContainedFailure(off, CAPACITY_DEFICIT));
     Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
   }
 

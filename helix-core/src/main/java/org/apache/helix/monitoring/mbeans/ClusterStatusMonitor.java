@@ -1726,13 +1726,28 @@ public class ClusterStatusMonitor implements ClusterStatusMonitorMBean {
   }
 
   /**
-   * Records how many share blocks instance tag isolation found in the last baseline. Ignored while
-   * isolation is off.
+   * Records how many share blocks instance tag isolation found in the last baseline. Dropped if
+   * the generation is no longer current, or isolation is off.
    */
-  public synchronized void updateWagedInstanceTagIsolationShareBlocks(int blocks) {
-    if (_wagedIsolationEnabled) {
+  public synchronized void updateWagedInstanceTagIsolationShareBlocks(long generation,
+      int blocks) {
+    if (_wagedIsolationEnabled && generation == _wagedIsolationGeneration) {
       _wagedIsolationShareBlocks = blocks;
     }
+  }
+
+  /**
+   * Counts a failure instance tag isolation contained in the per-category counters, unless the
+   * generation is no longer current or isolation is off.
+   * @return whether it was counted.
+   */
+  public synchronized boolean countWagedContainedFailure(long generation,
+      HelixRebalanceException.FailureCategory category) {
+    if (!_wagedIsolationEnabled || generation != _wagedIsolationGeneration) {
+      return false;
+    }
+    incrementWagedFailureCategoryCount(category);
+    return true;
   }
 
   /**

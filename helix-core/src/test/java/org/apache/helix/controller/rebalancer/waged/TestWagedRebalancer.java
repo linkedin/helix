@@ -1282,12 +1282,60 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
         Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 1L);
         Assert.assertTrue(monitor.getWagedFailureNoCandidateNodeCounter() > 0);
         Assert.assertEquals(monitor.getWagedFallbackInUseGauge(), 0L);
-        // Counted like a failure of the default mode, without lighting the serving gauges.
-        rebalancer.reportContainedFailure(HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
-        Assert.assertEquals(monitor.getWagedFailureCapacityDeficitCounter(), 1L);
-        Assert.assertEquals(monitor.getWagedCustomerActionableFailureGauge(), 0L);
       }
     }
+  }
+
+  /**
+   * A baseline still running when the monitor resets, as on a leadership change, reports neither
+   * its share blocks nor the failures it contained afterwards.
+   */
+  @Test
+  public void testIsolationSignalsOfABaselineRunningAcrossAMonitorResetAreDropped()
+      throws Exception {
+    CountDownLatch started = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicBoolean pause = new AtomicBoolean(true);
+    MockAssignmentMetadataStore metadataStore = new MockAssignmentMetadataStore() {
+      @Override
+      public Map<String, ResourceAssignment> getBaseline() {
+        // The first read is the baseline's, before it calculates.
+        if (pause.getAndSet(false)) {
+          started.countDown();
+          Uninterruptibles.awaitUninterruptibly(release);
+        }
+        return super.getBaseline();
+      }
+    };
+    WagedRebalancer rebalancer = new WagedRebalancer(metadataStore,
+        ConstraintBasedAlgorithmFactory.getInstance(Collections.emptyMap()), Optional.empty());
+    ClusterStatusMonitor monitor = attachMonitor(rebalancer);
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    splitIntoTwoCliques(clusterData);
+    clusterData.getClusterConfig().setWagedInstanceTagIsolationEnabled(true);
+    makePartitionUnplaceable(clusterData, _resourceNames.get(0));
+    AtomicReference<Throwable> pipelineFailure = new AtomicReference<>();
+    Thread pipeline = new Thread(() -> {
+      try {
+        rebalancer.computeNewIdealStates(clusterData, toResourceMap(clusterData),
+            new CurrentStateOutput());
+      } catch (Throwable t) {
+        pipelineFailure.set(t);
+      }
+    });
+    pipeline.start();
+    try {
+      Assert.assertTrue(started.await(30, TimeUnit.SECONDS));
+      monitor.reset();
+    } finally {
+      release.countDown();
+    }
+    pipeline.join(TimeUnit.SECONDS.toMillis(30));
+    Assert.assertFalse(pipeline.isAlive(), "The pipeline did not finish");
+    Assert.assertNull(pipelineFailure.get());
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationShareBlocksGauge(), 0L);
+    Assert.assertEquals(monitor.getWagedFailureNoCandidateNodeCounter(), 0L);
+    Assert.assertEquals(monitor.getWagedInstanceTagIsolationSkippedResourcesGauge(), 0L);
   }
 
   /**

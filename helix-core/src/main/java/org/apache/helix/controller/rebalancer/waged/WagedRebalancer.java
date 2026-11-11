@@ -114,6 +114,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   // dashboards see the same signal. May be null when WagedRebalancer is used outside the
   // pipeline (e.g. ReadOnlyWagedRebalancer for the REST partitionAssignment API).
   private volatile ClusterStatusMonitor _clusterStatusMonitor;
+  // The isolation reporting generation of the calculation running on this thread, so the
+  // algorithm's callbacks report with the generation of the pipeline that started it.
+  private final ThreadLocal<Long> _isolationGeneration = new ThreadLocal<>();
 
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
@@ -393,20 +396,23 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   /**
    * Counts a failure instance tag isolation contained in the per-FailureCategory counters, the way
    * the default mode counts it when the whole calculation fails. The calculation succeeded, so it
-   * ticks neither RebalanceFailureCounter nor the reversible serving gauges.
+   * ticks neither RebalanceFailureCounter nor the reversible serving gauges. Like every isolation
+   * report it carries the generation of the pipeline that started the calculation.
    */
   void reportContainedFailure(HelixRebalanceException.FailureCategory category) {
-    _failureCategoryMetrics.get(category).increment(1L);
+    Long generation = _isolationGeneration.get();
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
-    if (monitor != null) {
-      monitor.incrementWagedFailureCategoryCount(category);
+    if (generation != null && monitor != null
+        && monitor.countWagedContainedFailure(generation, category)) {
+      _failureCategoryMetrics.get(category).increment(1L);
     }
   }
 
   void reportShareBlocks(int blocks) {
+    Long generation = _isolationGeneration.get();
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
-    if (monitor != null) {
-      monitor.updateWagedInstanceTagIsolationShareBlocks(blocks);
+    if (generation != null && monitor != null) {
+      monitor.updateWagedInstanceTagIsolationShareBlocks(generation, blocks);
     }
   }
 
@@ -473,7 +479,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       @Override
       public OptimalAssignment calculate(ClusterModel clusterModel)
           throws HelixRebalanceException {
-        return algorithm.calculate(clusterModel);
+        _isolationGeneration.set(generation);
+        try {
+          return algorithm.calculate(clusterModel);
+        } finally {
+          _isolationGeneration.remove();
+        }
       }
 
       @Override
