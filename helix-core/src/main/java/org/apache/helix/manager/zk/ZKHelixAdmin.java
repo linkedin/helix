@@ -219,6 +219,15 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException("Node " + nodeId + " already exists in cluster " + clusterName);
     }
 
+    // dropInstance deletes the InstanceConfig before the instance subtree, so a subtree without a
+    // config means a drop is partial or still in flight; re-adding would inherit its stale state.
+    String instancePath = PropertyPathBuilder.instance(clusterName, nodeId);
+    if (_zkClient.exists(instancePath)) {
+      throw new HelixException("Node " + nodeId + " has a residual subtree at " + instancePath
+          + " without an InstanceConfig. Indicates a partial or in-flight dropInstance."
+          + " Run dropInstance to complete cleanup, then retry.");
+    }
+
     List<InstanceConfig> matchingLogicalIdInstances =
         InstanceUtil.findInstancesWithMatchingLogicalId(_baseDataAccessor, clusterName,
             instanceConfig);

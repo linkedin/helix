@@ -1801,9 +1801,6 @@ public class ZkClient implements Watcher {
    * @throws ZkClientException on unrecoverable failure
    */
   public void deleteRecursively(String path) throws ZkClientException {
-    if (!exists(path)) {
-      return;
-    }
     List<String> orderedPaths;
     try {
       orderedPaths = collectSubtreeChildrenFirst(path);

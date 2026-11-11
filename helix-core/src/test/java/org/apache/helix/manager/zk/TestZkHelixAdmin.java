@@ -1433,6 +1433,72 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
+  // dropInstance deletes the InstanceConfig before the instance subtree, so a crash between the
+  // two phases leaves a residual subtree. addInstance must refuse to re-add on top of it.
+  @Test
+  public void testAddInstanceRejectsResidualSubtree() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestAddInstanceRejectsResidualSubtree";
+    final String instanceName = "host_residual";
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    String staleCurrentStatePath = createResidualInstanceSubtree(admin, clusterName, instanceName);
+
+    try {
+      admin.addInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("addInstance should reject an instance with a residual subtree");
+    } catch (HelixException expected) {
+      Assert.assertTrue(expected.getMessage().contains("residual subtree"), expected.getMessage());
+    }
+    // The rejected add must not recreate the config or touch the residual subtree.
+    Assert.assertFalse(
+        _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    Assert.assertTrue(_gZkClient.exists(staleCurrentStatePath));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Recovery path for the residual subtree case: dropInstance resumes and clears the subtree,
+  // after which addInstance succeeds and starts from a clean subtree.
+  @Test
+  public void testAddInstanceSucceedsAfterDropClearsResidualSubtree() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestAddInstanceAfterResidualSubtreeDrop";
+    final String instanceName = "host_residual";
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    String staleCurrentStatePath = createResidualInstanceSubtree(admin, clusterName, instanceName);
+
+    admin.dropInstance(clusterName, new InstanceConfig(instanceName));
+    Assert.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+    Assert.assertTrue(
+        _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    Assert.assertTrue(
+        _gZkClient.exists(PropertyPathBuilder.instanceCurrentState(clusterName, instanceName)));
+    Assert.assertFalse(_gZkClient.exists(staleCurrentStatePath));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Simulates a dropInstance that deleted the InstanceConfig but crashed before deleting the
+  // instance subtree. Returns the path of a stale CURRENTSTATES child left in that subtree.
+  private String createResidualInstanceSubtree(HelixAdmin admin, String clusterName,
+      String instanceName) {
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+    String staleCurrentStatePath =
+        PropertyPathBuilder.instanceCurrentState(clusterName, instanceName) + "/stale-session";
+    _gZkClient.createPersistent(staleCurrentStatePath);
+    _gZkClient.delete(PropertyPathBuilder.instanceConfig(clusterName, instanceName));
+    Assert.assertTrue(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
+    return staleCurrentStatePath;
+  }
+
   // Realistic instance shape: addInstance creates 7 standard subdirs, plus
   // depth>=2 paths under CURRENTSTATES (sessionId/resource) and ERRORS.
   // Verifies the BFS children-first ordering inside ZkClient.deleteRecursively
