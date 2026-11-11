@@ -28,7 +28,6 @@ import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
 import org.apache.helix.zookeeper.zkclient.IZkChildListener;
-import org.apache.helix.zookeeper.zkclient.IZkDataListener;
 import org.apache.helix.zookeeper.zkclient.IZkStateListener;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
@@ -38,8 +37,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
-public class ZkDistributedLeaderElection implements IZkDataListener, IZkStateListener,
-    IZkChildListener {
+public class ZkDistributedLeaderElection implements IZkStateListener, IZkChildListener {
   private static final Logger LOG = LoggerFactory.getLogger(ZkDistributedLeaderElection.class);
   private static final String PREFIX = "MSDS_SERVER_";
   private static final String PARTICIPANT_ID = "MSDS_PARTICIPANT_ID";
@@ -241,16 +239,6 @@ public class ZkDistributedLeaderElection implements IZkDataListener, IZkStateLis
   public void handleSessionEstablishmentError(Throwable error) {
     _isLeader = false;
     _currentLeaderInfo = null;
-  }
-
-  @Override
-  public void handleDataChange(String s, Object o) {
-    return;
-  }
-
-  @Override
-  public void handleDataDeleted(String s) {
-    refreshSession(Long.toHexString(_zkClient.getSessionId()));
   }
 
   @Override
