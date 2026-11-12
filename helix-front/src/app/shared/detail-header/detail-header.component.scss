@@ -26,23 +26,26 @@ $tags: (
   padding-left: 10px;
 
   span {
-    color: #fff;
-    font-size: 12px;
-    line-height: 12px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    font-weight: normal;
-    border-radius: 24px;
-    padding: 6px 8px;
+    border-radius: 6px;
+    padding: 2px 8px;
   }
 
   @each $kind, $palette in $tags {
     .#{$kind} {
-      background-color: mat.get-color-from-palette($palette);
+      $c: mat.get-color-from-palette($palette, 700);
+      color: $c;
+      background-color: rgba($c, 0.1);
+      box-shadow: inset 0 0 0 1px rgba($c, 0.3);
     }
   }
 }
 
-// Dark mode tints each tag like a label instead of a solid fill
+// Dark mode uses lighter steps of the same hue
 :host-context(.dark-theme) .tag {
   @each $kind, $palette in $tags {
     .#{$kind} {

@@ -29,10 +29,10 @@ $hi-nuage: (
   contrast: map-get(mat.$indigo-palette, contrast),
 );
 
-// Define the palettes for the theme using the Material Design palettes available in palette.scss
-// For each palette, optionally specify a default, lighter, and darker hue.
+// One brand hue: the accent is a deeper step of the primary rather than a
+// second colour, so links and actions never compete with status colours.
 $hi-primary: mat.define-palette($hi-nuage);
-$hi-accent: mat.define-palette(mat.$pink-palette, A200, A100, A400);
+$hi-accent: mat.define-palette($hi-nuage, 700, 300, 900);
 
 // The warn palette is optional (defaults to red).
 $hi-warn: mat.define-palette(mat.$red-palette);
@@ -56,7 +56,7 @@ $hi-dark-base-theme: mat.define-dark-theme(
   (
     color: (
       primary: mat.define-palette($hi-nuage-dark, 300, 100, 500),
-      accent: mat.define-palette(mat.$pink-palette, 200, 100, 300),
+      accent: mat.define-palette($hi-nuage-dark, 300, 100, 500),
       warn: mat.define-palette(mat.$red-palette, 300, 100, 500),
     ),
   )
