@@ -21,8 +21,10 @@ package org.apache.helix.controller.rebalancer.waged.model;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixException;
@@ -39,6 +41,10 @@ public class OptimalAssignment {
   private Map<String, ResourceAssignment> _optimalAssignment = Collections.emptyMap();
   private Map<AssignableReplica, Map<AssignableNode, List<String>>> _failedAssignments =
       new HashMap<>();
+  // Resources skipped by instance-tag isolation. Preloaded replicas may leave partial entries in
+  // _optimalAssignment; the caller replaces those with complete previous assignments or omits them
+  // from a temporary overwrite. Empty in the default global mode.
+  private Set<String> _skippedResources = Collections.emptySet();
 
   /**
    * Update the OptimalAssignment instance with the existing assignment recorded in the input cluster model.
@@ -85,6 +91,28 @@ public class OptimalAssignment {
 
   public boolean hasAnyFailure() {
     return !_failedAssignments.isEmpty();
+  }
+
+  /**
+   * Record the resources that instance-tag isolation skipped because it set their share block
+   * aside. Only used when instance-tag isolation is enabled.
+   */
+  public void setSkippedResources(Set<String> skippedResources) {
+    // Defensive copy: the caller owns a mutable set, and an unmodifiable view over it would still
+    // change underneath this object if that set were ever touched again.
+    _skippedResources = skippedResources == null || skippedResources.isEmpty()
+        ? Collections.emptySet()
+        : Collections.unmodifiableSet(new HashSet<>(skippedResources));
+  }
+
+  /**
+   * @return The resources skipped by instance-tag isolation. Preloaded replicas may still leave
+   *         entries in {@link #getOptimalResourceAssignment()}; the caller must replace those
+   *         entries with the complete previous assignment, or drop them for a temporary overwrite.
+   *         Never null; empty in the default global mode.
+   */
+  public Set<String> getSkippedResources() {
+    return _skippedResources;
   }
 
   public String getFailures() {
