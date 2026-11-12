@@ -673,6 +673,22 @@ public class BaseControllerDataProvider implements ControlContextProvider {
   }
 
   /**
+   * Returns the number of routable instances in the cluster, i.e. the denominator the
+   * percentage-based auto Maintenance Mode thresholds
+   * (MAX_OFFLINE_INSTANCES_ALLOWED_PERCENTAGE at entry,
+   * NUM_OFFLINE_INSTANCES_FOR_AUTO_EXIT_PERCENTAGE at exit) resolve against.
+   *
+   * <p>Membership rules live in {@link InstanceUtil#getRoutableInstances(Map)}, which is also the
+   * population {@link #getInstancesUnableToAcceptOnlineReplicas(long)} narrows, so the offline
+   * count and the percentage denominator are guaranteed to be measured over the same instances.
+   *
+   * @return the count of routable instances.
+   */
+  public int getRoutableInstanceCount() {
+    return InstanceUtil.getRoutableInstances(getInstanceConfigMap()).size();
+  }
+
+  /**
    * Return all the live nodes that are enabled and tagged with given instanceTag. If a node is
    * enabled, it is assignable.
    *
