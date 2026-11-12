@@ -27,9 +27,12 @@ import java.util.TreeMap;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
+import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalanceStatus;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ConvergenceStatus;
@@ -143,6 +146,161 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
   }
 
   @Test
+  public void testUnchangedRecordIsConfirmedOncePerHeartbeatWithoutSchedulingARun() {
+    persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0);
+    int before = version();
+    long beat = ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    ConvergenceStatusCalculator.Result idle = result(Status.CONVERGED, Reason.NONE, 0, "a");
+    idle.getCluster().setEvaluatedAt(T0 + beat - 1);
+    Assert.assertEquals(persist(_manager, idle, T0 + beat - 1), -1L);
+    Assert.assertEquals(version(), before);
+
+    idle.getCluster().setEvaluatedAt(T0 + beat);
+    idle.getCluster().setGeneratedAt(T0 + beat);
+    Assert.assertEquals(persist(_manager, idle, T0 + beat), -1L);
+    Assert.assertEquals(version(), before + 1);
+    Assert.assertEquals(record().getEvaluatedAt(), T0 + beat);
+    Assert.assertEquals(record().getGeneratedAt(), T0);
+  }
+
+  @Test
+  public void testTickConfirmsAnIdleRecordOnlyWhenTheControllerIsCaughtUp() {
+    persist(_manager, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 1, "a"), T0);
+    int before = version();
+    long beat = T0 + ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    _stage.tick(beat, false);
+    Assert.assertEquals(version(), before);
+
+    _stage.tick(beat, true);
+    Assert.assertEquals(record().getEvaluatedAt(), beat);
+    Assert.assertEquals(record().getGeneratedAt(), T0);
+    Assert.assertEquals(record().getListedResources(), Collections.singletonList("a"));
+
+    // A run that reached the stage but produced nothing keeps the record unconfirmed.
+    _stage._submitted.incrementAndGet();
+    _stage.tick(beat + ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    Assert.assertEquals(record().getEvaluatedAt(), beat);
+  }
+
+  @Test
+  public void testFormerLeaderAsksAtMostOnceAMinuteUntilToldToForget() {
+    HelixManager manager = manager(_session, true);
+    Mockito.when(manager.isLeader()).thenReturn(true, true, false);
+    persist(manager, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 1, "a"), T0);
+    int before = version();
+    long beat = T0 + ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    // Every second for ten minutes: a lost leadership nobody announced backs off to one read a
+    // minute.
+    long end = beat + 10 * ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    for (long now = beat; now < end; now += ConvergenceStatusPersistStage.TICK_MS) {
+      _stage.tick(now, true);
+    }
+    Mockito.verify(manager, Mockito.atMost(20)).isLeader();
+    Assert.assertEquals(version(), before);
+
+    Mockito.clearInvocations(manager);
+    _stage.requestForget();
+    for (int i = 0; i < 5; i++) {
+      _stage.tick(end + i * ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    }
+    Mockito.verify(manager, Mockito.never()).isLeader();
+  }
+
+  @Test
+  public void testTickForgetsOnASessionChangeOrALostLeadershipWithoutZooKeeper() {
+    HelixManager manager = manager(_session, true);
+    persist(manager, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 1, "a"), T0);
+    int before = version();
+    long beat = T0 + ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    Mockito.when(manager.getSessionId()).thenReturn("newer");
+    Mockito.clearInvocations(manager);
+    for (int i = 0; i < 5; i++) {
+      _stage.tick(beat + i * ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    }
+    Mockito.verify(manager, Mockito.never()).isLeader();
+    Assert.assertEquals(version(), before);
+
+    // While disconnected the tick does nothing at all, not even ask for the session.
+    HelixManager offline = manager(_session, true);
+    persist(offline, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 2, "a"), beat);
+    Mockito.when(offline.isConnected()).thenReturn(false);
+    Mockito.clearInvocations(offline);
+    _stage.tick(beat + 2 * ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    Mockito.verify(offline, Mockito.never()).getSessionId();
+
+    // Without the request this tick would beat; with it, the stage just forgets.
+    persist(_manager, result(Status.BLOCKED, Reason.ERROR_STATE, 1, "a"), beat);
+    int written = version();
+    _stage.requestForget();
+    _stage.tick(beat + 2 * ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    Assert.assertEquals(version(), written);
+  }
+
+  @Test
+  public void testReEnabledMonitoringConfirmsTheOldRecordOnItsFirstRun() {
+    persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0);
+    // Monitoring off: the stage drops everything it held and writes nothing.
+    _stage.requestForget();
+    _stage.tick(T0 + 1_000L, true);
+    int before = version();
+
+    // Back on, well inside the heartbeat: unchanged content is still confirmed at once.
+    long on = T0 + 5_000L;
+    ConvergenceStatusCalculator.Result same = result(Status.CONVERGED, Reason.NONE, 0, "a");
+    same.getCluster().setEvaluatedAt(on);
+    persist(_manager, same, on);
+    Assert.assertEquals(version(), before + 1);
+    Assert.assertEquals(record().getEvaluatedAt(), on);
+
+    // A change made while it was off is written on the first run too.
+    persist(_manager, result(Status.BLOCKED, Reason.ERROR_STATE, 1, "a"), on + 1_000L);
+    Assert.assertEquals(record().getStatus(), Status.BLOCKED);
+  }
+
+  @Test
+  public void testUnconvergedSinceAfterMonitoringIsTurnedOffAndOn() {
+    ConvergenceStatusCalculator.Result blocked = result(Status.BLOCKED, Reason.ERROR_STATE, 1, "a");
+    blocked.getCluster().setEvaluatedAt(T0);
+    persist(_manager, blocked, T0);
+    Assert.assertEquals(record().getResourceReport("a").getUnconvergedSince(), T0);
+
+    // Off for two minutes and still not converged: it never converged in between, so the time
+    // it started is kept.
+    _stage.requestForget();
+    _stage.tick(T0 + 1_000L, true);
+    long back = T0 + 2 * 60_000L;
+    blocked = result(Status.BLOCKED, Reason.ERROR_STATE, 1, "a");
+    blocked.getCluster().setEvaluatedAt(back);
+    persist(_manager, blocked, back);
+    Assert.assertEquals(record().getResourceReport("a").getUnconvergedSince(), T0);
+
+    // Off for longer than five heartbeats: what happened meanwhile is unknown, so it restarts.
+    _stage.requestForget();
+    _stage.tick(back + 1_000L, true);
+    long later = back + 6 * ConvergenceStatusPersistStage.HEARTBEAT_MS;
+    blocked = result(Status.BLOCKED, Reason.ERROR_STATE, 1, "a");
+    blocked.getCluster().setEvaluatedAt(later);
+    persist(_manager, blocked, later);
+    Assert.assertEquals(record().getResourceReport("a").getUnconvergedSince(), later);
+  }
+
+  @Test
+  public void testWagedChangeIsNotAppliedToAResultThatIsBehind() {
+    persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0);
+    int before = version();
+    WagedRebalancer waged = Mockito.mock(WagedRebalancer.class);
+    Mockito.when(waged.getConvergenceStatus()).thenReturn(new WagedRebalanceStatus(false, true,
+        false, HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT, true));
+    _stage._wagedRebalancer = waged;
+    _stage._lastResult = result(Status.CONVERGED, Reason.NONE, 0, "a");
+    // A run reached the stage and failed in it: its last result is out of date.
+    _stage._submitted.incrementAndGet();
+    _stage.tick(T0 + ConvergenceStatusPersistStage.HEARTBEAT_MS, true);
+    Mockito.verify(waged, Mockito.never()).getConvergenceStatus();
+    Assert.assertEquals(version(), before);
+  }
+
+  @Test
   public void testFailedLeaderCheckKeepsTheNewestRecord() {
     HelixManager manager = manager(_session, true);
     persist(manager, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 1, "a"), T0);
@@ -151,7 +309,7 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
     long converged = T0 + ConvergenceStatusPersistStage.MIN_REWRITE_MS;
     persist(manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), converged);
     Assert.assertEquals(record().getStatus(), Status.IN_PROGRESS);
-    _stage.tick(converged + ConvergenceStatusPersistStage.RETRY_MIN_MS);
+    _stage.tick(converged + ConvergenceStatusPersistStage.RETRY_MIN_MS, true);
     Assert.assertEquals(record().getStatus(), Status.CONVERGED);
   }
 
@@ -203,13 +361,27 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
   }
 
   @Test
+  public void testWagedChangeWaitsForACaughtUpController() {
+    persist(_manager, result(Status.CONVERGED, Reason.NONE, 0, "a"), T0);
+    int before = version();
+    WagedRebalancer waged = Mockito.mock(WagedRebalancer.class);
+    Mockito.when(waged.getConvergenceStatus()).thenReturn(new WagedRebalanceStatus(false, true,
+        false, HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT, true));
+    _stage._wagedRebalancer = waged;
+    _stage._lastResult = result(Status.CONVERGED, Reason.NONE, 0, "a");
+    _stage.tick(T0 + 2_000L, false);
+    Mockito.verify(waged, Mockito.never()).getConvergenceStatus();
+    Assert.assertEquals(version(), before);
+  }
+
+  @Test
   public void testHeldBackChangeIsWrittenByTheTick() {
     persist(_manager, result(Status.IN_PROGRESS, Reason.PENDING_TRANSITION, 3, "a"), T0);
     int before = version();
     persist(_manager, result(Status.BLOCKED, Reason.ERROR_STATE, 3, "a"), T0 + 1_000L);
-    _stage.tick(T0 + 2_000L);
+    _stage.tick(T0 + 2_000L, true);
     Assert.assertEquals(version(), before);
-    _stage.tick(T0 + ConvergenceStatusPersistStage.MIN_REWRITE_MS);
+    _stage.tick(T0 + ConvergenceStatusPersistStage.MIN_REWRITE_MS, false);
     Assert.assertEquals(version(), before + 1);
     Assert.assertEquals(record().getStatus(), Status.BLOCKED);
   }
@@ -368,11 +540,11 @@ public class TestConvergenceStatusPersistStage extends ZkTestBase {
     Assert.assertEquals(persist(manager, result, T0 + 1),
         ConvergenceStatusPersistStage.RETRY_MIN_MS - 1);
     Mockito.verify(failing, Mockito.times(1)).setChildren(Mockito.anyList(), Mockito.anyList());
-    _stage.tick(T0 + ConvergenceStatusPersistStage.RETRY_MIN_MS);
+    _stage.tick(T0 + ConvergenceStatusPersistStage.RETRY_MIN_MS, false);
     Mockito.verify(failing, Mockito.times(2)).setChildren(Mockito.anyList(), Mockito.anyList());
 
     persist(_manager, result, T0 + 1_500L);
-    _stage.tick(T0 + 3 * ConvergenceStatusPersistStage.RETRY_MIN_MS);
+    _stage.tick(T0 + 3 * ConvergenceStatusPersistStage.RETRY_MIN_MS, false);
     Assert.assertNotNull(record());
   }
 }

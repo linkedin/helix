@@ -88,14 +88,6 @@ final class ConvergenceResourceEvaluation {
     }
   }
 
-  void overrideAllUnknown(Reason reason) {
-    int errors = _tally.count(Status.BLOCKED, Reason.ERROR_STATE);
-    int total = _tally.total();
-    _tally.reset();
-    _tally.record(Status.BLOCKED, Reason.ERROR_STATE, errors);
-    _tally.record(Status.UNKNOWN, reason, total - errors);
-  }
-
   private void visit(Partition partition) {
     if (_in._pausedReason != null) {
       _tally.record(Status.PAUSED, _in._pausedReason);

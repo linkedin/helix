@@ -182,7 +182,8 @@ public class ClusterAccessor extends AbstractHelixResource {
   @GET
   @Path("{clusterId}/convergence")
   public Response getClusterConvergence(@PathParam("clusterId") String clusterId,
-      @DefaultValue("0") @QueryParam("limit") int limit) {
+      @DefaultValue("0") @QueryParam("limit") int limit,
+      @DefaultValue("false") @QueryParam("fallback") boolean fallback) {
     HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     // Every cluster has a config, and a failed read here is an error rather than a 404.
@@ -196,14 +197,16 @@ public class ClusterAccessor extends AbstractHelixResource {
     if (!enabled || managementMode) {
       // The answer does not depend on the record, so it is not read.
       return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, null, null, null,
-          null, enabled, managementMode));
+          null, enabled, managementMode, System.currentTimeMillis()));
     }
     ConvergenceStatus report =
         ConvergenceRecordCache.INSTANCE.get(getRealmAwareZkClient(), dataAccessor, clusterId);
     ObjectNode response = ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
-        dataAccessor.getProperty(keyBuilder.controllerLeader()), true, false);
+        dataAccessor.getProperty(keyBuilder.controllerLeader()), true, false,
+        System.currentTimeMillis());
     ConvergenceStatusResponseMapper.listResources(response, report, limit);
-    return JSONRepresentation(response);
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(response, fallback,
+        getRealmAwareZkClient(), clusterConfig, clusterId, null));
   }
 
   /**
