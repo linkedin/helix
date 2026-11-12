@@ -91,7 +91,7 @@ public abstract class TestInstanceOperationBase extends ZkTestBase {
   protected static final String HOST = "host";
   protected static final String LOGICAL_ID = "logicalId";
   protected static final String TOPOLOGY = String.format("%s/%s/%s", ZONE, HOST, LOGICAL_ID);
-  protected static final ImmutableSet<String> TOP_STATE_SET = ImmutableSet.of("MASTER");
+  protected static final ImmutableSet<String> TOP_STATE_SET = ImmutableSet.of("MASTER", "LEADER");
   protected static final ImmutableSet<String> SECONDARY_STATE_SET =
       ImmutableSet.of("SLAVE", "STANDBY");
   protected static final ImmutableSet<String> ACCEPTABLE_STATE_SET =
