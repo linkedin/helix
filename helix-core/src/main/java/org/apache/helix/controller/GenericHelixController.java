@@ -220,9 +220,12 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
    * A record of last pipeline finish duration
    */
   private long _lastPipelineEndTimestamp;
+  private ConvergenceStatusPersistStage _convergenceStage;
+  // Bookkeeping for isResourcePipelineCaughtUp only.
+  private volatile boolean _resourceRunInProgress;
+  private volatile boolean _lastResourceRunFailed;
 
   private final String _clusterName;
-  private ConvergenceStatusPersistStage _convergenceStage;
   private final Set<Pipeline.Type> _enabledPipelineTypes;
 
   private HelixManager _helixManager;
@@ -383,6 +386,17 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             + _clusterName, ex);
       }
     }
+  }
+
+  /**
+   * Whether the resource pipeline has handled everything it was given: its thread is alive,
+   * nothing is queued, no run is in progress and the last run succeeded. Read only, for the
+   * convergence report's heartbeat; it never changes what the pipeline does.
+   */
+  private boolean isResourcePipelineCaughtUp() {
+    Thread eventThread = _eventThread;
+    return eventThread != null && eventThread.isAlive() && isEventQueueEmpty(false)
+        && !_resourceRunInProgress && !_lastResourceRunFailed;
   }
 
   private static ConvergenceStatusPersistStage findConvergenceStage(PipelineRegistry registry) {
@@ -775,7 +789,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         long tick = ConvergenceStatusPersistStage.TICK_MS;
         _asyncTasksThreadPool.scheduleWithFixedDelay(() -> {
           try {
-            convergence.tick(System.currentTimeMillis());
+            convergence.tick(System.currentTimeMillis(), isResourcePipelineCaughtUp());
           } catch (Throwable t) {
             logger.warn("Convergence report tick failed for cluster {}", _clusterName, t);
           }
@@ -963,6 +977,11 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     long startTime = System.currentTimeMillis();
     boolean helixMetaDataAccessRebalanceFail = false;
     boolean rebalanceFail = false;
+    boolean resourceRun =
+        dataProvider instanceof ResourceControllerDataProvider && !pipelines.isEmpty();
+    if (resourceRun) {
+      _resourceRunInProgress = true;
+    }
     for (Pipeline pipeline : pipelines) {
       event.addAttribute(AttributeName.PipelineType.name(), pipeline.getPipelineType());
       try {
@@ -1006,6 +1025,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     }
 
     _lastPipelineEndTimestamp = System.currentTimeMillis();
+    if (resourceRun) {
+      _lastResourceRunFailed = rebalanceFail;
+      _resourceRunInProgress = false;
+    }
     logger.info("END: Invoking {} controller pipeline for event {}::{} for cluster {}, took {} ms",
         dataProvider.getPipelineName(), event.getEventType(), event.getEventId(), _clusterName,
         _lastPipelineEndTimestamp - startTime);

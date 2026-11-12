@@ -182,7 +182,8 @@ public class ClusterAccessor extends AbstractHelixResource {
   @GET
   @Path("{clusterId}/convergence")
   public Response getClusterConvergence(@PathParam("clusterId") String clusterId,
-      @DefaultValue("1000") @QueryParam("limit") int limit) {
+      @DefaultValue("1000") @QueryParam("limit") int limit,
+      @DefaultValue("false") @QueryParam("fallback") boolean fallback) {
     HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     // Every cluster has a config, and a failed read here is an error rather than a 404.
@@ -196,9 +197,11 @@ public class ClusterAccessor extends AbstractHelixResource {
         dataAccessor.getProperty(keyBuilder.controllerLeader()),
         clusterConfig.isConvergenceMonitoringEnabled(),
         ConvergenceStatusResponseMapper.isManagementMode(
-            getHelixAdmin().getClusterManagementMode(clusterId)));
+            getHelixAdmin().getClusterManagementMode(clusterId)),
+        System.currentTimeMillis());
     ConvergenceStatusResponseMapper.listResources(response, report, limit);
-    return JSONRepresentation(response);
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(response, fallback,
+        getRealmAwareZkClient(), clusterConfig, clusterId, null));
   }
 
   /**

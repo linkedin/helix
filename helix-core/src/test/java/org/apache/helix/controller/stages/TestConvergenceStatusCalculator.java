@@ -236,6 +236,29 @@ public class TestConvergenceStatusCalculator {
   }
 
   @Test
+  public void testWagedHealthChangeIsAppliedToTheKeptCounts() {
+    partition("db_0", new String[] {"i1", "MASTER"}, new String[] {"i1", "MASTER"});
+    partition("db_1", new String[] {"i1", "SLAVE"}, new String[] {"i1", "MASTER"});
+    WagedRebalanceStatus healthy = new WagedRebalanceStatus(false, false, false, null, true);
+    ConvergenceStatusCalculator.Result first = ConvergenceStatusCalculator.calculate(
+        inputs().wagedResources(Collections.singleton(DB), healthy), "s1", 1L);
+    Assert.assertTrue(first.hasWagedResources());
+    WagedRebalanceStatus failing = new WagedRebalanceStatus(false, true, false,
+        HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT, true);
+    ConvergenceStatus failed = ConvergenceStatusCalculator.withWagedStatus(first, failing, 2L)
+        .getResources().get(DB);
+    Assert.assertEquals(failed.getStatus(), Status.UNKNOWN);
+    Assert.assertEquals(failed.getPrimaryReason(), Reason.WAGED_CAPACITY_DEFICIT);
+    Assert.assertEquals(failed.getPartitionCount(), 2);
+    // Back to healthy: the counts were kept as computed, not as overridden.
+    ConvergenceStatus back = ConvergenceStatusCalculator.withWagedStatus(
+        ConvergenceStatusCalculator.withWagedStatus(first, failing, 2L), healthy, 3L)
+        .getResources().get(DB);
+    Assert.assertEquals(back.getStatusCounts(),
+        first.getResources().get(DB).getStatusCounts());
+  }
+
+  @Test
   public void testErrorReplicaStaysBlockedWithoutATrustedTarget() {
     partition("db_0", new String[] {"i1", "ERROR"}, new String[] {"i1", "ERROR"});
     partition("db_1", new String[] {"i1", "MASTER"}, new String[] {"i1", "MASTER"});

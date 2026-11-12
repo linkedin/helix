@@ -42,8 +42,11 @@ public class TestConvergenceStatusResponseMapper {
     report.setControllerName("controller_1");
     report.setStatusCounts(Collections.singletonMap(Status.IN_PROGRESS, 1));
     report.setReasonCounts(Collections.singletonMap(Reason.PENDING_TRANSITION, 1));
+    report.setEvaluatedAt(NOW);
     return report;
   }
+
+  private static final long NOW = 10_000_000L;
 
   private static LiveInstance leader(String session) {
     LiveInstance leader = new LiveInstance("controller");
@@ -54,7 +57,7 @@ public class TestConvergenceStatusResponseMapper {
   @Test
   public void testFreshReportIsReturnedAsASummary() {
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION),
-        report(SESSION), leader(SESSION), true, false);
+        report(SESSION), leader(SESSION), true, false, NOW);
     Assert.assertEquals(response.path("status").asText(), "IN_PROGRESS");
     Assert.assertEquals(response.path("reportState").asText(), "FRESH");
     Assert.assertEquals(response.path("publishedBy").asText(), "controller_1");
@@ -73,15 +76,35 @@ public class TestConvergenceStatusResponseMapper {
     ConvergenceStatus anchor = report(SESSION);
     anchor.setControllerName("controller_2");
     ObjectNode adopted = ConvergenceStatusResponseMapper.map("c", "db", report("old"), anchor,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     Assert.assertEquals(adopted.path("reportState").asText(), "FRESH");
     Assert.assertEquals(adopted.path("publishedBy").asText(), "controller_2");
     Assert.assertEquals(adopted.path("controllerSessionId").asText(), SESSION);
     ObjectNode stale = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION),
-        report("old"), leader(SESSION), true, false);
+        report("old"), leader(SESSION), true, false, NOW);
     Assert.assertEquals(stale.path("status").asText(), "UNKNOWN");
     Assert.assertEquals(stale.path("reportState").asText(), "CONTROLLER_SESSION_MISMATCH");
     Assert.assertTrue(stale.path("partitionSummary").isMissingNode());
+  }
+
+  @Test
+  public void testReportFromAStuckPipelineIsStale() {
+    ConvergenceStatus cluster = report(SESSION);
+    cluster.setEvaluatedAt(NOW - ConvergenceStatusResponseMapper.STALE_AFTER_MS - 1);
+    ObjectNode stale = ConvergenceStatusResponseMapper.map("c", "db", report(SESSION), cluster,
+        leader(SESSION), true, false, NOW);
+    Assert.assertEquals(stale.path("status").asText(), "UNKNOWN");
+    Assert.assertEquals(stale.path("reportState").asText(), "REPORT_STALE");
+    // A resource the controller has not covered yet is stale too, not merely missing.
+    Assert.assertEquals(ConvergenceStatusResponseMapper.map("c", "db", null, cluster,
+        leader(SESSION), true, false, NOW).path("reportState").asText(), "REPORT_STALE");
+    cluster.setEvaluatedAt(NOW - ConvergenceStatusResponseMapper.STALE_AFTER_MS);
+    Assert.assertEquals(ConvergenceStatusResponseMapper.map("c", "db", report(SESSION), cluster,
+        leader(SESSION), true, false, NOW).path("reportState").asText(), "FRESH");
+    // A record that was never confirmed is not trusted.
+    cluster.getRecord().getSimpleFields().remove("EVALUATED_AT");
+    Assert.assertEquals(ConvergenceStatusResponseMapper.map("c", "db", report(SESSION), cluster,
+        leader(SESSION), true, false, NOW).path("reportState").asText(), "REPORT_STALE");
   }
 
   @Test
@@ -90,7 +113,7 @@ public class TestConvergenceStatusResponseMapper {
     cluster.putResourceReport("db", report(SESSION));
     cluster.putResourceReport("db2", report(SESSION));
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     ConvergenceStatusResponseMapper.listResources(response, cluster, 1);
     Assert.assertEquals(response.path("listedResourceCount").asInt(), 2);
     JsonNode listed = response.path("listedResources");
@@ -101,11 +124,11 @@ public class TestConvergenceStatusResponseMapper {
     Assert.assertTrue(response.path("unlistedResourceCount").isMissingNode());
     // 0 leaves the list out; an untrusted report lists nothing.
     ObjectNode summary = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     ConvergenceStatusResponseMapper.listResources(summary, cluster, 0);
     Assert.assertTrue(summary.path("listedResources").isMissingNode());
     ObjectNode untrusted = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
-        leader("other"), true, false);
+        leader("other"), true, false, NOW);
     ConvergenceStatusResponseMapper.listResources(untrusted, cluster, 10);
     Assert.assertTrue(untrusted.path("listedResourceCount").isMissingNode());
   }
@@ -117,7 +140,7 @@ public class TestConvergenceStatusResponseMapper {
     cluster.setPrimaryReason(Reason.MAINTENANCE_MODE);
     cluster.setGeneratedAt(42L);
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", "db", report("old"), cluster,
-        leader(SESSION), true, false);
+        leader(SESSION), true, false, NOW);
     Assert.assertEquals(response.path("status").asText(), "PAUSED");
     Assert.assertEquals(response.path("primaryReason").asText(), "MAINTENANCE_MODE");
     Assert.assertEquals(response.path("reportState").asText(), "FRESH");
@@ -134,13 +157,13 @@ public class TestConvergenceStatusResponseMapper {
   public void testNothingToTrust() {
     String[] states = {
         ConvergenceStatusResponseMapper.map("c", null, report(SESSION), report(SESSION),
-            leader(SESSION), false, false).path("reportState").asText(),
-        ConvergenceStatusResponseMapper.map("c", null, null, null, leader(SESSION), true, false)
+            leader(SESSION), false, false, NOW).path("reportState").asText(),
+        ConvergenceStatusResponseMapper.map("c", null, null, null, leader(SESSION), true, false, NOW)
             .path("reportState").asText(),
         ConvergenceStatusResponseMapper.map("c", "db", null, report(SESSION), leader(SESSION),
-            true, false).path("reportState").asText(),
+            true, false, NOW).path("reportState").asText(),
         ConvergenceStatusResponseMapper.map("c", null, report(SESSION), report(SESSION), null,
-            true, false).path("reportState").asText()};
+            true, false, NOW).path("reportState").asText()};
     Assert.assertEquals(states, new String[] {"MONITORING_DISABLED", "REPORT_MISSING",
         "REPORT_MISSING", "CONTROLLER_LEADER_MISSING"});
   }
@@ -148,7 +171,7 @@ public class TestConvergenceStatusResponseMapper {
   @Test
   public void testManagementModeIsPausedWhateverTheReportSays() {
     ObjectNode response = ConvergenceStatusResponseMapper.map("c", null, report(SESSION),
-        report(SESSION), leader(SESSION), true, true);
+        report(SESSION), leader(SESSION), true, true, NOW);
     Assert.assertEquals(response.path("status").asText(), "PAUSED");
     Assert.assertEquals(response.path("primaryReason").asText(), "MANAGEMENT_MODE");
   }

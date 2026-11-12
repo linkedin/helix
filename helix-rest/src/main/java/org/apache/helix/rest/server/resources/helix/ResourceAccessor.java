@@ -256,7 +256,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   @GET
   @Path("{resourceName}/convergence")
   public Response getResourceConvergence(@PathParam("clusterId") String clusterId,
-      @PathParam("resourceName") String resourceName) {
+      @PathParam("resourceName") String resourceName,
+      @DefaultValue("false") @QueryParam("fallback") boolean fallback) {
     HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     Stat created = getRealmAwareZkClient().getStat(keyBuilder.idealStates(resourceName).getPath());
@@ -279,11 +280,14 @@ public class ResourceAccessor extends AbstractHelixResource {
       }
     }
     ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
-    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
-        cluster, dataAccessor.getProperty(keyBuilder.controllerLeader()),
-        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
-        ConvergenceStatusResponseMapper.isManagementMode(
-            getHelixAdmin().getClusterManagementMode(clusterId))));
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(
+        ConvergenceStatusResponseMapper.map(clusterId, resourceName, report, cluster,
+            dataAccessor.getProperty(keyBuilder.controllerLeader()),
+            clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
+            ConvergenceStatusResponseMapper.isManagementMode(
+                getHelixAdmin().getClusterManagementMode(clusterId)),
+            System.currentTimeMillis()),
+        fallback, getRealmAwareZkClient(), clusterConfig, clusterId, resourceName));
   }
 
   /**

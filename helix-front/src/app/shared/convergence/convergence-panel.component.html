@@ -67,6 +67,7 @@
   <div *ngIf="report?.reportState === 'FRESH'" class="meta muted">
     <span *ngFor="let f of facts" [class.warn]="f.warn">{{ f.label }}</span>
     <span>Published by {{ report.publishedBy }}</span>
+    <span *ngIf="confirmed">Controller confirmed {{ confirmed }} ago</span>
     <span *ngIf="report.generatedAt"
       >Last changed
       {{ report.generatedAt | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC</span

@@ -58,6 +58,12 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
   private final Set<String> _expectLiveInstances;
   private final boolean _isDeactivatedNodeAware;
   private final boolean _isLenientMatch;
+  private volatile Exception _lastError;
+
+  /** Why the last verification failed to read the cluster, or null if it read it. */
+  public Exception getLastError() {
+    return _lastError;
+  }
 
   @Deprecated
   public StrictMatchExternalViewVerifier(String zkAddr, String clusterName, Set<String> resources,
@@ -235,6 +241,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
 
   @Override
   protected boolean verifyState() {
+    _lastError = null;
     try {
       PropertyKey.Builder keyBuilder = _accessor.keyBuilder();
       // read cluster once and do verification
@@ -300,6 +307,7 @@ public class StrictMatchExternalViewVerifier extends ZkHelixClusterVerifier {
       return true;
     } catch (Exception e) {
       LOG.error("exception in verification", e);
+      _lastError = e;
       return false;
     }
   }

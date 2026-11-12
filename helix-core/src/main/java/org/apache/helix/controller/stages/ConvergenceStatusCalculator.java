@@ -102,6 +102,8 @@ public final class ConvergenceStatusCalculator {
     Set<String> _swapInstances = Collections.emptySet();
     WagedRebalanceStatus _wagedStatus;
     String _controllerName;
+    // Which pipeline run this snapshot belongs to; set by the persist stage.
+    long _generation;
 
     public Inputs controllerName(String controllerName) {
       _controllerName = controllerName;
@@ -410,10 +412,27 @@ public final class ConvergenceStatusCalculator {
   public static final class Result {
     private final ConvergenceStatus _cluster;
     private final Map<String, ConvergenceStatus> _resources;
+    // What applying another WAGED status needs: per resource counts before the WAGED override,
+    // a few hundred bytes each, and never the pipeline inputs.
+    private Map<String, Tally> _tallies = Collections.emptyMap();
+    private Set<String> _wagedResources = Collections.emptySet();
+    private WagedRebalanceStatus _wagedStatus;
+    private Reason _pausedReason;
+    private String _clusterName;
+    private String _controllerName;
+    private long _coveredThrough;
 
     Result(ConvergenceStatus cluster, Map<String, ConvergenceStatus> resources) {
       _cluster = cluster;
       _resources = resources;
+    }
+
+    public boolean hasWagedResources() {
+      return !_wagedResources.isEmpty();
+    }
+
+    public WagedRebalanceStatus getWagedStatus() {
+      return _wagedStatus;
     }
 
     public ConvergenceStatus getCluster() {
@@ -437,24 +456,48 @@ public final class ConvergenceStatusCalculator {
       }
     }
 
-    Map<String, ConvergenceStatus> reports = new TreeMap<>();
-    Tally clusterTally = new Tally();
-    TargetFreshness clusterFreshness = TargetFreshness.CURRENT;
-    OptimizerStatus clusterOptimizer = OptimizerStatus.NOT_APPLICABLE;
-
+    Map<String, Tally> tallies = new TreeMap<>();
     for (Resource resource : in._resources.values()) {
       if (TaskConstants.STATE_MODEL_NAME.equals(resource.getStateModelDefRef())) {
         continue;
       }
       ResourceEvaluation evaluation = new ResourceEvaluation(in, resource, failedKeys);
       evaluation.run();
+      tallies.put(resource.getResourceName(), evaluation._tally);
+    }
+    Result result = assemble(tallies, in._wagedResources, in._wagedStatus, in._pausedReason,
+        in._clusterName, in._controllerName, controllerSessionId, now);
+    result._coveredThrough = in._coveredThrough;
+    result._cluster.setCoveredThrough(in._coveredThrough);
+    return result;
+  }
 
-      TargetFreshness freshness = in._pausedReason != null ? TargetFreshness.UNKNOWN
+  /** The same counts under another WAGED status, for a WAGED health change between runs. */
+  public static Result withWagedStatus(Result previous, WagedRebalanceStatus status, long now) {
+    Result result = assemble(previous._tallies, previous._wagedResources, status,
+        previous._pausedReason, previous._clusterName, previous._controllerName,
+        previous._cluster.getControllerSessionId(), now);
+    result._coveredThrough = previous._coveredThrough;
+    result._cluster.setCoveredThrough(previous._coveredThrough);
+    return result;
+  }
+
+  private static Result assemble(Map<String, Tally> tallies, Set<String> wagedResources,
+      WagedRebalanceStatus waged, Reason pausedReason, String clusterName,
+      String controllerName, String controllerSessionId, long now) {
+    Map<String, ConvergenceStatus> reports = new TreeMap<>();
+    Tally clusterTally = new Tally();
+    TargetFreshness clusterFreshness = TargetFreshness.CURRENT;
+    OptimizerStatus clusterOptimizer = OptimizerStatus.NOT_APPLICABLE;
+
+    for (Map.Entry<String, Tally> entry : tallies.entrySet()) {
+      String name = entry.getKey();
+      Tally tally = entry.getValue();
+      TargetFreshness freshness = pausedReason != null ? TargetFreshness.UNKNOWN
           : TargetFreshness.CURRENT;
-      OptimizerStatus optimizer = in._pausedReason != null ? OptimizerStatus.UNKNOWN
+      OptimizerStatus optimizer = pausedReason != null ? OptimizerStatus.UNKNOWN
           : OptimizerStatus.NOT_APPLICABLE;
-      if (in._pausedReason == null && in._wagedResources.contains(resource.getResourceName())) {
-        WagedRebalanceStatus waged = in._wagedStatus;
+      if (pausedReason == null && wagedResources.contains(name)) {
         boolean known = waged != null && waged.isOutcomeKnown();
         optimizer = !known ? OptimizerStatus.UNKNOWN : waged.isBaselineComputationFailed()
             ? OptimizerStatus.BASELINE_FAILED : OptimizerStatus.HEALTHY;
@@ -474,35 +517,47 @@ public final class ConvergenceStatusCalculator {
           override = wagedReason(waged, Reason.WAGED_INTERNAL_FAILURE);
         }
         if (override != null) {
-          evaluation.overrideAllUnknown(override);
+          // A new tally: the kept one must stay as computed, to apply the next status to. An
+          // ERROR replica needs a reset whatever the target is, so it stays BLOCKED.
+          int errors = tally._counts[Status.BLOCKED.ordinal()][Reason.ERROR_STATE.ordinal()];
+          Tally unknown = new Tally();
+          unknown.record(Status.BLOCKED, Reason.ERROR_STATE, errors);
+          unknown.record(Status.UNKNOWN, override, tally.total() - errors);
+          tally = unknown;
         }
       }
 
-      ConvergenceStatus report = new ConvergenceStatus(resource.getResourceName());
-      fill(report, evaluation._tally, in._controllerName, controllerSessionId, now);
+      ConvergenceStatus report = new ConvergenceStatus(name);
+      fill(report, tally, controllerName, controllerSessionId, now);
       report.setTargetFreshness(freshness);
       report.setOptimizerStatus(optimizer);
-      reports.put(resource.getResourceName(), report);
+      reports.put(name, report);
 
-      clusterTally.add(evaluation._tally);
+      clusterTally.add(tally);
       clusterFreshness = worse(clusterFreshness, freshness);
       clusterOptimizer = worse(clusterOptimizer, optimizer);
     }
 
-    ConvergenceStatus cluster = new ConvergenceStatus(in._clusterName);
-    fill(cluster, clusterTally, in._controllerName, controllerSessionId, now);
+    ConvergenceStatus cluster = new ConvergenceStatus(clusterName);
+    fill(cluster, clusterTally, controllerName, controllerSessionId, now);
     cluster.setResourceCount(reports.size());
-    cluster.setCoveredThrough(in._coveredThrough);
     cluster.setTargetFreshness(clusterFreshness);
     cluster.setOptimizerStatus(clusterOptimizer);
-    if (in._pausedReason != null) {
+    if (pausedReason != null) {
       // The cluster record alone carries a pause, even for a cluster with no partitions.
       cluster.setStatus(Status.PAUSED);
-      cluster.setPrimaryReason(in._pausedReason);
+      cluster.setPrimaryReason(pausedReason);
       cluster.setTargetFreshness(TargetFreshness.UNKNOWN);
       cluster.setOptimizerStatus(OptimizerStatus.UNKNOWN);
     }
-    return new Result(cluster, Collections.unmodifiableMap(reports));
+    Result result = new Result(cluster, Collections.unmodifiableMap(reports));
+    result._tallies = tallies;
+    result._wagedResources = wagedResources;
+    result._wagedStatus = waged;
+    result._pausedReason = pausedReason;
+    result._clusterName = clusterName;
+    result._controllerName = controllerName;
+    return result;
   }
 
   private static void fill(ConvergenceStatus report, Tally tally, String controllerName,
@@ -513,6 +568,7 @@ public final class ConvergenceStatusCalculator {
     report.setStatusCounts(tally.statusCounts());
     report.setReasonCounts(tally.reasonCounts());
     report.setGeneratedAt(now);
+    report.setEvaluatedAt(now);
     report.setControllerSessionId(sessionId);
     report.setControllerName(controllerName);
   }
@@ -570,14 +626,6 @@ public final class ConvergenceStatusCalculator {
           }
         }
       }
-    }
-
-    void overrideAllUnknown(Reason reason) {
-      int errors = _tally._counts[Status.BLOCKED.ordinal()][Reason.ERROR_STATE.ordinal()];
-      int total = _tally.total();
-      _tally.reset();
-      _tally.record(Status.BLOCKED, Reason.ERROR_STATE, errors);
-      _tally.record(Status.UNKNOWN, reason, total - errors);
     }
 
     private void visit(Partition partition) {
@@ -838,12 +886,6 @@ public final class ConvergenceStatusCalculator {
         for (int r = 0; r < REASON_COUNT; r++) {
           _counts[s][r] += other._counts[s][r];
         }
-      }
-    }
-
-    void reset() {
-      for (int[] row : _counts) {
-        Arrays.fill(row, 0);
       }
     }
 
