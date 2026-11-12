@@ -97,6 +97,8 @@ public class CurrentStateComputationStage extends AbstractBaseStage {
     for (LiveInstance instance : liveInstances.values()) {
       String instanceName = instance.getInstanceName();
       String instanceSessionId = instance.getEphemeralOwner();
+      currentStateOutput.setParticipantSession(instanceName, instanceSessionId);
+      currentStateExcludingUnknown.setParticipantSession(instanceName, instanceSessionId);
       InstanceConfig instanceConfig = cache.getInstanceConfigMap().get(instanceName);
 
       // Determine once whether this instance should be included in the UNKNOWN-excluding output,

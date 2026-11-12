@@ -167,7 +167,7 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     _inProgressHandoffMap = new HashMap<>();
     _postDispatchHandoffMap = new HashMap<>();
     _lastTopStateLocationMap = new HashMap<>();
-    _missingMinActiveReplicaMap = new HashMap<>();
+    _missingMinActiveReplicaMap = new ConcurrentHashMap<>();
     _refreshedChangeTypes = ConcurrentHashMap.newKeySet();
     _customizedStateCache = new CustomizedStateCache(this, _aggregationEnabledTypes);
     _customizedViewCacheMap = new HashMap<>();

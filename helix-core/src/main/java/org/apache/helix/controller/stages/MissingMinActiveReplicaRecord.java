@@ -19,19 +19,26 @@ package org.apache.helix.controller.stages;
  * under the License.
  */
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.helix.model.Partition;
+
 /**
- * A record entry in cluster data cache tracking a partition whose active replica count has
- * dropped below its configured {@code minActiveReplicas}. It captures the moment the partition
- * was first observed below the minimum so that, once the count is restored, the controller can
- * compute how long the partition remained degraded (its recovery duration).
- * <p>
- * This mirrors {@link MissingTopStateRecord}, but tracks the active-replica-set boundary instead
- * of the single top-state holder. For v1 the start timestamp is stamped at detection time
- * (Option B); the field is intentionally the only durable input needed to derive the end-to-end
- * recovery duration when the partition heals.
+ * Tracks a detected drop below minActiveReplicas. Only the initially active replicas are retained:
+ * their subsequent active-to-active transitions must not be mistaken for restoring the minimum.
+ * Transition timing is read from the restoring replica when recovery is observed.
  */
 public class MissingMinActiveReplicaRecord {
   private final long startTimeStamp;
+  private Set<String> initiallyActive;
+  private Set<String> activeStates;
+  private int minimum;
+  private boolean attributionInvalid;
 
   public MissingMinActiveReplicaRecord(long start) {
     startTimeStamp = start;
@@ -39,5 +46,70 @@ public class MissingMinActiveReplicaRecord {
 
   /* package */ long getStartTimeStamp() {
     return startTimeStamp;
+  }
+
+  /* package */ boolean hasObservation() {
+    return initiallyActive != null;
+  }
+
+  /* package */ boolean wasInitiallyActive(String instance) {
+    return initiallyActive != null && initiallyActive.contains(instance);
+  }
+
+  /* package */ void observeInitialState(Map<String, String> states, Set<String> active,
+      int minActiveReplicas) {
+    if (initiallyActive == null) {
+      initiallyActive = new HashSet<>();
+      states.forEach((instance, state) -> {
+        if (active.contains(state)) {
+          initiallyActive.add(instance);
+        }
+      });
+      activeStates = new HashSet<>(active);
+      minimum = minActiveReplicas;
+    } else {
+      initiallyActive.removeIf(instance -> !active.contains(states.get(instance)));
+      if (minimum != minActiveReplicas || !activeStates.equals(active)) {
+        attributionInvalid = true;
+      }
+    }
+  }
+
+  /* package */ String findRestoringInstance(CurrentStateOutput output, String resource,
+      Partition partition, Set<String> active, int minActiveReplicas) {
+    if (!hasObservation() || minimum != minActiveReplicas || !activeStates.equals(active)) {
+      return null;
+    }
+    int retained = 0;
+    List<String> recovered = new ArrayList<>();
+    for (Map.Entry<String, String> entry : output.getCurrentStateMap(resource, partition).entrySet()) {
+      if (!active.contains(entry.getValue())) {
+        continue;
+      }
+      if (initiallyActive.contains(entry.getKey())) {
+        retained++;
+      } else {
+        long end = output.getEndTime(resource, partition, entry.getKey());
+        if (end < startTimeStamp) {
+          return null;
+        }
+        recovered.add(entry.getKey());
+      }
+    }
+    int required = minActiveReplicas - retained;
+    if (required <= 0 || recovered.size() < required) {
+      return null;
+    }
+    recovered.sort(
+        Comparator.comparingLong(instance -> output.getEndTime(resource, partition, instance)));
+    return recovered.get(required - 1);
+  }
+
+  /* package */ void invalidateAttribution() {
+    attributionInvalid = true;
+  }
+
+  /* package */ boolean isAttributionInvalid() {
+    return attributionInvalid;
   }
 }
