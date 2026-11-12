@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -323,13 +324,40 @@ public class InstanceConfig extends HelixProperty {
     return _record.getSimpleField(InstanceConfigProperty.DOMAIN.name());
   }
 
+  // Memoized parse of the DOMAIN field, keyed by the raw domain string so it self-invalidates on
+  // any domain change. getDomainAsMap() runs per-instance on hot paths (e.g. Topology construction
+  // during rebalance); parsing the domain string each call allocates several short-lived strings
+  // and arrays. See getDomainAsMap().
+  private volatile DomainMapCache _domainMapCache;
+
+  private static final class DomainMapCache {
+    private final String _domainString;
+    private final Map<String, String> _domainMap;
+
+    private DomainMapCache(String domainString, Map<String, String> domainMap) {
+      _domainString = domainString;
+      _domainMap = domainMap;
+    }
+  }
+
   /**
    * Parse the key value pairs of domain and return a map structure
    * @return
    */
   public Map<String, String> getDomainAsMap() {
-    String domain = getDomainAsString();
-    return ConfigStringUtil.parseConcatenatedConfig(getDomainAsString());
+    String domainString = getDomainAsString();
+    DomainMapCache cache = _domainMapCache;
+    if (cache == null || !Objects.equals(domainString, cache._domainString)) {
+      // Parse once and memoize against the current domain string. A new InstanceConfig is
+      // constructed whenever the backing znode changes, and any in-place domain mutation updates
+      // the domain string, so comparing the string keeps the cache self-invalidating.
+      cache = new DomainMapCache(domainString,
+          Collections.unmodifiableMap(ConfigStringUtil.parseConcatenatedConfig(domainString)));
+      _domainMapCache = cache;
+    }
+    // Return a fresh mutable copy to preserve the long-standing contract that callers may modify
+    // the returned map (e.g. VirtualTopologyGroupService mutates it before calling setDomain).
+    return new HashMap<>(cache._domainMap);
   }
 
   /**
@@ -1124,8 +1152,7 @@ public class InstanceConfig extends HelixProperty {
    * @return the logicalId of this instance
    */
   public String getLogicalId(String logicalIdKey) {
-    // TODO: Consider caching DomainMap, parsing the DOMAIN string every time
-    // getLogicalId is called can become expensive if called too frequently.
+    // getDomainAsMap() memoizes the parse of the DOMAIN string, so repeated calls are cheap.
     return getDomainAsMap().getOrDefault(logicalIdKey, getInstanceName());
   }
 
