@@ -432,6 +432,11 @@ final class WagedRebalanceFeasibilityWhatIf {
     ClusterConfig simulationClusterConfig =
         new ClusterConfig(new ZNRecord(clusterConfig.getRecord()));
     simulationClusterConfig.setDelayRebalaceEnabled(false);
+    // Simulate all or nothing, as without instance tag isolation. With isolation on, WAGED keeps a
+    // resource it cannot place on its previous assignment instead of failing, and the checks below
+    // would read that as placed. While another clique already fails, the baseline fails too and the
+    // edit is certified, as when WAGED cannot compute the cluster without isolation.
+    simulationClusterConfig.setWagedInstanceTagIsolationEnabled(false);
 
     String subject = "the proposed ideal-state edit to resource " + targetResource;
 
