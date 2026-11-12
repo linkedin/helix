@@ -19,27 +19,37 @@ package org.apache.helix.model;
  * under the License.
  */
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.helix.HelixProperty;
+import org.apache.helix.zookeeper.datamodel.SessionAwareZNRecord;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 
 /**
  * An aggregate snapshot of whether the current assignment has reached the target assignment, for
  * one resource or for the whole cluster: an overall status and reason plus the number of partitions
- * per status and per reason. The record size is constant, whatever the number of partitions.
+ * per status and per reason.
+ *
+ * <p>The whole cluster is one record, so publishing costs one ZooKeeper write however many
+ * resources there are. It lists only the resources that are not converged and healthy, each with
+ * its own status and counts. It is always compressed.
  */
 public class ConvergenceStatus extends HelixProperty {
   public static final int SCHEMA_VERSION = 1;
 
   private static final String STATUS_COUNTS = "STATUS_COUNTS";
   private static final String REASON_COUNTS = "REASON_COUNTS";
+  private static final String RESOURCE_PREFIX = "RESOURCE:";
+  private static final String STATUS_COUNT_PREFIX = "STATUS_COUNT:";
+  private static final String REASON_COUNT_PREFIX = "REASON_COUNT:";
   // When and by whom a report was computed, as opposed to what it says.
   private static final Set<String> PROVENANCE_FIELDS = new HashSet<>(Arrays.asList(
       Field.GENERATED_AT.name(), Field.UNCONVERGED_SINCE.name(),
@@ -79,7 +89,9 @@ public class ConvergenceStatus extends HelixProperty {
     UNDER_REPLICATED,
     // A replica sits on an instance outside the preference list and was not moved, for example
     // because the instance in the list has no capacity for it.
-    OUTSIDE_PREFERENCE_LIST
+    OUTSIDE_PREFERENCE_LIST,
+    // Left out of the cluster record to keep it small; the cluster status still counts it.
+    DETAIL_TRUNCATED
   }
 
   /** Whether the target assignment came from a fresh computation. */
@@ -107,12 +119,18 @@ public class ConvergenceStatus extends HelixProperty {
     RESOURCE_COUNT,
     TARGET_FRESHNESS,
     OPTIMIZER_STATUS,
+    UNLISTED_RESOURCE_COUNT,
     COVERED_THROUGH
   }
 
+  // What a listed resource keeps of its own report, besides its counts.
+  private static final List<Field> ENTRY_FIELDS = Arrays.asList(Field.STATUS, Field.PRIMARY_REASON,
+      Field.UNCONVERGED_SINCE, Field.TARGET_FRESHNESS, Field.OPTIMIZER_STATUS);
+
   public ConvergenceStatus(String id) {
-    super(id);
+    super(new SessionAwareZNRecord(id));
     _record.setIntField(Field.SCHEMA_VERSION.name(), SCHEMA_VERSION);
+    _record.setBooleanField(ZNRecord.ENABLE_COMPRESSION_BOOLEAN_FIELD, true);
   }
 
   public ConvergenceStatus(ZNRecord record) {
@@ -158,10 +176,14 @@ public class ConvergenceStatus extends HelixProperty {
 
   /**
    * The Helix session of the controller that wrote this record. The cluster record's session is
-   * what readers check against the leader before trusting any report.
+   * what readers check against the leader before trusting any report. The write is bound to this
+   * session, so a controller that lost its session cannot overwrite its successor's report.
    */
   public void setControllerSessionId(String sessionId) {
     _record.setSimpleField(Field.CONTROLLER_SESSION_ID.name(), sessionId);
+    if (_record instanceof SessionAwareZNRecord) {
+      ((SessionAwareZNRecord) _record).setExpectedSessionId(sessionId);
+    }
   }
 
   public String getControllerSessionId() {
@@ -221,6 +243,34 @@ public class ConvergenceStatus extends HelixProperty {
     return fromStringMap(_record.getMapField(REASON_COUNTS), Reason.class, null);
   }
 
+  /** Lists a resource that is not converged and healthy, with its own status and counts. */
+  public void putResourceReport(String resource, ConvergenceStatus report) {
+    Map<String, String> entry = new TreeMap<>();
+    for (Field field : ENTRY_FIELDS) {
+      String value = report._record.getSimpleField(field.name());
+      if (value != null) {
+        entry.put(field.name(), value);
+      }
+    }
+    report.getStatusCounts().forEach((k, v) -> entry.put(STATUS_COUNT_PREFIX + k, v.toString()));
+    report.getReasonCounts().forEach((k, v) -> entry.put(REASON_COUNT_PREFIX + k, v.toString()));
+    _record.setMapField(RESOURCE_PREFIX + resource, entry);
+  }
+
+  public void removeResourceReport(String resource) {
+    _record.getMapFields().remove(RESOURCE_PREFIX + resource);
+  }
+
+  public List<String> getListedResources() {
+    List<String> names = new ArrayList<>();
+    for (String key : _record.getMapFields().keySet()) {
+      if (key.startsWith(RESOURCE_PREFIX)) {
+        names.add(key.substring(RESOURCE_PREFIX.length()));
+      }
+    }
+    return names;
+  }
+
   /**
    * The newest ideal state creation time, in ZooKeeper time, among the resources this record
    * covers. A resource whose ideal state is newer is not covered yet. Set on the cluster record.
@@ -231,6 +281,67 @@ public class ConvergenceStatus extends HelixProperty {
 
   public long getCoveredThrough() {
     return _record.getLongField(Field.COVERED_THROUGH.name(), 0L);
+  }
+
+  /** Resources that are not converged but were left out to keep the record small. */
+  public void setUnlistedResourceCount(int count) {
+    _record.setIntField(Field.UNLISTED_RESOURCE_COUNT.name(), count);
+  }
+
+  public int getUnlistedResourceCount() {
+    return _record.getIntField(Field.UNLISTED_RESOURCE_COUNT.name(), 0);
+  }
+
+  /** The listed entry of a resource that is not converged and healthy, or null. */
+  public ConvergenceStatus getResourceReport(String resource) {
+    Map<String, String> entry = _record.getMapField(RESOURCE_PREFIX + resource);
+    if (entry == null) {
+      return null;
+    }
+    ConvergenceStatus view = view(resource);
+    Map<String, String> statusCounts = new TreeMap<>();
+    Map<String, String> reasonCounts = new TreeMap<>();
+    entry.forEach((key, value) -> {
+      if (key.startsWith(STATUS_COUNT_PREFIX)) {
+        statusCounts.put(key.substring(STATUS_COUNT_PREFIX.length()), value);
+      } else if (key.startsWith(REASON_COUNT_PREFIX)) {
+        reasonCounts.put(key.substring(REASON_COUNT_PREFIX.length()), value);
+      } else {
+        view._record.setSimpleField(key, value);
+      }
+    });
+    view._record.setMapField(STATUS_COUNTS, statusCounts);
+    view._record.setMapField(REASON_COUNTS, reasonCounts);
+    return view;
+  }
+
+  /**
+   * A covered resource that is not listed: converged and healthy, or UNKNOWN when some resources
+   * were left out of the record to keep it small. The record keeps no per resource data for these,
+   * so the caller supplies the partition count and whether WAGED places it.
+   */
+  public ConvergenceStatus getUnlistedReport(String resource, int partitions, boolean waged) {
+    ConvergenceStatus view = view(resource);
+    boolean truncated = getUnlistedResourceCount() > 0;
+    Status status = truncated ? Status.UNKNOWN : Status.CONVERGED;
+    Reason reason = truncated ? Reason.DETAIL_TRUNCATED : Reason.NONE;
+    view.setStatus(status);
+    view.setPrimaryReason(reason);
+    view.setTargetFreshness(TargetFreshness.CURRENT);
+    view.setOptimizerStatus(waged ? OptimizerStatus.HEALTHY : OptimizerStatus.NOT_APPLICABLE);
+    if (partitions > 0) {
+      view.setStatusCounts(Collections.singletonMap(status, partitions));
+      view.setReasonCounts(Collections.singletonMap(reason, partitions));
+    }
+    return view;
+  }
+
+  private ConvergenceStatus view(String resource) {
+    ConvergenceStatus view = new ConvergenceStatus(resource);
+    view.setGeneratedAt(getGeneratedAt());
+    view.setControllerSessionId(getControllerSessionId());
+    view.setControllerName(getControllerName());
+    return view;
   }
 
   public int getPartitionCount() {

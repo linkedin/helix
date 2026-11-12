@@ -65,6 +65,8 @@ import org.apache.helix.guardrail.rules.StateModelDefExistenceGuardrailRule;
 import org.apache.helix.guardrail.rules.UserDefinedRebalancerClassGuardrailRule;
 import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
+import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.CustomizedView;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -74,9 +76,11 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.rest.common.HttpConstants;
 import org.apache.helix.rest.server.filters.ClusterAuth;
+import org.apache.helix.task.TaskConstants;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -240,6 +244,46 @@ public class ResourceAccessor extends AbstractHelixResource {
     }
 
     return JSONRepresentation(resourceHealthResult);
+  }
+
+  /**
+   * Returns the convergence report of one resource, with a {@code reportState} saying whether it
+   * can be trusted. 404 when the resource does not exist; a resource the controller has not
+   * reported on yet answers {@code REPORT_MISSING}.
+   */
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{resourceName}/convergence")
+  public Response getResourceConvergence(@PathParam("clusterId") String clusterId,
+      @PathParam("resourceName") String resourceName) {
+    HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    Stat created = getRealmAwareZkClient().getStat(keyBuilder.idealStates(resourceName).getPath());
+    if (created == null) {
+      return notFound("Resource " + resourceName + " does not exist in cluster " + clusterId);
+    }
+    // One record holds every resource; it lists only the ones that need attention.
+    ConvergenceStatus cluster =
+        ConvergenceRecordCache.INSTANCE.get(getRealmAwareZkClient(), dataAccessor, clusterId);
+    ConvergenceStatus report = cluster == null ? null : cluster.getResourceReport(resourceName);
+    // Not listed: converged, once the controller covered it. Both times are ZooKeeper's; a task
+    // resource is never covered.
+    if (report == null && cluster != null && created.getCtime() <= cluster.getCoveredThrough()) {
+      IdealState idealState = dataAccessor.getProperty(keyBuilder.idealStates(resourceName));
+      if (idealState != null
+          && !TaskConstants.STATE_MODEL_NAME.equals(idealState.getStateModelDefRef())) {
+        report = cluster.getUnlistedReport(resourceName,
+            Math.max(idealState.getNumPartitions(), idealState.getPartitionSet().size()),
+            WagedValidationUtil.isWagedEnabled(idealState));
+      }
+    }
+    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
+        cluster, dataAccessor.getProperty(keyBuilder.controllerLeader()),
+        clusterConfig != null && clusterConfig.isConvergenceMonitoringEnabled(),
+        ConvergenceStatusResponseMapper.isManagementMode(
+            getHelixAdmin().getClusterManagementMode(clusterId))));
   }
 
   /**

@@ -42,6 +42,7 @@ import com.codahale.metrics.annotation.Timed;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.AccessOption;
@@ -172,14 +173,16 @@ public class ClusterAccessor extends AbstractHelixResource {
 
   /**
    * Returns the cluster convergence report the leader controller published, with a
-   * {@code reportState} saying whether it can be trusted.
+   * {@code reportState} saying whether it can be trusted. A trusted report lists the resources
+   * that need attention, worst first, up to {@code limit} of them; 0 leaves the list out.
    */
   @ClusterAuth
   @ResponseMetered(name = HttpConstants.READ_REQUEST)
   @Timed(name = HttpConstants.READ_REQUEST)
   @GET
   @Path("{clusterId}/convergence")
-  public Response getClusterConvergence(@PathParam("clusterId") String clusterId) {
+  public Response getClusterConvergence(@PathParam("clusterId") String clusterId,
+      @DefaultValue("1000") @QueryParam("limit") int limit) {
     HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     // Every cluster has a config, and a failed read here is an error rather than a 404.
@@ -187,12 +190,15 @@ public class ClusterAccessor extends AbstractHelixResource {
     if (clusterConfig == null) {
       return notFound(String.format("Cluster %s does not exist", clusterId));
     }
-    ConvergenceStatus report = dataAccessor.getProperty(keyBuilder.convergenceStatus());
-    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
+    ConvergenceStatus report =
+        ConvergenceRecordCache.INSTANCE.get(getRealmAwareZkClient(), dataAccessor, clusterId);
+    ObjectNode response = ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
         dataAccessor.getProperty(keyBuilder.controllerLeader()),
         clusterConfig.isConvergenceMonitoringEnabled(),
         ConvergenceStatusResponseMapper.isManagementMode(
-            getHelixAdmin().getClusterManagementMode(clusterId))));
+            getHelixAdmin().getClusterManagementMode(clusterId)));
+    ConvergenceStatusResponseMapper.listResources(response, report, limit);
+    return JSONRepresentation(response);
   }
 
   /**

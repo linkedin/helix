@@ -70,6 +70,7 @@ import org.apache.helix.controller.dataproviders.WorkflowControllerDataProvider;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.controller.pipeline.Pipeline;
 import org.apache.helix.controller.pipeline.PipelineRegistry;
+import org.apache.helix.controller.pipeline.Stage;
 import org.apache.helix.controller.rebalancer.StatefulRebalancer;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.controller.stages.AttributeName;
@@ -80,6 +81,7 @@ import org.apache.helix.controller.stages.CompatibilityCheckStage;
 import org.apache.helix.controller.stages.CurrentStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedStateComputationStage;
 import org.apache.helix.controller.stages.CustomizedViewAggregationStage;
+import org.apache.helix.controller.stages.ConvergenceStatusPersistStage;
 import org.apache.helix.controller.stages.ExternalViewComputeStage;
 import org.apache.helix.controller.stages.IntermediateStateCalcStage;
 import org.apache.helix.controller.stages.MaintenanceRecoveryStage;
@@ -220,6 +222,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   private long _lastPipelineEndTimestamp;
 
   private final String _clusterName;
+  private ConvergenceStatusPersistStage _convergenceStage;
   private final Set<Pipeline.Type> _enabledPipelineTypes;
 
   private HelixManager _helixManager;
@@ -380,6 +383,19 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
             + _clusterName, ex);
       }
     }
+  }
+
+  private static ConvergenceStatusPersistStage findConvergenceStage(PipelineRegistry registry) {
+    for (ClusterEventType type : ClusterEventType.values()) {
+      for (Pipeline pipeline : registry.getPipelinesForEvent(type)) {
+        for (Stage stage : pipeline.getStages()) {
+          if (stage instanceof ConvergenceStatusPersistStage) {
+            return (ConvergenceStatusPersistStage) stage;
+          }
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -564,6 +580,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       rebalancePipeline.addStage(new PersistAssignmentStage());
       rebalancePipeline.addStage(new TargetExteralViewCalcStage());
       rebalancePipeline.addStage(new ParticipantDeregistrationStage());
+      rebalancePipeline.addStage(new ConvergenceStatusPersistStage());
 
       // external view generation
       Pipeline externalViewPipeline = new Pipeline(pipelineName);
@@ -752,6 +769,18 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         Thread eventThread = _eventThread;
         return eventThread == null || eventThread.isAlive();
       });
+      ConvergenceStatusPersistStage convergence = findConvergenceStage(_registry);
+      _convergenceStage = convergence;
+      if (convergence != null) {
+        long tick = ConvergenceStatusPersistStage.TICK_MS;
+        _asyncTasksThreadPool.scheduleWithFixedDelay(() -> {
+          try {
+            convergence.tick(System.currentTimeMillis());
+          } catch (Throwable t) {
+            logger.warn("Convergence report tick failed for cluster {}", _clusterName, t);
+          }
+        }, tick, tick, TimeUnit.MILLISECONDS);
+      }
       logger.info("Initialized {} pipeline", Pipeline.Type.DEFAULT.name());
     } else {
       _eventQueue = null;
@@ -1419,6 +1448,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       // This to-be-closed WAGED rebalancer will be reset later on a later event processing if
       // the controller becomes leader again.
       _rebalancerRef.invalidateRebalancer();
+      ConvergenceStatusPersistStage convergence = _convergenceStage;
+      if (convergence != null) {
+        convergence.requestForget();
+      }
     }
 
     logger.info("END: GenericClusterController.onControllerChange() for cluster " + _clusterName);
