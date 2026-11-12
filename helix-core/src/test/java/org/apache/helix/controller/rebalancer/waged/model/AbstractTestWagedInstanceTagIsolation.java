@@ -33,6 +33,7 @@ import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.waged.RebalanceAlgorithm;
 import org.apache.helix.controller.rebalancer.waged.constraints.ConstraintBasedAlgorithmFactory;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
@@ -70,6 +71,21 @@ abstract class AbstractTestWagedInstanceTagIsolation {
   // Larger than a single node's capacity, so NodeCapacityConstraint rejects every node in the
   // clique and none of that resource's replicas has a candidate at all.
   protected static final int UNPLACEABLE_PARTITION_WEIGHT = 150;
+  // The ideal state owns a resource's placement tag. The fixtures keep the tag on the resource
+  // config's record and build each replica with an ideal state that carries it.
+  protected static final String GROUP_TAG_FIELD = "INSTANCE_GROUP_TAG";
+
+  /** A replica of the resource, tagged with the tag its config's record holds. */
+  protected static AssignableReplica replica(ClusterConfig clusterConfig, ResourceConfig resource,
+      String partition, String state, int statePriority) {
+    IdealState idealState = new IdealState(resource.getResourceName());
+    String tag = resource.getRecord().getSimpleField(GROUP_TAG_FIELD);
+    if (tag != null) {
+      idealState.setInstanceGroupTag(tag);
+    }
+    return new AssignableReplica(clusterConfig, resource, idealState, partition, state,
+        statePriority);
+  }
 
   protected static String cliqueTag(int clique) {
     return "clique_" + clique;
@@ -162,13 +178,13 @@ abstract class AbstractTestWagedInstanceTagIsolation {
       CliqueSpec spec = entry.getValue();
       ResourceConfig resourceConfig = new ResourceConfig(resourceName(clique));
       resourceConfig.getRecord()
-          .setSimpleField(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(),
+          .setSimpleField(GROUP_TAG_FIELD,
               cliqueTag(clique));
       resourceConfig.setPartitionCapacityMap(Collections
           .singletonMap(ResourceConfig.DEFAULT_PARTITION_KEY,
               Collections.singletonMap(CAPACITY_KEY, spec._partitionWeight)));
       for (int p = 0; p < spec._partitionCount; p++) {
-        replicas.add(new AssignableReplica(clusterConfig, resourceConfig,
+        replicas.add(replica(clusterConfig, resourceConfig,
             resourceName(clique) + "_" + p, "ONLINE", 0));
       }
     }
@@ -225,7 +241,7 @@ abstract class AbstractTestWagedInstanceTagIsolation {
     ResourceConfig resourceConfig = new ResourceConfig(resource);
     if (tag != null) {
       resourceConfig.getRecord()
-          .setSimpleField(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), tag);
+          .setSimpleField(GROUP_TAG_FIELD, tag);
     }
     resourceConfig.setPartitionCapacityMap(Collections.singletonMap(
         ResourceConfig.DEFAULT_PARTITION_KEY, Collections.singletonMap(CAPACITY_KEY, weight)));
@@ -235,7 +251,7 @@ abstract class AbstractTestWagedInstanceTagIsolation {
   protected void addReplicas(Set<AssignableReplica> replicas, ClusterConfig clusterConfig,
       ResourceConfig resourceConfig, int partitionCount) {
     for (int p = 0; p < partitionCount; p++) {
-      replicas.add(new AssignableReplica(clusterConfig, resourceConfig,
+      replicas.add(replica(clusterConfig, resourceConfig,
           resourceConfig.getResourceName() + "_" + p, "ONLINE", 0));
     }
   }
@@ -327,7 +343,7 @@ abstract class AbstractTestWagedInstanceTagIsolation {
       _minActive.put(name, Math.min(minActive, replicas));
       for (int p = 0; p < partitions; p++) {
         for (int r = 0; r < replicas; r++) {
-          _population.add(new AssignableReplica(_config, resource, name + "_" + p, "ONLINE", 0));
+          _population.add(replica(_config, resource, name + "_" + p, "ONLINE", 0));
         }
       }
       return this;
@@ -355,12 +371,12 @@ abstract class AbstractTestWagedInstanceTagIsolation {
           for (String instance : assignment.getReplicaMap(partition).keySet()) {
             if (_liveNodes.containsKey(instance)) {
               allocated.computeIfAbsent(instance, key -> new HashSet<>())
-                  .add(new AssignableReplica(_config, config, name, "ONLINE", 0));
+                  .add(replica(_config, config, name, "ONLINE", 0));
               live++;
             }
           }
           for (int i = live; i < _minActive.get(resource); i++) {
-            toAssign.add(new AssignableReplica(_config, config, name, "ONLINE", 0));
+            toAssign.add(replica(_config, config, name, "ONLINE", 0));
           }
         }
       });

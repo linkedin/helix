@@ -519,18 +519,17 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
 
   @DataProvider(name = "untaggedResources")
   public Object[][] untaggedResources() {
-    // The tag, and whether it sits on the resource config rather than on the ideal state.
-    return new Object[][] {{null, false}, {null, true}, {"", false}, {"", true}};
+    return new Object[][] {{null}, {""}};
   }
 
   /**
    * With isolation on, a resource whose tag is the empty string can use every instance, like a
-   * resource with no tag, wherever the empty tag is set. Draining an instance that holds one of
-   * its carried replicas reports the same single loss as for the resource with no tag.
+   * resource with no tag. Draining an instance that holds one of its carried replicas reports the
+   * same single loss as for the resource with no tag.
    */
   @Test(dataProvider = "untaggedResources")
-  public void testIsolationCountsAnEmptyTagLikeNoTag(String tag, boolean onResourceConfig) {
-    ValidationResult result = validateCarriedDrain(tag, onResourceConfig);
+  public void testIsolationCountsAnEmptyTagLikeNoTag(String tag) {
+    ValidationResult result = validateCarriedDrain(tag);
     Assert.assertFalse(result.isFeasible());
     Assert.assertEquals(result.getViolations().size(), 1);
     Violation violation = result.getViolations().get(0);
@@ -539,7 +538,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
     Assert.assertTrue(violation.getMessage().contains("from 2 to 1"),
         "message should report the replica drop: " + violation.getMessage());
     Assert.assertEquals(violation.getMessage(),
-        validateCarriedDrain(null, false).getViolations().get(0).getMessage());
+        validateCarriedDrain(null).getViolations().get(0).getMessage());
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -548,7 +547,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
 
   // Evacuates the target with isolation on while both simulations return the same carried
   // assignment, which keeps a replica of the resource on the target.
-  private ValidationResult validateCarriedDrain(String tag, boolean onResourceConfig) {
+  private ValidationResult validateCarriedDrain(String tag) {
     Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
         ImmutableMap.of(RESOURCE + "_0",
             ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
@@ -556,15 +555,7 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
     doReturn(isolationClusterConfig(true)).when(dataAccessor)
         .getProperty(BUILDER.clusterConfig());
     IdealState idealState = wagedIdealState(RESOURCE);
-    ResourceConfig resourceConfig = new ResourceConfig(RESOURCE);
-    if (onResourceConfig) {
-      resourceConfig.getRecord()
-          .setSimpleField(ResourceConfig.ResourceConfigProperty.INSTANCE_GROUP_TAG.name(), tag);
-      doReturn(ImmutableList.of(resourceConfig)).when(dataAccessor)
-          .getChildValues(BUILDER.resourceConfigs(), true);
-    } else {
-      idealState.setInstanceGroupTag(tag);
-    }
+    idealState.setInstanceGroupTag(tag);
     doReturn(ImmutableList.of(idealState)).when(dataAccessor)
         .getChildValues(BUILDER.idealStates(), true);
     return rule.validate(context(dataAccessor, InstanceConstants.InstanceOperation.EVACUATE,

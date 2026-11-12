@@ -277,8 +277,8 @@ public class ClusterContext {
     }
     if (!capacity.isEmpty()) {
       _estimatedMaxUtilization = estimateMaxUtilization(capacity, usage, _preferredScoringKeys);
-      _estimatedTopStateMaxUtilization =
-          estimateMaxUtilization(capacity, topStateUsage, _preferredScoringKeys);
+      _estimatedTopStateMaxUtilization = estimateMaxUtilization(capacity, topStateUsage,
+          _topStateScoringKeys != null ? _topStateScoringKeys : _preferredScoringKeys);
     }
     _estimatedMaxPartitionCount = estimateAvgReplicaCount(replicas, nodes);
     _estimatedMaxTopStateCount = estimateAvgReplicaCount(topStateReplicas, nodes);

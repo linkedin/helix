@@ -366,9 +366,9 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     Set<AssignableReplica> leftOnShared = new HashSet<>();
     for (int clique = 1; clique < 3; clique++) {
       ResourceConfig resource = taggedResource(resourceName(clique), cliqueTag(clique), 60);
-      AssignableReplica away = new AssignableReplica(clusterConfig, resource,
+      AssignableReplica away = replica(clusterConfig, resource,
           resourceName(clique) + "_0", "ONLINE", 0);
-      AssignableReplica home = new AssignableReplica(clusterConfig, resource,
+      AssignableReplica home = replica(clusterConfig, resource,
           resourceName(clique) + "_1", "ONLINE", 0);
       AssignableNode own =
           taggedNode(clusterConfig, instanceName(clique, 0), cliqueTag(clique));
@@ -407,14 +407,14 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     r1Weights.put("R1_0", Collections.singletonMap(CAPACITY_KEY, 60));
     r1Weights.put("R1_1", Collections.singletonMap(CAPACITY_KEY, 70));
     r1.setPartitionCapacityMap(r1Weights);
-    AssignableReplica r00 = new AssignableReplica(config, r0, "R0_0", "ONLINE", 0);
-    AssignableReplica r01 = new AssignableReplica(config, r0, "R0_1", "ONLINE", 0);
-    AssignableReplica r10 = new AssignableReplica(config, r1, "R1_0", "ONLINE", 0);
-    AssignableReplica r11 = new AssignableReplica(config, r1, "R1_1", "ONLINE", 0);
+    AssignableReplica r00 = replica(config, r0, "R0_0", "ONLINE", 0);
+    AssignableReplica r01 = replica(config, r0, "R0_1", "ONLINE", 0);
+    AssignableReplica r10 = replica(config, r1, "R1_0", "ONLINE", 0);
+    AssignableReplica r11 = replica(config, r1, "R1_1", "ONLINE", 0);
     n0.assignInitBatch(Arrays.asList(r00, r10));
     n0b.assignInitBatch(Arrays.asList(r01, r11));
     Set<AssignableReplica> toBeAssigned = new HashSet<>();
-    toBeAssigned.add(new AssignableReplica(config, r1, "R1_2", "ONLINE", 0));
+    toBeAssigned.add(replica(config, r1, "R1_2", "ONLINE", 0));
     addReplicas(toBeAssigned, config, taggedResource("R2", cliqueTag(2), NODE_CAPACITY), 3);
     Set<AssignableReplica> everything = new HashSet<>(toBeAssigned);
     everything.addAll(Arrays.asList(r00, r01, r10, r11));
@@ -521,7 +521,7 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     Set<AssignableReplica> toBeAssigned = new HashSet<>();
     for (int p = 0; p < 6; p++) {
       (p < 4 ? stale : toBeAssigned)
-          .add(new AssignableReplica(clusterConfig, ra, "RA_" + p, "ONLINE", 0));
+          .add(replica(clusterConfig, ra, "RA_" + p, "ONLINE", 0));
     }
     Set<AssignableNode> nodes = new HashSet<>();
     for (int i = 0; i < 2; i++) {
@@ -709,7 +709,7 @@ public class TestWagedInstanceTagIsolationCapacity extends AbstractTestWagedInst
     for (int p = 0; p < partitions; p++) {
       for (int s = 0; s < states.length; s++) {
         int priority = s == 0 && !"ONLINE".equals(states[s]) ? 1 : 2;
-        replicas.add(new AssignableReplica(config, resource,
+        replicas.add(replica(config, resource,
             resource.getResourceName() + "_" + p, states[s], priority));
       }
     }

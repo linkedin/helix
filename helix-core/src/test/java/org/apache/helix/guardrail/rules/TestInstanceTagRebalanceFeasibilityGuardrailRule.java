@@ -461,25 +461,6 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
   }
 
   @Test
-  public void testIsolationResolvesTheTagFromTheResourceConfig() {
-    // The resource is pinned only through its ResourceConfig, the same merged view WAGED uses.
-    Map<String, ResourceAssignment> carried = ImmutableMap.of(RESOURCE, resourceAssignment(
-        ImmutableMap.of(RESOURCE + "_0",
-            ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
-    HelixDataAccessor dataAccessor = simulationAccessor();
-    doReturn(isolationClusterConfig(true)).when(dataAccessor)
-        .getProperty(BUILDER.clusterConfig());
-    doReturn(ImmutableList.of(wagedIdealState(RESOURCE))).when(dataAccessor)
-        .getChildValues(BUILDER.idealStates(), true);
-    doReturn(ImmutableList.of(resourceConfigWithGroupTag(RESOURCE, TAG))).when(dataAccessor)
-        .getChildValues(BUILDER.resourceConfigs(), true);
-    ValidationResult result = rule.validate(
-        context(dataAccessor, ImmutableList.of(TAG), fixedProvider(carried, carried)));
-    Assert.assertFalse(result.isFeasible());
-    Assert.assertEquals(result.getViolations().get(0).getPartitionName(), RESOURCE + "_0");
-  }
-
-  @Test
   public void testWithoutIsolationEveryNonDroppedReplicaCounts() {
     // With isolation off every non DROPPED entry counts, on any instance. The default mode never
     // returns this pair, since an unplaceable clique fails the what-if outright.

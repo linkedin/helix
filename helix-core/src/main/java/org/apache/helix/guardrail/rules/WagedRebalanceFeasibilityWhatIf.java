@@ -276,11 +276,10 @@ final class WagedRebalanceFeasibilityWhatIf {
       ResourceAssignment candidateAssignment = candidate.get(resourceName);
       String groupTag = null;
       if (instanceTagIsolation) {
-        ResourceConfig mergedConfig = ResourceConfig.mergeIdealStateWithResourceConfig(
-            resourceConfigByName.get(resourceName), idealStateByName.get(resourceName));
-        // WAGED treats an empty tag as no tag, so the resource can use every instance.
-        groupTag = mergedConfig == null ? null
-            : Strings.emptyToNull(mergedConfig.getInstanceGroupTag());
+        // The ideal state owns the placement tag, as for WAGED itself. WAGED treats an empty tag
+        // as no tag, so the resource can use every instance.
+        IdealState idealState = idealStateByName.get(resourceName);
+        groupTag = idealState == null ? null : Strings.emptyToNull(idealState.getInstanceGroupTag());
       }
       List<Partition> partitions = new ArrayList<>(baselineAssignment.getMappedPartitions());
       partitions.sort(Comparator.comparing(Partition::getPartitionName));
