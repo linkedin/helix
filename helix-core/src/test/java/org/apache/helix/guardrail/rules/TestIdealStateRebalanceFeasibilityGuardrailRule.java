@@ -319,6 +319,30 @@ public class TestIdealStateRebalanceFeasibilityGuardrailRule {
         "overflow summary should record the true total: " + overflow.getMessage());
   }
 
+  @Test
+  public void testSimulatesWithoutInstanceTagIsolation() {
+    // With isolation on, WAGED keeps a resource it cannot place on its previous assignment instead of
+    // failing, which the checks would read as placed. So both what-ifs run all or nothing.
+    IdealState proposed = proposedWagedIdealState(RESOURCE, 2);
+    Map<String, ResourceAssignment> placed = ImmutableMap.of(RESOURCE, resourceAssignment(RESOURCE,
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER", "instance1", "SLAVE"))));
+    ClusterConfig clusterConfig = clusterConfig();
+    clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    HelixDataAccessor dataAccessor =
+        accessor(ImmutableList.of(wagedIdealState(RESOURCE)), clusterConfig);
+    List<Boolean> isolationSimulated = new ArrayList<>();
+    WagedAssignmentProvider provider =
+        (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> {
+          isolationSimulated.add(cfg.isWagedInstanceTagIsolationEnabled());
+          return placed;
+        };
+
+    Assert.assertTrue(rule.validate(context(dataAccessor, proposed, provider)).isFeasible());
+    Assert.assertEquals(isolationSimulated, ImmutableList.of(false, false));
+    Assert.assertTrue(clusterConfig.isWagedInstanceTagIsolationEnabled(),
+        "the cluster's own config must be left as is");
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------
@@ -340,9 +364,14 @@ public class TestIdealStateRebalanceFeasibilityGuardrailRule {
   // A fully-wired accessor for the simulation path: an enabled cluster, the given current WAGED ideal
   // states, no resource configs, and a small assignable instance pool / live set.
   private HelixDataAccessor accessor(List<IdealState> baselineIdealStates) {
+    return accessor(baselineIdealStates, clusterConfig());
+  }
+
+  private HelixDataAccessor accessor(List<IdealState> baselineIdealStates,
+      ClusterConfig clusterConfig) {
     HelixDataAccessor dataAccessor = mock(HelixDataAccessor.class);
     when(dataAccessor.keyBuilder()).thenReturn(BUILDER);
-    doReturn(clusterConfig()).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    doReturn(clusterConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
     doReturn(baselineIdealStates).when(dataAccessor).getChildValues(BUILDER.idealStates(), true);
     doReturn(ImmutableList.of()).when(dataAccessor).getChildValues(BUILDER.resourceConfigs(), true);
     doReturn(ImmutableList.of(assignableInstance("instance0"), assignableInstance("instance1"),

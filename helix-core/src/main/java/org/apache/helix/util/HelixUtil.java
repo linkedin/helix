@@ -421,6 +421,10 @@ public final class HelixUtil {
     ClusterConfig simulationClusterConfig = new ClusterConfig(clusterConfig.getRecord());
     simulationClusterConfig.setGlobalRebalanceAsyncMode(false);
     simulationClusterConfig.setDelayRebalaceEnabled(false);
+    // Keep the probe all or nothing. With instance tag isolation on, a clique that cannot take the
+    // drained replicas is skipped instead of failing, which would read as a clean placement. The
+    // full what-if this falls back to applies isolation itself.
+    simulationClusterConfig.setWagedInstanceTagIsolationEnabled(false);
 
     HelixDataAccessor helixDataAccessor =
         new ZKHelixDataAccessor(simulationClusterConfig.getClusterName(), baseDataAccessor);

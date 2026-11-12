@@ -128,7 +128,8 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
   // ---- WAGED failure-category counters (mirror of WagedRebalancerMetricCollector) ----
   // Each WAGED HelixRebalanceException increments exactly one of these. The pair
   // {WagedCustomerActionableFailureCounter, WagedInternalFailureCounter} is the recommended
-  // rollup signal for alert routing.
+  // rollup signal for alert routing. A failure instance tag isolation contains counts too, once per
+  // placement failure or capacity deficit, although the calculation itself succeeds.
 
   /**
    * @return Number of WAGED failures attributable to customer-controlled cluster/resource
@@ -215,6 +216,29 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
    * @return 1 if the WAGED delayed-rebalance-overwrite computation is currently failing; 0 otherwise.
    */
   long getWagedRebalanceOverwriteFailingGauge();
+
+  /**
+   * Reversible gauge: the distinct resources WAGED instance tag isolation is skipping in any
+   * rebalance scope, the ones carried forward after a collision included. Each scope owns its
+   * report, so a healthy scope never clears another one's, and a resource a baseline skipped counts
+   * until a later baseline places it. A skipped resource keeps its previous assignment and the
+   * calculation still succeeds, so the failure gauges above never see it. Alert on {@code > 0}.
+   * Each skipped resource's own InstanceTagIsolationSkippedGauge reads 1, and the WARN logs name
+   * the scope, groups and reason. Reads 0 while isolation is off, holds its last value while
+   * maintenance mode pauses WAGED, and resets with the monitor.
+   * @return the number of distinct resources instance tag isolation is skipping.
+   */
+  long getWagedInstanceTagIsolationSkippedResourcesGauge();
+
+  /**
+   * The share blocks WAGED instance tag isolation found in the last baseline: the groups of
+   * resources that share no instance, which it can skip on their own. Fewer than two while the flag
+   * is on means isolation cannot contain any failure, typically because an untagged resource, or a
+   * resource tagged with a label every instance carries, joins every clique. Alert on {@code == 1}.
+   * Reads 0 while isolation is off, and until a baseline has run since the monitor reset.
+   * @return the number of share blocks, or 0 when unknown.
+   */
+  long getWagedInstanceTagIsolationShareBlocksGauge();
 
   // ---- WAGED hard-constraint failure sub-breakdown (subset of WagedFailureNoCandidateNodeCounter) ----
   // When a partition cannot find any eligible node, every hard constraint that rejected at least

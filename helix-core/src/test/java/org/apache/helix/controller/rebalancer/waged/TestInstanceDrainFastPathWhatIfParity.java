@@ -274,6 +274,48 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
     tearDownCluster(cluster);
   }
 
+  /**
+   * With instance tag isolation on, WAGED skips a clique it cannot place instead of failing. The fast
+   * path must not read that skip as a clean placement: it declines, and the full what-if, which
+   * applies isolation, blocks the drain.
+   */
+  @Test
+  public void testIsolatedCliqueThatCannotTakeTheDrainFastPathDeclinesAndAgreesWithFullWhatIf() {
+    String cluster = "TestDrainParityIsolatedClique";
+    setupCluster(cluster, 4, 30);
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    PropertyKey.Builder keys = accessor.keyBuilder();
+    ClusterConfig clusterConfig = accessor.getProperty(keys.clusterConfig());
+    clusterConfig.setWagedInstanceTagIsolationEnabled(true);
+    accessor.setProperty(keys.clusterConfig(), clusterConfig);
+    // Clique A is instances 0 and 1, clique B instances 2 and 3. Each clique's resource has four
+    // single-replica partitions of weight 30, which one instance of capacity 100 cannot hold.
+    for (int i = 0; i < 4; i++) {
+      InstanceConfig instanceConfig = accessor.getProperty(keys.instanceConfig(instanceName(i)));
+      instanceConfig.addTag(i < 2 ? "A" : "B");
+      accessor.setProperty(keys.instanceConfig(instanceName(i)), instanceConfig);
+    }
+    for (String tag : Arrays.asList("A", "B")) {
+      IdealState idealState =
+          createResourceWithWagedRebalance(cluster, "R" + tag, "MasterSlave", 4, 1, 1);
+      idealState.setInstanceGroupTag(tag);
+      accessor.setProperty(keys.idealStates("R" + tag), idealState);
+    }
+    seedBestPossible(cluster, readIdealStates(cluster));
+
+    String target = instanceName(0);
+    Outcome fastPath = evaluateRule(cluster, target, true);
+    Outcome fullOnly = evaluateRule(cluster, target, false);
+
+    Assert.assertFalse(fullOnly.feasible, "the full what-if must block this drain");
+    Assert.assertTrue(fastPath.probeCalls > 0, "the fast path must have been attempted");
+    Assert.assertEquals(fastPath.probeHits, 0,
+        "the fast path must NOT certify a drain its clique cannot take");
+    Assert.assertFalse(fastPath.feasible, "the rule must fall back to the full what-if and block");
+
+    tearDownCluster(cluster);
+  }
+
   // Real WAGED on a topology-aware cluster with a persisted assignment, then TOPOLOGY removed:
   // WAGED drops every node and places nothing. The EVACUATE what-if must be indeterminate, not
   // approved, while the public lenient util keeps returning empty replica maps.

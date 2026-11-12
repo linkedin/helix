@@ -78,6 +78,10 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   // partial vs baseline) so concurrent phases don't clobber each other's gauge. May be null.
   private volatile BiConsumer<ClusterModel.RebalanceScopeType, Set<HardConstraint.Type>>
       _blockingSnapshotReporter;
+  // Optional listeners for instance tag isolation: the category of each failure a successful run
+  // contained, and the share blocks a global baseline found. May be null.
+  private volatile Consumer<HelixRebalanceException.FailureCategory> _containedFailureReporter;
+  private volatile Consumer<Integer> _shareBlocksReporter;
 
   ConstraintBasedAlgorithm(List<HardConstraint> hardConstraints,
       Map<SoftConstraint, Float> softConstraints, ForkJoinPool constraintEvaluationPool) {
@@ -108,6 +112,23 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     _blockingSnapshotReporter = reporter;
   }
 
+  /**
+   * Attach a reporter that, once a run with instance tag isolation succeeds, gets the category of
+   * every failure isolation contained in it. Null disables it.
+   */
+  public void setContainedFailureReporter(
+      Consumer<HelixRebalanceException.FailureCategory> reporter) {
+    _containedFailureReporter = reporter;
+  }
+
+  /**
+   * Attach a reporter that gets the number of share blocks instance tag isolation finds in each
+   * global baseline. Null disables it.
+   */
+  public void setShareBlocksReporter(Consumer<Integer> reporter) {
+    _shareBlocksReporter = reporter;
+  }
+
   @Override
   public OptimalAssignment calculate(ClusterModel clusterModel) throws HelixRebalanceException {
     // Track every HardConstraint.Type that blocks placement during this run, then publish the
@@ -130,28 +151,18 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     List<AssignableNode> nodes = new ArrayList<>(clusterModel.getAssignableNodes().values());
     Set<String> busyInstances =
         getBusyInstances(clusterModel.getContext().getBestPossibleAssignment().values());
-
-    // create a always >0 capacity map to avoid divide by 0.
-    Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
-    for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
-        .getEstimateUtilizationMap().entrySet()) {
-      String capacityKey = clusterRemainingCap.getKey();
-      if (clusterRemainingCap.getValue() < 0) {
-        // all replicas' assignment will fail if there is one dimension's remain capacity <0.
-        long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
-        long remainingCapacity = clusterRemainingCap.getValue();
-        long totalUsage = totalCapacity - remainingCapacity;
-        throw new HelixRebalanceException(String
-            .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
-                clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
-            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
-            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
-      }
-      // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
-      positiveEstimateClusterRemainCap.put(capacityKey,
-           (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
-          (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
+    // A no-op unless WAGED_INSTANCE_TAG_ISOLATION_ENABLED is set on the cluster config.
+    InstanceTagIsolation isolation = new InstanceTagIsolation(clusterModel, nodes);
+    Consumer<Integer> shareBlocksReporter = _shareBlocksReporter;
+    // Only a baseline covers every assignable node, and every tag change triggers one.
+    if (shareBlocksReporter != null
+        && clusterModel.getRebalanceScopeType() == ClusterModel.RebalanceScopeType.GLOBAL_BASELINE
+        && clusterModel.getContext().isInstanceTagIsolationEnabled()) {
+      shareBlocksReporter.accept(isolation.shareBlockCount());
     }
+
+    Map<String, Float> positiveEstimateClusterRemainCap =
+        computeScoringCapacities(clusterModel, isolation);
 
     // Create a wrapper for each AssignableReplica.
     List<AssignableReplicaWithScore> toBeAssignedReplicas =
@@ -161,31 +172,92 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
 
     for (AssignableReplicaWithScore replicaWithScore : toBeAssignedReplicas) {
       AssignableReplica replica = replicaWithScore.getAssignableReplica();
+      if (isolation.shouldSkip(replica)) {
+        continue;
+      }
+      OptimalAssignment failureSink = isolation.failureSink(optimalAssignment);
       Optional<AssignableNode> maybeBestNode =
           getNodeWithHighestPoints(replica, nodes, clusterModel.getContext(), busyInstances,
-              optimalAssignment, blockingTypes);
-      // stop immediately if any replica cannot find best assignable node
-      if (!maybeBestNode.isPresent() || optimalAssignment.hasAnyFailure()) {
+              failureSink, blockingTypes);
+      // Stop if the replica has no candidate node, unless isolation can skip its share block.
+      if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
+        // Only the first placement failure of a run can be thrown. Later ones are tolerated and
+        // only logged, so they skip the per node reasons, which grow with the cluster size.
+        String failReasons = isolation.hasToleratedPlacementFailure()
+            ? "listed for the first failure only" : failureSink.getFailures();
         String errorMessage = String.format(
             "Unable to find any available candidate node for partition %s (resource: %s, cluster: %s); "
                 + "Failure summary: %s; Fail reasons: %s",
             replica.getPartitionName(),
             replica.getResourceName(),
             clusterModel.getContext().getClusterName(),
-            optimalAssignment.getFailureSummary(),
-            optimalAssignment.getFailures());
-        throw new HelixRebalanceException(errorMessage,
+            failureSink.getFailureSummary(),
+            failReasons);
+        HelixRebalanceException failure = new HelixRebalanceException(errorMessage,
             HelixRebalanceException.Type.FAILED_TO_CALCULATE,
             HelixRebalanceException.FailureCategory.NO_CANDIDATE_NODE);
+        if (!isolation.tryIsolate(replica, failure)) {
+          throw failure;
+        }
+        continue;
       }
       AssignableNode bestNode = maybeBestNode.get();
       // Assign the replica and update the cluster model.
       clusterModel
           .assign(replica.getResourceName(), replica.getPartitionName(), replica.getReplicaState(),
               bestNode.getInstanceName());
+      isolation.recordPlacement(replica, bestNode);
+    }
+
+    isolation.finish(optimalAssignment);
+    Consumer<HelixRebalanceException.FailureCategory> containedFailureReporter =
+        _containedFailureReporter;
+    if (containedFailureReporter != null) {
+      isolation.containedFailures().forEach(containedFailureReporter);
     }
     optimalAssignment.updateAssignments(clusterModel);
     return optimalAssignment;
+  }
+
+  /**
+   * Estimated free capacity per key once every replica is placed, plus 1% of the total to avoid a
+   * divide by zero. Used to score replicas.
+   *
+   * @throws HelixRebalanceException when the cluster as a whole cannot hold all the partitions.
+   *         With instance tag isolation on, the blocks behind the deficit are skipped instead
+   *         wherever {@link InstanceTagIsolation#absorbCapacityDeficit} can do so, and it throws
+   *         where it cannot.
+   */
+  private static Map<String, Float> computeScoringCapacities(ClusterModel clusterModel,
+      InstanceTagIsolation isolation) throws HelixRebalanceException {
+    Map<String, Float> positiveEstimateClusterRemainCap = new HashMap<>();
+    for (Map.Entry<String, Long> clusterRemainingCap : clusterModel.getContext()
+        .getEstimateUtilizationMap().entrySet()) {
+      String capacityKey = clusterRemainingCap.getKey();
+      if (clusterRemainingCap.getValue() < 0) {
+        // A short key fails the run, unless isolation can skip the blocks that are over.
+        long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
+        long remainingCapacity = clusterRemainingCap.getValue();
+        long totalUsage = totalCapacity - remainingCapacity;
+        HelixRebalanceException capacityDeficit = new HelixRebalanceException(String
+            .format("The cluster '%s' does not have enough %s capacity for all partitions. Total capacity: %d, Required: %d, Deficit: %d",
+                clusterModel.getContext().getClusterName(), capacityKey, totalCapacity, totalUsage, Math.abs(remainingCapacity)),
+            HelixRebalanceException.Type.FAILED_TO_CALCULATE,
+            HelixRebalanceException.FailureCategory.CAPACITY_DEFICIT);
+        // This sum ignores tags, so one clique far over capacity can push it below zero.
+        Map<String, Float> residual =
+            isolation.absorbCapacityDeficit(capacityDeficit, DIV_GUARD);
+        if (residual == null) {
+          throw capacityDeficit;
+        }
+        return residual;
+      }
+      // estimate remain capacity after assignment + %1 of current cluster capacity before assignment
+      positiveEstimateClusterRemainCap.put(capacityKey,
+           (float) clusterModel.getContext().getEstimateUtilizationMap().get(capacityKey) +
+          (clusterModel.getContext().getClusterCapacityMap().get(capacityKey) * DIV_GUARD));
+    }
+    return positiveEstimateClusterRemainCap;
   }
 
   private Optional<AssignableNode> getNodeWithHighestPoints(AssignableReplica replica,
