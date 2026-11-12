@@ -401,6 +401,27 @@ public class TestPartitionRecoveryDurationMetric extends BaseStageTest {
   }
 
   @Test
+  public void testUnselectedRecoveredReplicaMovedAgainSkipsHelixLatency() throws Exception {
+    preSetup(MIN_ACTIVE_REPLICAS);
+    long start = System.currentTimeMillis() - 10000L;
+    runTimedPipeline(timedStates(statesOf("MASTER", "OFFLINE", "OFFLINE"), start),
+        cache -> seedRecord(start));
+    Map<String, CurrentState> recovered = timedStates(statesOf("SLAVE", "MASTER", "SLAVE"), start);
+    setExecution(recovered, 0, "MASTER", start + 8000L, start + 9000L);
+    // Replica 1 restored the minimum first, but its promotion overwrote that timing.
+    setExecution(recovered, 1, "SLAVE", start + 6000L, start + 7000L);
+    setExecution(recovered, 2, "OFFLINE", start + 3000L, start + 5000L);
+
+    runTimedPipeline(recovered, null);
+
+    ResourceMonitor monitor = getResourceMonitor();
+    Assert.assertEquals(monitor.getSucceededPartitionRecoveryCounter(), 1L);
+    Assert.assertEquals(monitor.getPartitionRecoveryHelixLatencySampleCounter(), 0L,
+        "A later move by any recovered replica makes the restoring replica ambiguous");
+    Assert.assertFalse(hasRecord());
+  }
+
+  @Test
   public void testRestoringReplicaChangedSinceObservationSkipsHelixLatency() throws Exception {
     preSetup(MIN_ACTIVE_REPLICAS);
     long start = System.currentTimeMillis() - 10000L;

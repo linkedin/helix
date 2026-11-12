@@ -52,6 +52,10 @@ public class MissingMinActiveReplicaRecord {
     return initiallyActive != null;
   }
 
+  /* package */ boolean wasInitiallyActive(String instance) {
+    return initiallyActive != null && initiallyActive.contains(instance);
+  }
+
   /* package */ void observeInitialState(Map<String, String> states, Set<String> active,
       int minActiveReplicas) {
     if (initiallyActive == null) {

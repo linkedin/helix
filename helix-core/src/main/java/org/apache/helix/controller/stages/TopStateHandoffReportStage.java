@@ -307,27 +307,41 @@ public class TopStateHandoffReportStage extends AbstractAsyncBaseStage {
         || restoredAt < record.getStartTimeStamp() || restoredAt > now) {
       return TIMESTAMP_NOT_RECORDED;
     }
-    LiveInstance liveInstance = cache.getLiveInstances().get(instance);
-    String session = currentStateOutput.getParticipantSession(instance);
-    if (liveInstance == null || session == null || !session.equals(liveInstance.getEphemeralOwner())) {
-      return TIMESTAMP_NOT_RECORDED;
-    }
-    CurrentState currentState =
-        resolveCurrentStates(cache, currentStateMemo, instance, session).get(resourceName);
+    long transitionStart = TIMESTAMP_NOT_RECORDED;
     String partitionName = partition.getPartitionName();
-    if (currentState == null
-        || !currentStateOutput.getCurrentStateMap(resourceName, partition).get(instance)
-            .equals(currentState.getState(partitionName))
-        || currentState.getEndTime(partitionName) != restoredAt) {
-      return TIMESTAMP_NOT_RECORDED;
+    for (Map.Entry<String, String> entry :
+        currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet()) {
+      String candidate = entry.getKey();
+      if (!activeStates.contains(entry.getValue()) || record.wasInitiallyActive(candidate)) {
+        continue;
+      }
+      LiveInstance liveInstance = cache.getLiveInstances().get(candidate);
+      String session = currentStateOutput.getParticipantSession(candidate);
+      if (liveInstance == null || session == null
+          || !session.equals(liveInstance.getEphemeralOwner())) {
+        return TIMESTAMP_NOT_RECORDED;
+      }
+      CurrentState currentState =
+          resolveCurrentStates(cache, currentStateMemo, candidate, session).get(resourceName);
+      long end = currentStateOutput.getEndTime(resourceName, partition, candidate);
+      if (currentState == null || !entry.getValue().equals(currentState.getState(partitionName))
+          || currentState.getEndTime(partitionName) != end) {
+        return TIMESTAMP_NOT_RECORDED;
+      }
+      String previousState = currentState.getPreviousState(partitionName);
+      // A later move on any recovered replica can change which END_TIME sorts first.
+      if (previousState == null || activeStates.contains(previousState)) {
+        return TIMESTAMP_NOT_RECORDED;
+      }
+      long start = currentState.getStartTime(partitionName);
+      if (start < 0 || start > end || end > now) {
+        return TIMESTAMP_NOT_RECORDED;
+      }
+      if (candidate.equals(instance)) {
+        transitionStart = start;
+      }
     }
-    String previousState = currentState.getPreviousState(partitionName);
-    // A later active-to-active transition overwrites the original recovery timestamps.
-    if (previousState == null || activeStates.contains(previousState)) {
-      return TIMESTAMP_NOT_RECORDED;
-    }
-    long transitionStart = currentState.getStartTime(partitionName);
-    if (transitionStart < 0 || transitionStart > restoredAt) {
+    if (transitionStart < 0) {
       return TIMESTAMP_NOT_RECORDED;
     }
     return Math.max(record.getStartTimeStamp(), transitionStart) - record.getStartTimeStamp();
