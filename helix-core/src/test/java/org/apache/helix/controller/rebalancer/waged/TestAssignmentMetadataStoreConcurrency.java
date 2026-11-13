@@ -184,7 +184,7 @@ public class TestAssignmentMetadataStoreConcurrency {
    * A HashMap whose entry spliterator runs a callback once, when the first element is consumed
    * (after HashMap has captured its expected modCount, before iteration finishes).
    */
-  private static class WriteOnFirstElementMap extends HashMap<String, ResourceAssignment> {
+  static class WriteOnFirstElementMap extends HashMap<String, ResourceAssignment> {
     private final Runnable _writeDuringIteration;
     private final AtomicBoolean _fired = new AtomicBoolean();
 
