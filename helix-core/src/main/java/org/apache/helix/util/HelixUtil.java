@@ -305,11 +305,13 @@ public final class HelixUtil {
     ClusterEvent event =
         new ClusterEvent(globalSyncClusterConfig.getClusterName(), ClusterEventType.Unknown);
 
+    // Declared outside the try so its refreshed state model definitions, which include custom
+    // ones, can resolve each resource's definition when converting the output below.
+    ResourceControllerDataProvider dataProvider =
+        new ResourceControllerDataProvider(globalSyncClusterConfig.getClusterName());
     try {
       // First, prepare waged rebalancer with a snapshot, so that it can react on the difference
       // between the current snapshot and the provided parameters which act as the new snapshot
-      ResourceControllerDataProvider dataProvider =
-          new ResourceControllerDataProvider(globalSyncClusterConfig.getClusterName());
       dataProvider.requireFullRefresh();
       dataProvider.refresh(helixDataAccessor);
       readOnlyWagedRebalancer.updateChangeDetectorSnapshots(dataProvider);
@@ -378,8 +380,13 @@ public final class HelixUtil {
     for (IdealState idealState : idealStates) {
       String resourceName = idealState.getResourceName();
       StateModelDefinition stateModelDefinition =
-          BuiltInStateModelDefinitions.valueOf(idealState.getStateModelDefRef())
-              .getStateModelDefinition();
+          dataProvider.getStateModelDef(idealState.getStateModelDefRef());
+      if (stateModelDefinition == null) {
+        throw new HelixException(String.format(
+            "getIdealAssignmentForWagedFullAuto(): State model definition %s of resource %s is not "
+                + "found in cluster %s!", idealState.getStateModelDefRef(), resourceName,
+            clusterName));
+      }
       PartitionStateMap partitionStateMap = output.getPartitionStateMap(resourceName);
       ResourceAssignment resourceAssignment = new ResourceAssignment(resourceName);
       for (String partitionName : idealState.getPartitionSet()) {
