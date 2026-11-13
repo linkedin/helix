@@ -49,6 +49,7 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.util.HelixUtil;
 import org.apache.helix.zookeeper.api.client.HelixZkClient;
 import org.apache.helix.zookeeper.datamodel.serializer.ByteArraySerializer;
@@ -441,6 +442,45 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
       tearDownCluster(cluster);
     }
     Assert.assertTrue(certified > 0, "the fast path never certified a drain");
+  }
+
+  // A WAGED resource on a custom (non-built-in) state model registered in the cluster must still get
+  // a target assignment, instead of failing on a BuiltInStateModelDefinitions lookup.
+  @Test
+  public void testTargetAssignmentForCustomStateModel() {
+    String cluster = "TestWhatIfCustomStateModel";
+    String stateModel = "CustomLeaderStandby";
+    setupCluster(cluster, 3, 20);
+    _gSetupTool.getClusterManagementTool().addStateModelDef(cluster, stateModel,
+        new StateModelDefinition.Builder(stateModel).addState("LEADER", 0).addState("STANDBY", 1)
+            .addState("OFFLINE", 2).addState("DROPPED").initialState("OFFLINE")
+            .addTransition("OFFLINE", "STANDBY").addTransition("STANDBY", "LEADER")
+            .addTransition("LEADER", "STANDBY").addTransition("STANDBY", "OFFLINE")
+            .addTransition("OFFLINE", "DROPPED").upperBound("LEADER", 1)
+            .dynamicUpperBound("STANDBY", "R").build());
+    createResourceWithWagedRebalance(cluster, "R", stateModel, 3, 2, 2);
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    PropertyKey.Builder keys = accessor.keyBuilder();
+    List<IdealState> idealStates = readIdealStates(cluster);
+    // As in seedBestPossible: absent from ZK, the resource reads as newly added, so WAGED computes it.
+    accessor.removeProperty(keys.idealStates("R"));
+
+    ResourceAssignment assignment = HelixUtil.getTargetAssignmentForWagedFullAuto(
+        new ZkBucketDataAccessor(_bucketZkClient), _baseAccessor,
+        accessor.getProperty(keys.clusterConfig()),
+        accessor.getChildValues(keys.instanceConfigs(), true),
+        accessor.getChildNames(keys.liveInstances()), idealStates,
+        accessor.getChildValues(keys.resourceConfigs(), true)).get("R");
+
+    Assert.assertEquals(assignment.getMappedPartitions().size(), 3);
+    for (Partition partition : assignment.getMappedPartitions()) {
+      Map<String, String> replicaMap = assignment.getReplicaMap(partition);
+      Assert.assertEquals(replicaMap.size(), 2, "unexpected replicas for " + partition);
+      Assert.assertEquals(
+          replicaMap.values().stream().filter("LEADER"::equals).count(), 1L,
+          "expected exactly one LEADER for " + partition);
+    }
+    tearDownCluster(cluster);
   }
 
   // ---------------------------------------------------------------------------------------------
