@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import org.apache.helix.BucketDataAccessor;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
@@ -179,6 +180,60 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertTrue(newIdealStates.isEmpty());
     Assert.assertTrue(_metadataStore.getBaseline().isEmpty());
     Assert.assertTrue(_metadataStore.getBestPossibleAssignment().isEmpty());
+  }
+
+  /**
+   * The best possible cache is rewritten, as the async partial rebalance thread does, while the
+   * pipeline thread is reading it in emergencyRebalance. Uses the real AssignmentMetadataStore
+   * because MockAssignmentMetadataStore swaps references and cannot show the race.
+   */
+  @Test
+  public void testRebalanceWhenBestPossibleCacheUpdatedDuringEmergencyRebalance()
+      throws IOException, HelixRebalanceException {
+    AssignmentMetadataStore store =
+        new AssignmentMetadataStore(Mockito.mock(BucketDataAccessor.class), "TestCluster");
+    store._globalBaseline = new HashMap<>();
+    store._bestPossibleAssignment = new HashMap<>();
+    WagedRebalancer rebalancer = new WagedRebalancer(store, _algorithm, Optional.empty());
+
+    ResourceControllerDataProvider clusterData = setupClusterDataCache();
+    Map<String, Resource> resourceMap = clusterData.getIdealStates().entrySet().stream()
+        .collect(Collectors.toMap(Map.Entry::getKey, entry -> {
+          Resource resource = new Resource(entry.getKey());
+          entry.getValue().getPartitionSet().forEach(resource::addPartition);
+          return resource;
+        }));
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.CLUSTER_CONFIG));
+    when(clusterData.checkAndReduceCapacity(Mockito.any(), Mockito.any(),
+        Mockito.any())).thenReturn(true);
+
+    // The first run populates the store with a best possible assignment to read back.
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertFalse(store.getBestPossibleAssignment().isEmpty());
+
+    // The next run reads that assignment, and the first element read triggers the cache rewrite.
+    Map<String, ResourceAssignment> rewrite = new HashMap<>(store.getBestPossibleAssignment());
+    AtomicBoolean writeDone = new AtomicBoolean();
+    store._bestPossibleAssignment =
+        new TestAssignmentMetadataStoreConcurrency.WriteOnFirstElementMap(rewrite, () -> {
+          Assert.assertTrue(store.asyncUpdateBestPossibleAssignmentCache(rewrite,
+              store.getBestPossibleVersion() + 1));
+          writeDone.set(true);
+        });
+    when(clusterData.getRefreshedChangeTypes())
+        .thenReturn(Collections.singleton(HelixConstants.ChangeType.IDEAL_STATE));
+
+    // The mock algorithm only places replicas in the rebalance scope, so the resulting ideal
+    // states are not asserted. The run must complete instead of failing in the emergency rebalance.
+    try {
+      rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    } catch (HelixRebalanceException e) {
+      Assert.fail("Computing the new ideal states failed because the best possible cache was "
+          + "updated during the emergency rebalance: type=" + e.getFailureType() + " category="
+          + e.getFailureCategory() + " cause=" + e.getCause(), e);
+    }
+    Assert.assertTrue(writeDone.get(), "The concurrent cache write was not exercised");
   }
 
   @Test(dependsOnMethods = "testRebalance")
