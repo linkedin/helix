@@ -121,6 +121,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   // algorithm's callbacks report with the generation of the pipeline that started it.
   private final ThreadLocal<Long> _isolationGeneration = new ThreadLocal<>();
 
+  // Whether the last computeNewIdealStates call served the last known-good assignment.
+  private volatile boolean _lastComputationFallback = false;
+
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
     if (metadataStoreAddrs != null && clusterName != null) {
@@ -619,6 +622,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     // a clean synchronous compute would clear a rollup that a still-failing async partial had set --
     // the gauge would flicker to 0 while serving is broken. The rollup reset is therefore driven by
     // the partial (serving) computation succeeding; see reportPartialRebalanceSuccess.
+    _lastComputationFallback = usedFallback;
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.setWagedFallbackInUseGauge(usedFallback);
@@ -647,6 +651,15 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     LOG.info("Finish computing new ideal states for resources: {}",
         resourceMap.keySet().toString());
     return newIdealStates;
+  }
+
+  /**
+   * @return true if the last computeNewIdealStates call failed to rebalance and served the last
+   *         known-good assignment instead. Only meaningful right after a call that returned
+   *         normally, since a call that throws does not update it.
+   */
+  public boolean isLastComputationFallback() {
+    return _lastComputationFallback;
   }
 
   // Coordinate global rebalance and partial rebalance according to the cluster changes.

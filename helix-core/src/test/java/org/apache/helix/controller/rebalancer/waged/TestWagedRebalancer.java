@@ -441,6 +441,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     // Rebalance with normal configuration. So the assignment will be persisted in the metadata store.
     Map<String, IdealState> result =
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertFalse(rebalancer.isLastComputationFallback());
 
     // Recreate a rebalance with the same metadata store but bad algorithm instance.
     RebalanceAlgorithm badAlgorithm = Mockito.mock(RebalanceAlgorithm.class);
@@ -462,6 +463,7 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Map<String, IdealState> newResult =
         rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
     Assert.assertEquals(newResult, result);
+    Assert.assertTrue(rebalancer.isLastComputationFallback());
     // Ensure failure has been recorded on both the aggregate and per-FailureCategory counters.
     // The mock algorithm throws via the legacy two-arg HelixRebalanceException constructor which
     // defaults the category to UNKNOWN, so the FailureCategoryUnknownCounter is the one that
@@ -474,6 +476,12 @@ public class TestWagedRebalancer extends AbstractTestClusterModel {
     Assert.assertEquals(rebalancer.getMetricCollector().getMetric(
         WagedRebalancerMetricCollector.WagedRebalancerMetricNames.FailureCategoryUnknownCounter.name(),
         CountMetric.class).getValue().longValue(), 1L);
+
+    // Once the algorithm recovers, the same rebalancer stops reporting the fallback.
+    Mockito.doAnswer(invocation -> _algorithm.calculate(invocation.getArgument(0)))
+        .when(badAlgorithm).calculate(any());
+    rebalancer.computeNewIdealStates(clusterData, resourceMap, new CurrentStateOutput());
+    Assert.assertFalse(rebalancer.isLastComputationFallback());
   }
 
   @Test(dependsOnMethods = "testRebalance")
