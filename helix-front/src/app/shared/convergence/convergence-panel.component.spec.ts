@@ -136,6 +136,28 @@ describe('ConvergencePanelComponent', () => {
     expect(text('convergence-status')).toBe('Converged');
   });
 
+  it('does not count unknown partitions as not converged', () => {
+    get.mockReturnValue(
+      of(
+        fresh({
+          status: 'UNKNOWN',
+          primaryReason: 'WAGED_INTERNAL_FAILURE',
+          partitionSummary: {
+            total: 10,
+            affected: 10,
+            statusCounts: { UNKNOWN: 10 },
+            reasonCounts: { WAGED_INTERNAL_FAILURE: 10 },
+          },
+        }),
+      ),
+    );
+    const { fixture, text } = create();
+    expect(text('convergence-headline')).toContain(
+      'Status unknown for 10 of 10 partitions',
+    );
+    fixture.destroy();
+  });
+
   it('explains a report that cannot be trusted', () => {
     get.mockReturnValue(
       of({
@@ -151,6 +173,23 @@ describe('ConvergencePanelComponent', () => {
       'There is no controller leader, so no report can be trusted.',
     );
     expect(text('convergence-legend')).toBeUndefined();
+    fixture.destroy();
+  });
+
+  it('says when the report is stale and when it was last confirmed', () => {
+    get.mockReturnValue(
+      of({
+        clusterId: 'Demo',
+        status: 'UNKNOWN',
+        primaryReason: 'NONE',
+        reportState: 'REPORT_STALE',
+        evaluatedAt: Date.now() - 6 * 60_000,
+      }),
+    );
+    const { fixture, text } = create();
+    expect(text('convergence-headline')).toContain('stopped updating');
+    expect(text('convergence-headline')).toContain('Last confirmed');
+    expect(fixture.componentInstance.tone).toBe('warning');
     fixture.destroy();
   });
 

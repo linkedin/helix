@@ -52,7 +52,7 @@ public class ConvergenceStatus extends HelixProperty {
   private static final String REASON_COUNT_PREFIX = "REASON_COUNT:";
   // When and by whom a report was computed, as opposed to what it says.
   private static final Set<String> PROVENANCE_FIELDS = new HashSet<>(Arrays.asList(
-      Field.GENERATED_AT.name(), Field.UNCONVERGED_SINCE.name(),
+      Field.GENERATED_AT.name(), Field.EVALUATED_AT.name(), Field.UNCONVERGED_SINCE.name(),
       Field.CONTROLLER_SESSION_ID.name(), Field.CONTROLLER_NAME.name()));
 
   public enum Status {
@@ -113,6 +113,7 @@ public class ConvergenceStatus extends HelixProperty {
     STATUS,
     PRIMARY_REASON,
     GENERATED_AT,
+    EVALUATED_AT,
     UNCONVERGED_SINCE,
     CONTROLLER_SESSION_ID,
     CONTROLLER_NAME,
@@ -163,6 +164,16 @@ public class ConvergenceStatus extends HelixProperty {
 
   public long getGeneratedAt() {
     return _record.getLongField(Field.GENERATED_AT.name(), 0L);
+  }
+
+  /** When the controller last ran the pipeline and confirmed this report; a liveness signal. */
+  public void setEvaluatedAt(long timestamp) {
+    _record.setLongField(Field.EVALUATED_AT.name(), timestamp);
+  }
+
+  /** 0 when the controller that wrote the report predates the heartbeat. */
+  public long getEvaluatedAt() {
+    return _record.getLongField(Field.EVALUATED_AT.name(), 0L);
   }
 
   /** When this scope last stopped being converged, or 0 while it is converged. */
@@ -339,6 +350,7 @@ public class ConvergenceStatus extends HelixProperty {
   private ConvergenceStatus view(String resource) {
     ConvergenceStatus view = new ConvergenceStatus(resource);
     view.setGeneratedAt(getGeneratedAt());
+    view.setEvaluatedAt(getEvaluatedAt());
     view.setControllerSessionId(getControllerSessionId());
     view.setControllerName(getControllerName());
     return view;

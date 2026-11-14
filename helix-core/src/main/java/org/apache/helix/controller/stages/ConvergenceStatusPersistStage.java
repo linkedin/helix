@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.helix.HelixDataAccessor;
@@ -34,6 +35,8 @@ import org.apache.helix.PropertyKey;
 import org.apache.helix.controller.dataproviders.BaseControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalanceStatus;
+import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ConvergenceStatus.OptimizerStatus;
@@ -68,6 +71,7 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
   public static final long TICK_MS = 1_000L;
   static final long STATUS_MIN_INTERVAL_MS = 1_000L;
   static final long MIN_REWRITE_MS = 10_000L;
+  public static final long HEARTBEAT_MS = 60_000L;
   static final long RETRY_MIN_MS = 1_000L;
   // Well under the five minutes after which readers call the record stale.
   static final long RETRY_MAX_MS = 60_000L;
@@ -98,9 +102,18 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
   private ConvergenceStatus _pending;
   private long _backoffUntil;
   private int _failures;
+  // Runs that reached this stage, and the latest one whose result was handled. While some run is
+  // not handled the record is not confirmed, so a run that failed in here can never look fresh.
+  final AtomicLong _submitted = new AtomicLong();
+  private volatile long _handled;
   // Set from other threads; the tick acts on them under the lock.
   private volatile boolean _disabled;
   private volatile boolean _forgetRequested;
+  // The last result and its WAGED rebalancer, to apply a WAGED health change between runs without
+  // running the pipeline. The result keeps per resource counts only, not the run's inputs.
+  ConvergenceStatusCalculator.Result _lastResult;
+  WagedRebalancer _wagedRebalancer;
+
   /**
    * Never throws: a failure here would stop every later pipeline of this event, external view
    * included, and reporting must never cost the cluster that.
@@ -120,9 +133,13 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
       if (_disabled) {
         return;
       }
-      event.addAttribute(AttributeName.CONVERGENCE_STATUS_INPUTS.name(),
+      // Counted first, so a run that fails to snapshot is not handled either.
+      long generation = _submitted.incrementAndGet();
+      ConvergenceStatusCalculator.Inputs inputs =
           ConvergenceStatusCalculator.Inputs.from(event, cache, manager.getClusterName())
-              .controllerName(manager.getInstanceName()));
+              .controllerName(manager.getInstanceName());
+      inputs._generation = generation;
+      event.addAttribute(AttributeName.CONVERGENCE_STATUS_INPUTS.name(), inputs);
       super.process(event);
     } catch (Exception e) {
       LOG.warn("Skipped convergence reporting for event {}", event.getEventId(), e);
@@ -143,12 +160,16 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     if (inputs == null || session == null || !isEventSession(event, session)) {
       return;
     }
+    Object rebalancer = event.getAttribute(AttributeName.STATEFUL_REBALANCER.name());
     long now = System.currentTimeMillis();
     ConvergenceStatusCalculator.Result result =
         ConvergenceStatusCalculator.calculate(inputs, session, now);
     _lock.lock();
     try {
-      publish(manager, session, result, now);
+      boolean waged = rebalancer instanceof WagedRebalancer && result.hasWagedResources();
+      _lastResult = waged ? result : null;
+      _wagedRebalancer = waged ? (WagedRebalancer) rebalancer : null;
+      publish(manager, session, result, now, inputs._generation);
     } finally {
       _lock.unlock();
     }
@@ -166,14 +187,15 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     }
     _lock.lock();
     try {
-      return publish(manager, session, result, now);
+      return publish(manager, session, result, now, _submitted.get());
     } finally {
       _lock.unlock();
     }
   }
 
+  /** @param generation the run this result comes from, or 0 for one that only reapplies it */
   private long publish(HelixManager manager, String session,
-      ConvergenceStatusCalculator.Result result, long now) {
+      ConvergenceStatusCalculator.Result result, long now, long generation) {
     if (_forgetRequested) {
       // Leadership changed since: start over, so the leader check below runs again.
       forget();
@@ -202,19 +224,22 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
       }
       _pending = record;
     } catch (RuntimeException e) {
+      // Stays behind, so the record is not confirmed on content this run could not produce.
       LOG.warn("Failed to prepare the convergence report of cluster {}",
           manager.getClusterName(), e);
       return -1L;
     }
+    // Handled; a pending record keeps it unconfirmed until it is written.
+    _handled = Math.max(_handled, generation);
     return attempt(now);
   }
 
   /**
-   * Called by the controller on its timer: retries a held back or failed write, and drops
-   * everything once this controller no longer leads the cluster. Skips the round if the worker is
-   * busy publishing.
+   * Called by the controller on its timer: retries a held back or failed write, picks up a WAGED
+   * health change, and confirms an unchanged record once per {@link #HEARTBEAT_MS} while the
+   * controller is caught up. Skips the round if the worker is busy publishing.
    */
-  public void tick(long now) {
+  public void tick(long now, boolean controllerCaughtUp) {
     if (!_lock.tryLock()) {
       return;
     }
@@ -228,12 +253,38 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
         forget();
         return;
       }
-      attempt(now);
+      // Only on a caught up controller: otherwise a run for the change may still be on its way.
+      boolean current = controllerCaughtUp && !isBehind();
+      if (current) {
+        refreshWagedStatus(now);
+      }
+      if (_pending != null) {
+        attempt(now);
+      } else if (current) {
+        beat(now);
+      }
     } catch (RuntimeException e) {
       LOG.warn("Convergence report tick failed", e);
     } finally {
       _lock.unlock();
     }
+  }
+
+  boolean isBehind() {
+    return _handled < _submitted.get();
+  }
+
+  private void refreshWagedStatus(long now) {
+    if (_wagedRebalancer == null || _lastResult == null || _manager == null) {
+      return;
+    }
+    WagedRebalanceStatus status = _wagedRebalancer.getConvergenceStatus();
+    if (sameWaged(status, _lastResult.getWagedStatus())) {
+      return;
+    }
+    // Kept only once it was computed, so a failure computing it is retried by the next tick.
+    _lastResult = ConvergenceStatusCalculator.withWagedStatus(_lastResult, status, now);
+    publish(_manager, _session, _lastResult, now, 0L);
   }
 
   private long attempt(long now) {
@@ -246,6 +297,10 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     boolean takeOver = _written == null
         || !_session.equals(_written._report.getControllerSessionId());
     long wait = takeOver ? 0L : writeDelay(_pending, _written, now);
+    if (wait < 0 && now - _written._writtenAt >= HEARTBEAT_MS) {
+      // Unchanged, but a run confirmed it, so it doubles as the beat.
+      wait = 0L;
+    }
     if (wait < 0) {
       _pending = null;
       return -1L;
@@ -254,6 +309,17 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
       return wait;
     }
     return write(_pending, now) ? -1L : _backoffUntil - now;
+  }
+
+  /** Confirms the unchanged record of a caught-up controller; moves only when it was confirmed. */
+  private void beat(long now) {
+    if (_written == null || _session == null || _manager == null
+        || !_session.equals(_written._report.getControllerSessionId())
+        || now - _written._writtenAt < HEARTBEAT_MS || now < _backoffUntil) {
+      return;
+    }
+    _written._report.setEvaluatedAt(now);
+    write(_written._report, now);
   }
 
   private boolean write(ConvergenceStatus record, long now) {
@@ -298,6 +364,8 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
     _pending = null;
     _written = null;
     _loadedSession = null;
+    _lastResult = null;
+    _wagedRebalancer = null;
     _manager = null;
     _session = null;
     _forgetRequested = false;
@@ -312,6 +380,11 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
   static List<String> fold(ConvergenceStatus record, Map<String, ConvergenceStatus> resources,
       ConvergenceStatus previous, long now) {
     boolean paused = record.getStatus() == Status.PAUSED;
+    // A record left by an earlier leader long ago says nothing about when this started.
+    if (previous != null && previous.getEvaluatedAt() > 0
+        && now - previous.getEvaluatedAt() > 5 * HEARTBEAT_MS) {
+      previous = null;
+    }
     List<String> listed = new ArrayList<>();
     long oldestUnconverged = 0L;
     for (Map.Entry<String, ConvergenceStatus> entry : resources.entrySet()) {
@@ -394,6 +467,17 @@ public class ConvergenceStatusPersistStage extends AbstractAsyncBaseStage {
       default:
         return 3;
     }
+  }
+
+  private static boolean sameWaged(WagedRebalanceStatus a, WagedRebalanceStatus b) {
+    if (a == null || b == null) {
+      return a == b;
+    }
+    return a.isOutcomeKnown() == b.isOutcomeKnown()
+        && a.isLastKnownGoodFallback() == b.isLastKnownGoodFallback()
+        && a.isServingComputationFailed() == b.isServingComputationFailed()
+        && a.isBaselineComputationFailed() == b.isBaselineComputationFailed()
+        && Objects.equals(a.getServingFailureCategory(), b.getServingFailureCategory());
   }
 
   private long retryDelay() {
