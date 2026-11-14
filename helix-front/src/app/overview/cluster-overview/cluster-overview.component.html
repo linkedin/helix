@@ -6,6 +6,11 @@
     (refresh)="load()"
   ></hi-list-status>
 
+  <hi-convergence-panel
+    class="convergence"
+    [cluster]="clusterName"
+  ></hi-convergence-panel>
+
   <ng-container *ngIf="issues">
     <p class="notice verdict" [ngClass]="tone" data-testid="verdict">
       {{ verdict }}
