@@ -1612,6 +1612,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     logger.info("Shutting down {} pipeline", Pipeline.Type.TASK.name());
     shutdownPipeline(_taskEventThread, _taskEventQueue);
 
+    logger.info("Shutting down {} pipeline", Pipeline.Type.MANAGEMENT_MODE.name());
+    shutdownPipeline(_managementModeEventThread, _managementModeEventQueue);
+
     if (_convergenceStage != null) {
       _convergenceStage.shutdown();
     }
