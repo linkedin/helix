@@ -52,6 +52,7 @@ import org.apache.helix.zookeeper.zkclient.IZkStateListener;
 import org.apache.helix.zookeeper.zkclient.ZkConnection;
 import org.apache.helix.zookeeper.zkclient.ZkServer;
 import org.apache.helix.zookeeper.zkclient.callback.ZkAsyncCallbacks;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkSessionMismatchedException;
@@ -1196,47 +1197,80 @@ public class TestRawZkClient extends ZkTestBase {
     Assert.assertFalse(_zkClient.exists(newNode));
   }
 
-  // Verifies the batched implementation of deleteRecursively handles a subtree
-  // larger than DELETE_RECURSIVE_BATCH_SIZE (1000). The legacy single-op
-  // recursion was jute.maxbuffer-safe but O(N) round-trips; the new batched
-  // multi() path must complete in ceil(N/1000) round-trips for the same N
-  // znodes, all deleted.
+  // A subtree larger than DELETE_RECURSIVE_BATCH_SIZE is deleted in ceil(N / batch size) multi()
+  // calls, none larger than the batch size.
   @Test
   void testDeleteRecursivelyLargeSubtree() {
     System.out.println("Start test: " + TestHelper.getTestMethodName());
     String root = "/testDeleteRecursivelyLargeSubtree";
-    int numChildren = 2500; // > 2 batches
-    _zkClient.createPersistent(root);
-    for (int i = 0; i < numChildren; i++) {
-      _zkClient.createPersistent(root + "/child-" + i);
+    int numChildren = 2500;
+    List<Integer> opCounts = new ArrayList<>();
+    ZkClient zkClient = createZkClientRecordingMulti(opCounts, -1);
+    try {
+      zkClient.createPersistent(root);
+      for (int i = 0; i < numChildren; i++) {
+        zkClient.createPersistent(root + "/child-" + i);
+      }
+
+      zkClient.deleteRecursively(root);
+
+      Assert.assertFalse(zkClient.exists(root));
+      Assert.assertEquals(opCounts, Arrays.asList(1000, 1000, 501));
+    } finally {
+      zkClient.close();
     }
-    Assert.assertEquals(_zkClient.getChildren(root).size(), numChildren);
-
-    _zkClient.deleteRecursively(root);
-
-    Assert.assertFalse(_zkClient.exists(root));
   }
 
-  // Deeper subtree shape (depth > 2) - verifies the children-first BFS
-  // ordering produces a valid delete sequence when ops cross batch
-  // boundaries between depth levels.
+  // Children-first ordering stays valid when a batch boundary falls between depth levels: 3 groups
+  // of 400 leaves plus the groups and the root is 1204 znodes, so the second batch holds the last
+  // leaves together with their parents.
   @Test
   void testDeleteRecursivelyDeepSubtree() {
     System.out.println("Start test: " + TestHelper.getTestMethodName());
     String root = "/testDeleteRecursivelyDeepSubtree";
-    _zkClient.createPersistent(root);
-    // Build a wide+deep tree: 3 grandchildren x 100 children each = 303 znodes
-    for (int g = 0; g < 3; g++) {
-      String gpath = root + "/group-" + g;
-      _zkClient.createPersistent(gpath);
-      for (int i = 0; i < 100; i++) {
-        _zkClient.createPersistent(gpath + "/leaf-" + i);
-      }
+    List<Integer> opCounts = new ArrayList<>();
+    ZkClient zkClient = createZkClientRecordingMulti(opCounts, -1);
+    try {
+      createGroupedSubtree(zkClient, root, 3, 400);
+
+      zkClient.deleteRecursively(root);
+
+      Assert.assertFalse(zkClient.exists(root));
+      Assert.assertEquals(opCounts, Arrays.asList(1000, 204));
+    } finally {
+      zkClient.close();
     }
+  }
 
-    _zkClient.deleteRecursively(root);
+  // A failure in the second batch leaves the first batch deleted; calling again deletes the rest.
+  @Test
+  void testDeleteRecursivelyResumesAfterBatchFailure() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyBatchFailure";
+    List<Integer> opCounts = new ArrayList<>();
+    ZkClient zkClient = createZkClientRecordingMulti(opCounts, 2);
+    try {
+      createGroupedSubtree(zkClient, root, 3, 400);
 
-    Assert.assertFalse(_zkClient.exists(root));
+      try {
+        zkClient.deleteRecursively(root);
+        Assert.fail("deleteRecursively should fail when a batch fails");
+      } catch (ZkClientException expected) {
+        Assert.assertTrue(expected.getCause() instanceof ZkException,
+            "Unexpected cause: " + expected.getCause());
+      }
+      Assert.assertTrue(zkClient.exists(root));
+      int remaining = 1;
+      for (String group : zkClient.getChildren(root)) {
+        remaining += 1 + zkClient.getChildren(root + "/" + group).size();
+      }
+      Assert.assertEquals(remaining, 204);
+
+      _zkClient.deleteRecursively(root);
+      Assert.assertFalse(_zkClient.exists(root));
+    } finally {
+      zkClient.close();
+    }
   }
 
   // Idempotency: deleting a non-existent path is a no-op (preserves the
@@ -1251,11 +1285,10 @@ public class TestRawZkClient extends ZkTestBase {
     Assert.assertFalse(_zkClient.exists(missing));
   }
 
-  // Idempotency under partial delete: simulate a previous incomplete run by
-  // deleting a leaf out-of-band, then call deleteRecursively on the parent.
-  // The walk only collects znodes that still exist, so the delete completes.
+  // A child deleted before the walk, e.g. by an earlier partial delete, is not listed, so the
+  // delete completes.
   @Test
-  void testDeleteRecursivelyIdempotentAfterPartialDelete() {
+  void testDeleteRecursivelySkipsChildDeletedBeforeWalk() {
     System.out.println("Start test: " + TestHelper.getTestMethodName());
     String root = "/testDeleteRecursivelyPartial";
     _zkClient.createPersistent(root);
@@ -1271,11 +1304,10 @@ public class TestRawZkClient extends ZkTestBase {
     Assert.assertFalse(_zkClient.exists(root));
   }
 
-  // Each multi() batch is all-or-nothing, so a znode deleted by another agent between the walk and
-  // the batch fails the call with NoNode and rolls the batch back. A second call walks only the
-  // znodes that remain and completes the delete.
+  // A znode deleted by another agent between the walk and its batch fails that multi() with NoNode;
+  // the batch is then deleted one znode at a time, skipping the missing one.
   @Test
-  void testDeleteRecursivelyFailsOnConcurrentDeleteThenResumes() {
+  void testDeleteRecursivelyToleratesConcurrentDelete() {
     System.out.println("Start test: " + TestHelper.getTestMethodName());
     String root = "/testDeleteRecursivelyConcurrentDelete";
     ZkClient zkClient = createZkClientRacingFirstMulti(client -> client.delete(root + "/child-1"));
@@ -1285,17 +1317,37 @@ public class TestRawZkClient extends ZkTestBase {
         zkClient.createPersistent(root + "/child-" + i);
       }
 
-      try {
-        zkClient.deleteRecursively(root);
-        Assert.fail("deleteRecursively should fail when a collected znode is deleted concurrently");
-      } catch (ZkClientException expected) {
-        Assert.assertTrue(expected.getCause() instanceof ZkNoNodeException,
-            "Unexpected cause: " + expected.getCause());
+      zkClient.deleteRecursively(root);
+
+      Assert.assertFalse(zkClient.exists(root));
+    } finally {
+      zkClient.close();
+    }
+  }
+
+  // A batch that commits but whose response is lost to a connection loss is resent, and the resend
+  // fails with NoNode because its znodes are already gone. That must not fail the call.
+  @Test
+  void testDeleteRecursivelyToleratesResentBatch() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteRecursivelyResentBatch";
+    ZkClient zkClient = new ZkClient(ZkTestBase.ZK_ADDR) {
+      private final AtomicBoolean _resent = new AtomicBoolean(false);
+
+      @Override
+      public List<OpResult> multi(Iterable<Op> ops) {
+        List<OpResult> results = super.multi(ops);
+        if (_resent.compareAndSet(false, true)) {
+          return super.multi(ops);
+        }
+        return results;
       }
-      // child-2 is ordered before child-1 in the batch, so its delete was rolled back.
-      Assert.assertTrue(zkClient.exists(root + "/child-2"));
+    };
+    try {
+      zkClient.createPersistent(root + "/child-0", true);
 
       zkClient.deleteRecursively(root);
+
       Assert.assertFalse(zkClient.exists(root));
     } finally {
       zkClient.close();
@@ -1361,6 +1413,76 @@ public class TestRawZkClient extends ZkTestBase {
       _zkClient.deleteRecursively(root);
       zkClient.close();
     }
+  }
+
+  // A fenced delete stops, without touching anything, once the fence znode has been deleted and
+  // recreated, e.g. by another agent deleting the subtree and re-creating it meanwhile.
+  @Test
+  void testDeleteInBatchesStopsWhenFenceChanges() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteInBatchesFenceChanged";
+    _zkClient.createPersistent(root + "/child-0", true);
+    List<String> paths = _zkClient.getSubtreeChildrenFirst(root);
+    int fenceVersion = _zkClient.writeDataGetStat(root, null, -1).getVersion();
+    _zkClient.deleteRecursively(root);
+    _zkClient.createPersistent(root + "/child-0", true);
+    try {
+      _zkClient.deleteInBatches(paths, root, fenceVersion);
+      Assert.fail("deleteInBatches should fail once the fence znode changed");
+    } catch (ZkClientException expected) {
+      Assert.assertTrue(expected.getCause() instanceof ZkBadVersionException,
+          "Unexpected cause: " + expected.getCause());
+    } finally {
+      Assert.assertTrue(_zkClient.exists(root + "/child-0"));
+      _zkClient.deleteRecursively(root);
+    }
+  }
+
+  // If the fence znode is gone, everything under it is gone too, so a fenced delete returns.
+  @Test
+  void testDeleteInBatchesReturnsWhenFenceIsGone() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteInBatchesFenceGone";
+    _zkClient.createPersistent(root + "/child-0", true);
+    List<String> paths = _zkClient.getSubtreeChildrenFirst(root);
+    int fenceVersion = _zkClient.writeDataGetStat(root, null, -1).getVersion();
+    _zkClient.deleteRecursively(root);
+
+    _zkClient.deleteInBatches(paths, root, fenceVersion);
+
+    Assert.assertFalse(_zkClient.exists(root));
+  }
+
+  // Creates root with numGroups children, each with leavesPerGroup children.
+  private static void createGroupedSubtree(ZkClient zkClient, String root, int numGroups,
+      int leavesPerGroup) {
+    zkClient.createPersistent(root);
+    for (int g = 0; g < numGroups; g++) {
+      String groupPath = root + "/group-" + g;
+      zkClient.createPersistent(groupPath);
+      for (int i = 0; i < leavesPerGroup; i++) {
+        zkClient.createPersistent(groupPath + "/leaf-" + i);
+      }
+    }
+  }
+
+  // Returns a ZkClient that records the op count of every multi() call in opCounts and fails the
+  // call numbered failOnCall (counting from 1) without sending it; -1 never fails.
+  private ZkClient createZkClientRecordingMulti(List<Integer> opCounts, int failOnCall) {
+    return new ZkClient(ZkTestBase.ZK_ADDR) {
+      @Override
+      public List<OpResult> multi(Iterable<Op> ops) {
+        int count = 0;
+        for (Op ignored : ops) {
+          count++;
+        }
+        opCounts.add(count);
+        if (opCounts.size() == failOnCall) {
+          throw new ZkException("simulated failure of multi() call " + failOnCall);
+        }
+        return super.multi(ops);
+      }
+    };
   }
 
   // Returns a ZkClient that runs the given action once, just before its first multi() call, to

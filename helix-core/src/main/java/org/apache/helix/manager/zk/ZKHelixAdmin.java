@@ -115,6 +115,7 @@ import org.apache.helix.zookeeper.impl.factory.SharedZkClientFactory;
 import org.apache.helix.zookeeper.routing.RoutingDataManager;
 import org.apache.helix.zookeeper.zkclient.DataUpdater;
 import org.apache.helix.zookeeper.zkclient.NetworkUtil;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
@@ -223,14 +224,13 @@ public class ZKHelixAdmin implements HelixAdmin {
       throw new HelixException("Node " + nodeId + " already exists in cluster " + clusterName);
     }
 
-    // dropInstance deletes the InstanceConfig before the instance subtree, so a subtree without a
-    // config means a drop is partial or still in flight; re-adding would inherit its stale state.
+    // A subtree without an InstanceConfig is left by a dropInstance that failed partway. Delete it
+    // so the instance starts clean instead of inheriting stale state such as CURRENTSTATES.
     String instancePath = PropertyPathBuilder.instance(clusterName, nodeId);
     if (_zkClient.exists(instancePath)) {
-      throw new HelixConflictException("Node " + nodeId + " has a residual subtree at "
-          + instancePath
-          + " without an InstanceConfig. Indicates a partial or in-flight dropInstance."
-          + " Run dropInstance to complete cleanup, then retry.");
+      logger.warn("Node {} has a leftover subtree at {} without an InstanceConfig, left by a "
+          + "partial dropInstance. Deleting it before adding the instance.", nodeId, instancePath);
+      deleteDroppedInstanceGarbage(clusterName, nodeId);
     }
 
     List<InstanceConfig> matchingLogicalIdInstances =
@@ -282,13 +282,12 @@ public class ZKHelixAdmin implements HelixAdmin {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     boolean hasConfig = _zkClient.exists(instanceConfigPath);
-    boolean hasInstance = _zkClient.exists(instancePath);
-    // dropInstancePathsRecursively is no longer atomic (config is deleted before
-    // the subtree). A retry after a partial drop may find the config already
-    // gone but the subtree still present; treat that as a resume case.
-    if (!hasConfig && !hasInstance) {
+    boolean hasInstanceSubtree = _zkClient.exists(instancePath);
+    // A drop of a large instance is not atomic (see dropInstanceZnodesOnce), so a retry may find
+    // the config already gone but the subtree still present; it finishes that drop.
+    if (!hasConfig && !hasInstanceSubtree) {
       throw new HelixException(
-          "Node " + instanceName + " does not exist in config for cluster " + clusterName);
+          "Node " + instanceName + " does not exist in cluster " + clusterName);
     }
 
     String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
@@ -297,46 +296,55 @@ public class ZKHelixAdmin implements HelixAdmin {
           "Node " + instanceName + " is still alive for cluster " + clusterName + ", can't drop.");
     }
 
-    dropInstancePathsRecursively(clusterName, instanceName);
+    dropInstanceZnodes(clusterName, instanceName);
   }
 
-  // Two-phase drop. Previously a single deleteRecursivelyAtomic([instance, config])
-  // built one multi() packet whose size grew O(#znodes); on instances with ~13K
-  // accumulated MESSAGES it crossed the 4 MB jute.maxbuffer limit, surfaced as
-  // CONNECTIONLOSS, and the default 24h ZkClient retry timeout pinned the Helix
-  // REST Jetty thread pool until restart.
-  //
-  // Phase 1: delete InstanceConfig first. This makes the instance non-Assignable,
-  //   so the controller stops generating new state-transition messages while the
-  //   subtree delete is in flight.
-  // Phase 2: deleteRecursively on /INSTANCES/{instance}. ZkClient.deleteRecursively
-  //   batches internally to stay within jute.maxbuffer.
-  //
-  // Trade-off: this is no longer atomic. If the JVM dies between Phase 1 and the
-  // end of Phase 2, a stale /INSTANCES/{instance} subtree remains. The next
-  // dropInstance call resumes cleanup; dropInstance's existence check above is
-  // relaxed to allow the resume case where InstanceConfig is already gone.
-  private void dropInstancePathsRecursively(String clusterName, String instanceName) {
-    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+  @Override
+  public void deleteDroppedInstanceGarbage(String clusterName, String instanceName) {
+    if (_zkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName))) {
+      throw new HelixConflictException("Node " + instanceName + " has an InstanceConfig in cluster "
+          + clusterName + ", so its subtree is not garbage from a failed drop. Use dropInstance "
+          + "instead.");
+    }
+    if (_zkClient.exists(PropertyPathBuilder.liveInstance(clusterName, instanceName))) {
+      throw new HelixConflictException("Node " + instanceName + " is still live in cluster "
+          + clusterName + ", so its subtree is in use. Stop the participant, then retry.");
+    }
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    retryInstanceZnodeDelete(clusterName, instanceName, () -> deleteDroppedInstanceGarbageOnce(
+        clusterName, instanceName, _zkClient.getSubtreeChildrenFirst(instancePath)));
+  }
+
+  // Deletes the instance's InstanceConfig and /INSTANCES/{instance} subtree.
+  private void dropInstanceZnodes(String clusterName, String instanceName) {
+    retryInstanceZnodeDelete(clusterName, instanceName,
+        () -> dropInstanceZnodesOnce(clusterName, instanceName));
+  }
+
+  // Runs deleteAttempt, retrying up to 3 times when it failed because the subtree changed
+  // concurrently. Each attempt lists the subtree again, so no backoff is needed:
+  // - NotEmpty: a child was created meanwhile, e.g. the controller persisting node history.
+  // - NoNode: a znode was deleted meanwhile, concurrently or by an atomic multi() that committed
+  //   before a connection loss and was then resent.
+  // - Fence lost: another agent fenced the subtree for its own delete. Retried only while the
+  //   instance has no config; otherwise it was re-added, and its new subtree must be kept.
+  private void retryInstanceZnodeDelete(String clusterName, String instanceName,
+      Runnable deleteAttempt) {
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     int retryCnt = 0;
     while (true) {
       try {
-        // Phase 1
-        if (_zkClient.exists(instanceConfigPath)) {
-          _zkClient.delete(instanceConfigPath);
-        }
-        // Phase 2
-        _zkClient.deleteRecursively(instancePath);
+        deleteAttempt.run();
         return;
-      } catch (ZkClientException e) {
-        if (retryCnt < 3 && isRetryableDropFailure(e)) {
-          // NotEmpty: racing with the controller persisting node history. NoNode: a znode was
-          // deleted after deleteRecursively walked the subtree, either concurrently or by a multi()
-          // that committed before a connection loss and was then resent. Both are resolved by
-          // walking the subtree again, so no backoff is needed.
+      } catch (ZkClientException | ZkException e) {
+        boolean fenceLost = isFenceLost(e);
+        if (fenceLost && _zkClient.exists(instanceConfigPath)) {
+          throw new HelixConflictException("Node " + instanceName + " was re-added to cluster "
+              + clusterName + " while its znodes were being deleted; its new znodes are kept.");
+        }
+        if (retryCnt < 3 && (fenceLost || isConcurrentChange(e))) {
           logger.warn("Retrying dropping instance {} with exception {}", instanceName,
-              e.getCause().getMessage());
+              e.getMessage());
           retryCnt++;
         } else {
           String errorMessage =
@@ -348,8 +356,83 @@ public class ZKHelixAdmin implements HelixAdmin {
     }
   }
 
-  private static boolean isRetryableDropFailure(ZkClientException e) {
-    Throwable cause = e.getCause();
+  // Deletes the InstanceConfig and the /INSTANCES/{instance} subtree, or only the subtree if the
+  // config is already gone.
+  //
+  // When they fit in one multi() batch, which covers almost every instance, they are deleted in a
+  // single transaction, so a failed drop leaves nothing behind. A larger delete would not fit in
+  // jute.maxbuffer (on instances with ~13K accumulated MESSAGES it reached ~3.75 MB). ZK reports an
+  // oversized request as a connection loss, which ZkClient resends until its operation timeout
+  // (24h by default) instead of failing, so the choice is made from the size before sending.
+  //
+  // Larger instances are deleted in two phases. The InstanceConfig goes first, so the controller
+  // immediately stops counting the instance, together with a write that fences the subtree root.
+  // The subtree then goes in batches that each check the fence. A failure between the phases leaves
+  // the subtree without a config; dropInstance, addInstance and the controller's periodic
+  // InstanceGarbageCollector each delete such a subtree.
+  private void dropInstanceZnodesOnce(String clusterName, String instanceName) {
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    List<String> subtree = _zkClient.getSubtreeChildrenFirst(instancePath);
+    if (!_zkClient.exists(instanceConfigPath)) {
+      deleteDroppedInstanceGarbageOnce(clusterName, instanceName, subtree);
+      return;
+    }
+    if (subtree.size() + 1
+        <= org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE) {
+      List<Op> ops = new ArrayList<>(subtree.size() + 1);
+      subtree.forEach(path -> ops.add(Op.delete(path, -1)));
+      ops.add(Op.delete(instanceConfigPath, -1));
+      _zkClient.multi(ops);
+      return;
+    }
+    List<OpResult> results = _zkClient.multi(
+        Arrays.asList(Op.delete(instanceConfigPath, -1), fenceOp(instancePath)));
+    _zkClient.deleteInBatches(subtree, instancePath, fenceVersion(results.get(1)));
+  }
+
+  // Deletes a /INSTANCES/{instance} subtree whose InstanceConfig is gone. The subtree root is
+  // fenced first and the config checked after that: an instance re-added before the fence has a
+  // config, and one re-added after it has a new root, which fails the fence check of every delete
+  // batch. Either way the re-added instance is left alone.
+  private void deleteDroppedInstanceGarbageOnce(String clusterName, String instanceName,
+      List<String> subtree) {
+    if (subtree.isEmpty()) {
+      return;
+    }
+    String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    int fenceVersion;
+    try {
+      fenceVersion = fenceVersion(
+          _zkClient.multi(Collections.singletonList(fenceOp(instancePath))).get(0));
+    } catch (ZkNoNodeException e) {
+      return;
+    }
+    if (_zkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName))) {
+      throw new HelixConflictException("Node " + instanceName + " was re-added to cluster "
+          + clusterName + " while its leftover subtree was being deleted; its new znodes are "
+          + "kept.");
+    }
+    _zkClient.deleteInBatches(subtree, instancePath, fenceVersion);
+  }
+
+  // Bumps the data version of the subtree root without changing its data (nothing stores data
+  // there), so deletes that check the new version abort if the root is deleted and recreated.
+  private static Op fenceOp(String instancePath) {
+    return Op.setData(instancePath, null, -1);
+  }
+
+  private static int fenceVersion(OpResult fenceResult) {
+    return ((OpResult.SetDataResult) fenceResult).getStat().getVersion();
+  }
+
+  private static boolean isFenceLost(RuntimeException e) {
+    Throwable cause = e instanceof ZkClientException ? e.getCause() : e;
+    return cause instanceof ZkBadVersionException;
+  }
+
+  private static boolean isConcurrentChange(RuntimeException e) {
+    Throwable cause = e instanceof ZkClientException ? e.getCause() : e;
     return cause instanceof ZkNoNodeException || (cause instanceof ZkException
         && cause.getCause() instanceof KeeperException.NotEmptyException);
   }
@@ -381,7 +464,7 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   private void purgeInstance(String clusterName, String instanceName) {
     logger.info("Purge instance {} from cluster {}.", instanceName, clusterName);
-    dropInstancePathsRecursively(clusterName, instanceName);
+    dropInstanceZnodes(clusterName, instanceName);
   }
 
   @Override

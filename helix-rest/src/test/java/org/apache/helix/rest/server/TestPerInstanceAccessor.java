@@ -601,9 +601,9 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
   }
 
   // A dropInstance that fails after deleting the InstanceConfig leaves the instance subtree behind.
-  // Re-adding the instance must return 409 until the drop is finished, a retried DELETE must finish
-  // it instead of rejecting the missing config, and once the instance is fully removed DELETE
-  // returns 404 and the instance can be added again.
+  // A retried DELETE must finish that drop instead of rejecting the missing config, after which
+  // DELETE returns 404. PUT deletes such a leftover before adding the instance, unless the instance
+  // is live, which returns 409.
   @Test(dependsOnMethods = "testDeleteInstance")
   public void testDeleteInstanceResumesPartialDrop() throws IOException {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -612,22 +612,39 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(instanceConfig.getRecord()),
         MediaType.APPLICATION_JSON_TYPE);
     String instanceUri = "clusters/" + CLUSTER_NAME + "/instances/" + instanceName;
+    String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName);
+    String staleCurrentStatePath =
+        PropertyPathBuilder.instanceCurrentState(CLUSTER_NAME, instanceName) + "/stale-session";
     Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
         Response.Status.OK.getStatusCode());
-    String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
-    _gZkClient.delete(PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName));
+
+    // DELETE finishes a partial drop.
+    _gZkClient.delete(instanceConfigPath);
     Assert.assertTrue(_gZkClient.exists(instancePath));
-
-    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
-        Response.Status.CONFLICT.getStatusCode());
-
     delete(instanceUri, Response.Status.OK.getStatusCode());
     Assert.assertFalse(_gZkClient.exists(instancePath));
     delete(instanceUri, Response.Status.NOT_FOUND.getStatusCode());
 
+    // PUT deletes the leftover subtree, including its stale state, then adds the instance.
     Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
         Response.Status.OK.getStatusCode());
+    _gZkClient.createPersistent(staleCurrentStatePath);
+    _gZkClient.delete(instanceConfigPath);
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
+    Assert.assertTrue(_gZkClient.exists(instanceConfigPath));
+    Assert.assertFalse(_gZkClient.exists(staleCurrentStatePath));
+
+    // PUT on the leftover of a live instance is a conflict.
+    _gZkClient.delete(instanceConfigPath);
+    String liveInstancePath = PropertyPathBuilder.liveInstance(CLUSTER_NAME, instanceName);
+    _gZkClient.createPersistent(liveInstancePath);
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.CONFLICT.getStatusCode());
+    _gZkClient.delete(liveInstancePath);
     delete(instanceUri, Response.Status.OK.getStatusCode());
+    Assert.assertFalse(_gZkClient.exists(instancePath));
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

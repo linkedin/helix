@@ -107,10 +107,12 @@ public class ZkClient implements Watcher {
   // TODO: remove it once we have a better way to exit retry for this case
   private static final int NUM_CHILDREN_LIMIT = 100 * 1000;
 
-  // Batch size for deleteRecursively. Sized so each multi() packet stays well
-  // below jute.maxbuffer (4 MB default): ~240 bytes/op * 1000 ops ~= 240 KB.
-  // See deleteRecursively for context.
-  private static final int DELETE_RECURSIVE_BATCH_SIZE = 1000;
+  /**
+   * Maximum number of delete ops {@link #deleteRecursively(String)} sends in one multi(). At about
+   * 240 bytes per op a batch is about 240 KB, well below jute.maxbuffer (just under 1 MB by
+   * default in ZooKeeper).
+   */
+  public static final int DELETE_RECURSIVE_BATCH_SIZE = 1000;
 
   private static final boolean SYNC_ON_SESSION = Boolean.parseBoolean(
       System.getProperty(ZkSystemPropertyKeys.ZK_AUTOSYNC_ENABLED, "true"));
@@ -2031,71 +2033,40 @@ public class ZkClient implements Watcher {
   /**
    * Delete the path as well as all its children.
    *
-   * <p>This operation is <b>not atomic</b>: it may partially complete on
-   * failure. A second call is safe to run and resumes the deletion, since it
-   * only walks the znodes that still exist.
+   * <p>This operation is <b>not atomic</b>: it may partially complete on failure. Calling it again
+   * resumes the deletion, since it only walks the znodes that still exist.
    *
-   * <p>Implementation: BFS-collects all descendant paths children-first, then
-   * issues delete operations in batches of {@value #DELETE_RECURSIVE_BATCH_SIZE}
-   * via {@link #multi(Iterable)}. Batching keeps each on-wire packet well
-   * below {@code jute.maxbuffer} (4 MB by default) so this method works for
-   * arbitrarily large subtrees. Each batch is all-or-nothing, so the subtree
-   * changing concurrently between the walk and a batch fails the call:
-   * <ul>
-   *   <li>A collected znode deleted by another agent surfaces as
-   *   {@code ZkClientException -> ZkNoNodeException}.</li>
-   *   <li>A child created under a collected znode (e.g. the controller writing
-   *   ParticipantHistory while an instance is dropped) surfaces as
-   *   {@code ZkClientException -> ZkException -> KeeperException.NotEmptyException},
-   *   so callers' existing NotEmpty-retry loops can re-walk and retry.</li>
-   * </ul>
-   * Calling again after either failure completes the deletion.
+   * <p>The subtree is listed with {@link #getSubtreeChildrenFirst(String)} and deleted with
+   * {@link #deleteInBatches(List, String, int)}, see those for details.
    *
-   * @param path ZK path to delete (no-op if path does not exist)
-   * @throws ZkClientException on unrecoverable failure
+   * @param path ZK path to delete; a no-op if it does not exist
+   * @throws ZkClientException if a znode cannot be deleted or the subtree cannot be listed
    */
   public void deleteRecursively(String path) throws ZkClientException {
-    List<String> orderedPaths;
+    List<String> pathsChildrenFirst;
     try {
-      orderedPaths = collectSubtreeChildrenFirst(path);
-    } catch (ZkNoNodeException e) {
-      return;
+      pathsChildrenFirst = getSubtreeChildrenFirst(path);
     } catch (Exception e) {
-      // Wrapped like batch failures so callers handle a failed walk the same way, e.g. a child list
-      // too large to read.
+      // Wrapped like a failed delete, so callers handle e.g. an unreadable child list the same way.
       LOG.error("zkclient {}, Failed to list subtree of {} for recursive delete, exception {}",
           _uid, path, e);
       throw new ZkClientException("Failed to delete " + path, e);
     }
-    if (orderedPaths.isEmpty()) {
-      return;
-    }
-    for (int i = 0; i < orderedPaths.size(); i += DELETE_RECURSIVE_BATCH_SIZE) {
-      int end = Math.min(i + DELETE_RECURSIVE_BATCH_SIZE, orderedPaths.size());
-      List<Op> ops = new ArrayList<>(end - i);
-      for (int j = i; j < end; j++) {
-        ops.add(Op.delete(orderedPaths.get(j), -1));
-      }
-      // multi() throws on any failed op, so a successful return means the whole batch was deleted.
-      try {
-        multi(ops);
-      } catch (Exception e) {
-        LOG.error("zkclient {}, Failed batched delete for {} (batch index {}, size {}), exception {}",
-            _uid, path, i, ops.size(), e);
-        throw new ZkClientException("Failed to delete " + path, e);
-      }
-    }
+    deleteInBatches(pathsChildrenFirst, null, -1);
   }
 
   /**
-   * BFS-walk the subtree rooted at {@code root} and return all znode paths
-   * ordered children-first (safe for sequential deletion). NoNode encountered
-   * during traversal is tolerated: the missing branch is skipped.
+   * Lists the subtree rooted at {@code path}, children before their parents, so the paths can be
+   * deleted in order. A branch deleted during the walk is skipped.
+   *
+   * @param path root of the subtree
+   * @return the paths of the subtree, or an empty list if {@code path} does not exist
+   * @throws ZkException if a child list cannot be read
    */
-  private List<String> collectSubtreeChildrenFirst(String root) {
-    List<String> orderedPaths = new ArrayList<>();
+  public List<String> getSubtreeChildrenFirst(String path) {
+    List<String> pathsParentsFirst = new ArrayList<>();
     Queue<String> queue = new LinkedList<>();
-    queue.offer(root);
+    queue.offer(path);
     while (!queue.isEmpty()) {
       String node = queue.poll();
       List<String> children;
@@ -2109,10 +2080,108 @@ public class ZkClient implements Watcher {
           queue.offer(node + "/" + child);
         }
       }
-      orderedPaths.add(node);
+      pathsParentsFirst.add(node);
     }
-    Collections.reverse(orderedPaths);
-    return orderedPaths;
+    Collections.reverse(pathsParentsFirst);
+    return pathsParentsFirst;
+  }
+
+  /**
+   * Deletes the given znodes, in order, with {@link #multi(Iterable)} calls of at most
+   * {@value #DELETE_RECURSIVE_BATCH_SIZE} ops each, which keeps every request well below
+   * {@code jute.maxbuffer}. Not atomic: on failure, the batches already sent stay deleted.
+   *
+   * <p>If a batch fails because a znode in it is already gone, for example deleted by another
+   * agent, or by a batch that committed before a connection loss and was then resent, that batch is
+   * redone one znode at a time and missing znodes are skipped. A child created under a znode being
+   * deleted fails the call as
+   * {@code ZkClientException -> ZkException -> KeeperException.NotEmptyException}, so callers can
+   * list the subtree again and retry.
+   *
+   * <p>If {@code fencePath} is set, every request also checks that it still has data version
+   * {@code fenceVersion}, so a subtree deleted and recreated by another agent meanwhile is never
+   * touched. The call then fails as {@code ZkClientException -> ZkBadVersionException} and deletes
+   * nothing more. If {@code fencePath} no longer exists, nothing under it is left either, so the
+   * call returns.
+   *
+   * @param pathsChildrenFirst znodes to delete, each listed before its parent
+   * @param fencePath znode whose data version guards the delete, or null for none
+   * @param fenceVersion expected data version of {@code fencePath}; ignored if it is null
+   * @throws ZkClientException if a znode cannot be deleted or the fence no longer holds
+   */
+  public void deleteInBatches(List<String> pathsChildrenFirst, String fencePath,
+      int fenceVersion) throws ZkClientException {
+    int maxDeletesPerBatch =
+        fencePath == null ? DELETE_RECURSIVE_BATCH_SIZE : DELETE_RECURSIVE_BATCH_SIZE - 1;
+    for (int i = 0; i < pathsChildrenFirst.size(); i += maxDeletesPerBatch) {
+      List<String> batch = pathsChildrenFirst.subList(i,
+          Math.min(i + maxDeletesPerBatch, pathsChildrenFirst.size()));
+      List<Op> ops = new ArrayList<>(batch.size() + 1);
+      if (fencePath != null) {
+        ops.add(Op.check(fencePath, fenceVersion));
+      }
+      for (String node : batch) {
+        ops.add(Op.delete(node, -1));
+      }
+      // multi() throws on any failed op, so a successful return means the whole batch was deleted.
+      try {
+        multi(ops);
+      } catch (ZkNoNodeException e) {
+        if (fencePath != null && !isFenceIntact(fencePath, fenceVersion)) {
+          return;
+        }
+        LOG.info("zkclient {}, A znode in a batched delete under {} is already gone, deleting the "
+            + "batch one znode at a time", _uid, batch.get(batch.size() - 1));
+        if (!deleteOneByOneSkippingMissing(batch, fencePath, fenceVersion)) {
+          return;
+        }
+      } catch (Exception e) {
+        LOG.error("zkclient {}, Failed batched delete under {} (batch index {}, size {}), "
+            + "exception {}", _uid, batch.get(batch.size() - 1), i, ops.size(), e);
+        throw new ZkClientException("Failed to delete " + batch.get(batch.size() - 1), e);
+      }
+    }
+  }
+
+  // Deletes the given znodes in order, one request each, skipping missing ones. Returns false if
+  // fencePath turned out to be gone, which means everything under it is gone too.
+  private boolean deleteOneByOneSkippingMissing(List<String> nodes, String fencePath,
+      int fenceVersion) {
+    for (String node : nodes) {
+      try {
+        if (fencePath == null) {
+          delete(node);
+        } else {
+          multi(Arrays.asList(Op.check(fencePath, fenceVersion), Op.delete(node, -1)));
+        }
+      } catch (ZkNoNodeException e) {
+        if (!isFenceIntact(fencePath, fenceVersion)) {
+          return false;
+        }
+      } catch (Exception e) {
+        LOG.error("zkclient {}, Failed to delete {}, exception {}", _uid, node, e);
+        throw new ZkClientException("Failed to delete " + node, e);
+      }
+    }
+    return true;
+  }
+
+  // Called after a NoNode. Returns false if fencePath is gone, and true if there is no fence or it
+  // still has fenceVersion, meaning the missing znode was another one. Throws if it was recreated.
+  private boolean isFenceIntact(String fencePath, int fenceVersion) {
+    if (fencePath == null) {
+      return true;
+    }
+    Stat stat = getStat(fencePath);
+    if (stat == null) {
+      return false;
+    }
+    if (stat.getVersion() != fenceVersion) {
+      throw new ZkClientException("Failed to delete under " + fencePath + ": it changed during "
+          + "the delete", new ZkBadVersionException("Expected version " + fenceVersion
+          + " of " + fencePath + " but found " + stat.getVersion()));
+    }
+    return true;
   }
 
   /**

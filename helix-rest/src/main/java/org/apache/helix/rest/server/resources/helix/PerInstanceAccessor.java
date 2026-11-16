@@ -768,8 +768,8 @@ public class PerInstanceAccessor extends AbstractHelixResource {
 
     HelixAdmin admin = getHelixAdmin();
     // Not finding the instance is reported as 404, so callers retrying a drop can treat it as done.
-    // A missing InstanceConfig alone doesn't mean the instance is gone: dropInstance deletes the
-    // config before the instance subtree, so a failed drop can leave the subtree behind, and a
+    // A missing InstanceConfig alone doesn't mean the instance is gone: dropInstance deletes a large
+    // instance's config before its subtree, so a failed drop can leave the subtree behind, and a
     // retried DELETE must reach dropInstance to finish that cleanup.
     BaseDataAccessor<ZNRecord> baseAccessor = getDataAccssor(clusterId).getBaseDataAccessor();
     if (!baseAccessor.exists(PropertyPathBuilder.instanceConfig(clusterId, instanceName),

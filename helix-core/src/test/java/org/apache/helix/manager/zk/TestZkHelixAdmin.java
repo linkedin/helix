@@ -33,6 +33,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
@@ -245,11 +246,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       Assert.fail("HelixManager failed disconnecting");
     }
 
-    // Tests that ZkClientException thrown from ZkClient should be caught
-    // and converted to HelixException. dropInstance is now a two-phase batched
-    // drop that delegates the subtree delete to ZkClient.deleteRecursively;
-    // simulate the racy NotEmpty case by having deleteRecursively throw the
-    // legacy exception shape so the existing 3-retry loop is exercised.
+    // Tests that ZkClientException thrown from ZkClient should be caught and converted to
+    // HelixException. A small instance is deleted in one multi(); simulate the
+    // racy NotEmpty case so the 3-retry loop is exercised.
     String instancePath = PropertyPathBuilder.instance(clusterName, config.getInstanceName());
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String liveInstancePath = PropertyPathBuilder.liveInstance(clusterName, instanceName);
@@ -261,7 +260,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         new ZkException("ZkException: failed to delete " + instancePath,
             new KeeperException.NotEmptyException(
                 "NotEmptyException: directory" + instancePath + " is not empty"))))
-        .when(mockZkClient).deleteRecursively(instancePath);
+        .when(mockZkClient).multi(Mockito.any());
 
     HelixAdmin helixAdminMock = new ZKHelixAdmin(mockZkClient);
     try {
@@ -2408,44 +2407,68 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  // dropInstance deletes the InstanceConfig before the instance subtree, so a crash between the
-  // two phases leaves a residual subtree. addInstance must refuse to re-add on top of it.
+  // A drop of a large instance that fails between its two phases leaves a leftover subtree.
+  // addInstance deletes it first, so the new instance does not inherit stale state.
   @Test
-  public void testAddInstanceRejectsResidualSubtree() {
+  public void testAddInstanceCleansLeftoverSubtree() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    final String clusterName = "TestAddInstanceRejectsResidualSubtree";
-    final String instanceName = "host_residual";
+    final String clusterName = "TestAddInstanceCleansLeftoverSubtree";
+    final String instanceName = "host_leftover";
 
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     admin.addCluster(clusterName, true);
-    String staleCurrentStatePath = createResidualInstanceSubtree(admin, clusterName, instanceName);
+    String staleCurrentStatePath = createLeftoverInstanceSubtree(admin, clusterName, instanceName);
 
-    try {
-      admin.addInstance(clusterName, new InstanceConfig(instanceName));
-      Assert.fail("addInstance should reject an instance with a residual subtree");
-    } catch (HelixConflictException expected) {
-      Assert.assertTrue(expected.getMessage().contains("residual subtree"), expected.getMessage());
-    }
-    // The rejected add must not recreate the config or touch the residual subtree.
-    Assert.assertFalse(
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+
+    Assert.assertFalse(_gZkClient.exists(staleCurrentStatePath));
+    Assert.assertTrue(
         _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
-    Assert.assertTrue(_gZkClient.exists(staleCurrentStatePath));
+    Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
+        InstanceType.PARTICIPANT));
 
     _gSetupTool.deleteCluster(clusterName);
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  // Recovery path for the residual subtree case: dropInstance resumes and clears the subtree,
-  // after which addInstance succeeds and starts from a clean subtree.
+  // A live instance is still using its subtree, so addInstance must not delete it.
   @Test
-  public void testAddInstanceSucceedsAfterDropClearsResidualSubtree() {
+  public void testAddInstanceRejectsLeftoverSubtreeOfLiveInstance() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    final String clusterName = "TestAddInstanceAfterResidualSubtreeDrop";
-    final String instanceName = "host_residual";
+    final String clusterName = "TestAddInstanceLeftoverSubtreeLive";
+    final String instanceName = "host_leftover_live";
 
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     admin.addCluster(clusterName, true);
-    String staleCurrentStatePath = createResidualInstanceSubtree(admin, clusterName, instanceName);
+    String staleCurrentStatePath = createLeftoverInstanceSubtree(admin, clusterName, instanceName);
+    _gZkClient.createPersistent(PropertyPathBuilder.liveInstance(clusterName, instanceName));
+
+    try {
+      admin.addInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("addInstance should reject a leftover subtree of a live instance");
+    } catch (HelixConflictException expected) {
+      Assert.assertTrue(expected.getMessage().contains("still live"), expected.getMessage());
+    }
+    Assert.assertTrue(_gZkClient.exists(staleCurrentStatePath));
+    Assert.assertFalse(
+        _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+
+    _gZkClient.delete(PropertyPathBuilder.liveInstance(clusterName, instanceName));
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Recovery path for the leftover subtree case: dropInstance resumes and clears the subtree,
+  // after which addInstance succeeds and starts from a clean subtree.
+  @Test
+  public void testAddInstanceSucceedsAfterDropClearsLeftoverSubtree() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestAddInstanceAfterLeftoverSubtreeDrop";
+    final String instanceName = "host_leftover";
+
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    String staleCurrentStatePath = createLeftoverInstanceSubtree(admin, clusterName, instanceName);
 
     admin.dropInstance(clusterName, new InstanceConfig(instanceName));
     Assert.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
@@ -2465,16 +2488,16 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   // listed as a cluster member, so e.g. rebalance doesn't assign partitions to it, and tag lookup
   // must skip it instead of throwing.
   @Test
-  public void testInstanceListsExcludeResidualSubtree() {
+  public void testInstanceListsExcludeLeftoverSubtree() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
-    final String clusterName = "TestInstanceListsExcludeResidualSubtree";
+    final String clusterName = "TestInstanceListsExcludeLeftoverSubtree";
     final String tag = "tagA";
     HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
     admin.addCluster(clusterName, true);
     InstanceConfig tagged = new InstanceConfig("host_tagged");
     tagged.addTag(tag);
     admin.addInstance(clusterName, tagged);
-    createResidualInstanceSubtree(admin, clusterName, "host_residual");
+    createLeftoverInstanceSubtree(admin, clusterName, "host_leftover");
 
     Assert.assertEquals(admin.getInstancesInCluster(clusterName),
         Collections.singletonList("host_tagged"));
@@ -2487,7 +2510,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
 
   // Simulates a dropInstance that deleted the InstanceConfig but crashed before deleting the
   // instance subtree. Returns the path of a stale CURRENTSTATES child left in that subtree.
-  private String createResidualInstanceSubtree(HelixAdmin admin, String clusterName,
+  private String createLeftoverInstanceSubtree(HelixAdmin admin, String clusterName,
       String instanceName) {
     admin.addInstance(clusterName, new InstanceConfig(instanceName));
     String staleCurrentStatePath =
@@ -2534,7 +2557,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  // Non-NotEmpty errors from deleteRecursively must NOT trigger the 3-retry
+  // Errors other than NotEmpty and NoNode must NOT trigger the 3-retry
   // loop. The production incident was 1880 threads stuck retrying
   // CONNECTIONLOSS for 24h; we want fail-fast for anything that isn't the
   // racy NotEmpty case.
@@ -2556,7 +2579,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     // Simulate an unrecoverable error (neither a NotEmpty nor a NoNode cause, so the
     // dropInstance retry loop must NOT retry).
     Mockito.doThrow(new ZkClientException("simulated unrecoverable ZK error"))
-        .when(mockZkClient).deleteRecursively(instancePath);
+        .when(mockZkClient).multi(Mockito.any());
 
     HelixAdmin helixAdminMock = new ZKHelixAdmin(mockZkClient);
     long start = System.currentTimeMillis();
@@ -2571,12 +2594,12 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     long elapsed = System.currentTimeMillis() - start;
     AssertJUnit.assertTrue("dropInstance should fail fast (took " + elapsed + " ms)", elapsed < 2000);
 
-    Mockito.verify(mockZkClient, Mockito.times(1)).deleteRecursively(instancePath);
+    Mockito.verify(mockZkClient, Mockito.times(1)).multi(Mockito.any());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  // deleteRecursively fails with NoNode when a znode disappears after the subtree walk, e.g. when
-  // a multi() batch commits but its response is lost and the resend finds the znodes gone.
+  // The atomic delete fails with NoNode when a znode disappears after the subtree walk, e.g. when
+  // its multi() commits but the response is lost and the resend finds the znodes gone.
   // dropInstance retries, re-walking only the znodes that remain.
   @Test
   public void testDropInstanceRetriesOnNoNode() {
@@ -2585,13 +2608,14 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     final String instanceName = "host_nonode";
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     RealmAwareZkClient mockZkClient = mockZkClientForOfflineInstance(clusterName, instanceName);
-    ZkClientException noNode = new ZkClientException("Failed to delete " + instancePath,
-        new ZkNoNodeException(new KeeperException.NoNodeException(instancePath + "/MESSAGES/m1")));
-    Mockito.doThrow(noNode).doNothing().when(mockZkClient).deleteRecursively(instancePath);
+    ZkNoNodeException noNode =
+        new ZkNoNodeException(new KeeperException.NoNodeException(instancePath + "/MESSAGES/m1"));
+    Mockito.doThrow(noNode).doReturn(Collections.emptyList()).when(mockZkClient)
+        .multi(Mockito.any());
 
     new ZKHelixAdmin(mockZkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
 
-    Mockito.verify(mockZkClient, Mockito.times(2)).deleteRecursively(instancePath);
+    Mockito.verify(mockZkClient, Mockito.times(2)).multi(Mockito.any());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
@@ -2602,9 +2626,8 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     final String instanceName = "host_nonode_repeated";
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     RealmAwareZkClient mockZkClient = mockZkClientForOfflineInstance(clusterName, instanceName);
-    Mockito.doThrow(new ZkClientException("Failed to delete " + instancePath,
-            new ZkNoNodeException(new KeeperException.NoNodeException(instancePath))))
-        .when(mockZkClient).deleteRecursively(instancePath);
+    Mockito.doThrow(new ZkNoNodeException(new KeeperException.NoNodeException(instancePath)))
+        .when(mockZkClient).multi(Mockito.any());
 
     try {
       new ZKHelixAdmin(mockZkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
@@ -2613,12 +2636,12 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       Assert.assertEquals(expected.getMessage(),
           "Failed to drop instance: " + instanceName + ". Retry times: 3");
     }
-    Mockito.verify(mockZkClient, Mockito.times(4)).deleteRecursively(instancePath);
+    Mockito.verify(mockZkClient, Mockito.times(4)).multi(Mockito.any());
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
   // End to end against real ZK: a message znode is deleted after the subtree walk but before the
-  // first multi() batch, so the batch fails with NoNode. dropInstance retries and completes.
+  // atomic multi(), so it fails with NoNode. dropInstance retries and completes.
   @Test
   public void testDropInstanceCompletesWhenZnodeDeletedMidDrop() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -2694,6 +2717,125 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     Assert.assertFalse(_gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
     _gSetupTool.deleteCluster(clusterName);
     System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // An instance whose config and subtree fit in one batch is deleted with a single atomic multi(),
+  // so a failed drop leaves nothing behind. A larger one is deleted in two phases: the config
+  // together with a fence on the subtree root, then the subtree in batches of at most
+  // DELETE_RECURSIVE_BATCH_SIZE ops that each check the fence.
+  @Test
+  public void testDropInstanceIsAtomicUnlessSubtreeExceedsOneBatch() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceAtomicOrBatched";
+    final int batchSize =
+        org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE;
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig("host_small"));
+    setupAdmin.addInstance(clusterName, new InstanceConfig("host_large"));
+    addMessages(clusterName, "host_large", batchSize);
+    String largeConfigPath = PropertyPathBuilder.instanceConfig(clusterName, "host_large");
+    String largeInstancePath = PropertyPathBuilder.instance(clusterName, "host_large");
+
+    List<List<String>> multiCalls = new ArrayList<>();
+    List<Boolean> largeConfigExisted = new ArrayList<>();
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
+        createZkClientBeforeEachMulti((callIndex, paths) -> {
+          multiCalls.add(paths);
+          largeConfigExisted.add(_gZkClient.exists(largeConfigPath));
+        });
+    try {
+      HelixAdmin admin = new ZKHelixAdmin(zkClient);
+      admin.dropInstance(clusterName, new InstanceConfig("host_small"));
+      Assert.assertEquals(multiCalls.size(), 1);
+      Assert.assertTrue(multiCalls.get(0)
+          .contains(PropertyPathBuilder.instanceConfig(clusterName, "host_small")));
+
+      multiCalls.clear();
+      largeConfigExisted.clear();
+      admin.dropInstance(clusterName, new InstanceConfig("host_large"));
+      Assert.assertEquals(multiCalls.get(0), Arrays.asList(largeConfigPath, largeInstancePath),
+          "The config is deleted together with the fence on the subtree root");
+      List<List<String>> batches = multiCalls.subList(1, multiCalls.size());
+      Assert.assertTrue(batches.size() > 1, "Expected batched deletes: " + batches.size());
+      for (int i = 0; i < batches.size(); i++) {
+        List<String> paths = batches.get(i);
+        Assert.assertTrue(paths.size() <= batchSize, "Batch too large: " + paths.size());
+        Assert.assertEquals(paths.get(0), largeInstancePath, "Each batch checks the fence first");
+        Assert.assertFalse(paths.contains(largeConfigPath));
+        Assert.assertFalse(largeConfigExisted.get(i + 1));
+      }
+      Assert.assertFalse(_gZkClient.exists(largeInstancePath));
+    } finally {
+      zkClient.close();
+      _gSetupTool.deleteCluster(clusterName);
+    }
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // An instance re-added while its large drop is between batches gets a new subtree root, which
+  // fails the fence check of the drop's remaining batches. The drop then stops without touching the
+  // re-added instance's znodes.
+  @Test
+  public void testDropInstanceKeepsInstanceReAddedDuringDrop() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceReAddedDuringDrop";
+    final String instanceName = "host_readded";
+    final int batchSize =
+        org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE;
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    addMessages(clusterName, instanceName, 2 * batchSize);
+
+    // Call 0 deletes the config and fences the root; re-add the instance before batch 1.
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
+        createZkClientBeforeEachMulti((callIndex, paths) -> {
+          if (callIndex == 1) {
+            setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+          }
+        });
+    try {
+      new ZKHelixAdmin(zkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("dropInstance should report that the instance was re-added");
+    } catch (HelixConflictException expected) {
+      Assert.assertTrue(expected.getMessage().contains("re-added"), expected.getMessage());
+    } finally {
+      zkClient.close();
+    }
+    Assert.assertTrue(
+        _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
+        InstanceType.PARTICIPANT));
+    Assert.assertTrue(_gZkClient.getChildren(
+        PropertyPathBuilder.instanceMessage(clusterName, instanceName)).isEmpty());
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  private void addMessages(String clusterName, String instanceName, int count) {
+    String messagesPath = PropertyPathBuilder.instanceMessage(clusterName, instanceName);
+    for (int i = 0; i < count; i++) {
+      _gZkClient.createPersistent(messagesPath + "/msg-" + i);
+    }
+  }
+
+  // Returns a ZkClient that calls beforeMulti with the call index (from 0) and the paths of the ops
+  // before each multi() call is sent.
+  private static org.apache.helix.zookeeper.impl.client.ZkClient createZkClientBeforeEachMulti(
+      BiConsumer<Integer, List<String>> beforeMulti) {
+    return new org.apache.helix.zookeeper.impl.client.ZkClient(ZK_ADDR) {
+      private int _callIndex = 0;
+
+      @Override
+      public List<OpResult> multi(Iterable<Op> ops) {
+        List<String> paths = new ArrayList<>();
+        ops.forEach(op -> paths.add(op.getPath()));
+        beforeMulti.accept(_callIndex++, paths);
+        return super.multi(ops);
+      }
+    };
   }
 
   // Mock ZK client for an instance that has a config and a subtree but is not live.
