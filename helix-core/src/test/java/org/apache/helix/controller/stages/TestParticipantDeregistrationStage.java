@@ -1,13 +1,21 @@
 package org.apache.helix.controller.stages;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
+import org.apache.helix.AccessOption;
+import org.apache.helix.BaseDataAccessor;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
+import org.apache.helix.HelixException;
+import org.apache.helix.HelixManager;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
 import org.apache.helix.common.ZkTestBase;
+import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
@@ -16,13 +24,24 @@ import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.ParticipantHistory;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.tools.ClusterVerifiers.BestPossibleExternalViewVerifier;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 
 public class TestParticipantDeregistrationStage extends ZkTestBase {
@@ -287,6 +306,100 @@ public class TestParticipantDeregistrationStage extends ZkTestBase {
       }
     }
     Assert.assertTrue(assigned, "Participant should have been assigned to at least one partition");
+  }
+
+  // A drop that fails after deleting the InstanceConfig leaves the instance out of the offline time
+  // map, so the stage must remember it and finish the drop on a later pass, but only while the
+  // instance is still un-registered: a re-added instance must not be dropped.
+  @Test
+  public void testFailedDeregistrationIsResumedOnLaterPass() throws Exception {
+    String clusterName = "TestDeregistrationResume";
+    String instanceName = "host_partial";
+    HelixAdmin admin = mock(HelixAdmin.class);
+    BaseDataAccessor<ZNRecord> zkAccessor = mock(BaseDataAccessor.class);
+    HelixManager manager = mockConnectedManager(clusterName, admin, zkAccessor);
+    doThrow(new HelixException("simulated failure after the config was deleted")).doNothing()
+        .when(admin).dropInstance(eq(clusterName), any(InstanceConfig.class));
+    ParticipantDeregistrationStage stage = new ParticipantDeregistrationStage();
+
+    // Pass 1: the instance is offline past the timeout and its drop fails partway.
+    stage.execute(deregistrationEvent(manager,
+        mockCache(clusterName, Collections.singletonMap(instanceName, 0L),
+            Collections.singletonMap(instanceName, new InstanceConfig(instanceName)))));
+    // Pass 2: the config is gone, so only the stage's own record leads it back to the instance.
+    setRegistrationInZk(zkAccessor, clusterName, instanceName, false, true);
+    ResourceControllerDataProvider configGone =
+        mockCache(clusterName, Collections.emptyMap(), Collections.emptyMap());
+    stage.execute(deregistrationEvent(manager, configGone));
+    verify(admin, times(2)).dropInstance(eq(clusterName),
+        argThat(config -> config.getInstanceName().equals(instanceName)));
+
+    // Pass 3: the drop finished, so nothing is retried.
+    stage.execute(deregistrationEvent(manager, configGone));
+    verify(admin, times(2)).dropInstance(eq(clusterName), any(InstanceConfig.class));
+  }
+
+  @Test
+  public void testFailedDeregistrationIsNotResumedAfterReAdd() throws Exception {
+    String clusterName = "TestDeregistrationNoResumeAfterReAdd";
+    String instanceName = "host_readded";
+    HelixAdmin admin = mock(HelixAdmin.class);
+    BaseDataAccessor<ZNRecord> zkAccessor = mock(BaseDataAccessor.class);
+    HelixManager manager = mockConnectedManager(clusterName, admin, zkAccessor);
+    doThrow(new HelixException("simulated failure after the config was deleted"))
+        .when(admin).dropInstance(eq(clusterName), any(InstanceConfig.class));
+    ParticipantDeregistrationStage stage = new ParticipantDeregistrationStage();
+
+    stage.execute(deregistrationEvent(manager,
+        mockCache(clusterName, Collections.singletonMap(instanceName, 0L),
+            Collections.singletonMap(instanceName, new InstanceConfig(instanceName)))));
+    // The instance was re-added before the next pass, but the cache doesn't show it yet.
+    setRegistrationInZk(zkAccessor, clusterName, instanceName, true, true);
+    stage.execute(deregistrationEvent(manager,
+        mockCache(clusterName, Collections.emptyMap(), Collections.emptyMap())));
+
+    verify(admin, times(1)).dropInstance(eq(clusterName), any(InstanceConfig.class));
+  }
+
+  private static HelixManager mockConnectedManager(String clusterName, HelixAdmin admin,
+      BaseDataAccessor<ZNRecord> zkAccessor) {
+    HelixManager manager = mock(HelixManager.class);
+    HelixDataAccessor accessor = mock(HelixDataAccessor.class);
+    when(manager.isConnected()).thenReturn(true);
+    when(manager.getClusterName()).thenReturn(clusterName);
+    when(manager.getClusterManagmentTool()).thenReturn(admin);
+    when(manager.getHelixDataAccessor()).thenReturn(accessor);
+    when(accessor.getBaseDataAccessor()).thenReturn(zkAccessor);
+    return manager;
+  }
+
+  private static ResourceControllerDataProvider mockCache(String clusterName,
+      Map<String, Long> offlineTimes, Map<String, InstanceConfig> instanceConfigs) {
+    ClusterConfig clusterConfig = new ClusterConfig(clusterName);
+    clusterConfig.setParticipantDeregistrationTimeout(0);
+    ResourceControllerDataProvider cache = mock(ResourceControllerDataProvider.class);
+    when(cache.getClusterName()).thenReturn(clusterName);
+    when(cache.getClusterConfig()).thenReturn(clusterConfig);
+    when(cache.getInstanceOfflineTimeMap()).thenReturn(offlineTimes);
+    when(cache.getLiveInstances()).thenReturn(Collections.emptyMap());
+    when(cache.getInstanceConfigMap()).thenReturn(instanceConfigs);
+    return cache;
+  }
+
+  private static void setRegistrationInZk(BaseDataAccessor<ZNRecord> zkAccessor,
+      String clusterName, String instanceName, boolean hasConfig, boolean hasSubtree) {
+    when(zkAccessor.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName),
+        AccessOption.PERSISTENT)).thenReturn(hasConfig);
+    when(zkAccessor.exists(PropertyPathBuilder.instance(clusterName, instanceName),
+        AccessOption.PERSISTENT)).thenReturn(hasSubtree);
+  }
+
+  private static ClusterEvent deregistrationEvent(HelixManager manager,
+      ResourceControllerDataProvider cache) {
+    ClusterEvent event = new ClusterEvent(manager.getClusterName(), ClusterEventType.Unknown);
+    event.addAttribute(AttributeName.helixmanager.name(), manager);
+    event.addAttribute(AttributeName.ControllerDataProvider.name(), cache);
+    return event;
   }
 
   @Override
