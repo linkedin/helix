@@ -76,6 +76,11 @@ public class MessageSelectionStage extends AbstractBaseStage {
     }
 
     MessageOutput output = new MessageOutput();
+    // Throttling later removes messages from the selected output in place, so keep a copy for
+    // convergence reporting.
+    boolean convergence = cache.getClusterConfig() != null
+        && cache.getClusterConfig().isConvergenceMonitoringEnabled();
+    MessageOutput snapshot = convergence ? new MessageOutput() : null;
 
     for (String resourceName : resourceMap.keySet()) {
       Resource resource = resourceMap.get(resourceName);
@@ -94,6 +99,9 @@ public class MessageSelectionStage extends AbstractBaseStage {
               stateConstraints, stateTransitionPriorities, stateModelDef,
               resource.isP2PMessageEnabled());
           output.addMessages(resourceName, partition, selectedMessages);
+          if (snapshot != null && !selectedMessages.isEmpty()) {
+            snapshot.addMessages(resourceName, partition, selectedMessages);
+          }
         }
       } catch (HelixException ex) {
         LogUtil.logError(LOG, _eventId,
@@ -101,6 +109,9 @@ public class MessageSelectionStage extends AbstractBaseStage {
       }
     }
     event.addAttribute(AttributeName.MESSAGES_SELECTED.name(), output);
+    if (snapshot != null) {
+      event.addAttribute(AttributeName.MESSAGES_SELECTED_SNAPSHOT.name(), snapshot);
+    }
   }
 
   private void increaseStateCnt(Map<String, Bounds> stateConstraints, String state,
