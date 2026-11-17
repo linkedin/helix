@@ -62,6 +62,7 @@ import org.apache.helix.manager.zk.ZKUtil;
 import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
+import org.apache.helix.model.ConvergenceStatus;
 import org.apache.helix.model.ControllerHistory;
 import org.apache.helix.model.CustomizedStateConfig;
 import org.apache.helix.model.HelixConfigScope;
@@ -167,6 +168,36 @@ public class ClusterAccessor extends AbstractHelixResource {
     clusterInfo.put(ClusterProperties.liveInstances.name(), liveInstances);
 
     return JSONRepresentation(clusterInfo);
+  }
+
+  /**
+   * Returns the cluster convergence report the leader controller published, with a
+   * {@code reportState} saying whether it can be trusted.
+   */
+  @ClusterAuth
+  @ResponseMetered(name = HttpConstants.READ_REQUEST)
+  @Timed(name = HttpConstants.READ_REQUEST)
+  @GET
+  @Path("{clusterId}/convergence")
+  public Response getClusterConvergence(@PathParam("clusterId") String clusterId) {
+    HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
+    PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
+    // Every cluster has a config, and a failed read here is an error rather than a 404.
+    ClusterConfig clusterConfig = dataAccessor.getProperty(keyBuilder.clusterConfig());
+    if (clusterConfig == null) {
+      return notFound(String.format("Cluster %s does not exist", clusterId));
+    }
+    boolean enabled = clusterConfig.isConvergenceMonitoringEnabled();
+    boolean managementMode = ConvergenceStatusResponseMapper.isManagementMode(
+        getHelixAdmin().getClusterManagementMode(clusterId));
+    if (!enabled || managementMode) {
+      // The answer does not depend on the record, so it is not read.
+      return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, null, null, null,
+          null, enabled, managementMode));
+    }
+    ConvergenceStatus report = dataAccessor.getProperty(keyBuilder.convergenceStatus());
+    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, null, report, report,
+        dataAccessor.getProperty(keyBuilder.controllerLeader()), true, false));
   }
 
   /**

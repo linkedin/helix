@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableMap;
@@ -120,6 +121,15 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   // The isolation reporting generation of the calculation running on this thread, so the
   // algorithm's callbacks report with the generation of the pipeline that started it.
   private final ThreadLocal<Long> _isolationGeneration = new ThreadLocal<>();
+  private final AtomicBoolean _servingComputationFailed = new AtomicBoolean(false);
+  private final AtomicBoolean _baselineComputationFailed = new AtomicBoolean(false);
+  private final AtomicReference<HelixRebalanceException.FailureCategory>
+      _servingFailureCategory = new AtomicReference<>();
+  // Whether the last run fell back and why, published together so a reader never sees one
+  // without the other.
+  private volatile LastRun _lastRun = LastRun.CLEAN;
+  // Set once a partial run has finished, so a new leader does not report its default flags as health.
+  private volatile boolean _servingOutcomeKnown;
 
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
@@ -376,6 +386,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   void reportAsyncFailure(HelixRebalanceException ex) {
     _rebalanceFailureCount.increment(1L);
     reportFailureCategory(ex);
+    _servingFailureCategory.set(ex.getFailureCategory());
+    _servingOutcomeKnown = true;
+    _servingComputationFailed.set(true);
   }
 
   /**
@@ -425,6 +438,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
    * GLOBAL_BASELINE phase, so it is reversible regardless of async mode. Null-tolerant.
    */
   void reportBaselineComputeStatus(boolean clean) {
+    _baselineComputationFailed.set(!clean);
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.updateWagedBaselineComputeFailing(!clean);
@@ -454,6 +468,9 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
    * Null-tolerant.
    */
   void reportPartialRebalanceSuccess() {
+    _servingComputationFailed.set(false);
+    _servingFailureCategory.set(null);
+    _servingOutcomeKnown = true;
     ClusterStatusMonitor monitor = _clusterStatusMonitor;
     if (monitor != null) {
       monitor.resetWagedFailureRollupGauges();
@@ -538,6 +555,12 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       _globalRebalanceRunner.resetChangeDetector();
     } finally {
       resetIsolationReporting();
+      // A new leadership term reports nothing until its own first run.
+      _servingComputationFailed.set(false);
+      _baselineComputationFailed.set(false);
+      _servingFailureCategory.set(null);
+      _servingOutcomeKnown = false;
+      _lastRun = LastRun.CLEAN;
     }
   }
 
@@ -579,11 +602,13 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
 
     Map<String, IdealState> newIdealStates;
     boolean usedFallback = false;
+    HelixRebalanceException.FailureCategory failure = null;
     try {
       // Calculate the target assignment based on the current cluster status.
       newIdealStates = computeBestPossibleStates(clusterData, resourceMap, currentStateOutput,
           algorithm);
     } catch (HelixRebalanceException ex) {
+      failure = ex.getFailureCategory();
       LOG.error("Failed to calculate the new assignments. category={} customerActionable={}",
           ex.getFailureCategory(), ex.isCustomerActionable(), ex);
       // Record the failure in metrics.
@@ -623,6 +648,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     if (monitor != null) {
       monitor.setWagedFallbackInUseGauge(usedFallback);
     }
+    _lastRun = usedFallback ? new LastRun(failure) : LastRun.CLEAN;
 
     // Construct the new best possible states according to the current state and target assignment.
     // Note that the new ideal state might be an intermediate state between the current state and
@@ -647,6 +673,29 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     LOG.info("Finish computing new ideal states for resources: {}",
         resourceMap.keySet().toString());
     return newIdealStates;
+  }
+
+  public WagedRebalanceStatus getConvergenceStatus() {
+    LastRun last = _lastRun;
+    HelixRebalanceException.FailureCategory category =
+        last._fallback ? last._category : _servingFailureCategory.get();
+    return new WagedRebalanceStatus(last._fallback, _servingComputationFailed.get(),
+        _baselineComputationFailed.get(), category, _servingOutcomeKnown || last._fallback);
+  }
+
+  private static final class LastRun {
+    static final LastRun CLEAN = new LastRun(false, null);
+    final boolean _fallback;
+    final HelixRebalanceException.FailureCategory _category;
+
+    LastRun(HelixRebalanceException.FailureCategory category) {
+      this(true, category);
+    }
+
+    private LastRun(boolean fallback, HelixRebalanceException.FailureCategory category) {
+      _fallback = fallback;
+      _category = category;
+    }
   }
 
   // Coordinate global rebalance and partial rebalance according to the cluster changes.
