@@ -1,75 +1,89 @@
 <div class="legend">
+  <span class="scale" aria-hidden="true">
+    <i *ngFor="let s of loadSteps" class="shade-{{ s }}"></i>
+    <span class="ticks"
+      ><b style="left: 0">0%</b><b style="left: 50%">50%</b
+      ><b style="left: 75%">75%</b><b style="left: 100%">100%</b></span
+    >
+  </span>
   <span
     class="legend-item"
     *ngFor="let band of bands"
     [attr.data-band]="band.id"
+    ><i class="swatch shade-{{ band.shade }}"></i>{{ band.label }}
+    <b>{{ heatmap.counts[band.id] || 0 }}</b></span
   >
-    <i class="swatch band-{{ band.id }}"></i>{{ band.label }}
-    <b>{{ counts[band.id] || 0 }}</b>
-  </span>
-  <span>
-    Tile size grows with load. Striped: not live. Outlined: under an operation.
-    !: ERROR replicas.
-  </span>
+  <span class="muted note"
+    >Striped: not live. Ringed: under an operation. !: ERROR replicas.</span
+  >
 </div>
 
 <div
-  #map
   class="map"
   role="group"
   aria-label="Instances by fault zone"
-  [style.height.px]="height"
+  [class.dense]="dense"
+  [style.--hi-columns]="heatmap.columns"
 >
   <section
     class="zone"
-    *ngFor="let box of boxes; trackBy: byZone"
-    [attr.data-zone]="box.zone.label"
-    [attr.aria-label]="
-      box.zone.label + ', ' + box.zone.tiles.length + ' instances'
-    "
-    [style.left.px]="box.x"
-    [style.top.px]="box.y"
-    [style.width.px]="box.w"
-    [style.height.px]="box.h"
+    *ngFor="let zone of heatmap.zones; trackBy: byZone"
+    [attr.data-zone]="zone.label"
+    [attr.aria-label]="zone.label + ', ' + zone.tiles.length + ' instances'"
   >
-    <div class="zone-head" *ngIf="box.head" [title]="box.zone.label">
-      {{ box.zone.label }} ({{ box.zone.tiles.length }})
-    </div>
-    <button
-      type="button"
-      *ngFor="let t of box.tiles; trackBy: byTile"
-      class="tile band-{{ t.value.band }}"
-      [class.offline]="!t.value.instance.live"
-      [class.op]="!!t.value.operation"
-      [class.selected]="t.value === selected"
-      [attr.aria-pressed]="t.value === selected"
-      [attr.data-instance]="t.value.instance.name"
-      [attr.aria-label]="t.value.label"
-      [title]="t.value.label"
-      [style.left.px]="t.x"
-      [style.top.px]="t.y"
-      [style.width.px]="t.w"
-      [style.height.px]="t.h"
-      (click)="select(t.value)"
+    <div
+      class="zone-head"
+      [title]="
+        zone.label +
+        ', ' +
+        zone.tiles.length +
+        ' instances, average ' +
+        percent(zone.mean) +
+        ', max ' +
+        percent(zone.max)
+      "
     >
-      <span class="name" *ngIf="t.w >= 44 && t.h >= 16">{{
-        t.value.instance.name
-      }}</span>
-      <span class="value" *ngIf="t.w >= 44 && t.h >= 32">{{
-        t.value.text
-      }}</span>
-      <span class="err-mark" *ngIf="t.value.instance.errorReplicas">!</span>
-    </button>
+      <i class="swatch shade-{{ zone.shade }}"></i>
+      <b>{{ zone.label }}</b>
+      <span>({{ zone.tiles.length }})</span>
+      <ng-container *ngIf="zone.mean !== null; else noStats">
+        <span class="stat">avg {{ percent(zone.mean) }}</span>
+        <span class="stat">max {{ percent(zone.max) }}</span>
+      </ng-container>
+      <ng-template #noStats><span class="stat">unknown</span></ng-template>
+    </div>
+    <div class="cells">
+      <button
+        type="button"
+        *ngFor="let t of zone.tiles; trackBy: byTile"
+        class="tile shade-{{ t.shade }}"
+        [class.offline]="!t.instance.live"
+        [class.op]="!!t.operation"
+        [class.over]="t.band === 'over'"
+        [class.selected]="t === selected"
+        [attr.aria-pressed]="t === selected"
+        [attr.data-instance]="t.instance.name"
+        [attr.aria-label]="t.label"
+        [title]="t.label"
+        (click)="select(t)"
+      >
+        <span class="value" *ngIf="!dense">{{
+          t.ratio === null ? '?' : t.text
+        }}</span>
+        <span class="err-mark" *ngIf="t.instance.errorReplicas">!</span>
+      </button>
+    </div>
   </section>
 </div>
 
-<aside class="detail" aria-live="polite">
-  <p class="muted" *ngIf="!selected">
-    Click a tile to see its usage, partitions and top resources.
-  </p>
-  <ng-container *ngIf="selected?.instance as i">
+<aside class="detail" [class.idle]="!selected" aria-live="polite">
+  <ng-container *ngIf="selected?.instance as i; else summary">
     <button type="button" class="close" (click)="select(null)">Close</button>
-    <h3>{{ i.name }}</h3>
+    <h3>
+      <ng-container *ngFor="let part of breakable(i.name)"
+        >{{ part }}<wbr
+      /></ng-container>
+    </h3>
     <div class="muted">
       {{ i.zone || 'No fault zone' }}, {{ i.live ? 'live' : 'not live' }},
       operation {{ i.operation || 'none' }}
@@ -84,7 +98,10 @@
     >
       <span>{{ k.key }}</span>
       <span class="mini"
-        ><i class="band-{{ k.band }}" [style.width.%]="k.ratio * 100"></i
+        ><i
+          class="shade-{{ shadeOf(k.ratio) }}"
+          [style.width.%]="k.ratio * 100"
+        ></i
       ></span>
       <span class="grow">{{ k.text }}</span>
     </div>
@@ -113,4 +130,10 @@
     </div>
     <p class="muted" *ngIf="!detail.resources.length">No replicas.</p>
   </ng-container>
+
+  <ng-template #summary>
+    <p class="muted">
+      Click a cell to see its usage, partitions and top resources.
+    </p>
+  </ng-template>
 </aside>

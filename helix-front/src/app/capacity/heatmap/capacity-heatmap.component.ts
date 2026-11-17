@@ -1,27 +1,25 @@
 import {
   ChangeDetectionStrategy,
-  ChangeDetectorRef,
   Component,
-  ElementRef,
   Input,
   OnChanges,
-  OnDestroy,
-  OnInit,
-  ViewChild,
 } from '@angular/core';
 
 import { CapacitySnapshot } from '../shared/capacity-snapshot.model';
 import {
   BANDS,
   buildHeatmap,
+  Heatmap,
   HeatTile,
   HeatZone,
   instanceDetail,
   InstanceDetail,
-  layoutHeatmap,
-  ZoneBox,
+  percent,
+  shadeOf,
 } from './heatmap.model';
-import { Tile } from './treemap';
+
+// above this many instances cells shrink and drop their text
+const DENSE = 800;
 
 @Component({
   selector: 'hi-capacity-heatmap',
@@ -29,54 +27,31 @@ import { Tile } from './treemap';
   styleUrls: ['./capacity-heatmap.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class CapacityHeatmapComponent implements OnInit, OnChanges, OnDestroy {
+export class CapacityHeatmapComponent implements OnChanges {
   @Input() snapshot: CapacitySnapshot | null = null;
   @Input() key = '';
   @Input() topStateOnly = false;
-  @ViewChild('map', { static: true }) map: ElementRef<HTMLElement>;
 
   readonly bands = BANDS;
-  zones: HeatZone[] = [];
-  boxes: ZoneBox[] = [];
-  counts: Record<string, number> = {};
-  height = 0;
+  readonly loadSteps = Array.from({ length: 21 }, (_, i) => `l${i}`);
+  readonly percent = percent;
+  readonly shadeOf = shadeOf;
+  heatmap: Heatmap = buildHeatmap(null, '', false);
+  dense = false;
   selected: HeatTile | null = null;
   detail: InstanceDetail | null = null;
-  private width = 0;
-  private observer: ResizeObserver | null = null;
-
-  constructor(private changes: ChangeDetectorRef) {}
-
-  ngOnInit() {
-    if (typeof ResizeObserver !== 'undefined') {
-      this.observer = new ResizeObserver(() => {
-        // runs outside the Angular zone, so render this view directly
-        if (this.map.nativeElement.clientWidth !== this.width) {
-          this.layout();
-          this.changes.detectChanges();
-        }
-      });
-      this.observer.observe(this.map.nativeElement);
-    }
-  }
 
   ngOnChanges() {
-    this.zones = buildHeatmap(this.snapshot, this.key, this.topStateOnly);
-    this.counts = {};
+    this.heatmap = buildHeatmap(this.snapshot, this.key, this.topStateOnly);
+    this.dense = (this.snapshot?.instances.length || 0) > DENSE;
     const name = this.selected?.instance.name;
     let selected: HeatTile | null = null;
-    this.zones.forEach((zone) =>
-      zone.tiles.forEach((tile) => {
-        this.counts[tile.band] = (this.counts[tile.band] || 0) + 1;
-        selected = tile.instance.name === name ? tile : selected;
+    this.heatmap.zones.forEach((zone) =>
+      zone.tiles.forEach((t) => {
+        selected = t.instance.name === name ? t : selected;
       }),
     );
     this.select(selected);
-    this.layout();
-  }
-
-  ngOnDestroy() {
-    this.observer?.disconnect();
   }
 
   select(tile: HeatTile | null) {
@@ -91,22 +66,16 @@ export class CapacityHeatmapComponent implements OnInit, OnChanges, OnDestroy {
       );
   }
 
-  byZone(_: number, box: ZoneBox) {
-    return box.zone.name;
+  // lets a host name wrap after its dots and underscores
+  breakable(name: string): string[] {
+    return name.split(/(?<=[._])/);
   }
 
-  byTile(_: number, tile: Tile<HeatTile>) {
-    return tile.value.instance.name;
+  byZone(_: number, zone: HeatZone) {
+    return zone.name;
   }
 
-  // Runs once per input change or width change, never per frame.
-  private layout() {
-    // 960 is only a fallback for an element that is not laid out yet
-    this.width = this.map?.nativeElement.clientWidth || 960;
-    this.height = Math.min(
-      720,
-      300 + 10 * (this.snapshot?.instances.length || 0),
-    );
-    this.boxes = layoutHeatmap(this.zones, this.width, this.height);
+  byTile(_: number, tile: HeatTile) {
+    return tile.instance.name;
   }
 }
