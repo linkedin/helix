@@ -30,6 +30,8 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
 import { ConvergencePanelComponent } from './convergence/convergence-panel.component';
 import { ConvergenceService } from './convergence/convergence.service';
 
+import { ResizableColumnsDirective } from './resizable/resizable-columns.directive';
+
 @NgModule({
   imports: [
     CommonModule,
@@ -58,6 +60,7 @@ import { ConvergenceService } from './convergence/convergence.service';
     ThemeToggleComponent,
     CommandPaletteComponent,
     ConvergencePanelComponent,
+    ResizableColumnsDirective,
   ],
   exports: [
     RouterModule,
@@ -76,6 +79,7 @@ import { ConvergenceService } from './convergence/convergence.service';
     ThemeToggleComponent,
     CommandPaletteComponent,
     ConvergencePanelComponent,
+    ResizableColumnsDirective,
   ],
   providers: [HelperService, ConvergenceService],
 })

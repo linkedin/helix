@@ -61,4 +61,15 @@ describe('ClusterComponent', () => {
     const compiled = fixture.debugElement.nativeElement;
     expect(compiled.querySelector('hi-cluster-list')).toBeDefined();
   });
+
+  it('announces a resize when the list width changes', async () => {
+    component.container = { updateContentMargins() {} } as any;
+    let resized = 0;
+    const count = () => resized++;
+    window.addEventListener('resize', count);
+    component.resetWidth();
+    await new Promise((done) => setTimeout(done));
+    window.removeEventListener('resize', count);
+    expect(resized).toBe(1);
+  });
 });

@@ -59,6 +59,13 @@
   padding: 0 16px !important;
 }
 
+@media (max-width: 900px) {
+  .mat-tab-link {
+    padding: 0 10px !important;
+    font-size: 13px;
+  }
+}
+
 .datatable-scroll {
   width: 100% !important;
 }
@@ -144,4 +151,112 @@ body {
     color: var(--hi-tonal-text, #005a9d);
     font-weight: 500;
   }
+}
+
+// tables with hiResizableColumns: sideways scroll in their own box, a resize
+// handle on each header edge, and numbers that line up
+.hi-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+table.hi-resizable {
+  font-variant-numeric: tabular-nums;
+
+  th {
+    position: relative;
+    // widths are written as the outer width, so padding must not be added again
+    box-sizing: border-box;
+  }
+
+  // the last handle stays inside the table so it never adds a scrollbar
+  th:last-child > .hi-col-handle {
+    right: 0;
+  }
+
+  &.hi-columns-fixed {
+    table-layout: fixed;
+
+    th,
+    td {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+}
+
+.hi-col-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 1;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 20%;
+    left: 3px;
+    width: 2px;
+    height: 60%;
+    border-radius: 1px;
+  }
+
+  &:hover::after,
+  &.active::after,
+  &:focus-visible::after {
+    background: var(--hi-primary-text, #0075ac);
+  }
+
+  // a focused handle is a full-height bar, not the hairline hover shows
+  &:focus-visible {
+    outline: none;
+
+    &::after {
+      top: 0;
+      left: 2px;
+      width: 4px;
+      height: 100%;
+    }
+  }
+}
+
+// macOS hides scrollbars until scrolling, so a table that scrolls sideways
+// gives no hint that more columns exist; keep a thin bar visible
+.hi-table-scroll,
+.ngx-datatable.scroll-horz .datatable-body {
+  scrollbar-width: thin;
+
+  &::-webkit-scrollbar {
+    height: 10px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border-radius: 5px;
+    background: var(--hi-text-secondary, rgba(0, 0, 0, 0.35));
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--hi-track, rgba(0, 0, 0, 0.06));
+  }
+}
+
+body.hi-col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.datatable-body-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+// keyboard focus is always visible on tabs and buttons
+.mat-tab-link:focus-visible,
+.mat-button-base:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--hi-primary-text, #0075ac);
+  outline-offset: 2px;
 }

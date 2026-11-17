@@ -63,6 +63,7 @@
     [messages]="{ emptyMessage: 'No partitions match this filter.' }"
     selectionType="single"
     (select)="onSelect($event)"
+    (resize)="widths.save($event)"
   >
     <ngx-datatable-column
       [width]="50"
@@ -77,7 +78,7 @@
     </ngx-datatable-column>
     <ngx-datatable-column
       name="Status"
-      [width]="110"
+      [width]="widths.get('Status', 110)"
       [sortable]="false"
       [canAutoResize]="false"
     >
@@ -85,13 +86,21 @@
         <span class="badge" [ngClass]="row.status">{{ row.status }}</span>
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Name" [width]="220" [sortable]="false">
+    <ngx-datatable-column
+      name="Name"
+      [width]="widths.get('Name', 220)"
+      [sortable]="false"
+    >
       <ng-template let-row="row" ngx-datatable-cell-template>
         <div class="wrap" [title]="row.name">{{ row.name }}</div>
         <div class="muted">{{ row.explanation }}</div>
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Replicas" [width]="480" [sortable]="false">
+    <ngx-datatable-column
+      name="Replicas"
+      [width]="widths.get('Replicas', 480)"
+      [sortable]="false"
+    >
       <ng-template let-value="value" ngx-datatable-cell-template>
         <span
           *ngFor="let replica of value"

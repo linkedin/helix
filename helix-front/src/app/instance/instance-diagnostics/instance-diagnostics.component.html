@@ -111,7 +111,10 @@
         /></label>
       </div>
       <div class="table-scroll" *ngIf="filteredErrors.length">
-        <table aria-label="Recorded transition error paths">
+        <table
+          aria-label="Recorded transition error paths"
+          hiResizableColumns="instance-errors"
+        >
           <thead>
             <tr>
               <th>Resource</th>
@@ -224,7 +227,11 @@
         Reading this page of messages.
       </p>
       <div class="table-scroll" *ngIf="messages.length">
-        <table class="messages-table" aria-label="Queued message evidence">
+        <table
+          class="messages-table"
+          aria-label="Queued message evidence"
+          hiResizableColumns="instance-messages"
+        >
           <thead>
             <tr>
               <th>Message / state</th>

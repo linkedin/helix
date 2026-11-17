@@ -29,12 +29,15 @@ type InstanceFilter =
   | 'swap-in'
   | 'unknown';
 
+import { ColumnWidths } from '../../shared/resizable/column-widths';
+
 @Component({
   selector: 'hi-instance-list',
   templateUrl: './instance-list.component.html',
   styleUrls: ['./instance-list.component.scss'],
 })
 export class InstanceListComponent implements OnInit, OnDestroy {
+  readonly widths = new ColumnWidths('instances');
   isLoading = true;
   error = '';
   updated: number | null = null;
