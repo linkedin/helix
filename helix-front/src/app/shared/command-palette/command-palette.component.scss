@@ -9,8 +9,11 @@
   height: 34px;
   margin-right: 8px;
   padding: 0 8px 0 10px;
+  // plain fallbacks for browsers without color-mix() (Chrome before 111)
+  border: 1px solid rgba(128, 128, 128, 0.35);
   border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 8px;
+  background: rgba(128, 128, 128, 0.08);
   background: color-mix(in srgb, currentColor 5%, transparent);
   color: inherit;
   font: inherit;
@@ -19,6 +22,7 @@
   transition: background-color var(--hi-motion-fast, 120ms) var(--hi-ease, ease);
 
   &:hover {
+    background: rgba(128, 128, 128, 0.16);
     background: color-mix(in srgb, currentColor 10%, transparent);
   }
 
@@ -41,7 +45,9 @@
   }
 
   kbd {
+    border-color: rgba(128, 128, 128, 0.45);
     border-color: color-mix(in srgb, currentColor 28%, transparent);
+    background: rgba(128, 128, 128, 0.12);
     background: color-mix(in srgb, currentColor 8%, transparent);
     color: inherit;
   }

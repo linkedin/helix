@@ -25,6 +25,16 @@
   white-space: nowrap;
   border-radius: 6px;
   color: var(--tone);
-  background-color: color-mix(in srgb, var(--tone) 12%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 35%, transparent);
+  // browsers without color-mix() (Chrome before 111) get a neutral tint and a
+  // full-strength ring; a fallback declared in the same rule would not help,
+  // since a value with var() only fails after the cascade has picked it
+  background-color: rgba(128, 128, 128, 0.12);
+  box-shadow: inset 0 0 0 1px var(--tone);
+}
+
+@supports (background-color: color-mix(in srgb, red 12%, transparent)) {
+  .status-disabled {
+    background-color: color-mix(in srgb, var(--tone) 12%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 35%, transparent);
+  }
 }
