@@ -90,12 +90,72 @@ describe('ClusterOverviewComponent', () => {
     const fixture = create();
 
     expect(getSnapshot).toHaveBeenCalledWith('Demo');
-    expect(texts(fixture, 'verdict')).toEqual([
-      'Healthy: Helix reports nothing to act on.',
-    ]);
+    expect(texts(fixture, 'verdict')).toEqual(['Healthy: nothing to act on']);
     expect(fixture.componentInstance.tone).toBe('ok');
     expect(texts(fixture, 'issue')).toEqual([]);
     expect(texts(fixture, 'see-all')).toEqual([]);
+  });
+
+  it('folds a blocked or untrusted convergence report into the verdict', () => {
+    const fixture = create();
+    const overview = fixture.componentInstance;
+    const report = (status: string, reportState = 'FRESH') =>
+      ({
+        clusterId: 'Demo',
+        status,
+        primaryReason: 'NONE',
+        reportState,
+      }) as any;
+
+    overview.onConvergence(report('BLOCKED'));
+    fixture.detectChanges();
+    expect(texts(fixture, 'verdict')).toEqual([
+      'Needs attention: convergence blocked',
+    ]);
+    expect(overview.tone).toBe('error');
+
+    overview.onConvergence(report('UNKNOWN', 'REPORT_STALE'));
+    fixture.detectChanges();
+    expect(texts(fixture, 'verdict')).toEqual([
+      'Needs attention: convergence report is stale',
+    ]);
+    expect(overview.tone).toBe('warning');
+
+    overview.onConvergence(report('IN_PROGRESS'));
+    fixture.detectChanges();
+    expect(overview.tone).toBe('ok');
+
+    overview.onConvergence(report('UNKNOWN', 'MONITORING_DISABLED'));
+    fixture.detectChanges();
+    expect(texts(fixture, 'verdict')).toEqual([
+      'Convergence is not monitored, so this does not show whether replicas match the target.',
+    ]);
+    expect(overview.tone).toBe('');
+  });
+
+  it('never turns green when a convergence read fails', () => {
+    const fixture = create();
+    const overview = fixture.componentInstance;
+
+    overview.onConvergenceReadFailed();
+    fixture.detectChanges();
+    expect(texts(fixture, 'verdict')).toEqual([
+      'Needs attention: convergence status could not be read',
+    ]);
+    expect(overview.tone).toBe('warning');
+
+    overview.onConvergence({
+      clusterId: 'Demo',
+      status: 'BLOCKED',
+      primaryReason: 'NONE',
+      reportState: 'FRESH',
+    } as any);
+    overview.onConvergenceReadFailed();
+    fixture.detectChanges();
+    expect(texts(fixture, 'verdict')).toEqual([
+      'Needs attention: convergence blocked',
+    ]);
+    expect(overview.tone).toBe('error');
   });
 
   it('shows the worst five issues, key numbers and read times', () => {
@@ -124,7 +184,7 @@ describe('ClusterOverviewComponent', () => {
     const component = fixture.componentInstance;
 
     expect(texts(fixture, 'verdict')).toEqual([
-      'Needs attention: 4 critical, 3 warnings.',
+      'Needs attention: 4 critical issues, 3 warnings',
     ]);
     expect(component.tone).toBe('error');
     expect(
@@ -144,13 +204,13 @@ describe('ClusterOverviewComponent', () => {
     ]);
     expect(texts(fixture, 'see-all')).toEqual(['See all 9 in Diagnostics']);
     expect(texts(fixture, 'card')).toEqual([
-      '1 / 2 instances live 1 with no live session.',
-      '1 not enabled or under an operation 1 DISABLE',
-      '4 resources 3 WAGED, 1 not WAGED. 1 disabled, 2 enabled with no external view.',
-      '2 ERROR replicas On 1 instance.',
-      '1 over WAGED capacity 1 with unknown capacity. Hottest: n3 at 120% of CU.',
-      'ctl controller leader Holds leadership.',
-      'maintenance cluster mode Reason: upgrade.',
+      '1 / 2 instances live 1 without a live session',
+      '1 disabled or in an operation 1 disabled',
+      '4 resources 3 WAGED, 1 non-WAGED, 1 disabled, 2 missing an external view',
+      '2 ERROR replicas On 1 instance',
+      '1 over WAGED capacity Hottest: n3 at 120% of CU, 1 with unknown capacity',
+      'ctl controller leader Holds leadership',
+      'Maintenance cluster mode Reason: upgrade',
     ]);
     expect(component.cards.map((c) => c.link)).toEqual([
       '../topology',
@@ -178,17 +238,37 @@ describe('ClusterOverviewComponent', () => {
     expect(component.tone).toBe('warning');
     expect(component.updated).toBeNull();
     expect(texts(fixture, 'card')).toEqual([
-      '1 / 1 instances live All have a live session.',
-      '0 not enabled or under an operation All ENABLE.',
-      '1 resources 1 WAGED, 0 not WAGED. 0 disabled, 0 enabled with no external view.',
-      'unknown ERROR replicas Could not read the capacity snapshot.',
-      'unknown over WAGED capacity Could not read the capacity snapshot.',
-      'unknown controller leader Could not read the capacity snapshot.',
-      'unknown cluster mode Could not read the capacity snapshot.',
+      '1 / 1 instances live All have a live session',
+      '0 disabled or in an operation All enabled',
+      '1 resource 1 WAGED, 0 non-WAGED',
+      'Unknown ERROR replicas Could not read the capacity snapshot',
+      'Unknown over WAGED capacity Could not read the capacity snapshot',
+      'Unknown controller leader Could not read the capacity snapshot',
+      'Unknown cluster mode Could not read the capacity snapshot',
     ]);
     const [readTimes] = texts(fixture, 'read-times');
     expect(readTimes).not.toContain('sample taken at');
     expect(readTimes).toContain('Instances and resources were read at');
+  });
+
+  it('keeps the large size for counts only', () => {
+    const overview = create().componentInstance;
+    expect(['3 / 4', 0, 12].map((v) => overview.isWord(v))).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(
+      ['Normal', 'Unknown', 'controller_1'].map((v) => overview.isWord(v)),
+    ).toEqual([true, true, true]);
+  });
+
+  it('reads the convergence panel again on the one refresh', () => {
+    const fixture = create();
+    const panel = { load: jest.fn() };
+    (fixture.componentInstance as any).panel = panel;
+    fixture.componentInstance.load();
+    expect(panel.load).toHaveBeenCalledTimes(1);
   });
 
   it('drops a superseded read on refresh and on destroy', () => {

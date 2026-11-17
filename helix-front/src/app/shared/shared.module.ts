@@ -27,6 +27,8 @@ import { DisabledLabelComponent } from './disabled-label/disabled-label.componen
 import { ListStatusComponent } from './list-status/list-status.component';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
+import { ConvergencePanelComponent } from './convergence/convergence-panel.component';
+import { ConvergenceService } from './convergence/convergence.service';
 
 @NgModule({
   imports: [
@@ -55,6 +57,7 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     ListStatusComponent,
     ThemeToggleComponent,
     CommandPaletteComponent,
+    ConvergencePanelComponent,
   ],
   exports: [
     RouterModule,
@@ -72,7 +75,8 @@ import { ThemeToggleComponent } from './theme-toggle/theme-toggle.component';
     ListStatusComponent,
     ThemeToggleComponent,
     CommandPaletteComponent,
+    ConvergencePanelComponent,
   ],
-  providers: [HelperService],
+  providers: [HelperService, ConvergenceService],
 })
 export class SharedModule {}

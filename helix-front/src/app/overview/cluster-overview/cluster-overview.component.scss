@@ -1,6 +1,9 @@
 @use '../../shared/diagnostics';
 
 .diagnostics {
+  .convergence {
+    margin-bottom: 14px;
+  }
   .verdict {
     font-size: 15px;
     font-weight: 500;
@@ -13,8 +16,8 @@
   .summary-card {
     strong {
       overflow-wrap: anywhere;
-      // controller names are long words, keep them on one line where possible
-      &.long {
+      // only counts get the large size; words such as Normal or a controller name stay smaller
+      &.word {
         font-size: 16px;
         font-weight: 500;
         line-height: 1.5;
