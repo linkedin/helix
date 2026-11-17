@@ -251,8 +251,11 @@ public class DelayedRebalanceUtil {
       Set<String> offlineOrDisabledInstances, Map<String, Long> instanceOfflineTimeMap,
       Set<String> liveNodes, Map<String, InstanceConfig> instanceConfigMap, long delay,
       ClusterConfig clusterConfig, HelixManager manager) {
+    // REBALANCE_SCHEDULER is shared by every cluster this controller leads, so key by cluster too.
+    String timerKey =
+        manager == null ? resourceName : manager.getClusterName() + "/" + resourceName;
     if (!isDelayedRebalanceEnabled) {
-      REBALANCE_SCHEDULER.removeScheduledRebalance(resourceName);
+      REBALANCE_SCHEDULER.removeScheduledRebalance(timerKey);
       return;
     }
 
@@ -268,12 +271,12 @@ public class DelayedRebalanceUtil {
     }
 
     if (nextRebalanceTime == Long.MAX_VALUE) {
-      long startTime = REBALANCE_SCHEDULER.removeScheduledRebalance(resourceName);
+      long startTime = REBALANCE_SCHEDULER.removeScheduledRebalance(timerKey);
       LOG.debug("Remove exist rebalance timer for resource {} at {}", resourceName, startTime);
     } else {
-      long currentScheduledTime = REBALANCE_SCHEDULER.getRebalanceTime(resourceName);
+      long currentScheduledTime = REBALANCE_SCHEDULER.getRebalanceTime(timerKey);
       if (currentScheduledTime < 0 || currentScheduledTime > nextRebalanceTime) {
-        REBALANCE_SCHEDULER.scheduleRebalance(manager, resourceName, nextRebalanceTime);
+        REBALANCE_SCHEDULER.scheduleRebalance(manager, timerKey, nextRebalanceTime);
         LOG.debug("Set next rebalance time for resource {} at time {}", resourceName,
             nextRebalanceTime);
       }

@@ -21,8 +21,10 @@ package org.apache.helix.controller.rebalancer.util;
 
 import java.util.Collections;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.helix.HelixManager;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
@@ -31,6 +33,9 @@ import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class TestDelayedRebalanceUtil {
   @DataProvider
@@ -86,5 +91,42 @@ public class TestDelayedRebalanceUtil {
         clusterConfig);
     Assert.assertEquals(activeNodes, recentDisable ? nodes : Collections.emptySet());
     Assert.assertEquals(clusterConfig.getRecord(), original);
+  }
+
+  @DataProvider
+  public Object[][] expiryOrders() {
+    return new Object[][] {{500L, 1000L}, {1000L, 500L}};
+  }
+
+  // One controller can lead several clusters with the same resource name. Each cluster's
+  // delay-expiry timer must still run its own pipeline.
+  @Test(dataProvider = "expiryOrders")
+  public void testDelayTimerIsPerCluster(long firstEndsInMs, long secondEndsInMs)
+      throws InterruptedException {
+    String resource = "resource_" + firstEndsInMs;
+    CountDownLatch first = scheduleExpiry("first_" + firstEndsInMs, resource, firstEndsInMs);
+    CountDownLatch second = scheduleExpiry("second_" + firstEndsInMs, resource, secondEndsInMs);
+    Assert.assertTrue(first.await(5, TimeUnit.SECONDS));
+    Assert.assertTrue(second.await(5, TimeUnit.SECONDS));
+  }
+
+  // The returned latch opens when the timer fires, the only manager call off the test thread.
+  private static CountDownLatch scheduleExpiry(String cluster, String resource, long endsInMs) {
+    long delay = 1000L;
+    CountDownLatch fired = new CountDownLatch(1);
+    Thread caller = Thread.currentThread();
+    HelixManager manager = mock(HelixManager.class);
+    when(manager.getClusterName()).thenAnswer(invocation -> {
+      if (Thread.currentThread() != caller) {
+        fired.countDown();
+      }
+      return cluster;
+    });
+    String node = cluster + "_node";
+    DelayedRebalanceUtil.setRebalanceScheduler(resource, true, Collections.singleton(node),
+        Collections.singletonMap(node, System.currentTimeMillis() - delay + endsInMs),
+        Collections.emptySet(), Collections.singletonMap(node, new InstanceConfig(node)), delay,
+        new ClusterConfig(cluster), manager);
+    return fired;
   }
 }
