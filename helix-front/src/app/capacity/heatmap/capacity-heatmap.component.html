@@ -1,10 +1,21 @@
 <div class="legend">
   <span class="scale" aria-hidden="true">
-    <i *ngFor="let s of loadSteps" class="shade-{{ s }}"></i>
-    <span class="ticks"
-      ><b style="left: 0">0%</b><b style="left: 50%">50%</b
-      ><b style="left: 75%">75%</b><b style="left: 100%">100%</b></span
-    >
+    <ng-container *ngIf="mode === 'load'; else medianScale">
+      <i *ngFor="let s of loadSteps" class="shade-{{ s }}"></i>
+      <span class="ticks"
+        ><b style="left: 0">0%</b><b style="left: 50%">50%</b
+        ><b style="left: 75%">75%</b><b style="left: 100%">100%</b></span
+      >
+    </ng-container>
+    <ng-template #medianScale>
+      <i *ngFor="let s of medianSteps" class="shade-{{ s }}"></i>
+      <span class="ticks"
+        ><b style="left: 0">50% below</b
+        ><b style="left: 50%"
+          >{{ heatmap.basis }} {{ percent(heatmap.reference) }}</b
+        ><b style="left: 100%">50% above</b></span
+      >
+    </ng-template>
   </span>
   <span
     class="legend-item"
@@ -13,21 +24,44 @@
     ><i class="swatch shade-{{ band.shade }}"></i>{{ band.label }}
     <b>{{ heatmap.counts[band.id] || 0 }}</b></span
   >
+  <label class="find">
+    <input
+      type="search"
+      placeholder="Find instance"
+      aria-label="Find instance"
+      [value]="queryText"
+      (input)="find($any($event.target).value)"
+      (keydown.enter)="findFirst()"
+    />
+    <span class="muted" *ngIf="query" aria-live="polite"
+      >{{ matches.size }} found</span
+    >
+  </label>
+  <span class="muted" *ngIf="mode === 'median' && heatmap.basis === 'mean'"
+    >The median is 0%, so cells are compared with the mean.</span
+  >
   <span class="muted note"
     >Striped: not live. Ringed: under an operation. !: ERROR replicas.</span
   >
 </div>
 
 <div
+  #map
   class="map"
   role="group"
-  aria-label="Instances by fault zone"
+  [attr.aria-label]="byZone ? 'Instances by fault zone' : 'All instances'"
   [class.dense]="dense"
+  [class.flat]="!byZone"
+  [class.finding]="!!query"
   [style.--hi-columns]="heatmap.columns"
+  (mouseover)="showCard($event)"
+  (focusin)="showCard($event)"
+  (mouseleave)="hideCard()"
+  (focusout)="hideCard()"
 >
   <section
     class="zone"
-    *ngFor="let zone of heatmap.zones; trackBy: byZone"
+    *ngFor="let zone of heatmap.zones; trackBy: zoneId"
     [attr.data-zone]="zone.label"
     [attr.aria-label]="zone.label + ', ' + zone.tiles.length + ' instances'"
   >
@@ -60,11 +94,11 @@
         [class.offline]="!t.instance.live"
         [class.op]="!!t.operation"
         [class.over]="t.band === 'over'"
+        [class.match]="matches.has(t.instance.name)"
         [class.selected]="t === selected"
         [attr.aria-pressed]="t === selected"
         [attr.data-instance]="t.instance.name"
         [attr.aria-label]="t.label"
-        [title]="t.label"
         (click)="select(t)"
       >
         <span class="value" *ngIf="!dense">{{
@@ -74,6 +108,18 @@
       </button>
     </div>
   </section>
+
+  <div
+    class="hover-card"
+    *ngIf="hover"
+    role="tooltip"
+    [class.above]="!hover.below"
+    [style.left.px]="hover.x"
+    [style.top.px]="hover.y"
+  >
+    <b>{{ hover.tile.short }}</b>
+    <span>{{ hover.tile.label }}</span>
+  </div>
 </div>
 
 <aside class="detail" [class.idle]="!selected" aria-live="polite">
@@ -99,7 +145,7 @@
       <span>{{ k.key }}</span>
       <span class="mini"
         ><i
-          class="shade-{{ shadeOf(k.ratio) }}"
+          class="shade-{{ loadShade(k.ratio) }}"
           [style.width.%]="k.ratio * 100"
         ></i
       ></span>
@@ -132,8 +178,36 @@
   </ng-container>
 
   <ng-template #summary>
-    <p class="muted">
-      Click a cell to see its usage, partitions and top resources.
-    </p>
+    <h4 *ngIf="byZone">Zones, hottest first</h4>
+    <button
+      type="button"
+      class="row zone-row"
+      *ngFor="let zone of byZone ? zonesByLoad : []"
+      (click)="revealZone(zone)"
+    >
+      <span class="name" [title]="zone.label">{{ zone.label }}</span>
+      <span class="mini"
+        ><i
+          class="shade-{{ loadShade(zone.mean) }}"
+          [style.width.%]="zone.mean * 100"
+        ></i
+      ></span>
+      <span class="num">{{ percent(zone.mean) }}</span>
+      <span class="num muted" *ngIf="zone.max !== null"
+        >max {{ percent(zone.max) }}</span
+      >
+    </button>
+    <h4 *ngIf="heatmap.hottest.length">Hottest instances</h4>
+    <button
+      type="button"
+      class="row zone-row"
+      *ngFor="let t of heatmap.hottest"
+      (click)="reveal(t)"
+    >
+      <span class="name grow" [title]="t.instance.name">{{ t.short }}</span>
+      <span class="muted">{{ t.instance.zone || 'No fault zone' }}</span>
+      <span class="num">{{ t.text }}</span>
+    </button>
+    <p class="muted">Click a cell for its usage, partitions and resources.</p>
   </ng-template>
 </aside>
