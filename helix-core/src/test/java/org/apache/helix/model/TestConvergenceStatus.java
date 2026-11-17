@@ -64,6 +64,48 @@ public class TestConvergenceStatus {
   }
 
   @Test
+  public void testClusterRecordListsOnlyResourcesThatNeedAttention() {
+    ConvergenceStatus cluster = new ConvergenceStatus("cluster");
+    cluster.setControllerSessionId("s1");
+    ConvergenceStatus db = new ConvergenceStatus("db");
+    db.setStatus(ConvergenceStatus.Status.BLOCKED);
+    db.setPrimaryReason(ConvergenceStatus.Reason.ERROR_STATE);
+    db.setUnconvergedSince(5L);
+    db.setStatusCounts(Collections.singletonMap(ConvergenceStatus.Status.BLOCKED, 2));
+    cluster.putResourceReport("db", db);
+
+    ConvergenceStatus read = new ConvergenceStatus(new ZNRecord(cluster.getRecord()));
+    Assert.assertTrue(read.getRecord().getBooleanField(ZNRecord.ENABLE_COMPRESSION_BOOLEAN_FIELD,
+        false));
+    Assert.assertEquals(read.getListedResources(), Collections.singletonList("db"));
+    ConvergenceStatus listed = read.getResourceReport("db");
+    Assert.assertEquals(listed.getStatus(), ConvergenceStatus.Status.BLOCKED);
+    Assert.assertEquals(listed.getPrimaryReason(), ConvergenceStatus.Reason.ERROR_STATE);
+    Assert.assertEquals(listed.getUnconvergedSince(), 5L);
+    Assert.assertEquals(listed.getPartitionCount(), 2);
+    Assert.assertEquals(listed.getControllerSessionId(), "s1");
+    Assert.assertNull(read.getResourceReport("ok"));
+    ConvergenceStatus ok = read.getUnlistedReport("ok", 4, false);
+    Assert.assertEquals(ok.getStatus(), ConvergenceStatus.Status.CONVERGED);
+    Assert.assertEquals(ok.getPartitionCount(), 4);
+    Assert.assertEquals(ok.getOptimizerStatus(), ConvergenceStatus.OptimizerStatus.NOT_APPLICABLE);
+    Assert.assertEquals(read.getUnlistedReport("waged", 3, true).getOptimizerStatus(),
+        ConvergenceStatus.OptimizerStatus.HEALTHY);
+    // With resources left out, an unlisted one cannot be called converged.
+    read.setUnlistedResourceCount(1);
+    Assert.assertEquals(read.getUnlistedReport("ok", 4, false).getPrimaryReason(),
+        ConvergenceStatus.Reason.DETAIL_TRUNCATED);
+
+    // A status or version from a newer writer still reads, counted as UNKNOWN.
+    read.getRecord().setMapField("STATUS_COUNTS", Collections.singletonMap("SOMETHING_NEW", "3"));
+    read.getRecord().setSimpleField("STATUS", "SOMETHING_NEW");
+    read.getRecord().setIntField("SCHEMA_VERSION", ConvergenceStatus.SCHEMA_VERSION + 1);
+    Assert.assertTrue(read.isValid());
+    Assert.assertEquals(read.getStatus(), ConvergenceStatus.Status.UNKNOWN);
+    Assert.assertEquals(read.getPartitionCount(), 3);
+  }
+
+  @Test
   public void testSemanticEqualityIgnoresProvenanceOnly() {
     ConvergenceStatus a = new ConvergenceStatus("db");
     a.setStatus(ConvergenceStatus.Status.IN_PROGRESS);

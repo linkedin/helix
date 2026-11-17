@@ -85,6 +85,49 @@ public class TestConvergenceStatusResponseMapper {
   }
 
   @Test
+  public void testLimitReturnsTheWorstResources() {
+    ConvergenceStatus cluster = report(SESSION);
+    cluster.putResourceReport("aa", report(SESSION));
+    ConvergenceStatus blocked = report(SESSION);
+    blocked.setStatus(Status.BLOCKED);
+    blocked.setPrimaryReason(Reason.ERROR_STATE);
+    cluster.putResourceReport("zz", blocked);
+    ObjectNode response = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
+        leader(SESSION), true, false);
+    ConvergenceStatusResponseMapper.listResources(response, cluster, 1);
+    Assert.assertEquals(response.path("listedResourceCount").asInt(), 2);
+    Assert.assertEquals(response.path("listedResources").size(), 1);
+    Assert.assertEquals(response.path("listedResources").get(0).path("resourceName").asText(),
+        "zz");
+  }
+
+  @Test
+  public void testClusterResponseListsTheResourcesThatNeedAttention() {
+    ConvergenceStatus cluster = report(SESSION);
+    cluster.putResourceReport("db", report(SESSION));
+    cluster.putResourceReport("db2", report(SESSION));
+    ObjectNode response = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
+        leader(SESSION), true, false);
+    ConvergenceStatusResponseMapper.listResources(response, cluster, 1);
+    Assert.assertEquals(response.path("listedResourceCount").asInt(), 2);
+    JsonNode listed = response.path("listedResources");
+    Assert.assertEquals(listed.size(), 1);
+    Assert.assertEquals(listed.get(0).path("resourceName").asText(), "db");
+    Assert.assertEquals(listed.get(0).path("primaryReason").asText(), "PENDING_TRANSITION");
+    Assert.assertEquals(listed.get(0).path("notConvergedPartitions").asInt(), 1);
+    Assert.assertTrue(response.path("unlistedResourceCount").isMissingNode());
+    // 0 leaves the list out; an untrusted report lists nothing.
+    ObjectNode summary = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
+        leader(SESSION), true, false);
+    ConvergenceStatusResponseMapper.listResources(summary, cluster, 0);
+    Assert.assertTrue(summary.path("listedResources").isMissingNode());
+    ObjectNode untrusted = ConvergenceStatusResponseMapper.map("c", null, cluster, cluster,
+        leader("other"), true, false);
+    ConvergenceStatusResponseMapper.listResources(untrusted, cluster, 10);
+    Assert.assertTrue(untrusted.path("listedResourceCount").isMissingNode());
+  }
+
+  @Test
   public void testPausedClusterRecordPausesEveryResource() {
     ConvergenceStatus cluster = report(SESSION);
     cluster.setStatus(Status.PAUSED);
