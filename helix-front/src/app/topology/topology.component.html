@@ -5,6 +5,7 @@
     [count]="snapshot ? snapshot.instances.length : null"
     [updated]="updated"
     label="instances"
+    [hint]="hint"
     loadingText="Reading the cluster. A cold read can take a minute or two."
     emptyText="This cluster has no instances."
     (refresh)="load()"
@@ -40,13 +41,6 @@
         </button>
       </ng-container>
     </div>
-
-    <p class="footnote" data-testid="read-times">
-      Domains were read at {{ utc(domainsReadAt) }}. Capacity, live state and
-      ERROR counts are from the sample taken at {{ utc(updated) }}, so an
-      instance moved to another domain after that sample shows its old numbers
-      under the new group.
-    </p>
 
     <p class="empty" *ngIf="!snapshot.capacityKeys.length">
       This cluster does not define WAGED capacity keys, so no capacity usage is
@@ -164,14 +158,5 @@
         </tr>
       </tbody>
     </table>
-
-    <p class="footnote">
-      Groups follow the key=value pairs of each instance DOMAIN, in the order
-      they are written. Worst is the highest used / max of one instance and
-      average is the group total used over total max. Both skip instances whose
-      usage or capacity is unknown and count them as unknown, never as zero.
-      Used is the sum of WAGED partition weights over the last published
-      external view.
-    </p>
   </ng-container>
 </section>

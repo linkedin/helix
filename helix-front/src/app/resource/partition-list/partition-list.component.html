@@ -24,6 +24,7 @@
     [count]="partitions ? partitions.length : null"
     [updated]="updated"
     label="partitions"
+    [hint]="hint"
     [loadingText]="isLoading ? '' : 'Reading instance liveness.'"
     [emptyText]="emptyText"
     (refresh)="load()"
@@ -160,8 +161,4 @@
       </ng-template>
     </ngx-datatable-footer>
   </ngx-datatable>
-  <p class="muted">
-    A replica serves when its instance is live and its ExternalView state is not
-    the initial, ERROR or DROPPED state. This does not check application health.
-  </p>
 </section>

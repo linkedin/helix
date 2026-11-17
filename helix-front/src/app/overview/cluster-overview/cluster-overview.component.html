@@ -2,6 +2,7 @@
   <hi-list-status
     [loading]="isLoading"
     [updated]="updated"
+    [hint]="readTimes"
     loadingText="Reading the cluster. A cold read can take a minute or two."
     (refresh)="load()"
   ></hi-list-status>
@@ -72,18 +73,5 @@
         </table>
       </div>
     </ng-container>
-
-    <p class="muted footnote" data-testid="read-times">
-      <ng-container *ngIf="snapshot">
-        ERROR replicas, capacity, controller and cluster mode are from the
-        sample taken at
-        {{ updated | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC, which may be
-        served from cache.
-      </ng-container>
-      <ng-container *ngIf="instances || resources">
-        Instances and resources were read at
-        {{ listsReadAt | date: 'yyyy-MM-dd HH:mm:ss' : 'UTC' }} UTC.
-      </ng-container>
-    </p>
   </ng-container>
 </section>

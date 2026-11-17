@@ -20,6 +20,16 @@ import {
   styleUrls: ['./cluster-diagnostics.component.scss'],
 })
 export class ClusterDiagnosticsComponent implements OnInit, OnDestroy {
+  get readTimes(): string {
+    const lists = this.listsReadAt
+      ? ` Instances and resources were read at ${this.utc(this.listsReadAt)}, so an issue can describe a slightly different moment than its neighbours.`
+      : '';
+    return (
+      `Capacity, live state and ERROR counts are from the sample taken at ${this.utc(this.updated)}, which may be served from cache.${lists} ` +
+      'Built from published Helix state only, it does not check application health.'
+    );
+  }
+
   readonly severities = SEVERITIES;
   readonly categories = CATEGORIES;
   clusterName: string;

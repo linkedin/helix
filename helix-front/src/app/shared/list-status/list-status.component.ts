@@ -45,6 +45,8 @@ export class ListStatusComponent {
   get countLabel(): string {
     return this.count === 1 ? singular(this.label) : this.label;
   }
+  // fine print shown on demand next to the sample time, e.g. how a page reads
+  @Input() hint = '';
   @Input() emptyText = '';
   // shown next to the spinner for reads that can take a while
   @Input() loadingText = '';

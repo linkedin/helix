@@ -43,6 +43,17 @@
     }}<span *ngIf="count != null"
       >&nbsp;&middot; {{ count }} {{ countLabel }}</span
     >
+    <button
+      *ngIf="hint"
+      type="button"
+      class="hint-button"
+      [attr.aria-label]="hint"
+      [matTooltip]="hint"
+      matTooltipClass="hi-hint-tooltip"
+      data-testid="list-status-hint"
+    >
+      <mat-icon class="hint-icon">info_outline</mat-icon>
+    </button>
   </span>
 
   <span fxFlex="1 1 auto"></span>

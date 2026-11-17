@@ -66,9 +66,7 @@ describe('ClusterDiagnosticsComponent', () => {
     expect(component.isLoading).toBe(false);
     expect(component.updated).toBe(Date.parse('2026-11-01T10:00:00Z'));
     expect(component.listsReadAt).toBeGreaterThan(component.updated);
-    const text = fixture.nativeElement
-      .querySelector('[data-testid="read-times"]')
-      .textContent.replace(/\s+/g, ' ');
+    const text = component.readTimes;
     expect(text).toContain('sample taken at 2026-11-01 10:00:00 UTC');
     expect(text).toContain('Instances and resources were read at');
     expect(rows(fixture)).toEqual([

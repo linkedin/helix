@@ -26,6 +26,15 @@ import {
   ],
 })
 export class TopologyComponent implements OnInit, OnDestroy {
+  get hint(): string {
+    return (
+      `Domains were read at ${this.utc(this.domainsReadAt)}. Capacity, live state and ERROR counts are from the sample taken at ${this.utc(this.updated)}, ` +
+      'so an instance moved to another domain after that sample shows its old numbers under the new group. ' +
+      'Groups follow the key=value pairs of each instance DOMAIN, in order. Worst is the highest used / max of one instance and average is the group total used over total max; ' +
+      'both count unknown usage as unknown, never zero.'
+    );
+  }
+
   clusterName: string;
   snapshot: CapacitySnapshot | null = null;
   tree: TopologyNode[] = [];

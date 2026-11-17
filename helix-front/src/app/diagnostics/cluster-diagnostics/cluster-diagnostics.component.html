@@ -5,17 +5,11 @@
     [count]="issues ? issues.length : null"
     [updated]="updated"
     label="issues"
+    [hint]="readTimes"
     loadingText="Reading the cluster. A cold read can take a minute or two."
     emptyText="No cluster, instance, resource or capacity issue. Partition replica counts are on each resource's Partitions tab."
     (refresh)="load()"
   ></hi-list-status>
-
-  <p class="footnote" *ngIf="listsReadAt" data-testid="read-times">
-    Capacity, live state and ERROR counts are from the sample taken at
-    {{ utc(updated) }}, which may be served from cache. Instances and resources
-    were read at {{ utc(listsReadAt) }}. If something changed between the two,
-    an issue can describe a different moment than its neighbours.
-  </p>
 
   <ng-container *ngIf="issues?.length">
     <div class="filters">
@@ -94,9 +88,4 @@
       </div>
     </div>
   </ng-container>
-
-  <p class="muted footnote">
-    Built from the published Helix state: capacity snapshot, instance and
-    resource summaries. It does not check application health.
-  </p>
 </section>

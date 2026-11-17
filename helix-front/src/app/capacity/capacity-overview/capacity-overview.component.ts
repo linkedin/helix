@@ -23,6 +23,9 @@ export interface CapacityRow {
   styleUrls: ['./capacity-overview.component.scss'],
 })
 export class CapacityOverviewComponent implements OnInit, OnDestroy {
+  readonly hint =
+    'Used is the sum of WAGED partition weights over the last published external view, not live CPU or disk. ' +
+    'Unknown means a weight or capacity could not be read, never zero. Not WAGED resources count toward partition columns only.';
   clusterName: string;
   snapshot: CapacitySnapshot | null = null;
   rows: CapacityRow[] = [];

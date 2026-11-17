@@ -26,6 +26,9 @@ import { ColumnWidths } from '../../shared/resizable/column-widths';
   styleUrls: ['./partition-list.component.scss'],
 })
 export class PartitionListComponent implements OnInit, OnDestroy {
+  readonly hint =
+    'A replica serves when its instance is live and its ExternalView state is not the initial, ERROR or DROPPED state. ' +
+    'This does not check application health.';
   readonly widths = new ColumnWidths('partitions');
   @ViewChild('partitionsTable', { static: false })
   table: DatatableComponent;

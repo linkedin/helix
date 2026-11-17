@@ -13,8 +13,10 @@ import {
 import { InstanceService } from '../shared/instance.service';
 import {
   OperationRow,
+  age,
   formatUtc,
   operationDetail,
+  operationSummary,
   operationRows,
 } from '../shared/instance-operations';
 import { HelperService } from '../../shared/helper.service';
@@ -37,6 +39,9 @@ import { ColumnWidths } from '../../shared/resizable/column-widths';
   styleUrls: ['./instance-list.component.scss'],
 })
 export class InstanceListComponent implements OnInit, OnDestroy {
+  readonly hint =
+    'Operation filters include live and offline instances. Membership issues counts nodes that are offline or not enabled. ' +
+    'Resource ERROR and under-replication are on the Resources tab. Live means the instance holds a ZooKeeper session, not that the process is healthy.';
   readonly widths = new ColumnWidths('instances');
   isLoading = true;
   error = '';
@@ -134,16 +139,64 @@ export class InstanceListComponent implements OnInit, OnDestroy {
       .join(', ');
   }
 
+  // Participant names are host_port; the port is what tells two participants
+  // on one host apart, so it stays visible when the host is cut short.
+  nameHead(name: string): string {
+    const at = name.search(/_\d+$/);
+    return at > 0 ? name.slice(0, at) : name;
+  }
+
+  nameTail(name: string): string {
+    const at = name.search(/_\d+$/);
+    return at > 0 ? name.slice(at) : '';
+  }
+
+  // key=value pairs of a DOMAIN, so a line breaks between pairs, not inside one
+  domainPairs(domain: string | undefined): string[] {
+    return (domain || '').split(',').filter(Boolean).map((pair, i, all) =>
+      i < all.length - 1 ? `${pair.trim()},` : pair.trim(),
+    );
+  }
+
+  // Rows are cached per instance object, so change detection sees the same
+  // arrays and does not rebuild an open history menu under the keyboard focus.
+  private readonly operationCache = new WeakMap<
+    Instance,
+    { rows: OperationRow[]; newest: OperationRow[] }
+  >();
+
+  private cachedOperations(instance: Instance) {
+    let cached = this.operationCache.get(instance);
+    if (!cached) {
+      const rows = operationRows(instance.summary, instance.operationState);
+      cached = { rows, newest: rows.slice().reverse() };
+      this.operationCache.set(instance, cached);
+    }
+    return cached;
+  }
+
   operations(instance: Instance): OperationRow[] {
-    return operationRows(instance.summary, instance.operationState);
+    return this.cachedOperations(instance).rows;
   }
 
   operationDetail(row: OperationRow): string {
     return operationDetail(row);
   }
 
-  operationTitle(row: OperationRow): string {
-    return `${row.entry.operation} from ${row.entry.source || 'unknown source'}${row.active ? ' (active)' : ''}: ${operationDetail(row)}`;
+  current(rows: OperationRow[]): OperationRow | undefined {
+    return rows.find((row) => row.active);
+  }
+
+  newestFirst(instance: Instance): OperationRow[] {
+    return this.cachedOperations(instance).newest;
+  }
+
+  summary(rows: OperationRow[]): string {
+    return operationSummary(rows);
+  }
+
+  age(millis: number): string {
+    return age(millis);
   }
 
   markerUntil(instance: Instance): string {

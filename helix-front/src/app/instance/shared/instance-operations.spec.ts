@@ -1,7 +1,12 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { InstanceSummary } from './instance.model';
-import { operationDetail, operationRows } from './instance-operations';
+import {
+  age,
+  operationDetail,
+  operationRows,
+  operationSummary,
+} from './instance-operations';
 
 const summary = (
   instanceOperations: InstanceSummary['instanceOperations'],
@@ -61,5 +66,44 @@ describe('operationRows', () => {
 
   it('shows nothing for an enabled instance with no stored operation', () => {
     expect(operationRows(summary([]), 'ENABLE')).toEqual([]);
+  });
+});
+
+describe('age', () => {
+  const now = Date.UTC(2026, 10, 17);
+  it.each([
+    [now - 20 * 1000, 'just now'],
+    [now - 5 * 60000, '5m'],
+    [now - 47 * 3600000, '47h'],
+    [now - 6 * 86400000, '6d'],
+    [now - 90 * 86400000, '3mo'],
+    [now - 800 * 86400000, '2y'],
+    // a clock that runs ahead never reads as negative
+    [now + 60000, 'just now'],
+  ])('%p reads %p', (millis, expected) => {
+    expect(age(millis, now)).toBe(expected);
+  });
+});
+
+describe('operationSummary', () => {
+  const now = Date.UTC(2026, 10, 17);
+  it('names the active operation, its age, reason and the earlier count', () => {
+    const rows = operationRows(
+      {
+        ...summary([
+          { operation: 'ENABLE', source: 'ADMIN', reason: '', timestamp: 1000 },
+          {
+            operation: 'EVACUATE',
+            source: 'AUTOMATION',
+            reason: 'drain',
+            timestamp: now - 6 * 86400000,
+          },
+        ]),
+      },
+      'EVACUATE',
+    );
+    expect(operationSummary(rows, now)).toBe(
+      'EVACUATE from AUTOMATION since 2026-11-11 00:00 UTC (6d). Reason: drain. 1 earlier operation, click for history.',
+    );
   });
 });

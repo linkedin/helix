@@ -166,10 +166,18 @@ describe('InstanceListComponent summaries', () => {
     );
     const component = build(of([instance]));
 
-    expect(component.operations(instance).length).toBe(2);
-    expect(component.operationTitle(component.operations(instance)[1])).toBe(
-      'EVACUATE from AUTOMATION (active): 1970-01-01 00:01 UTC · drain',
+    const ops = component.operations(instance);
+    expect(ops.length).toBe(2);
+    // same arrays on every change detection pass, so an open menu is not rebuilt
+    expect(component.operations(instance)).toBe(ops);
+    expect(component.newestFirst(instance)).toBe(
+      component.newestFirst(instance),
     );
+    // the cell shows only the active operation, the menu lists newest first
+    expect(component.current(ops).entry.operation).toBe('EVACUATE');
+    expect(
+      component.newestFirst(instance).map((op) => op.entry.operation),
+    ).toEqual(['EVACUATE', 'DISABLE']);
     // -1 is dated by the config creation time
     expect(component.operationDetail(component.operations(instance)[0])).toBe(
       '1970-01-01 00:30 UTC (instance config created)',
