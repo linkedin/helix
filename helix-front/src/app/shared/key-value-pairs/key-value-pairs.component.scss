@@ -1,7 +1,7 @@
 .groups {
   font-size: 14px;
-  line-height: 14px;
-  row-gap: 10px;
+  line-height: 20px;
+  row-gap: 8px;
   white-space: normal;
 
   .column {
@@ -12,7 +12,7 @@
 
   .name {
     font-size: 12px;
-    line-height: 12px;
+    line-height: 16px;
     color: var(--hi-text-secondary, rgba(0, 0, 0, 0.54));
   }
 }

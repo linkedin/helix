@@ -5,3 +5,16 @@
 .mat-toolbar h6 {
   font-size: 14px;
 }
+
+.beta {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--hi-primary-text, #0064a5);
+  background-color: var(--hi-tonal-bg, #e0eff6);
+}

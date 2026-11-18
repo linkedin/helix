@@ -75,6 +75,12 @@ export class AppComponent implements OnInit {
     });
 
     this.watchTokenExpiry();
+
+    // Tab bars measure their labels once, on first render. If that happens
+    // before the web font loads they wrongly decide to page, so re-measure.
+    document.fonts?.ready.then(() =>
+      window.dispatchEvent(new Event('resize'))
+    );
   }
 
   private hasIdentityToken(): boolean {

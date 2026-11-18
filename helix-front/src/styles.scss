@@ -9,6 +9,19 @@
 @import '~@swimlane/ngx-datatable/assets/icons.css';
 // with overrides
 .ngx-datatable.material {
+  // Flat, full-bleed table: hairlines in place of the stock drop shadow
+  box-shadow: none;
+  border: solid var(--hi-divider, rgba(0, 0, 0, 0.1));
+  border-width: 1px 0;
+
+  .datatable-header .datatable-header-cell {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+  }
+
   &.single-selection,
   &.multi-selection,
   &.multi-click-selection {
@@ -18,10 +31,10 @@
 
       &.active,
       &.active .datatable-row-group {
-        background-color: #0077b5 !important;
+        background-color: var(--hi-selected, rgba(0, 119, 181, 0.1)) !important;
 
         .datatable-body-cell {
-          color: #fff !important;
+          color: var(--hi-primary-text, #0064a5) !important;
         }
       }
     }
@@ -49,6 +62,8 @@ body {
 }
 
 :root {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
   --hi-motion-fast: 120ms;
   --hi-motion: 200ms;
   --hi-ease: cubic-bezier(0.2, 0, 0, 1);
@@ -68,5 +83,54 @@ body {
   *::before,
   *::after {
     transition-duration: 0s !important;
+  }
+}
+
+.mat-card.mat-card:not([class*='mat-elevation-z']) {
+  box-shadow: none;
+  border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--hi-surface, #fff);
+}
+
+.mat-card .mat-card-header .mat-card-title,
+.mat-card .mat-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.mat-button-toggle-group {
+  box-shadow: none;
+  border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.14));
+  border-radius: 8px;
+  background: var(--hi-surface, #fff);
+
+  .mat-button-toggle {
+    background: transparent;
+    color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+    font-size: 13px;
+  }
+
+  .mat-button-toggle + .mat-button-toggle,
+  &.mat-button-toggle-appearance-standard
+    .mat-button-toggle
+    + .mat-button-toggle {
+    border-left: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.1));
+  }
+
+  .mat-button-toggle-button {
+    height: 34px;
+  }
+
+  .mat-button-toggle-label-content {
+    line-height: 34px;
+    padding: 0 14px;
+  }
+
+  .mat-button-toggle-checked {
+    background: var(--hi-tonal-bg, #e0eff6);
+    color: var(--hi-tonal-text, #005a9d);
+    font-weight: 500;
   }
 }

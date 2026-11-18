@@ -24,7 +24,7 @@
   <mat-nav-list *ngIf="!isLoading && !errorMessage">
     <div class="cluster-list-button-group">
       <button class="back-to-index-button" mat-button routerLink="/">
-        <mat-icon>arrow_back</mat-icon> Back to Index
+        <mat-icon>arrow_back</mat-icon> All services
       </button>
       <button mat-mini-fab *ngIf="can" (click)="createCluster()">
         <mat-icon>add</mat-icon>
@@ -56,7 +56,7 @@
         </button>
       </div>
     </div>
-    <h3 mat-subheader>
+    <h3 mat-subheader class="cluster-count">
       Clusters in {{ service }} ({{
         filter
           ? filteredClusters.length + ' of ' + clusters.length

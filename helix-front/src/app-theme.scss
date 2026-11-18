@@ -18,11 +18,67 @@
   }
 }
 
+// Neutral header in light mode too, as in dark: chrome stays quiet and the
+// brand lives in the logo and the accent
+.mat-toolbar.mat-primary.header {
+  background-color: #fff;
+  color: rgba(0, 0, 0, 0.87);
+}
+
+// Detail headers separate from the page with a hairline, not a shadow
+.mat-toolbar.mat-elevation-z1 {
+  box-shadow: none;
+  border-bottom: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.1));
+}
+
+// Tabs size to their label, so every cluster tab fits without paging arrows
+.mat-tab-nav-bar.mat-tab-header .mat-tab-link,
+.mat-tab-group .mat-tab-header .mat-tab-label {
+  min-width: 0;
+  height: 44px;
+  padding: 0 16px;
+  opacity: 1;
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: color var(--hi-motion-fast) var(--hi-ease);
+
+  &:hover {
+    color: var(--hi-text, rgba(0, 0, 0, 0.87));
+  }
+
+  &.mat-tab-label-active {
+    color: var(--hi-primary-text, #0064a5);
+  }
+}
+
+// Destructive menu items read as dangerous by colour, not by capitals
+.mat-menu-item.danger,
+.mat-menu-item.danger .mat-icon {
+  color: var(--hi-error, #c62828);
+}
+
+// Page actions (back, refresh, menu) are tonal buttons, not floating ones
+.mat-mini-fab.mat-accent:not([disabled]) {
+  box-shadow: none !important;
+  background-color: var(--hi-tonal-bg, #e0eff6);
+  color: var(--hi-tonal-text, #005a9d);
+  transition: background-color var(--hi-motion-fast) var(--hi-ease);
+
+  &:hover {
+    background-color: var(--hi-tonal-hover, #cce3f0);
+  }
+}
+.mat-mini-fab.mat-accent[disabled] {
+  box-shadow: none;
+}
+
 // Dark mode: ThemeService (and the inline script in index.html) puts this
 // class on <body>, so overlays such as dialogs and menus inherit it too.
 // App styles read the tokens below as var(--hi-token, <light value>), which
 // keeps light mode unchanged; only the dark values are defined here.
 .dark-theme {
+  scrollbar-color: rgba(201, 214, 227, 0.28) transparent;
   @include mat.all-component-colors($hi-dark-theme);
 
   // Surfaces step lighter with elevation: page, then cards, then menus.
@@ -53,6 +109,12 @@
   --hi-error-border: rgba(242, 139, 130, 0.45);
   --hi-warning-border: rgba(232, 184, 92, 0.45);
   --hi-success-border: rgba(111, 207, 143, 0.4);
+
+  --hi-tonal-bg: rgba(121, 184, 227, 0.14);
+  --hi-tonal-hover: rgba(121, 184, 227, 0.24);
+  --hi-tonal-text: #b4d9f2;
+  --hi-label-evacuate: #f0a35e;
+  --hi-label-swap: #c5a3f5;
 
   --hi-chip-bg: transparent;
   --hi-chip-active-bg: rgba(121, 184, 227, 0.18);

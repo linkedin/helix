@@ -88,7 +88,7 @@
           (click)="enableInstance()"
         >
           <mat-icon>play_circle_outline</mat-icon>
-          <span>Enable this Instance</span>
+          <span>Enable instance</span>
         </button>
         <button
           mat-menu-item
@@ -96,7 +96,7 @@
           (click)="disableInstance()"
         >
           <mat-icon>not_interested</mat-icon>
-          <span>Disable this Instance</span>
+          <span>Disable instance</span>
         </button>
         <button
           mat-menu-item
@@ -104,12 +104,12 @@
           (click)="evacuateInstance()"
         >
           <mat-icon>exit_to_app</mat-icon>
-          <span>Evacuate this Instance</span>
+          <span>Evacuate instance</span>
         </button>
         <mat-divider></mat-divider>
-        <button mat-menu-item (click)="removeInstance()">
+        <button mat-menu-item class="danger" (click)="removeInstance()">
           <mat-icon>delete</mat-icon>
-          <span>REMOVE this Instance</span>
+          <span>Remove instance</span>
         </button>
       </mat-menu>
     </mat-toolbar-row>

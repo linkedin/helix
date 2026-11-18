@@ -19,7 +19,7 @@ import { InputDialogComponent } from '../../shared/dialog/input-dialog/input-dia
 export class ClusterDetailComponent implements OnInit {
   readonly tabLinks = [
     { label: 'Overview', link: 'overview' },
-    { label: 'Dashboard (beta)', link: 'dashboard' },
+    { label: 'Dashboard', link: 'dashboard', beta: true },
     { label: 'Resources', link: 'resources' },
     { label: 'Workflows', link: 'workflows' },
     { label: 'Instances', link: 'instances' },
@@ -127,7 +127,7 @@ export class ClusterDetailComponent implements OnInit {
     this.dialog
       .open(InputDialogComponent, {
         data: {
-          title: 'Activate this Cluster',
+          title: 'Activate cluster',
           message:
             'To link this cluster to a Helix super cluster (controller), please enter the super cluster name:',
           values: {

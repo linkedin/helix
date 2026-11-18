@@ -16,9 +16,9 @@
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
   &.active {
-    background: var(--hi-chip-active-bg, #1565c0);
-    border-color: var(--hi-chip-active-border, #1565c0);
-    color: var(--hi-chip-active-text, #fff);
+    background: var(--hi-chip-active-bg, rgba(0, 119, 181, 0.1));
+    border-color: var(--hi-chip-active-border, rgba(0, 119, 181, 0.5));
+    color: var(--hi-chip-active-text, #005a9d);
   }
 }
 
@@ -33,4 +33,8 @@
     background: var(--hi-info-bg, #e3f2fd);
     color: var(--hi-info, #1565c0);
   }
+}
+
+.status-healthy {
+  color: var(--hi-success, #2e7d32);
 }

@@ -37,22 +37,9 @@
     Could not load {{ label }}: {{ error }}. Any rows shown may be stale.
   </span>
 
-  <span
-    *ngIf="!error && showEmpty"
-    class="status-message status-empty"
-    data-testid="list-status-empty"
-  >
-    <mat-icon>inbox</mat-icon>
-    No {{ label }} found.<span *ngIf="emptyText">&nbsp;{{ emptyText }}</span>
-  </span>
-
-  <span
-    *ngIf="!error && !showEmpty && !loading && updated"
-    class="status-message status-ok"
-  >
-    Sampled at {{ sampledAt }}<span *ngIf="count != null"
-      >&nbsp;&middot; {{ count }} {{ label }}</span
-    >
+  <span *ngIf="!error && !loading && updated" class="status-message status-ok">
+    Sampled at {{ sampledAt
+    }}<span *ngIf="count != null">&nbsp;&middot; {{ count }} {{ label }}</span>
   </span>
 
   <span fxFlex="1 1 auto"></span>
@@ -67,4 +54,14 @@
   >
     <mat-icon>refresh</mat-icon>
   </button>
+</section>
+
+<section
+  *ngIf="!error && showEmpty"
+  class="empty-state"
+  data-testid="list-status-empty"
+>
+  <mat-icon>inbox</mat-icon>
+  <h3>No {{ label }} found</h3>
+  <p *ngIf="emptyText">{{ emptyText }}</p>
 </section>

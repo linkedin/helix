@@ -20,7 +20,7 @@
 <section class="app" fxLayout="column" fxFill>
   <mat-toolbar
     *ngIf="headerEnabled"
-    class="header mat-elevation-z7"
+    class="header"
     color="primary"
   >
     <a mat-button routerLink="/">
@@ -45,7 +45,7 @@
     <mat-menu #userMenu="matMenu">
       <button mat-menu-item (click)="logout()">
         <mat-icon>logout</mat-icon>
-        <span>Sign Out</span>
+        <span>Sign out</span>
       </button>
     </mat-menu>
   </mat-toolbar>
@@ -59,7 +59,7 @@
   </section>
   <section
     *ngIf="footerEnabled"
-    class="footer mat-elevation-z7"
+    class="footer"
     fxLayout="row"
     fxLayoutAlign="center center"
   >

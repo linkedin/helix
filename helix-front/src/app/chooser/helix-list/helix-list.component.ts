@@ -12,6 +12,7 @@ import { ChooserService } from '../shared/chooser.service';
 export class HelixListComponent implements OnInit {
   groups: any;
   keys = _.keys;
+  shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K';
 
   constructor(protected service: ChooserService) {}
 
