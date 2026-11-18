@@ -140,7 +140,9 @@ $neutral: var(--hi-text-secondary, #7b8a98);
   border-top: 1px solid var(--hi-divider, #e6ebef);
   // One grid for every row, so the descriptions line up even when a row carries the tag.
   display: grid;
-  grid-template-columns: 56px max-content 1fr;
+  // the count column is only as wide as the largest count, so rows start
+  // flush with the legend above
+  grid-template-columns: max-content max-content 1fr;
   column-gap: 12px;
   li {
     grid-column: 1 / -1;
@@ -238,7 +240,7 @@ $neutral: var(--hi-text-secondary, #7b8a98);
 
 @media (max-width: 720px) {
   .reasons {
-    grid-template-columns: 44px 1fr;
+    grid-template-columns: max-content 1fr;
     .muted {
       grid-column: 2;
     }

@@ -1,13 +1,18 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
-import { forkJoin, Subscription } from 'rxjs';
+import { forkJoin, of, Subscription } from 'rxjs';
+import { catchError } from 'rxjs/operators';
 
+import { Resource } from '../shared/resource.model';
 import { ResourceService } from '../shared/resource.service';
 import {
   AssignmentKind,
   AssignmentRow,
   compareAssignment,
+  PartitionMap,
 } from './waged-assignment.model';
+
+export type CompareWith = 'none' | 'idealState' | 'externalView';
 
 const ABOUT: Record<AssignmentKind, { title: string; text: string }> = {
   baseline: {
@@ -18,6 +23,11 @@ const ABOUT: Record<AssignmentKind, { title: string; text: string }> = {
     title: 'Best possible',
     text: 'The placement WAGED computed in its latest rebalance, before delayed rebalance and preference list adjustments. The external view is what replicas actually hold.',
   },
+};
+
+const OTHER_NAMES: Record<Exclude<CompareWith, 'none'>, string> = {
+  idealState: 'ideal state',
+  externalView: 'external view',
 };
 
 @Component({
@@ -32,16 +42,25 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
   isLoading = true;
   error = '';
   notSaved = false;
+  compareWith: CompareWith = 'none';
   rows: AssignmentRow[] = [];
   differing = 0;
   onlyDiffering = false;
   version = '';
   written: number | null = null;
   readAt: number | null = null;
+  // the cluster's PERSIST_* flags, null when the config could not be read
+  persist: { bestPossible: boolean; intermediate: boolean } | null = null;
+  private saved: PartitionMap = {};
+  private resource: Resource | null = null;
   private sub: Subscription;
 
   get about() {
     return ABOUT[this.kind];
+  }
+
+  get otherName(): string {
+    return this.compareWith === 'none' ? '' : OTHER_NAMES[this.compareWith];
   }
 
   get shown(): AssignmentRow[] {
@@ -78,16 +97,26 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
         this.kind,
       ),
       this.service.get(this.clusterName, this.resourceName),
+      // only needed to explain the ideal state comparison
+      this.service
+        .getClusterConfig(this.clusterName)
+        .pipe(catchError(() => of(null))),
     ]).subscribe(
-      ([saved, resource]) => {
-        this.rows = compareAssignment(
-          saved.assignment?.[this.resourceName] || {},
-          resource.externalView?.mapFields || {},
-        );
-        this.differing = this.rows.filter((r) => r.difference).length;
+      ([saved, resource, config]) => {
+        this.saved = saved.assignment?.[this.resourceName] || {};
+        this.resource = resource;
+        const flag = (key: string) =>
+          String(config?.simpleFields?.[key]).toLowerCase() === 'true';
+        this.persist = config
+          ? {
+              bestPossible: flag('PERSIST_BEST_POSSIBLE_ASSIGNMENT'),
+              intermediate: flag('PERSIST_INTERMEDIATE_ASSIGNMENT'),
+            }
+          : null;
         this.version = saved.metadata?.version || '';
         this.written = saved.metadata?.writeTimeMs || null;
         this.readAt = Date.now();
+        this.compare(this.compareWith);
         this.isLoading = false;
       },
       (error) => {
@@ -98,6 +127,17 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
         this.isLoading = false;
       },
     );
+  }
+
+  compare(compareWith: CompareWith) {
+    this.compareWith = compareWith;
+    const other =
+      compareWith === 'none'
+        ? null
+        : this.resource?.[compareWith]?.mapFields || {};
+    this.rows = compareAssignment(this.saved, other, this.otherName);
+    this.differing = this.rows.filter((r) => r.difference).length;
+    this.onlyDiffering = this.onlyDiffering && this.differing > 0;
   }
 
   utc(time: number): string {

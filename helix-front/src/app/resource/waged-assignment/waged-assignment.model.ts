@@ -11,8 +11,9 @@ export interface Replica {
 export interface AssignmentRow {
   partition: string;
   saved: Replica[];
-  live: Replica[];
-  // null when the saved and live placement match
+  // the placement compared against, empty when not comparing
+  other: Replica[];
+  // null when the two placements match, or when not comparing
   difference: string | null;
 }
 
@@ -30,12 +31,16 @@ function replicas(map: Record<string, string> | undefined): Replica[] {
     );
 }
 
-function differenceOf(saved: Replica[], live: Replica[]): string | null {
+function differenceOf(
+  saved: Replica[],
+  live: Replica[],
+  otherName: string,
+): string | null {
   if (!saved.length) {
     return 'Not in the saved assignment';
   }
   if (!live.length) {
-    return 'Not in the external view';
+    return `Not in the ${otherName}`;
   }
   const liveState = new Map(live.map((r) => [r.instance, r.state]));
   const moving = saved.filter((r) => !liveState.has(r.instance)).length;
@@ -52,25 +57,27 @@ function differenceOf(saved: Replica[], live: Replica[]): string | null {
     : null;
 }
 
-// Every partition in either map, compared with what the external view shows.
+// Every partition in the saved map, and when another map is given, every
+// partition in either, compared with it.
 export function compareAssignment(
   saved: PartitionMap,
-  externalView: PartitionMap,
+  other: PartitionMap | null = null,
+  otherName = 'external view',
 ): AssignmentRow[] {
   const partitions = new Set([
     ...Object.keys(saved || {}),
-    ...Object.keys(externalView || {}),
+    ...Object.keys(other || {}),
   ]);
   return [...partitions]
     .sort((a, b) => names.compare(a, b))
     .map((partition) => {
       const s = replicas(saved?.[partition]);
-      const l = replicas(externalView?.[partition]);
+      const o = other ? replicas(other[partition]) : [];
       return {
         partition,
         saved: s,
-        live: l,
-        difference: differenceOf(s, l),
+        other: o,
+        difference: other ? differenceOf(s, o, otherName) : null,
       };
     });
 }

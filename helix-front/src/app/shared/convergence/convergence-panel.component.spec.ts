@@ -107,6 +107,7 @@ describe('ConvergencePanelComponent', () => {
             notConverged: 4,
             statusCounts: { CONVERGED: 4, BLOCKED: 3, UNKNOWN: 1 },
             reasonCounts: {
+              NONE: 4,
               PENDING_TRANSITION: 2,
               TARGET_INSTANCE_NOT_LIVE: 1,
             },
@@ -130,6 +131,8 @@ describe('ConvergencePanelComponent', () => {
     expect(reasons[0].textContent).toContain('Most urgent');
     expect(reasons[1].textContent).toContain('Pending transition');
     expect(reasons[1].textContent).not.toContain('Most urgent');
+    // converged partitions are already in the bar, not a reason row
+    expect(reasons.length).toBe(2);
 
     jest.advanceTimersByTime(POLL_MS);
     fixture.detectChanges();

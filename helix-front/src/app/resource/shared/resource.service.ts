@@ -106,6 +106,10 @@ export class ResourceService extends HelixService {
     );
   }
 
+  public getClusterConfig(clusterName: string): Observable<ZNRecord> {
+    return this.request(`/clusters/${clusterName}/configs`);
+  }
+
   public getStateModel(
     clusterName: string,
     name: string,

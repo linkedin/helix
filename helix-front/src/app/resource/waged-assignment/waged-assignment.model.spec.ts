@@ -27,14 +27,31 @@ describe('compareAssignment', () => {
       ['p_4', 'Not in the saved assignment'],
       ['p_10', null],
     ]);
+    expect(rows[4].other).toHaveLength(2);
     expect(rows[4].saved).toEqual([
       { instance: 'a', state: 'MASTER' },
       { instance: 'b', state: 'SLAVE' },
     ]);
   });
 
-  it('flags a saved partition the external view does not have', () => {
-    const [row] = compareAssignment({ p_0: { a: 'LEADER' } }, {});
-    expect(row.difference).toBe('Not in the external view');
+  it('names the map it compares with', () => {
+    const [row] = compareAssignment(
+      { p_0: { a: 'LEADER' } },
+      {},
+      'ideal state',
+    );
+    expect(row.difference).toBe('Not in the ideal state');
+  });
+
+  it('lists only the saved placement when not comparing', () => {
+    const rows = compareAssignment({ p_0: { a: 'LEADER' } });
+    expect(rows).toEqual([
+      {
+        partition: 'p_0',
+        saved: [{ instance: 'a', state: 'LEADER' }],
+        other: [],
+        difference: null,
+      },
+    ]);
   });
 });
