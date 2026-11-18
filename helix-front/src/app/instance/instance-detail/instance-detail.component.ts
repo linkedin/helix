@@ -25,6 +25,11 @@ export class InstanceDetailComponent implements OnInit, OnDestroy {
   instanceName: string;
   instance: Instance;
   isLoading = true;
+
+  // an instance that is not in the cluster has no tabs worth opening
+  get missing(): boolean {
+    return !this.isLoading && !this.instance && !!this.error;
+  }
   error = '';
   updated: number | null = null;
   can = false;
@@ -149,9 +154,9 @@ export class InstanceDetailComponent implements OnInit, OnDestroy {
           this.updated = Date.now();
         },
         /* error path */ (error) => {
+          this.instance = undefined;
           this.error =
             typeof error === 'string' ? error : 'Cannot load this instance.';
-          this.helperService.showError(error);
         }
       );
   }

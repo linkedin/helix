@@ -70,7 +70,7 @@
       routerLinkActive="cluster-list-item-selected"
     >
       <mat-icon mat-list-icon>blur_circular</mat-icon>
-      <h4 mat-line>{{ cluster.name }}</h4>
+      <h4 mat-line [title]="cluster.name">{{ cluster.name }}</h4>
     </a>
     <div
       *ngIf="clusters.length > 0 && filteredClusters.length == 0"

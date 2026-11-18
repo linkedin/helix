@@ -5,6 +5,8 @@
   border: 1px solid var(--hi-border, rgba(0, 0, 0, 0.18));
   border-radius: 14px;
   font-size: 13px;
+  background: var(--hi-surface, #fff);
+  color: inherit;
 }
 
 .capacity-table tr.group td {

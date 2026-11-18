@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from '@jest/globals';
 
-import { ListStatusComponent } from './list-status.component';
+import { ListStatusComponent, singular } from './list-status.component';
 
 describe('ListStatusComponent', () => {
   function make(): ListStatusComponent {
@@ -70,5 +70,23 @@ describe('ListStatusComponent', () => {
     c.refresh.subscribe(() => (fired += 1));
     c.refresh.emit();
     expect(fired).toBe(1);
+  });
+
+  it('names one item in the singular', () => {
+    const c = make();
+    c.label = 'partitions';
+    c.count = 1;
+    expect(c.countLabel).toBe('partition');
+    c.count = 2;
+    expect(c.countLabel).toBe('partitions');
+  });
+
+  it.each([
+    ['history entries', 'history entry'],
+    ['issues', 'issue'],
+    ['instances', 'instance'],
+    ['address', 'address'],
+  ])('singular(%p) is %p', (plural, one) => {
+    expect(singular(plural)).toBe(one);
   });
 });

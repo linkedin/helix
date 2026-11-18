@@ -18,3 +18,10 @@
   color: var(--hi-primary-text, #0064a5);
   background-color: var(--hi-tonal-bg, #e0eff6);
 }
+
+.load-error {
+  margin: 0 20px;
+  font-size: 14px;
+  white-space: normal;
+  color: var(--hi-error, #c62828);
+}

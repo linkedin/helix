@@ -18,3 +18,16 @@
     left: -15px;
   }
 }
+
+.pick-cluster {
+  margin: 48px auto;
+  text-align: center;
+  font-size: 15px;
+  color: var(--hi-text-secondary, #596979);
+}
+
+// the sidebar toggle overlaps the first 20px of the content, keep text clear of it
+.content {
+  padding-left: 16px;
+  box-sizing: border-box;
+}

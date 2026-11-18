@@ -178,6 +178,11 @@ describe('ClusterOverviewComponent', () => {
         resource('ra', { hasExternalView: false }),
         resource('rb', { hasExternalView: false, waged: false }),
         resource('rc', { enabled: false }),
+        resource('wf', {
+          hasExternalView: false,
+          waged: false,
+          rebalanceMode: 'TASK',
+        }),
       ]),
     );
     const fixture = create();

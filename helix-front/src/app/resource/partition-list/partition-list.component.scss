@@ -12,3 +12,9 @@
   width: 100%;
   padding: 0 20px;
 }
+
+// partition names have no spaces, so let them break instead of clipping
+.wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

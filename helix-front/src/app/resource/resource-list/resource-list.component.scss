@@ -38,3 +38,11 @@
 .status-healthy {
   color: var(--hi-success, #2e7d32);
 }
+
+// names stay on one line with an ellipsis, the full name is in the tooltip
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

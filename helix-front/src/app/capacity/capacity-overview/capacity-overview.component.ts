@@ -4,6 +4,7 @@ import { Subscription } from 'rxjs';
 
 import { HelperService } from '../../shared/helper.service';
 import { CapacityService } from '../shared/capacity.service';
+import { percent } from '../heatmap/heatmap.model';
 import {
   capacityRatio,
   CapacitySnapshot,
@@ -89,7 +90,7 @@ export class CapacityOverviewComponent implements OnInit, OnDestroy {
   }
 
   ratioText(row: CapacityRow): string {
-    return row.ratio === null ? 'unknown' : `${Math.round(row.ratio * 100)}%`;
+    return percent(row.ratio);
   }
 
   usedText(row: CapacityRow): string {

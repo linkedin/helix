@@ -26,8 +26,11 @@
         [routerLink]="card.link"
         data-testid="card"
       >
-        <strong [class.word]="isWord(card.value)">{{ card.value }}</strong>
-        {{ card.label }}
+        <strong [class.word]="isWord(card.value)"
+          ><ng-container *ngFor="let part of breakable(card.value)"
+            >{{ part }}<wbr /></ng-container
+        ></strong>
+        {{ cardLabel(card) }}
         <div class="muted">{{ card.detail }}</div>
       </a>
     </div>

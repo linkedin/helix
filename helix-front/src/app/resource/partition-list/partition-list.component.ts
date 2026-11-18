@@ -30,6 +30,14 @@ export class PartitionListComponent implements OnInit, OnDestroy {
   isLoading = true;
   clusterName: string;
   resource: Resource;
+
+  // a resource can declare partitions the controller has not placed yet
+  get emptyText(): string {
+    const declared = this.resource?.partitionCount;
+    return declared > 0
+      ? `The IdealState declares ${declared} partition${declared === 1 ? '' : 's'}, but the ExternalView assigns none yet.`
+      : 'The IdealState and ExternalView list no partitions.';
+  }
   readonly filters = PARTITION_FILTERS;
   resourceName: string;
   // null until the first successful read

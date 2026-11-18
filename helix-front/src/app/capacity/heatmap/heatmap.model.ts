@@ -53,8 +53,12 @@ export function bandOf(ratio: number | null): string {
   return ratio > 1 ? 'over' : ['low', 'mid', 'high', 'hot'][steps];
 }
 
+// a small but nonzero load reads as <1%, so it is not mistaken for idle
 export function percent(ratio: number | null): string {
-  return ratio === null ? 'unknown' : `${Math.round(ratio * 100)}%`;
+  if (ratio === null) {
+    return 'unknown';
+  }
+  return ratio > 0 && ratio < 0.005 ? '<1%' : `${Math.round(ratio * 100)}%`;
 }
 
 export function usageText(

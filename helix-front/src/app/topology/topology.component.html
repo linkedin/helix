@@ -140,7 +140,7 @@
                 <div
                   class="fill"
                   [class.over]="u.worst > 1"
-                  [class.hot]="u.worst > 0.85 && u.worst <= 1"
+                  [class.hot]="u.worst >= 0.855 && u.worst <= 1"
                   [style.width.%]="min(u.worst * 100, 100)"
                 ></div>
               </div>
@@ -159,7 +159,7 @@
             {{ row.node.instance ? '' : averageText(row.node) }}
           </td>
           <td [class.err]="row.node.stats.errorReplicas">
-            {{ row.node.stats.errorReplicas || '' }}
+            {{ row.node.stats.errorReplicas }}
           </td>
         </tr>
       </tbody>

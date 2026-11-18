@@ -21,7 +21,8 @@
   [ngClass]="{
     'state-label': true,
     'state-label-ready': isReady,
-    'state-label-not-ready': isReady == false
+    'state-label-not-ready': isReady == false,
+    'state-label-error': state === 'ERROR'
   }"
 >
   {{ state || 'NO STATE' }}

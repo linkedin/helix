@@ -40,6 +40,11 @@ export class ListStatusComponent {
   // epoch millis of the last successful sample; null means "never"
   @Input() updated: number | null = null;
   @Input() label = 'items';
+
+  // labels are plural nouns, so one item drops the trailing s
+  get countLabel(): string {
+    return this.count === 1 ? singular(this.label) : this.label;
+  }
   @Input() emptyText = '';
   // shown next to the spinner for reads that can take a while
   @Input() loadingText = '';
@@ -56,4 +61,9 @@ export class ListStatusComponent {
     const iso = new Date(this.updated).toISOString();
     return iso.slice(0, 19).replace('T', ' ') + ' UTC';
   }
+}
+
+// labels are plural nouns: entries -> entry, instances -> instance
+export function singular(label: string): string {
+  return label.replace(/ies$/, 'y').replace(/([^s])s$/, '$1');
 }

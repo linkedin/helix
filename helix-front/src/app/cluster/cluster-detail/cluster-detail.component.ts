@@ -30,6 +30,12 @@ export class ClusterDetailComponent implements OnInit {
   ];
 
   isLoading = false;
+  loadError = '';
+
+  // a cluster that does not exist has no tabs worth opening
+  get notFound(): boolean {
+    return this.loadError === 'Not Found';
+  }
   clusterName: string; // for better UX needs
   cluster: Cluster;
   can = false;
@@ -53,9 +59,15 @@ export class ClusterDetailComponent implements OnInit {
 
   protected loadCluster() {
     this.isLoading = true;
+    this.loadError = '';
     this.clusterService.get(this.clusterName).subscribe(
       (data) => (this.cluster = data),
-      (error) => this.helperService.showError(error),
+      (error) => {
+        // a cluster that cannot be read is not shown as disabled or leaderless
+        this.cluster = undefined;
+        this.loadError = String(error);
+        this.isLoading = false;
+      },
       () => (this.isLoading = false)
     );
   }

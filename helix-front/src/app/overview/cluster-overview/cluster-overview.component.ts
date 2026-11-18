@@ -6,6 +6,8 @@ import * as _ from 'lodash';
 
 import { CapacityService } from '../../capacity/shared/capacity.service';
 import { CapacitySnapshot } from '../../capacity/shared/capacity-snapshot.model';
+import { percent } from '../../capacity/heatmap/heatmap.model';
+import { singular } from '../../shared/list-status/list-status.component';
 import { Instance } from '../../instance/shared/instance.model';
 import { InstanceService } from '../../instance/shared/instance.service';
 import { ResourceSummary } from '../../resource/shared/resource.model';
@@ -18,6 +20,7 @@ import { ConvergencePanelComponent } from '../../shared/convergence/convergence-
 import {
   DiagnosticIssue,
   diagnosticIssues,
+  isTaskResource,
 } from '../../diagnostics/shared/diagnostic-rules';
 
 type Source = 'snapshot' | 'instances' | 'resources';
@@ -51,6 +54,16 @@ export interface OverviewCard {
   styleUrls: ['./cluster-overview.component.scss'],
 })
 export class ClusterOverviewComponent implements OnInit, OnDestroy {
+  // lets a host name wrap after its dots instead of mid-word
+  breakable(value: unknown): string[] {
+    return String(value).split(/(?<=[._])/);
+  }
+
+  // labels are plural nouns, so a count of one drops the trailing s
+  cardLabel(card: OverviewCard): string {
+    return card.value === 1 ? singular(card.label) : card.label;
+  }
+
   clusterName: string;
   snapshot: CapacitySnapshot | null = null;
   instances: Instance[] | null = null;
@@ -112,7 +125,7 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
     ]).subscribe(([snapshot, instances, resources]) => {
       this.snapshot = snapshot;
       this.instances = instances;
-      this.resources = resources;
+      this.resources = resources?.filter((r) => !isTaskResource(r)) ?? null;
       this.issues = diagnosticIssues(
         snapshot,
         instances || [],
@@ -256,18 +269,22 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
           tone: s.summary.totalErrorReplicas ? 'bad' : undefined,
         };
       }),
-      card(snapshot, 'snapshot', 'over WAGED capacity', '../capacity', (s) => ({
-        value: s.summary.instancesOverCapacity,
-        detail: [
-          hottest(s),
-          s.summary.instancesWithUnknownCapacity
-            ? `${s.summary.instancesWithUnknownCapacity} with unknown capacity`
-            : '',
-        ]
-          .filter(Boolean)
-          .join(', '),
-        tone: s.summary.instancesOverCapacity ? 'warn' : undefined,
-      })),
+      card(snapshot, 'snapshot', 'over WAGED capacity', '../capacity', (s) =>
+        s.capacityKeys.length
+          ? {
+              value: s.summary.instancesOverCapacity,
+              detail: [
+                hottest(s),
+                s.summary.instancesWithUnknownCapacity
+                  ? `${s.summary.instancesWithUnknownCapacity} with unknown capacity`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(', '),
+              tone: s.summary.instancesOverCapacity ? 'warn' : undefined,
+            }
+          : { value: 'n/a', detail: 'No WAGED capacity keys defined' },
+      ),
       card(snapshot, 'snapshot', 'controller leader', '../controller', (s) => ({
         value: s.controllerName || 'No leader',
         detail: s.controllerName
@@ -329,7 +346,10 @@ function hottest(snapshot: CapacitySnapshot): string {
     ),
     'ratio',
   );
-  return hot
-    ? `Hottest: ${hot.name} at ${Math.round(hot.ratio * 100)}% of ${hot.key}`
-    : 'No instances report WAGED usage';
+  if (!hot) {
+    return 'No instances report WAGED usage';
+  }
+  return hot.ratio > 0
+    ? `Hottest: ${hot.name} at ${percent(hot.ratio)} of ${hot.key}`
+    : 'No WAGED usage on any instance';
 }

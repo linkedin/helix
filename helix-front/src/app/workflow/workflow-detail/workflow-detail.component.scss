@@ -17,3 +17,13 @@
 .state-PENDING {
   color: mat.get-color-from-palette(mat.define-palette(mat.$grey-palette));
 }
+
+// a finished workflow is a normal outcome, not a failure; the doubled class
+// outranks the label's own dark theme rule
+::ng-deep
+  hi-disabled-label.label-done
+  .status-disabled.status-disabled.status-disabled {
+  border-color: var(--hi-success-border, #b7d8c2);
+  background-color: var(--hi-success-bg, #e9f4ed);
+  color: var(--hi-success, #25613a);
+}

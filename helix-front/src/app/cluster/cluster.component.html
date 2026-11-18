@@ -21,13 +21,19 @@
   <mat-sidenav
     #sidenav
     [mode]="isNarrowView ? 'over' : 'side'"
-    [opened]="!isNarrowView"
+    [opened]="!isNarrowView || !hasCluster"
     [disableClose]="!isNarrowView"
   >
     <hi-cluster-list></hi-cluster-list>
   </mat-sidenav>
-  <section fxFill>
-    <router-outlet></router-outlet>
+  <section fxFill class="content">
+    <router-outlet
+      (activate)="hasCluster = true"
+      (deactivate)="hasCluster = false"
+    ></router-outlet>
+    <p *ngIf="!hasCluster" class="pick-cluster">
+      Pick a cluster from the list to see its overview.
+    </p>
   </section>
 </mat-sidenav-container>
 <button

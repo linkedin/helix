@@ -56,7 +56,7 @@ export function diagnosticIssues(
   const rows = snapshot?.instances || [];
   const issues = [
     ...(snapshot ? clusterIssues(snapshot) : []),
-    ...resources.map(resourceIssue),
+    ...resources.filter((r) => !isTaskResource(r)).map(resourceIssue),
     ...instances.map(instanceIssue),
     ...rows.map(errorIssue),
     ...rows.map((row) => capacityIssue(row, snapshot)),
@@ -125,6 +125,12 @@ function clusterIssues(snapshot: CapacitySnapshot): DiagnosticIssue[] {
     );
   }
   return issues;
+}
+
+// Workflows and jobs belong to the Workflows tab, and a workflow never
+// publishes an external view, so they are not judged as resources.
+export function isTaskResource(resource: ResourceSummary): boolean {
+  return resource.rebalanceMode === 'TASK';
 }
 
 function resourceIssue(resource: ResourceSummary): DiagnosticIssue | null {
