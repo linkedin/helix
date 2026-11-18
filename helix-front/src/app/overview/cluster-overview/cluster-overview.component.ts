@@ -54,6 +54,22 @@ export interface OverviewCard {
   styleUrls: ['./cluster-overview.component.scss'],
 })
 export class ClusterOverviewComponent implements OnInit, OnDestroy {
+  // when each part of the page was read, behind the info icon by the sample time
+  get readTimes(): string {
+    const utc = (time: number) =>
+      new Date(time).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+    return [
+      this.snapshot && this.updated
+        ? `ERROR replicas, capacity, controller and cluster mode are from the sample taken at ${utc(this.updated)}, which may be served from cache.`
+        : '',
+      (this.instances || this.resources) && this.listsReadAt
+        ? `Instances and resources were read at ${utc(this.listsReadAt)}.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
   // lets a host name wrap after its dots instead of mid-word
   breakable(value: unknown): string[] {
     return String(value).split(/(?<=[._])/);

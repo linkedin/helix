@@ -78,3 +78,26 @@
     font-size: 13px;
   }
 }
+
+.hint-button {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.54));
+  cursor: help;
+  vertical-align: text-bottom;
+
+  &:focus-visible {
+    outline: 2px solid var(--hi-primary-text, #0075ac);
+    outline-offset: 2px;
+  }
+}
+
+.hint-icon {
+  font-size: 16px;
+  width: 16px;
+  height: 16px;
+}

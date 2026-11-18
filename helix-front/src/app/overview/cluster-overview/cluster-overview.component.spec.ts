@@ -226,7 +226,7 @@ describe('ClusterOverviewComponent', () => {
       '../controller',
       '../controller',
     ]);
-    const [readTimes] = texts(fixture, 'read-times');
+    const readTimes = component.readTimes;
     expect(readTimes).toContain('sample taken at 2026-11-01 10:00:00 UTC');
     expect(readTimes).toContain('Instances and resources were read at');
     expect(component.listsReadAt).toBeGreaterThan(component.updated);
@@ -251,7 +251,7 @@ describe('ClusterOverviewComponent', () => {
       'Unknown controller leader Could not read the capacity snapshot',
       'Unknown cluster mode Could not read the capacity snapshot',
     ]);
-    const [readTimes] = texts(fixture, 'read-times');
+    const readTimes = fixture.componentInstance.readTimes;
     expect(readTimes).not.toContain('sample taken at');
     expect(readTimes).toContain('Instances and resources were read at');
   });

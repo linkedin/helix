@@ -24,6 +24,7 @@
     [count]="instances ? instances.length : null"
     [updated]="updated"
     label="instances"
+    [hint]="hint"
     emptyText="No instances match this filter."
     (refresh)="load()"
   ></hi-list-status>
@@ -74,13 +75,6 @@
     >
       {{ operation.label }} ({{ count(operation.filter) }})
     </button>
-    <span class="filter-note"
-      >Operation filters include live and offline instances. Membership issues
-      counts nodes that are offline or not enabled. Resource ERROR and
-      under-replication are shown on the Resources tab. Live means
-      the instance holds a ZooKeeper session; it does not indicate the host
-      process is healthy.</span
-    >
   </div>
 
   <ngx-datatable
@@ -88,7 +82,7 @@
     class="material"
     [headerHeight]="headerHeight"
     [rowHeight]="'auto'"
-    columnMode="standard"
+    columnMode="force"
     [scrollbarH]="true"
     [footerHeight]="rowHeight"
     [rows]="instances"
@@ -121,10 +115,13 @@
         >
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Name" [width]="widths.get('Name', 260)">
+    <ngx-datatable-column name="Name" [width]="widths.get('Name', 240)" [minWidth]="180">
       <ng-template let-row="row" ngx-datatable-cell-template>
         <section fxLayout="row" fxLayoutAlign="start center">
-          <span class="ellipsis" [title]="row.name">{{ row.name }}</span>
+          <span class="name" [title]="row.name"
+            ><span class="ellipsis">{{ nameHead(row.name) }}</span
+            ><span class="name-tail">{{ nameTail(row.name) }}</span></span
+          >
           <hi-disabled-label
             *ngIf="row.operationState === 'DISABLE'"
             text="DISABLED"
@@ -150,47 +147,87 @@
     <ngx-datatable-column
       name="Domain"
       prop="summary.domain"
-      [width]="widths.get('Domain', 220)"
+      [width]="widths.get('Domain', 320)" [minWidth]="200"
     >
       <ng-template let-value="value" ngx-datatable-cell-template>
-        <span class="mono wrap" [title]="value || ''">{{ value }}</span>
+        <span class="mono domain" [title]="value || ''"
+          ><span *ngFor="let pair of domainPairs(value)" class="domain-pair">{{
+            pair
+          }}</span></span
+        >
       </ng-template>
     </ngx-datatable-column>
-    <ngx-datatable-column name="Tags" prop="summary.tags" [width]="widths.get('Tags', 80)" [sortable]="false">
+    <ngx-datatable-column name="Tags" prop="summary.tags" [width]="widths.get('Tags', 70)" [sortable]="false">
       <ng-template let-value="value" ngx-datatable-cell-template>
         {{ value ? value.join(', ') : '' }}
       </ng-template>
     </ngx-datatable-column>
     <ngx-datatable-column
       name="Operations"
-      [width]="widths.get('Operations', 300)"
+      [width]="widths.get('Operations', 230)" [minWidth]="190"
       [sortable]="false"
     >
       <ng-template let-row="row" ngx-datatable-cell-template>
-        <div
-          *ngFor="let op of operations(row)"
-          class="op-entry"
-          [class.active]="op.active"
-          [title]="operationTitle(op)"
-        >
-          <span class="op-chip" [attr.data-operation]="op.entry.operation"
-            >{{ op.entry.operation }} · {{ op.entry.source || 'unknown' }}</span
-          >
-          <span class="op-detail"
-            ><b *ngIf="op.active">active · </b>{{ operationDetail(op) }}</span
-          >
-        </div>
+        <ng-container *ngIf="operations(row) as ops">
+          <ng-container *ngIf="current(ops) as active">
+            <button
+              type="button"
+              class="op-chip op-current"
+              [attr.data-operation]="active.entry.operation"
+              [matMenuTriggerFor]="history"
+              #trigger="matMenuTrigger"
+              [matTooltip]="summary(ops)"
+              [matTooltipDisabled]="trigger.menuOpen"
+              [attr.aria-label]="summary(ops)"
+              (click)="$event.stopPropagation()"
+            >
+              {{ active.entry.operation }} &middot;
+              {{ active.entry.source || 'unknown' }}
+              <span *ngIf="active.atMillis" class="op-age">{{
+                age(active.atMillis)
+              }}</span>
+              <span *ngIf="ops.length > 1" class="op-more"
+                >+{{ ops.length - 1 }}</span
+              >
+            </button>
+            <mat-menu #history="matMenu" class="op-history">
+              <div class="op-history-title">
+                Operation history, newest first
+              </div>
+              <button
+                mat-menu-item
+                type="button"
+                *ngFor="let op of newestFirst(row)"
+                class="op-entry op-history-entry"
+                [class.active]="op.active"
+              >
+                <span class="op-chip" [attr.data-operation]="op.entry.operation"
+                  >{{ op.entry.operation }} &middot;
+                  {{ op.entry.source || 'unknown' }}</span
+                >
+                <span class="op-detail"
+                  ><b *ngIf="op.active">active &middot; </b
+                  >{{ operationDetail(op) }}</span
+                >
+              </button>
+            </mat-menu>
+          </ng-container>
+        </ng-container>
         <span
           *ngIf="markerUntil(row)"
           class="op-chip marker"
-          title="Maintenance marker: ACM holds this instance's operation until it expires."
-          >marker until {{ markerUntil(row) }}</span
+          [matTooltip]="
+            'Maintenance marker: ACM holds this instance until ' +
+            markerUntil(row) +
+            '.'
+          "
+          >marker</span
         >
       </ng-template>
     </ngx-datatable-column>
     <ngx-datatable-column
       name="Capacity"
-      [width]="widths.get('Capacity', 130)"
+      [width]="widths.get('Capacity', 130)" [minWidth]="110"
       [sortable]="false"
     >
       <ng-template let-row="row" ngx-datatable-cell-template>

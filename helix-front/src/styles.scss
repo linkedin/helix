@@ -260,3 +260,10 @@ button:focus-visible {
   outline: 2px solid var(--hi-primary-text, #0075ac);
   outline-offset: 2px;
 }
+
+// multi-sentence fine print shown from an info icon
+.hi-hint-tooltip {
+  max-width: 420px !important;
+  font-size: 12px;
+  line-height: 1.45;
+}

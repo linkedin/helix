@@ -112,9 +112,7 @@ describe('TopologyComponent', () => {
     ]);
     expect(component.utc(component.updated)).toBe('2026-11-01 10:00:00 UTC');
     expect(component.domainsReadAt).toBeGreaterThan(component.updated);
-    const text = fixture.nativeElement
-      .querySelector('[data-testid="read-times"]')
-      .textContent.replace(/\s+/g, ' ');
+    const text = component.hint;
     expect(text).toContain('Domains were read at');
     expect(text).toContain('sample taken at 2026-11-01 10:00:00 UTC');
   });

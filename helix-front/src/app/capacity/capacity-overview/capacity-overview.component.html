@@ -5,6 +5,7 @@
     [count]="snapshot ? snapshot.instances.length : null"
     [updated]="updated"
     label="instances"
+    [hint]="hint"
     loadingText="Reading the cluster. A cold read can take a minute or two."
     emptyText="This cluster has no instances."
     (refresh)="load()"
@@ -198,12 +199,5 @@
         </tr>
       </tbody>
     </table>
-
-    <p class="footnote">
-      Used is the sum of WAGED partition weights over the last published
-      external view, not live CPU or disk. Unknown means a weight or capacity
-      could not be read, never zero. Not WAGED resources count toward partition
-      columns only.
-    </p>
   </ng-container>
 </section>
