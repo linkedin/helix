@@ -1,33 +1,138 @@
-$bands: (
-  unknown: #cfd8dc,
-  low: #c8e6c9,
-  mid: #e6ee9c,
-  high: #ffe082,
-  hot: #ffab91,
-  over: #e53935,
+@use 'sass:color';
+@use 'sass:list';
+@use 'sass:map';
+@use 'sass:math';
+
+// Load gets lighter or more salient in 5% steps so neighbours stay apart.
+// Light runs pale green to orange. Dark follows a magma ramp, indigo
+// through rose to amber, since darkened yellows all turn the same olive.
+// Lightness rises steadily in both, so they do not rely on hue alone.
+$load-light: (
+  0: #edf5ec,
+  50: #fff2c2,
+  75: #fdd17a,
+  90: #f59c55,
+  100: #d9502f,
 );
+$load-dark: (
+  0: #22233a,
+  40: #2e2858,
+  55: #4a2c74,
+  70: #863a82,
+  80: #c04e72,
+  90: #ec7350,
+  100: #f9b45a,
+);
+
+@function linear($channel) {
+  $v: math.div($channel, 255);
+  @return if(
+    $v <= 0.03928,
+    math.div($v, 12.92),
+    math.pow(math.div($v + 0.055, 1.055), 2.4)
+  );
+}
+
+@function luminance($c) {
+  @return 0.2126 * linear(color.red($c)) + 0.7152 * linear(color.green($c)) +
+    0.0722 * linear(color.blue($c));
+}
+
+// whichever of dark or light text reads better on the cell
+@function text-on($c) {
+  $l: luminance($c);
+  $on-light: math.div($l + 0.05, luminance(#16202a) + 0.05);
+  $on-dark: math.div(1.05, $l + 0.05);
+  @return if($on-light >= $on-dark, #16202a, #f4f6f8);
+}
+
+@function between($stops, $at) {
+  $keys: map.keys($stops);
+  @for $i from 1 to list.length($keys) {
+    $lo: list.nth($keys, $i);
+    $hi: list.nth($keys, $i + 1);
+    @if $at <= $hi {
+      $t: math.div($at - $lo, $hi - $lo) * 100%;
+      @return mix(map.get($stops, $hi), map.get($stops, $lo), $t);
+    }
+  }
+  @return map.get($stops, list.nth($keys, -1));
+}
+
+@mixin shade($name, $color) {
+  .shade-#{$name} {
+    background-color: $color;
+    --hi-shade-text: #{text-on($color)};
+  }
+}
+
+@mixin shades($load, $over, $unknown) {
+  @for $i from 0 through 20 {
+    @include shade(l#{$i}, between($load, $i * 5));
+  }
+  @include shade(over, $over);
+  @include shade(unknown, $unknown);
+}
+
+@include shades($load-light, #b71c1c, #cfd8dc);
+
+:host-context(.dark-theme) {
+  @include shades($load-dark, #e5484d, #2a323b);
+}
 
 :host {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
-  gap: 0 12px;
+  gap: 0 16px;
   align-items: start;
-}
-
-@each $band, $color in $bands {
-  .band-#{$band} {
-    background-color: var(--hi-band-#{$band}, #{$color});
-  }
+  font-size: 12px;
+  --hi-cell-w: 40px;
+  --hi-cell-h: 28px;
 }
 
 .legend {
   grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 14px;
-  margin: 8px 0;
-  font-size: 12px;
+  align-items: center;
+  gap: 6px 12px;
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+}
+
+.legend {
+  margin: 4px 0 12px;
+}
+
+.note {
+  flex-basis: 100%;
+}
+
+.scale {
+  position: relative;
+  display: inline-flex;
+  width: 240px;
+  height: 10px;
+  margin: 0 8px 14px 0;
+
+  i {
+    flex: 1;
+  }
+}
+
+.ticks b {
+  position: absolute;
+  top: 12px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 400;
+  white-space: nowrap;
+
+  &:first-child {
+    transform: none;
+  }
+  &:last-child {
+    transform: translateX(-100%);
+  }
 }
 
 .swatch {
@@ -41,48 +146,79 @@ $bands: (
 
 .map {
   position: relative;
-  overflow: hidden;
+  display: grid;
+  // a zone is as wide as its columns of cells, but never wider than the map,
+  // so one large zone on a narrow screen shrinks its cells instead of spilling
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(
+      min(100%, calc(var(--hi-columns) * (var(--hi-cell-w) + 2px) + 6px)),
+      1fr
+    )
+  );
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+
+  &.dense {
+    --hi-cell-w: 20px;
+    --hi-cell-h: 16px;
+  }
 }
 
 .zone {
-  position: absolute;
-  overflow: hidden;
+  padding: 4px;
+  border-radius: 6px;
   background: var(--hi-zone, #eceff1);
 }
 
-.zone-head,
-.tile span,
-.grow {
-  overflow: hidden;
+// wraps the stats under the name when the zone is narrow
+.zone-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  margin-bottom: 4px;
   white-space: nowrap;
-  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
+
+  b {
+    color: var(--hi-text, inherit);
+  }
+  .swatch {
+    margin: 0;
+    border-radius: 2px;
+  }
+  .stat {
+    font-variant-numeric: tabular-nums;
+  }
 }
 
-.zone-head {
-  padding: 0 4px;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
+.cells {
+  display: grid;
+  grid-template-columns: repeat(var(--hi-columns), minmax(0, 1fr));
+  grid-auto-rows: var(--hi-cell-h);
+  gap: 2px;
 }
 
 .tile {
-  position: absolute;
+  position: relative;
   box-sizing: border-box;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 2px 4px;
-  border: 1px solid var(--hi-zone, #eceff1);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
   font: inherit;
   font-size: 11px;
-  line-height: 14px;
-  text-align: left;
-  color: var(--hi-band-text, #1b2a33);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--hi-shade-text, var(--hi-band-text, #1b2a33));
   cursor: pointer;
 
-  &.band-over {
-    color: var(--hi-band-over-text, #fff);
-  }
   &.offline {
     background-image: repeating-linear-gradient(
       135deg,
@@ -93,42 +229,56 @@ $bands: (
   &.op {
     box-shadow: inset 0 0 0 2px var(--hi-op-ring, #37474f);
   }
+  &.over {
+    box-shadow: inset 0 0 0 2px #fff;
+  }
+  &.op.over {
+    box-shadow:
+      inset 0 0 0 2px var(--hi-op-ring, #37474f),
+      inset 0 0 0 4px #fff;
+  }
   &:hover,
   &:focus-visible,
   &.selected {
     outline: 2px solid var(--hi-focus, #0d47a1);
-    outline-offset: -2px;
+    outline-offset: 1px;
     z-index: 1;
   }
-  span {
-    max-width: 100%;
-  }
+  // shrunk cells clip the number rather than spill over their neighbours
   .value {
-    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
   }
   .err-mark {
     position: absolute;
-    top: 2px;
-    right: 2px;
-    padding: 0 3px;
+    top: -3px;
+    right: -3px;
+    min-width: 10px;
+    padding: 0 2px;
     border-radius: 6px;
-    background: var(--hi-err-mark-bg, #fff);
-    color: var(--hi-err-mark-text, #b71c1c);
-    font-weight: 700;
+    background: var(--hi-err-mark-bg, #b71c1c);
+    color: var(--hi-err-mark-text, #fff);
+    font-size: 9px;
+    line-height: 12px;
+    text-align: center;
   }
 }
 
 .detail {
+  position: sticky;
+  top: 8px;
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  box-sizing: border-box;
   padding: 4px 12px 10px;
   border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.12));
-  font-size: 12px;
+  border-radius: 6px;
 
   h3,
   h4 {
     margin: 10px 0 4px;
     font-size: 13px;
     font-weight: 500;
-    overflow-wrap: anywhere;
   }
   .close {
     float: right;
@@ -165,6 +315,9 @@ $bands: (
 .grow {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .mini {
@@ -181,4 +334,20 @@ $bands: (
 
 :host-context(.dark-theme) .open {
   color: var(--hi-primary-text);
+}
+
+// narrow pages put the panel above the map so a selection stays in view
+@media (max-width: 899px) {
+  :host {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .detail {
+    position: static;
+    order: -1;
+    max-height: none;
+    margin-bottom: 10px;
+  }
+  .detail.idle {
+    display: none;
+  }
 }

@@ -4,7 +4,7 @@ import 'zone.js/dist/zone-testing';
 import { Component, NO_ERRORS_SCHEMA } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { describe, expect, it, jest } from '@jest/globals';
+import { describe, expect, it } from '@jest/globals';
 
 import { snapshotFixture, withResources } from '../testing/snapshot.fixture';
 import { CapacityHeatmapComponent } from './capacity-heatmap.component';
@@ -45,24 +45,31 @@ describe('CapacityHeatmapComponent', () => {
     ]);
   }
 
-  it('renders zones, banded tiles and legend counts', () => {
+  it('renders zones in name order, shaded cells and legend counts', () => {
     const html: HTMLElement = create().nativeElement;
 
     expect(
       Array.from(html.querySelectorAll('.zone')).map((z) =>
         z.getAttribute('data-zone'),
       ),
-    ).toEqual(['z3', 'z2', 'z1']);
+    ).toEqual(['z1', 'z2', 'z3']);
     expect(html.querySelectorAll('.tile').length).toBe(4);
+    expect(
+      html.querySelector('[data-zone="z3"] .zone-head').textContent,
+    ).toContain('avg 120%');
     const n4 = tile(html, 'n4');
-    expect(n4.className).toContain('band-unknown');
+    expect(n4.className).toContain('shade-unknown');
+    expect(n4.textContent.trim()).toBe('?');
     expect(n4.classList.contains('offline')).toBe(true);
     expect(n4.classList.contains('op')).toBe(true);
     expect(n4.getAttribute('aria-label')).toBe(
       'n4, z3, CU unknown, not live, operation DISABLE',
     );
-    expect(tile(html, 'n3').className).toContain('band-over');
-    expect(tile(html, 'n3').querySelector('.err-mark')).not.toBeNull();
+    const n3 = tile(html, 'n3');
+    expect(n3.className).toContain('shade-over');
+    expect(n3.classList.contains('over')).toBe(true);
+    expect(n3.textContent).toContain('120%');
+    expect(n3.querySelector('.err-mark')).not.toBeNull();
     expect(tile(html, 'n1').querySelector('.err-mark')).toBeNull();
     expect(legend(html)).toEqual([
       ['unknown', '1'],
@@ -81,8 +88,8 @@ describe('CapacityHeatmapComponent', () => {
     fixture.detectChanges();
     const html: HTMLElement = fixture.nativeElement;
 
-    expect(tile(html, 'n3').className).toContain('band-mid');
-    expect(tile(html, 'n3').title).toContain(
+    expect(tile(html, 'n3').className).toContain('shade-l12');
+    expect(tile(html, 'n3').getAttribute('aria-label')).toContain(
       'DISK top state 1200 / 2000 (60%)',
     );
     expect(legend(html)[2]).toEqual(['mid', '1']);
@@ -99,7 +106,7 @@ describe('CapacityHeatmapComponent', () => {
           .filter(Boolean)
           .join(' '),
       );
-    expect(detail.textContent).toContain('Click a tile');
+    expect(detail.textContent).toContain('Click a cell');
 
     const n3 = tile(html, 'n3');
     expect(n3.tagName).toBe('BUTTON');
@@ -131,36 +138,11 @@ describe('CapacityHeatmapComponent', () => {
     expect(rows('.key')[0]).toBe('CU 600 / 1000 (60%)');
     (detail.querySelector('.close') as HTMLElement).click();
     fixture.detectChanges();
-    expect(detail.textContent).toContain('Click a tile');
+    expect(detail.textContent).toContain('Click a cell');
     expect(n3.classList.contains('selected')).toBe(false);
   });
 
-  it('lays out again when the map is resized and stops watching on destroy', () => {
-    let resized: () => void;
-    const disconnect = jest.fn();
-    (window as any).ResizeObserver = class {
-      constructor(callback: () => void) {
-        resized = callback;
-      }
-      observe() {}
-      disconnect = disconnect;
-    };
-    const fixture = create();
-    const map = fixture.nativeElement.querySelector('.map');
-    Object.defineProperty(map, 'clientWidth', { value: 500 });
-    resized();
-    const zones = fixture.nativeElement.querySelectorAll('.zone');
-    const right = Array.from(zones).map(
-      (z: HTMLElement) => parseFloat(z.style.left) + parseFloat(z.style.width),
-    );
-
-    expect(Math.max(...right)).toBeLessThanOrEqual(500);
-    fixture.destroy();
-    expect(disconnect).toHaveBeenCalled();
-    delete (window as any).ResizeObserver;
-  });
-
-  it('lays out 1,000 instances in 50 zones quickly, inside the map', () => {
+  it('builds 1,000 instances in 50 zones quickly, in dense cells', () => {
     const base = snapshotFixture().instances[0];
     const instances = Array.from({ length: 1000 }, (_, i) => ({
       ...base,
@@ -176,16 +158,12 @@ describe('CapacityHeatmapComponent', () => {
     const start = performance.now();
     heatmap.ngOnChanges();
     expect(performance.now() - start).toBeLessThan(200);
-    expect(heatmap.boxes.length).toBe(50);
-    const outside = heatmap.boxes.filter(
-      (box) =>
-        box.x + box.w > 960 ||
-        box.y + box.h > heatmap.height ||
-        box.tiles.some(
-          (t) => t.x + t.w > box.w + 1e-6 || t.y + t.h > box.h + 1e-6,
-        ),
-    );
-    expect(outside).toEqual([]);
-    expect(fixture.nativeElement.querySelectorAll('.tile').length).toBe(1000);
+    expect(heatmap.heatmap.zones.length).toBe(50);
+    expect(heatmap.heatmap.zones[1].label).toBe('zone-1');
+    expect(heatmap.heatmap.columns).toBe(5);
+    const html: HTMLElement = fixture.nativeElement;
+    expect(html.querySelector('.map').classList.contains('dense')).toBe(true);
+    expect(html.querySelectorAll('.tile').length).toBe(1000);
+    expect(html.querySelector('.tile .value')).toBeNull();
   });
 });

@@ -4,23 +4,24 @@ import {
   InstanceCapacity,
   InstanceResourceUsage,
 } from '../shared/capacity-snapshot.model';
-import { Rect, squarify, Tile } from './treemap';
 
 // Coolest to hottest. Unknown has its own grey band and never counts as low.
+// Each band's swatch is a step from the middle of its range.
 export const BANDS = [
-  { id: 'unknown', label: 'Unknown' },
-  { id: 'low', label: 'Under 50%' },
-  { id: 'mid', label: '50 to 75%' },
-  { id: 'high', label: '75 to 90%' },
-  { id: 'hot', label: '90 to 100%' },
-  { id: 'over', label: 'Over 100%' },
+  { id: 'unknown', label: 'Unknown', shade: 'unknown' },
+  { id: 'low', label: 'Under 50%', shade: 'l5' },
+  { id: 'mid', label: '50 to 75%', shade: 'l12' },
+  { id: 'high', label: '75 to 90%', shade: 'l16' },
+  { id: 'hot', label: '90 to 100%', shade: 'l19' },
+  { id: 'over', label: 'Over 100%', shade: 'over' },
 ];
 
 export interface HeatTile {
   instance: InstanceCapacity;
   ratio: number | null;
   band: string;
-  weight: number;
+  // colour step: l0 to l20 in 5% steps, over or unknown
+  shade: string;
   // any operation other than ENABLE
   operation: string | null;
   text: string;
@@ -31,19 +32,19 @@ export interface HeatZone {
   name: string;
   label: string;
   tiles: HeatTile[];
-  weight: number;
-  worst: number | null;
+  mean: number | null;
+  max: number | null;
+  shade: string;
 }
 
-export interface ZoneBox extends Rect {
-  zone: HeatZone;
-  head: number;
-  tiles: Tile<HeatTile>[];
+export interface Heatmap {
+  zones: HeatZone[];
+  counts: Record<string, number>;
+  // cells per zone row, the same for every zone so zones compare by shape
+  columns: number;
 }
 
 const names = new Intl.Collator(undefined, { numeric: true });
-const GAP = 2;
-const HEAD = 18;
 
 export function bandOf(ratio: number | null): string {
   if (ratio === null) {
@@ -73,25 +74,36 @@ export function usageText(
     : `${used} / ${instance.max[key]} (${percent(ratio)})`;
 }
 
-// Zones worst first, instances by name so a node keeps its place in its zone.
+export function shadeOf(ratio: number | null): string {
+  if (ratio === null) {
+    return 'unknown';
+  }
+  return ratio > 1 ? 'over' : `l${Math.floor(ratio * 20)}`;
+}
+
+// Zones by name; inside a zone hottest first, unknown last, then by name.
 export function buildHeatmap(
   snapshot: CapacitySnapshot | null,
   key: string,
   topStateOnly: boolean,
-): HeatZone[] {
+): Heatmap {
+  const instances = snapshot?.instances || [];
+  const measure = topStateOnly ? `${key} top state` : key;
+  const ratios = instances.map((i) => capacityRatio(i, key, topStateOnly));
   const zones = new Map<string, HeatZone>();
-  const mode = topStateOnly ? `${key} top state` : key;
-  for (const instance of snapshot?.instances || []) {
+  const counts: Record<string, number> = {};
+  instances.forEach((instance, n) => {
     const name = instance.zone || '';
     const zone: HeatZone = zones.get(name) || {
       name,
       label: name || 'No fault zone',
       tiles: [],
-      weight: 0,
-      worst: null,
+      mean: null,
+      max: null,
+      shade: 'unknown',
     };
     zones.set(name, zone);
-    const ratio = capacityRatio(instance, key, topStateOnly);
+    const ratio = ratios[n];
     const operation =
       instance.operation && instance.operation !== 'ENABLE'
         ? instance.operation
@@ -101,15 +113,13 @@ export function buildHeatmap(
       instance,
       ratio,
       band: bandOf(ratio),
-      // sized by load with a floor so cool nodes stay visible; unknown gets a
-      // middle size, neither hidden nor mistaken for a hot node
-      weight: 0.4 + Math.min(ratio ?? 0.5, 1.3),
+      shade: shadeOf(ratio),
       operation,
       text: percent(ratio),
       label: [
         instance.name,
         zone.label,
-        `${mode} ${usageText(instance, key, topStateOnly)}`,
+        `${measure} ${usageText(instance, key, topStateOnly)}`,
         !instance.live && 'not live',
         operation && `operation ${operation}`,
         errors && `${errors} ERROR replica${errors > 1 ? 's' : ''}`,
@@ -117,45 +127,30 @@ export function buildHeatmap(
         .filter(Boolean)
         .join(', '),
     };
+    counts[tile.band] = (counts[tile.band] || 0) + 1;
     zone.tiles.push(tile);
-    zone.weight += tile.weight;
-    zone.worst =
-      ratio === null ? zone.worst : Math.max(zone.worst ?? ratio, ratio);
-  }
-  const list = Array.from(zones.values());
-  list.forEach((zone) =>
-    zone.tiles.sort((a, b) => names.compare(a.instance.name, b.instance.name)),
-  );
-  return list.sort(
-    (a, b) =>
-      (b.worst ?? -1) - (a.worst ?? -1) || names.compare(a.label, b.label),
-  );
-}
-
-// Zone boxes are inset by a gap; tiles are relative to their zone box.
-export function layoutHeatmap(
-  zones: HeatZone[],
-  width: number,
-  height: number,
-): ZoneBox[] {
-  const items = zones.map((zone) => ({ weight: zone.weight, value: zone }));
-  return squarify(items, { x: 0, y: 0, w: width, h: height }).map((box) => {
-    const [w, h] = [box.w - GAP, box.h - GAP];
-    const head = h > 2 * HEAD ? HEAD : 0;
-    const tiles = box.value.tiles.map((tile) => ({
-      weight: tile.weight,
-      value: tile,
-    }));
-    return {
-      zone: box.value,
-      x: box.x + GAP / 2,
-      y: box.y + GAP / 2,
-      w,
-      h,
-      head,
-      tiles: squarify(tiles, { x: 0, y: head, w, h: h - head }),
-    };
   });
+  const hotFirst = (a: HeatTile, b: HeatTile) =>
+    (b.ratio ?? -1) - (a.ratio ?? -1) ||
+    names.compare(a.instance.name, b.instance.name);
+  const list = Array.from(zones.values());
+  for (const zone of list) {
+    zone.tiles.sort(hotFirst);
+    const known = zone.tiles.filter((t) => t.ratio !== null);
+    zone.max = known.length ? known[0].ratio : null;
+    zone.mean = known.length
+      ? known.reduce((sum, t) => sum + t.ratio, 0) / known.length
+      : null;
+    zone.shade = shadeOf(zone.mean);
+  }
+  const largest = Math.max(0, ...list.map((z) => z.tiles.length));
+  return {
+    zones: list.sort(
+      (a, b) => +!a.name - +!b.name || names.compare(a.name, b.name),
+    ),
+    counts,
+    columns: Math.max(4, Math.min(12, Math.ceil(Math.sqrt(largest)))),
+  };
 }
 
 // Usage for every key and the resources using the most of the selected key.
