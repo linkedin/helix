@@ -22,7 +22,6 @@ package org.apache.helix.controller.stages;
 import static org.apache.helix.controller.stages.ConvergenceStatusCalculator.priority;
 import static org.apache.helix.controller.stages.ConvergenceStatusCalculator.severity;
 
-import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Map;
 
@@ -48,12 +47,6 @@ final class ConvergenceTally {
       for (int r = 0; r < REASON_COUNT; r++) {
         _counts[s][r] += other._counts[s][r];
       }
-    }
-  }
-
-  void reset() {
-    for (int[] row : _counts) {
-      Arrays.fill(row, 0);
     }
   }
 

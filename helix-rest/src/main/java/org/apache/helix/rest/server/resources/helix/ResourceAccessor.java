@@ -255,7 +255,8 @@ public class ResourceAccessor extends AbstractHelixResource {
   @GET
   @Path("{resourceName}/convergence")
   public Response getResourceConvergence(@PathParam("clusterId") String clusterId,
-      @PathParam("resourceName") String resourceName) {
+      @PathParam("resourceName") String resourceName,
+      @DefaultValue("false") @QueryParam("fallback") boolean fallback) {
     HelixDataAccessor dataAccessor = getDataAccssor(clusterId);
     PropertyKey.Builder keyBuilder = dataAccessor.keyBuilder();
     Stat created = getRealmAwareZkClient().getStat(keyBuilder.idealStates(resourceName).getPath());
@@ -269,7 +270,7 @@ public class ResourceAccessor extends AbstractHelixResource {
     if (!enabled || managementMode) {
       // The answer does not depend on the record or the ideal state, so neither is read.
       return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, null,
-          null, null, enabled, managementMode));
+          null, null, enabled, managementMode, System.currentTimeMillis()));
     }
     // One record holds every resource; it lists only the ones that need attention.
     ConvergenceStatus cluster =
@@ -285,8 +286,11 @@ public class ResourceAccessor extends AbstractHelixResource {
             idealState._waged);
       }
     }
-    return JSONRepresentation(ConvergenceStatusResponseMapper.map(clusterId, resourceName, report,
-        cluster, dataAccessor.getProperty(keyBuilder.controllerLeader()), true, false));
+    return JSONRepresentation(ConvergenceVerifierFallback.INSTANCE.addTo(
+        ConvergenceStatusResponseMapper.map(clusterId, resourceName, report, cluster,
+            dataAccessor.getProperty(keyBuilder.controllerLeader()), true, false,
+            System.currentTimeMillis()),
+        fallback, getRealmAwareZkClient(), clusterConfig, clusterId, resourceName));
   }
 
   /**

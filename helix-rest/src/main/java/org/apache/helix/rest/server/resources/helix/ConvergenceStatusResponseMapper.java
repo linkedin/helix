@@ -36,13 +36,14 @@ import org.apache.helix.model.LiveInstance;
 
 /**
  * Turns the stored convergence record into the REST response. It is only trusted while it carries
- * the session of the controller that currently leads the cluster, so a record left by an earlier
- * leader is trusted only after the new one has rewritten it.
+ * the session of the controller that currently leads the cluster, and while that controller keeps
+ * confirming it ({@code evaluatedAt}); the content's own age means nothing, since an idle cluster
+ * does not change.
  *
  * <p>{@code reportState} is FRESH, or the first that applies of: MANAGEMENT_MODE,
  * MONITORING_DISABLED, REPORT_MISSING, SCHEMA_UNSUPPORTED, CONTROLLER_LEADER_MISSING,
- * CONTROLLER_SESSION_MISMATCH, and REPORT_MISSING for a resource the controller has not covered
- * yet. Only FRESH carries the status details.
+ * CONTROLLER_SESSION_MISMATCH, REPORT_STALE, and REPORT_MISSING for a resource the controller has
+ * not covered yet. Only FRESH carries the status details.
  */
 final class ConvergenceStatusResponseMapper {
   // reportState: whether the report can be trusted, and if not, why.
@@ -53,6 +54,9 @@ final class ConvergenceStatusResponseMapper {
   static final String CONTROLLER_LEADER_MISSING = "CONTROLLER_LEADER_MISSING";
   static final String CONTROLLER_SESSION_MISMATCH = "CONTROLLER_SESSION_MISMATCH";
   static final String MANAGEMENT_MODE = "MANAGEMENT_MODE";
+  static final String REPORT_STALE = "REPORT_STALE";
+  // Three missed heartbeats of the controller; see ConvergenceStatusPersistStage.HEARTBEAT_MS.
+  static final long STALE_AFTER_MS = 3 * 60_000L;
 
   // Response fields written on every path.
   private static final String STATUS = "status";
@@ -68,7 +72,7 @@ final class ConvergenceStatusResponseMapper {
    */
   static ObjectNode map(String clusterId, String resourceName, ConvergenceStatus report,
       ConvergenceStatus clusterReport, LiveInstance leader, boolean monitoringEnabled,
-      boolean managementMode) {
+      boolean managementMode, long now) {
     ObjectNode response = JsonNodeFactory.instance.objectNode();
     response.put("clusterId", clusterId);
     if (resourceName != null) {
@@ -77,7 +81,11 @@ final class ConvergenceStatusResponseMapper {
     if (managementMode) {
       return unavailable(response, Status.PAUSED, Reason.MANAGEMENT_MODE, MANAGEMENT_MODE);
     }
-    String problem = problem(report, clusterReport, leader, monitoringEnabled);
+    if (clusterReport != null && clusterReport.getEvaluatedAt() > 0) {
+      // When the controller last ran its pipeline, as opposed to when the content last changed.
+      response.put("evaluatedAt", clusterReport.getEvaluatedAt());
+    }
+    String problem = problem(report, clusterReport, leader, monitoringEnabled, now);
     if (problem != null) {
       return unavailable(response, Status.UNKNOWN, Reason.NONE, problem);
     }
@@ -162,7 +170,7 @@ final class ConvergenceStatusResponseMapper {
   }
 
   private static String problem(ConvergenceStatus report, ConvergenceStatus clusterReport,
-      LiveInstance leader, boolean monitoringEnabled) {
+      LiveInstance leader, boolean monitoringEnabled, long now) {
     if (!monitoringEnabled) {
       return MONITORING_DISABLED;
     }
@@ -179,6 +187,13 @@ final class ConvergenceStatusResponseMapper {
     if (session == null || !session.equals(clusterReport.getControllerSessionId())) {
       return CONTROLLER_SESSION_MISMATCH;
     }
+    // A session only proves the leader is alive, not that its pipeline is still running. A record
+    // that was never confirmed cannot be trusted either.
+    long evaluatedAt = clusterReport.getEvaluatedAt();
+    if (now - evaluatedAt > STALE_AFTER_MS) {
+      return REPORT_STALE;
+    }
+    // Only now: a resource the controller has not covered yet on a stuck controller is stale.
     return report == null ? REPORT_MISSING : null;
   }
 

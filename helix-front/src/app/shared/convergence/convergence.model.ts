@@ -15,6 +15,8 @@ export interface ConvergenceReport {
   // FRESH, or why the report cannot be trusted; only FRESH carries the fields below
   reportState: string;
   generatedAt?: number;
+  // when the controller last ran its pipeline; it moves even when nothing changed
+  evaluatedAt?: number;
   publishedBy?: string;
   unconvergedSince?: number;
   targetFreshness?: string;
@@ -103,6 +105,8 @@ export const REPORT_STATE_TEXT: Record<string, string> = {
     'There is no controller leader, so no report can be trusted.',
   CONTROLLER_SESSION_MISMATCH:
     'The report is from an earlier leader and the current one has not confirmed it yet.',
+  REPORT_STALE:
+    'The controller stopped updating this report, so its status is hidden. Its pipeline may be stuck.',
   MANAGEMENT_MODE: REASON_TEXT.MANAGEMENT_MODE,
 };
 

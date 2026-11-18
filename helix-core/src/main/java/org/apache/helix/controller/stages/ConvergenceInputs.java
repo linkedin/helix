@@ -81,6 +81,8 @@ public final class ConvergenceInputs {
   Set<String> _swapInstances = Collections.emptySet();
   WagedRebalanceStatus _wagedStatus;
   String _controllerName;
+  // Which pipeline run this snapshot belongs to; set by the persist stage.
+  long _generation;
 
   public ConvergenceInputs controllerName(String controllerName) {
     _controllerName = controllerName;
