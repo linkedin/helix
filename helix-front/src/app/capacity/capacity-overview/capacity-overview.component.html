@@ -57,7 +57,12 @@
           {{ snapshot.wagedResourceCount }} /
           {{ snapshot.nonWagedResourceCount }}
         </div>
-        <div class="label">WAGED / not WAGED resources</div>
+        <div
+          class="label"
+          matTooltip="Other counts every resource that is not WAGED, including workflows and jobs, so it can be higher than on the Resources tab."
+        >
+          WAGED / other resources
+        </div>
       </div>
     </div>
 
@@ -79,7 +84,9 @@
       >
         Heat map
       </button>
-      <span class="controls-label">Capacity key</span>
+      <span class="controls-label" *ngIf="snapshot.capacityKeys.length"
+        >Capacity key</span
+      >
       <button
         *ngFor="let k of snapshot.capacityKeys"
         type="button"
@@ -127,7 +134,9 @@
           <th>Instance</th>
           <th>{{ snapshot.faultZoneType || 'Zone' }}</th>
           <th>State</th>
-          <th class="util-col">{{ key }} used / max</th>
+          <th class="util-col" *ngIf="snapshot.capacityKeys.length">
+            {{ key }} used / max
+          </th>
           <th>WAGED partitions</th>
           <th>Other partitions</th>
           <th>ERROR</th>
@@ -153,12 +162,12 @@
               row.instance.operation || 'no config'
             }}</span>
           </td>
-          <td class="util-col">
+          <td class="util-col" *ngIf="snapshot.capacityKeys.length">
             <div class="bar" *ngIf="row.ratio !== null">
               <div
                 class="fill"
                 [class.over]="row.ratio > 1"
-                [class.hot]="row.ratio > 0.85 && row.ratio <= 1"
+                [class.hot]="row.ratio >= 0.855 && row.ratio <= 1"
                 [style.width.%]="min(row.ratio * 100, 100)"
               ></div>
             </div>
@@ -180,7 +189,7 @@
             >
           </td>
           <td [class.err]="row.instance.errorReplicas">
-            {{ row.instance.errorReplicas || '' }}
+            {{ row.instance.errorReplicas }}
           </td>
         </tr>
       </tbody>

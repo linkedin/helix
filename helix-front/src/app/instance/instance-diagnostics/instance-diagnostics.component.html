@@ -31,15 +31,18 @@
         [class.active]="view === 'messages'"
         (click)="setView('messages')"
       >
-        <strong>{{ messageIndex === null ? '?' : messageIndex.length }}</strong>
+        <strong>{{
+          messageIndex === null ? 'Not read' : messageIndex.length
+        }}</strong>
         Queued messages
+        <div class="muted" *ngIf="messageIndex === null">Select to read</div>
       </button>
       <button
         class="summary-card"
         [class.active]="view === 'errors'"
         (click)="setView('errors')"
       >
-        <strong>{{ errorIndex === null ? '?' : errorIndex.length }}</strong>
+        <strong>{{ errorIndex === null ? '...' : errorIndex.length }}</strong>
         Recorded error paths
       </button>
     </div>
@@ -150,21 +153,23 @@
           >{{ filteredErrors.length }} matching paths /
           {{ errorIndex.length }} indexed paths</span
         >
-        <button
-          mat-button
-          (click)="setFilters(page - 1)"
-          [disabled]="page === 0"
-        >
-          Previous
-        </button>
-        <span>Page {{ page + 1 }} of {{ errorPages }}</span>
-        <button
-          mat-button
-          (click)="setFilters(page + 1)"
-          [disabled]="page + 1 >= errorPages"
-        >
-          Next
-        </button>
+        <ng-container *ngIf="errorPages > 1">
+          <button
+            mat-button
+            (click)="setFilters(page - 1)"
+            [disabled]="page === 0"
+          >
+            Previous
+          </button>
+          <span>Page {{ page + 1 }} of {{ errorPages }}</span>
+          <button
+            mat-button
+            (click)="setFilters(page + 1)"
+            [disabled]="page + 1 >= errorPages"
+          >
+            Next
+          </button>
+        </ng-container>
       </div>
       <section
         *ngIf="selectedError"
@@ -271,21 +276,23 @@
           >{{ messageIndex.length }} indexed messages. Messages can disappear
           between reads.</span
         >
-        <button
-          mat-button
-          (click)="loadMessages(messagePage - 1)"
-          [disabled]="messagesLoading || messagePage === 0"
-        >
-          Previous
-        </button>
-        <span>Page {{ messagePage + 1 }} of {{ messagePages }}</span>
-        <button
-          mat-button
-          (click)="loadMessages(messagePage + 1)"
-          [disabled]="messagesLoading || messagePage + 1 >= messagePages"
-        >
-          Next
-        </button>
+        <ng-container *ngIf="messagePages > 1">
+          <button
+            mat-button
+            (click)="loadMessages(messagePage - 1)"
+            [disabled]="messagesLoading || messagePage === 0"
+          >
+            Previous
+          </button>
+          <span>Page {{ messagePage + 1 }} of {{ messagePages }}</span>
+          <button
+            mat-button
+            (click)="loadMessages(messagePage + 1)"
+            [disabled]="messagesLoading || messagePage + 1 >= messagePages"
+          >
+            Next
+          </button>
+        </ng-container>
       </div>
     </section>
   </ng-container>

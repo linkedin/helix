@@ -22,6 +22,12 @@ export class ResourceDetailComponent implements OnInit {
   resourceName: string;
   resource: Resource;
   isLoading = true;
+  loadError = '';
+
+  // a resource that never loaded has no tabs to show; a failed refresh keeps them
+  get missing(): boolean {
+    return !this.isLoading && !this.resource && !!this.loadError;
+  }
   can = false;
 
   constructor(
@@ -72,9 +78,13 @@ export class ResourceDetailComponent implements OnInit {
 
   protected loadResource() {
     this.isLoading = true;
+    this.loadError = '';
     this.service.get(this.clusterName, this.resourceName).subscribe(
       (resource) => (this.resource = resource),
-      (error) => this.helper.showError(error),
+      (error) => {
+        this.loadError = String(error);
+        this.isLoading = false;
+      },
       () => (this.isLoading = false)
     );
   }

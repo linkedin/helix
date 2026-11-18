@@ -19,6 +19,7 @@ export const PARTITION_FILTERS = [
   { value: 'unserved', label: 'No live serving replica' },
   { value: 'missing-top', label: 'Missing top state' },
   { value: 'below-target', label: 'Below replica target' },
+  // counts partitions, not replicas
   { value: 'errors', label: 'ERROR replicas' },
   { value: 'assignment', label: 'Assignment differs' },
 ] as const;

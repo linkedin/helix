@@ -41,7 +41,7 @@
 }
 
 .mono {
-  font-family: monospace;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
@@ -92,4 +92,19 @@
     background: var(--hi-error-bg, #ffcdd2);
     color: var(--hi-error, #b71c1c);
   }
+}
+
+// names stay on one line with an ellipsis, the full name is in the tooltip
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+// domains have no spaces, so let them break instead of clipping
+.wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }

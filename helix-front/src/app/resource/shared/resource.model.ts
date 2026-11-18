@@ -54,6 +54,8 @@ export class Resource {
   readonly stateModel: string;
   readonly partitionCount: number;
   readonly replicaCount: number;
+  // raw REPLICAS, which can be ANY_LIVEINSTANCE rather than a number
+  readonly replicas: string;
 
   readonly idealState: any;
   readonly externalView: any;
@@ -88,6 +90,7 @@ export class Resource {
     this.stateModel = idealState.simpleFields.STATE_MODEL_DEF_REF;
     this.partitionCount = +idealState.simpleFields.NUM_PARTITIONS;
     this.replicaCount = +idealState.simpleFields.REPLICAS;
+    this.replicas = idealState.simpleFields.REPLICAS;
 
     // fetch partition names from externalView.mapFields is (relatively) more stable
     this.partitions = [];

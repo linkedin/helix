@@ -36,6 +36,11 @@
         .datatable-body-cell {
           color: var(--hi-primary-text, #0064a5) !important;
         }
+
+        // secondary text keeps its grey otherwise, which is unreadable on blue
+        .datatable-body-cell .muted {
+          color: rgba(255, 255, 255, 0.85);
+        }
       }
     }
   }
@@ -46,6 +51,12 @@
   //     }
   //   }
   // }
+}
+
+// nine cluster tabs do not fit at Material's 160px minimum, size them to their labels
+.mat-tab-link {
+  min-width: 0 !important;
+  padding: 0 16px !important;
 }
 
 .datatable-scroll {

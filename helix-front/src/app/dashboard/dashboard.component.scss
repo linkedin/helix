@@ -18,6 +18,12 @@
   line-height: 24px;
 }
 
+// the legend fills are light in both themes, so the text stays dark on them
+.oval,
+.rectangle {
+  color: rgba(0, 0, 0, 0.87);
+}
+
 .oval {
   width: 80px;
   height: 24px;

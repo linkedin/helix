@@ -22,7 +22,7 @@
     <mat-toolbar-row>
       <hi-detail-header [cluster]="clusterName"></hi-detail-header>
       <hi-disabled-label
-        *ngIf="!cluster?.enabled"
+        *ngIf="cluster && !cluster.enabled"
         text="DISABLED"
       ></hi-disabled-label>
       <hi-disabled-label
@@ -32,7 +32,10 @@
     </mat-toolbar-row>
     <mat-toolbar-row class="information">
       <mat-spinner *ngIf="isLoading" diameter="30"></mat-spinner>
-      <h6 *ngIf="!isLoading">
+      <span *ngIf="loadError" class="load-error">
+        Could not load this cluster: {{ loadError }}
+      </span>
+      <h6 *ngIf="!isLoading && cluster">
         Controller:
         <a mat-button color="accent" routerLink="controller">{{
           cluster.controller
@@ -98,7 +101,7 @@
       </mat-menu>
     </mat-toolbar-row>
   </mat-toolbar>
-  <nav mat-tab-nav-bar>
+  <nav mat-tab-nav-bar *ngIf="!notFound">
     <a
       mat-tab-link
       *ngFor="let tabLink of tabLinks"
@@ -111,7 +114,7 @@
       <span *ngIf="tabLink.beta" class="beta">Beta</span>
     </a>
   </nav>
-  <section fxFlex>
+  <section fxFlex *ngIf="!notFound">
     <router-outlet></router-outlet>
   </section>
 </section>

@@ -68,15 +68,18 @@
       [canAutoResize]="false"
     >
       <ng-template let-value="value" ngx-datatable-cell-template>
-        <span>{{ value }}</span>
-        <button
-          mat-icon-button
-          matTooltip="Copy to clipboard"
-          ngxClipboard
-          [cbContent]="value"
-        >
-          <mat-icon>content_copy</mat-icon>
-        </button>
+        <span class="epoch-cell">
+          <span>{{ value }}</span>
+          <button
+            mat-icon-button
+            matTooltip="Copy to clipboard"
+            aria-label="Copy epoch time"
+            ngxClipboard
+            [cbContent]="value"
+          >
+            <mat-icon>content_copy</mat-icon>
+          </button>
+        </span>
       </ng-template>
     </ngx-datatable-column>
     <ngx-datatable-column

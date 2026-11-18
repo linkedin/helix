@@ -16,15 +16,28 @@ hi-history-list {
   }
 
   .zone-picker {
-    margin: 4px 0 8px;
+    margin: 4px 16px 8px 0;
 
     .zone-label {
       margin-right: 8px;
       opacity: 0.7;
     }
+
+    // compact toggle; the default 48px row is taller than the table rows
+    .mat-button-toggle-appearance-standard .mat-button-toggle-label-content {
+      line-height: 32px;
+      padding: 0 12px;
+    }
   }
 
   .mat-icon {
     @include md-icon-size(20px);
+  }
+
+  // the copy button is taller than a text line, so center the epoch with it
+  .epoch-cell {
+    display: inline-flex;
+    align-items: center;
+    margin: -10px 0;
   }
 }

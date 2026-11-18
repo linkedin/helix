@@ -26,6 +26,7 @@
     <hi-disabled-label
       *ngIf="!isLoading && workflow.state !== 'IN_PROGRESS'"
       [text]="workflow.state"
+      [class.label-done]="workflow.state === 'COMPLETED'"
     ></hi-disabled-label>
   </mat-toolbar-row>
   <mat-toolbar-row class="information">

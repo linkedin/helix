@@ -34,12 +34,15 @@
     data-testid="list-status-error"
   >
     <mat-icon>error_outline</mat-icon>
-    Could not load {{ label }}: {{ error }}. Any rows shown may be stale.
+    Could not load {{ label }}: {{ error }}.
+    <ng-container *ngIf="count">Any rows shown may be stale.</ng-container>
   </span>
 
   <span *ngIf="!error && !loading && updated" class="status-message status-ok">
     Sampled at {{ sampledAt
-    }}<span *ngIf="count != null">&nbsp;&middot; {{ count }} {{ label }}</span>
+    }}<span *ngIf="count != null"
+      >&nbsp;&middot; {{ count }} {{ countLabel }}</span
+    >
   </span>
 
   <span fxFlex="1 1 auto"></span>

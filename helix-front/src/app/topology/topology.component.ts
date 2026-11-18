@@ -5,6 +5,7 @@ import { forkJoin, Subscription } from 'rxjs';
 import { HelperService } from '../shared/helper.service';
 import { CapacityService } from '../capacity/shared/capacity.service';
 import { CapacitySnapshot } from '../capacity/shared/capacity-snapshot.model';
+import { percent } from '../capacity/heatmap/heatmap.model';
 import { InstanceService } from '../instance/shared/instance.service';
 import {
   average,
@@ -128,7 +129,7 @@ export class TopologyComponent implements OnInit, OnDestroy {
   }
 
   pct(ratio: number | null): string {
-    return ratio === null ? 'unknown' : `${Math.round(ratio * 100)}%`;
+    return percent(ratio);
   }
 
   min(a: number, b: number): number {

@@ -109,6 +109,10 @@ export class InstanceService extends HelixService {
       map((data) => {
         const liveInstance = data.liveInstance;
         const config = data.config;
+        // helix-rest answers 200 with just the id for a name it does not know
+        if (!config && !liveInstance) {
+          throw 'This instance is not in the cluster: it has no instance config and no live session.';
+        }
         const enabled =
           config &&
           config.simpleFields &&

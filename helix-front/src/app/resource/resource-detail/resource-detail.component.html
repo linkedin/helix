@@ -25,18 +25,21 @@
         [resource]="resourceName"
       ></hi-detail-header>
       <hi-disabled-label
-        *ngIf="!isLoading && !resource.online"
+        *ngIf="resource && !resource.online"
         text="OFFLINE"
       ></hi-disabled-label>
       <hi-disabled-label
-        *ngIf="!isLoading && !resource.enabled"
+        *ngIf="resource && !resource.enabled"
         text="DISABLED"
       ></hi-disabled-label>
     </mat-toolbar-row>
     <mat-toolbar-row class="information">
       <a mat-mini-fab routerLink="../"><mat-icon>arrow_back</mat-icon></a>
       <mat-spinner *ngIf="isLoading" diameter="30"></mat-spinner>
-      <hi-key-value-pairs *ngIf="!isLoading" [obj]="resource">
+      <span *ngIf="loadError" class="load-error">
+        Could not load this resource: {{ loadError }}
+      </span>
+      <hi-key-value-pairs *ngIf="!isLoading && resource" [obj]="resource">
         <hi-key-value-pair
           name="Rebalance Mode"
           prop="rebalanceMode"
@@ -51,7 +54,7 @@
         ></hi-key-value-pair>
         <hi-key-value-pair
           name="Replication Factor"
-          prop="replicaCount"
+          prop="replicas"
         ></hi-key-value-pair>
       </hi-key-value-pairs>
       <span fxFlex="1 1 auto"></span>
@@ -83,11 +86,12 @@
     </mat-toolbar-row>
   </mat-toolbar>
   <hi-convergence-panel
+    *ngIf="!missing"
     class="convergence"
     [cluster]="clusterName"
     [resource]="resourceName"
   ></hi-convergence-panel>
-  <nav mat-tab-nav-bar>
+  <nav mat-tab-nav-bar *ngIf="!missing">
     <a
       mat-tab-link
       *ngFor="let tabLink of tabLinks"
@@ -99,5 +103,5 @@
       {{ tabLink.label }}
     </a>
   </nav>
-  <router-outlet></router-outlet>
+  <router-outlet *ngIf="!missing"></router-outlet>
 </section>

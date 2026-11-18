@@ -118,6 +118,15 @@ describe('diagnosticIssues', () => {
     ).toEqual([expected]);
   });
 
+  it('does not judge workflows and jobs, which publish no external view', () => {
+    const workflow = resource('queue', {
+      hasExternalView: false,
+      waged: false,
+      rebalanceMode: 'TASK',
+    });
+    expect(diagnosticIssues(snapshot(), [], [workflow])).toEqual([]);
+  });
+
   it.each([
     [
       'warning instance n1 /instances/n1: Instance disabled. No stored operation matches, so this is the legacy HELIX_ENABLED flag. No source or reason recorded.',

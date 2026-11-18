@@ -64,6 +64,11 @@ export class AppComponent implements OnInit {
   }
 
   ngOnInit() {
+    // tab bars size to their labels, so measure them again once the web font
+    // replaces the fallback, or the ink bar sits under the wrong tab
+    (document as any).fonts?.ready.then(() =>
+      window.dispatchEvent(new Event('resize')),
+    );
     this.currentUser = this.service.getCurrentUser().pipe(
       tap((user: any) => this.isLoggedIn = user && user !== 'Sign In')
     );

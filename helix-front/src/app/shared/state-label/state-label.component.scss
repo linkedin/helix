@@ -20,3 +20,9 @@
   color: var(--hi-warning, #8a5a00);
   background: var(--hi-warning-bg, #fff4dc);
 }
+
+// ERROR reads as an error wherever a state is shown, selected row or not
+.state-label-error {
+  color: var(--hi-error, #b3261e);
+  background: var(--hi-error-bg, #fde7e6);
+}

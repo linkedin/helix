@@ -10,17 +10,18 @@ export class ClusterComponent implements OnInit {
   @ViewChild('sidenav', { static: true }) sidenav;
 
   isNarrowView: boolean;
+  hasCluster = false;
 
   constructor(protected media: MediaObserver) {}
 
   ngOnInit() {
-    // auto adjust side nav only if not embed
-    this.isNarrowView = this.media.isActive('xs') || this.media.isActive('sm');
+    // auto adjust side nav only if not embed; below 1280px it overlays the page
+    this.isNarrowView = this.media.isActive('lt-lg');
 
     this.media.asObservable().subscribe((change: MediaChange[]) => {
-      change.forEach((item) => {
-        this.isNarrowView = item.mqAlias === 'xs' || item.mqAlias === 'sm';
-      });
+      this.isNarrowView = change.some((item) =>
+        ['xs', 'sm', 'md'].includes(item.mqAlias),
+      );
     });
   }
 
