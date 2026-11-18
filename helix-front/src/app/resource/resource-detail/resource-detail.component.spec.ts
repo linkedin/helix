@@ -49,4 +49,25 @@ describe('ResourceDetailComponent', () => {
     Object.assign(page, { resource: undefined, isLoading: true });
     expect(page.missing).toBe(false);
   });
+
+  it('adds the baseline and best possible tabs only for WAGED resources', () => {
+    const page = Object.create(ResourceDetailComponent.prototype);
+    Object.assign(page, { resource: { waged: false } });
+    const links = () => page.tabLinks.map((t) => t.link);
+    expect(links()).toEqual([
+      'partitions',
+      'externalView',
+      'idealState',
+      'configs',
+    ]);
+    page.resource = { waged: true };
+    expect(links()).toEqual([
+      'partitions',
+      'externalView',
+      'idealState',
+      'baseline',
+      'bestPossible',
+      'configs',
+    ]);
+  });
 });

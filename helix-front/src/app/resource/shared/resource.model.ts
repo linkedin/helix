@@ -68,6 +68,13 @@ export class Resource {
     return _.get(this.idealState, 'simpleFields.HELIX_ENABLED') != 'false';
   }
 
+  // WAGED resources also have a baseline and best possible assignment
+  get waged(): boolean {
+    return /\.WagedRebalancer$/.test(
+      _.get(this.idealState, 'simpleFields.REBALANCER_CLASS_NAME') || '',
+    );
+  }
+
   get online(): boolean {
     return !_.isEmpty(this.externalView);
   }

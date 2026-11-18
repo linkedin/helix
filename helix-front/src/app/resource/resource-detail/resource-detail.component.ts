@@ -5,18 +5,29 @@ import { Resource } from '../shared/resource.model';
 import { HelperService } from '../../shared/helper.service';
 import { ResourceService } from '../shared/resource.service';
 
+const TABS = [
+  { label: 'Partitions', link: 'partitions' },
+  { label: 'External View', link: 'externalView' },
+  { label: 'Ideal State', link: 'idealState' },
+  { label: 'Configuration', link: 'configs' },
+];
+const WAGED_TABS = [
+  ...TABS.slice(0, 3),
+  { label: 'Baseline', link: 'baseline' },
+  { label: 'Best Possible', link: 'bestPossible' },
+  TABS[3],
+];
+
 @Component({
   selector: 'hi-resource-detail',
   templateUrl: './resource-detail.component.html',
   styleUrls: ['./resource-detail.component.scss'],
 })
 export class ResourceDetailComponent implements OnInit {
-  readonly tabLinks = [
-    { label: 'Partitions', link: 'partitions' },
-    { label: 'External View', link: 'externalView' },
-    { label: 'Ideal State', link: 'idealState' },
-    { label: 'Configuration', link: 'configs' },
-  ];
+  // WAGED resources also show the assignments the rebalancer saved
+  get tabLinks() {
+    return this.resource?.waged ? WAGED_TABS : TABS;
+  }
 
   clusterName: string;
   resourceName: string;

@@ -91,6 +91,21 @@ export class ResourceService extends HelixService {
     );
   }
 
+  // What the WAGED rebalancer last saved for one resource, decoded by
+  // helix-rest. The filter keeps the payload to this resource.
+  public getWagedAssignment(
+    clusterName: string,
+    resourceName: string,
+    kind: 'baseline' | 'bestPossible',
+  ): Observable<{
+    assignment: Record<string, Record<string, Record<string, string>>>;
+    metadata?: { version?: string; writeTimeMs?: number };
+  }> {
+    return this.request(
+      `/clusters/${clusterName}/wagedAssignment/${kind}?resources=${encodeURIComponent(resourceName)}`,
+    );
+  }
+
   public getStateModel(
     clusterName: string,
     name: string,
