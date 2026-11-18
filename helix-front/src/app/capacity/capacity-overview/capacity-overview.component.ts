@@ -4,7 +4,7 @@ import { Subscription } from 'rxjs';
 
 import { HelperService } from '../../shared/helper.service';
 import { CapacityService } from '../shared/capacity.service';
-import { percent } from '../heatmap/heatmap.model';
+import { ColorMode, percent } from '../heatmap/heatmap.model';
 import {
   capacityRatio,
   CapacitySnapshot,
@@ -31,6 +31,8 @@ export class CapacityOverviewComponent implements OnInit, OnDestroy {
   rows: CapacityRow[] = [];
   key = '';
   topStateOnly = false;
+  colorBy: ColorMode = 'load';
+  byZone = true;
   view: 'table' | 'heatmap' = 'table';
   isLoading = true;
   error = '';

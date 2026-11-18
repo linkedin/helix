@@ -16,16 +16,20 @@ export const BANDS = [
   { id: 'over', label: 'Over 100%', shade: 'over' },
 ];
 
+export type ColorMode = 'load' | 'median';
+
 export interface HeatTile {
   instance: InstanceCapacity;
   ratio: number | null;
   band: string;
-  // colour step: l0 to l20 in 5% steps, over or unknown
+  // colour step: l0 to l20 in 5% steps, over or unknown; m5 to p5 in 10%
+  // steps around the median
   shade: string;
   // any operation other than ENABLE
   operation: string | null;
   text: string;
   label: string;
+  short: string;
 }
 
 export interface HeatZone {
@@ -39,12 +43,18 @@ export interface HeatZone {
 
 export interface Heatmap {
   zones: HeatZone[];
+  // what Distance from median compares with: the median, or the mean when
+  // the median is 0, as it is when most instances carry nothing
+  reference: number | null;
+  basis: 'median' | 'mean';
   counts: Record<string, number>;
+  hottest: HeatTile[];
   // cells per zone row, the same for every zone so zones compare by shape
   columns: number;
 }
 
 const names = new Intl.Collator(undefined, { numeric: true });
+const HOTTEST = 10;
 
 export function bandOf(ratio: number | null): string {
   if (ratio === null) {
@@ -74,29 +84,98 @@ export function usageText(
     : `${used} / ${instance.max[key]} (${percent(ratio)})`;
 }
 
-export function shadeOf(ratio: number | null): string {
-  if (ratio === null) {
+// In median mode the reference is what each ratio is compared with; when it
+// is 0 anything above it is as far above as the scale goes.
+export function shadeOf(
+  ratio: number | null,
+  mode: ColorMode,
+  reference: number | null,
+): string {
+  if (ratio === null || (mode === 'median' && reference === null)) {
     return 'unknown';
   }
-  return ratio > 1 ? 'over' : `l${Math.floor(ratio * 20)}`;
+  if (mode === 'load') {
+    return ratio > 1 ? 'over' : `l${Math.floor(ratio * 20)}`;
+  }
+  if (!reference) {
+    return ratio > 0 ? 'p5' : 'p0';
+  }
+  const step = Math.round((ratio / reference - 1) * 10);
+  const clamped = Math.max(-5, Math.min(5, step));
+  return clamped < 0 ? `m${-clamped}` : `p${clamped}`;
+}
+
+// Drops the prefix and suffix every name shares, cut where letters meet digits
+// or punctuation, so host-1234.example.com_11932 becomes 1234. Names short
+// enough to read whole are kept.
+export function shortNames(list: string[]): (name: string) => string {
+  if (list.length < 2 || list.every((name) => name.length <= 16)) {
+    return (name) => name;
+  }
+  const kind = (c = '') => (/\d/.test(c) ? 'd' : /[a-z]/i.test(c) ? 'a' : c);
+  const [first] = list;
+  let pre = first.length;
+  let suf = first.length;
+  for (const name of list) {
+    let i = 0;
+    while (i < pre && name[i] === first[i]) i++;
+    pre = i;
+    let j = 0;
+    while (j < suf && name[name.length - 1 - j] === first[first.length - 1 - j])
+      j++;
+    suf = j;
+  }
+  // the cut must fall on a boundary in every name, not just the first
+  const shortest = Math.min(...list.map((name) => name.length));
+  suf = Math.min(suf, shortest - pre);
+  const splits = (at: (name: string) => number) =>
+    list.some((name) => {
+      const i = at(name);
+      return kind(name[i - 1]) === kind(name[i]);
+    });
+  while (pre > 0 && splits(() => pre)) pre--;
+  while (suf > 0 && splits((name) => name.length - suf)) suf--;
+  return (name) => name.slice(pre, name.length - suf) || name;
+}
+
+function median(values: number[]): number | null {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return !sorted.length
+    ? null
+    : sorted.length % 2
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 // Zones by name; inside a zone hottest first, unknown last, then by name.
+// Without zones there is one block of every instance, hottest first.
 export function buildHeatmap(
   snapshot: CapacitySnapshot | null,
   key: string,
   topStateOnly: boolean,
+  mode: ColorMode = 'load',
+  byZone = true,
 ): Heatmap {
   const instances = snapshot?.instances || [];
   const measure = topStateOnly ? `${key} top state` : key;
+  const short = shortNames(instances.map((i) => i.name));
   const ratios = instances.map((i) => capacityRatio(i, key, topStateOnly));
+  const known = ratios.filter((r) => r !== null);
+  const mid = median(known);
+  const basis = mid === 0 && known.some((r) => r > 0) ? 'mean' : 'median';
+  const reference =
+    basis === 'mean' ? known.reduce((a, b) => a + b, 0) / known.length : mid;
   const zones = new Map<string, HeatZone>();
   const counts: Record<string, number> = {};
+  const tiles: HeatTile[] = [];
   instances.forEach((instance, n) => {
-    const name = instance.zone || '';
+    const own = instance.zone || 'No fault zone';
+    // ungrouped, every instance lands in one block and is ranked against all
+    const name = byZone ? instance.zone || '' : '*';
     const zone: HeatZone = zones.get(name) || {
       name,
-      label: name || 'No fault zone',
+      label: byZone ? own : 'All instances',
       tiles: [],
       mean: null,
       max: null,
@@ -113,12 +192,13 @@ export function buildHeatmap(
       instance,
       ratio,
       band: bandOf(ratio),
-      shade: shadeOf(ratio),
+      shade: shadeOf(ratio, mode, reference),
       operation,
       text: percent(ratio),
+      short: short(instance.name),
       label: [
         instance.name,
-        zone.label,
+        own,
         `${measure} ${usageText(instance, key, topStateOnly)}`,
         !instance.live && 'not live',
         operation && `operation ${operation}`,
@@ -129,6 +209,7 @@ export function buildHeatmap(
     };
     counts[tile.band] = (counts[tile.band] || 0) + 1;
     zone.tiles.push(tile);
+    tiles.push(tile);
   });
   const hotFirst = (a: HeatTile, b: HeatTile) =>
     (b.ratio ?? -1) - (a.ratio ?? -1) ||
@@ -141,14 +222,20 @@ export function buildHeatmap(
     zone.mean = known.length
       ? known.reduce((sum, t) => sum + t.ratio, 0) / known.length
       : null;
-    zone.shade = shadeOf(zone.mean);
+    zone.shade = shadeOf(zone.mean, mode, reference);
   }
   const largest = Math.max(0, ...list.map((z) => z.tiles.length));
   return {
     zones: list.sort(
       (a, b) => +!a.name - +!b.name || names.compare(a.name, b.name),
     ),
+    reference,
+    basis,
     counts,
+    hottest: tiles
+      .filter((t) => t.ratio !== null)
+      .sort(hotFirst)
+      .slice(0, HOTTEST),
     columns: Math.max(4, Math.min(12, Math.ceil(Math.sqrt(largest)))),
   };
 }

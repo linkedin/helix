@@ -7,6 +7,8 @@
 // Light runs pale green to orange. Dark follows a magma ramp, indigo
 // through rose to amber, since darkened yellows all turn the same olive.
 // Lightness rises steadily in both, so they do not rely on hue alone.
+// Median distance is blue below and red above, getting lighter and more
+// saturated away from the median.
 $load-light: (
   0: #edf5ec,
   50: #fff2c2,
@@ -23,6 +25,8 @@ $load-dark: (
   90: #ec7350,
   100: #f9b45a,
 );
+$median-light: (-5: #3a6fb0, 0: #f1f1f1, 5: #bf3b2c);
+$median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 
 @function linear($channel) {
   $v: math.div($channel, 255);
@@ -66,18 +70,22 @@ $load-dark: (
   }
 }
 
-@mixin shades($load, $over, $unknown) {
+@mixin shades($load, $median, $over, $unknown) {
   @for $i from 0 through 20 {
     @include shade(l#{$i}, between($load, $i * 5));
+  }
+  @for $i from 0 through 5 {
+    @include shade(m#{$i}, between($median, -$i));
+    @include shade(p#{$i}, between($median, $i));
   }
   @include shade(over, $over);
   @include shade(unknown, $unknown);
 }
 
-@include shades($load-light, #b71c1c, #cfd8dc);
+@include shades($load-light, $median-light, #b71c1c, #cfd8dc);
 
 :host-context(.dark-theme) {
-  @include shades($load-dark, #e5484d, #2a323b);
+  @include shades($load-dark, $median-dark, #e5484d, #2a323b);
 }
 
 :host {
@@ -97,6 +105,23 @@ $load-dark: (
   align-items: center;
   gap: 6px 12px;
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+}
+
+.find {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+
+  input {
+    width: 200px;
+    padding: 4px 8px;
+    border: 1px solid var(--hi-border, rgba(0, 0, 0, 0.23));
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
 }
 
 .legend {
@@ -163,6 +188,15 @@ $load-dark: (
   &.dense {
     --hi-cell-w: 20px;
     --hi-cell-h: 16px;
+  }
+
+  // one block of every instance, as many cells to a row as fit
+  &.flat {
+    grid-template-columns: minmax(0, 1fr);
+
+    .cells {
+      grid-template-columns: repeat(auto-fill, minmax(var(--hi-cell-w), 1fr));
+    }
   }
 }
 
@@ -264,6 +298,35 @@ $load-dark: (
   }
 }
 
+.finding .tile:not(.match) {
+  opacity: 0.2;
+}
+
+.hover-card {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 280px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--hi-tooltip-bg, rgba(33, 33, 33, 0.94));
+  color: #fff;
+  font-size: 11px;
+  line-height: 15px;
+  transform: translateX(-50%);
+  pointer-events: none;
+
+  &.above {
+    transform: translate(-50%, -100%);
+  }
+  b,
+  span {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+}
+
 .detail {
   position: sticky;
   top: 8px;
@@ -291,6 +354,36 @@ $load-dark: (
   }
   dd {
     margin: 0;
+  }
+}
+
+.zone-row {
+  width: 100%;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--hi-hover, rgba(0, 0, 0, 0.04));
+  }
+  .name {
+    flex: 0 0 84px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .grow {
+    flex: 1;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 }
 
@@ -347,7 +440,12 @@ $load-dark: (
     max-height: none;
     margin-bottom: 10px;
   }
+  // the zone ranking goes under the map until a cell is selected
   .detail.idle {
-    display: none;
+    order: 1;
+    margin: 12px 0 0;
+  }
+  .find {
+    margin-left: 0;
   }
 }

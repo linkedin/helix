@@ -115,6 +115,48 @@
       >
         Top state only
       </button>
+      <ng-container *ngIf="view === 'heatmap'">
+        <span class="controls-label">Color by</span>
+        <button
+          type="button"
+          class="chip"
+          [class.active]="colorBy === 'load'"
+          [attr.aria-pressed]="colorBy === 'load'"
+          (click)="colorBy = 'load'"
+        >
+          Load
+        </button>
+        <button
+          type="button"
+          class="chip"
+          [class.active]="colorBy === 'median'"
+          [attr.aria-pressed]="colorBy === 'median'"
+          (click)="colorBy = 'median'"
+          matTooltip="Compares each instance with the cluster median, so imbalance shows even when every instance is in the same band."
+        >
+          Distance from median
+        </button>
+        <span class="controls-label">Group by</span>
+        <button
+          type="button"
+          class="chip"
+          [class.active]="byZone"
+          [attr.aria-pressed]="byZone"
+          (click)="byZone = true"
+        >
+          Fault zone
+        </button>
+        <button
+          type="button"
+          class="chip"
+          [class.active]="!byZone"
+          [attr.aria-pressed]="!byZone"
+          (click)="byZone = false"
+          matTooltip="Ranks every instance against every other, ignoring fault zones."
+        >
+          None
+        </button>
+      </ng-container>
     </div>
 
     <p class="empty" *ngIf="!snapshot.capacityKeys.length">
@@ -127,6 +169,8 @@
       [snapshot]="snapshot"
       [key]="key"
       [topStateOnly]="topStateOnly"
+      [mode]="colorBy"
+      [byZone]="byZone"
     ></hi-capacity-heatmap>
 
     <table
