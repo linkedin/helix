@@ -18,12 +18,15 @@ import {
   PartitionRow,
 } from '../shared/partition-diagnostics';
 
+import { ColumnWidths } from '../../shared/resizable/column-widths';
+
 @Component({
   selector: 'hi-partition-list',
   templateUrl: './partition-list.component.html',
   styleUrls: ['./partition-list.component.scss'],
 })
 export class PartitionListComponent implements OnInit, OnDestroy {
+  readonly widths = new ColumnWidths('partitions');
   @ViewChild('partitionsTable', { static: false })
   table: DatatableComponent;
 

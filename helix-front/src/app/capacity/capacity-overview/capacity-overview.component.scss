@@ -165,3 +165,9 @@
   font-size: 12px;
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.55));
 }
+
+// cells stay on one line; a wide table scrolls inside its own box
+.capacity-table th,
+.capacity-table td {
+  white-space: nowrap;
+}

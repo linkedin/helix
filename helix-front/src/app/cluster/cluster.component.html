@@ -25,6 +25,18 @@
     [disableClose]="!isNarrowView"
   >
     <hi-cluster-list></hi-cluster-list>
+    <div
+      *ngIf="!isNarrowView"
+      class="resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the cluster list"
+      title="Drag or use the arrow keys to resize. Double click to reset."
+      tabindex="0"
+      (pointerdown)="startResize($event)"
+      (keydown)="resizeByKey($event)"
+      (dblclick)="resetWidth()"
+    ></div>
   </mat-sidenav>
   <section fxFill class="content">
     <router-outlet

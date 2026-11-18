@@ -14,6 +14,8 @@ import { DatatableComponent } from '@swimlane/ngx-datatable';
 
 type ResourceFilter = 'all' | 'waged' | 'classic' | 'disabled' | 'no-view';
 
+import { ColumnWidths } from '../../shared/resizable/column-widths';
+
 @Component({
   selector: 'hi-resource-list',
   templateUrl: './resource-list.component.html',
@@ -21,6 +23,7 @@ type ResourceFilter = 'all' | 'waged' | 'classic' | 'disabled' | 'no-view';
   providers: [WorkflowService],
 })
 export class ResourceListComponent implements OnInit, OnDestroy {
+  readonly widths = new ColumnWidths('resources');
   @ViewChild('resourcesTable', { static: false })
   table: DatatableComponent;
 

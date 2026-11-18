@@ -1,6 +1,29 @@
+:host {
+  --hi-sidenav-width: 25vw;
+}
+
 .mat-sidenav {
-  width: 25vw;
+  width: min(var(--hi-sidenav-width), 50vw);
   min-width: 200px;
+}
+
+// drag handle on the drawer edge; the width is kept across visits
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+
+  &:hover,
+  &:focus-visible {
+    outline: none;
+    background: var(--hi-primary-text, #0075ac);
+    opacity: 0.4;
+  }
 }
 
 .toggle-button {
@@ -11,7 +34,7 @@
   cursor: pointer;
 
   &.open {
-    left: calc(25vw - 20px);
+    left: calc(max(min(var(--hi-sidenav-width), 50vw), 200px) - 20px);
   }
 
   &.close {
