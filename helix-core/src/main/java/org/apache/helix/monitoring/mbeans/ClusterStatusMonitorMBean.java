@@ -114,13 +114,14 @@ public interface ClusterStatusMonitorMBean extends SensorNameProvider {
 
   /**
    * Reversible 0/1 wedged-controller ("zombie leader") gauge. 1 when the controller still holds
-   * queued DEFAULT events (and, since this MBean is registered only while leader, still holds
-   * leadership) but the pipeline is not processing them: either the DEFAULT pipeline thread is dead
-   * (caught immediately) or no pipeline run has completed within the configurable stall threshold
-   * (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS). 0 when idle (empty queue) or actively draining. Unlike
-   * the raw queue size this is producer-rate-independent and, because the threshold is set above the
-   * worst-case healthy run, does not false-positive on a long legitimate rebalance. Gate EKG/alerts
-   * on {@code == 1}.
+   * queued DEFAULT events (the controller registers this MBean only while it is the leader and has
+   * not been shut down) but the pipeline is not processing them: either the DEFAULT pipeline thread
+   * is dead (caught immediately) or the run in progress has lasted longer than the configurable
+   * stall threshold (CONTROLLER_PIPELINE_STALL_THRESHOLD_MS). 0 when idle (empty queue), actively
+   * draining, or waiting for the next event, so a burst after a long idle period does not read as a
+   * stall. Unlike the raw queue size this is producer-rate-independent and, because the threshold
+   * is set above the worst-case healthy run, does not false-positive on a long legitimate
+   * rebalance. Gate EKG/alerts on {@code == 1}.
    * @return 1 if the controller pipeline appears wedged, otherwise 0.
    */
   long getControllerPipelineStalledGauge();
