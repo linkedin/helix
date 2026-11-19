@@ -24,6 +24,8 @@ export class DataTableComponent implements OnInit {
   @Input() sorts = [];
   @Input() deletable = false;
   @Input() insertable = false;
+  // the config key a nested list or map table belongs to, so the confirmation names it
+  @Input() keyName?: string;
 
   @Output() update: EventEmitter<any> = new EventEmitter<any>();
   @Output() create: EventEmitter<any> = new EventEmitter<any>();
@@ -44,7 +46,12 @@ export class DataTableComponent implements OnInit {
       return;
     }
 
-    const name = row.name !== undefined ? row.name : column.name;
+    const inner = row.name !== undefined ? row.name : null;
+    const name = this.keyName
+      ? inner !== null
+        ? `${this.keyName}.${inner}`
+        : this.keyName
+      : (inner ?? column.name);
     this.dialog
       .open(ConfirmDialogComponent, {
         data: {

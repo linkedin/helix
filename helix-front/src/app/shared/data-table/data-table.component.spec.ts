@@ -37,6 +37,19 @@ describe('DataTableComponent', () => {
     expect(editor.confirmed).not.toHaveBeenCalled();
   });
 
+  it('names the config key of a nested list or map row', () => {
+    const { component, open } = table(true);
+    component.keyName = 'PREFERENCE_LIST';
+    component.onEdited({ value: 'a' }, column, 'b');
+    component.keyName = 'CAPACITY';
+    component.onEdited({ name: 'CPU', value: '4' }, column, '8');
+
+    expect(open.mock.calls.map((c: any) => c[1].data.message)).toEqual([
+      'Change "PREFERENCE_LIST" from "a" to "b"?',
+      'Change "CAPACITY.CPU" from "4" to "8"?',
+    ]);
+  });
+
   it('asks nothing for an unchanged value', () => {
     const { component, open, updates } = table(true);
     component.onEdited(row, column, '5');

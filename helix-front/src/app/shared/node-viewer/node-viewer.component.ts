@@ -342,6 +342,9 @@ export class NodeViewerComponent implements OnInit {
     }
 
     const newNode: Node = new Node(null);
+    // the list to write, and the one shown; the shown one changes only once the write succeeds
+    let listEntry: any = null;
+    let storedList: any = null;
 
     switch (type) {
       case 'simple':
@@ -350,7 +353,8 @@ export class NodeViewerComponent implements OnInit {
 
       case 'list':
         if (key) {
-          const entry = _.find(this.node.listFields, { name: key });
+          storedList = _.find(this.node.listFields, { name: key });
+          const entry = (listEntry = _.cloneDeep(storedList));
           const index = _.findIndex(entry.value, { value: row.value });
 
           if (isDeleting) {
@@ -413,6 +417,9 @@ export class NodeViewerComponent implements OnInit {
         this.isLoading = true;
         observer.subscribe(
           () => {
+            if (storedList) {
+              storedList.value = listEntry.value;
+            }
             this.helper.showSnackBar('Ideal State updated!');
           },
           (error) => {
