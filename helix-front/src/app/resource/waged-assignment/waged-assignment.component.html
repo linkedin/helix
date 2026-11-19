@@ -38,7 +38,18 @@
       </label>
     </div>
 
-    <ng-container *ngIf="compareWith === 'idealState'">
+    <p class="note" *ngIf="isComparing" data-testid="compare-loading">
+      Reading the {{ otherName }}...
+    </p>
+    <p
+      class="note warning"
+      *ngIf="compareError && compareWith !== 'none'"
+      data-testid="compare-error"
+    >
+      {{ compareError }}
+    </p>
+
+    <ng-container *ngIf="compared && compareWith === 'idealState'">
       <p
         class="note warning"
         *ngIf="persist && !persist.bestPossible && !persist.intermediate"
@@ -64,7 +75,7 @@
       </p>
     </ng-container>
 
-    <div class="filters" *ngIf="compareWith !== 'none'">
+    <div class="filters" *ngIf="compared">
       <span class="badge" [class.ok]="!differing" [class.warning]="differing">{{
         differing
           ? differing + ' of ' + rows.length + ' differ from the ' + otherName
@@ -100,7 +111,7 @@
         <tr>
           <th>Partition</th>
           <th>{{ about.title }}</th>
-          <ng-container *ngIf="compareWith !== 'none'">
+          <ng-container *ngIf="compared">
             <th>{{ otherName | titlecase }}</th>
             <th>Difference</th>
           </ng-container>
@@ -115,7 +126,7 @@
               >{{ r.instance }}</span
             >
           </td>
-          <ng-container *ngIf="compareWith !== 'none'">
+          <ng-container *ngIf="compared">
             <td>
               <span class="replica" *ngFor="let r of row.other"
                 ><hi-state-label [state]="r.state"></hi-state-label

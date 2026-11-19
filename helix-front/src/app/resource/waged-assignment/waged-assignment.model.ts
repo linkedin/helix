@@ -42,19 +42,24 @@ function differenceOf(
   if (!live.length) {
     return `Not in the ${otherName}`;
   }
+  // by instance, so a replica moved from one instance to another counts on both sides
   const liveState = new Map(live.map((r) => [r.instance, r.state]));
-  const moving = saved.filter((r) => !liveState.has(r.instance)).length;
-  if (moving) {
-    return `${moving} replica${moving === 1 ? '' : 's'} not placed yet`;
-  }
-  const extra = live.length - saved.length;
-  if (extra > 0) {
-    return `${extra} extra replica${extra === 1 ? '' : 's'} still placed`;
-  }
-  const states = saved.filter((r) => liveState.get(r.instance) !== r.state);
-  return states.length
-    ? `${states.length} state${states.length === 1 ? '' : 's'} differ`
-    : null;
+  const savedNames = new Set(saved.map((r) => r.instance));
+  const missing = saved.filter((r) => !liveState.has(r.instance)).length;
+  const extra = live.filter((r) => !savedNames.has(r.instance)).length;
+  const states = saved.filter(
+    (r) => liveState.has(r.instance) && liveState.get(r.instance) !== r.state,
+  ).length;
+  const plural = (n: number, word: string) =>
+    `${n} ${word}${n === 1 ? '' : 's'}`;
+  const parts = [
+    missing ? `${plural(missing, 'replica')} not placed yet` : '',
+    extra ? `${plural(extra, 'extra replica')} still placed` : '',
+    states
+      ? `${plural(states, 'state')} ${states === 1 ? 'differs' : 'differ'}`
+      : '',
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
 }
 
 // Every partition in the saved map, and when another map is given, every

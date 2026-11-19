@@ -52,8 +52,11 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
   // the cluster's PERSIST_* flags, null when the config could not be read
   persist: { bestPossible: boolean; intermediate: boolean } | null = null;
   private saved: PartitionMap = {};
+  isComparing = false;
+  compareError = '';
   private resource: Resource | null = null;
   private sub: Subscription;
+  private compareSub: Subscription;
 
   get about() {
     return ABOUT[this.kind];
@@ -61,6 +64,11 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
 
   get otherName(): string {
     return this.compareWith === 'none' ? '' : OTHER_NAMES[this.compareWith];
+  }
+
+  // true once the placement to compare with has been read
+  get compared(): boolean {
+    return this.compareWith !== 'none' && !!this.resource;
   }
 
   get shown(): AssignmentRow[] {
@@ -83,27 +91,55 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
 
   ngOnDestroy() {
     this.sub?.unsubscribe();
+    this.compareSub?.unsubscribe();
   }
 
   load() {
     this.isLoading = true;
     this.error = '';
     this.notSaved = false;
+    this.resource = null;
+    this.persist = null;
+    this.compareError = '';
     this.sub?.unsubscribe();
-    this.sub = forkJoin([
-      this.service.getWagedAssignment(
-        this.clusterName,
-        this.resourceName,
-        this.kind,
-      ),
+    this.compareSub?.unsubscribe();
+    this.sub = this.service
+      .getWagedAssignment(this.clusterName, this.resourceName, this.kind)
+      .subscribe(
+        (saved) => {
+          this.saved = saved.assignment?.[this.resourceName] || {};
+          this.version = saved.metadata?.version || '';
+          this.written = saved.metadata?.writeTimeMs || null;
+          this.readAt = Date.now();
+          this.isLoading = false;
+          this.compare(this.compareWith);
+        },
+        (error) => {
+          // helix-rest answers 404 until the controller saves an assignment
+          this.notSaved = /not found/i.test(String(error));
+          this.error = this.notSaved ? '' : String(error);
+          this.rows = [];
+          this.isLoading = false;
+        },
+      );
+  }
+
+  // the default view needs only the saved assignment; the resource and the cluster config are
+  // read the first time a comparison is picked
+  compare(compareWith: CompareWith) {
+    this.compareWith = compareWith;
+    this.show();
+    if (compareWith === 'none' || this.resource || this.isComparing) return;
+    this.isComparing = true;
+    this.compareError = '';
+    this.compareSub = forkJoin([
       this.service.get(this.clusterName, this.resourceName),
       // only needed to explain the ideal state comparison
       this.service
         .getClusterConfig(this.clusterName)
         .pipe(catchError(() => of(null))),
     ]).subscribe(
-      ([saved, resource, config]) => {
-        this.saved = saved.assignment?.[this.resourceName] || {};
+      ([resource, config]) => {
         this.resource = resource;
         const flag = (key: string) =>
           String(config?.simpleFields?.[key]).toLowerCase() === 'true';
@@ -113,28 +149,21 @@ export class WagedAssignmentComponent implements OnInit, OnDestroy {
               intermediate: flag('PERSIST_INTERMEDIATE_ASSIGNMENT'),
             }
           : null;
-        this.version = saved.metadata?.version || '';
-        this.written = saved.metadata?.writeTimeMs || null;
-        this.readAt = Date.now();
-        this.compare(this.compareWith);
-        this.isLoading = false;
+        this.isComparing = false;
+        this.show();
       },
       (error) => {
-        // helix-rest answers 404 until the controller saves an assignment
-        this.notSaved = /not found/i.test(String(error));
-        this.error = this.notSaved ? '' : String(error);
-        this.rows = [];
-        this.isLoading = false;
+        this.compareError = `Could not read the resource to compare with: ${error}`;
+        this.isComparing = false;
       },
     );
   }
 
-  compare(compareWith: CompareWith) {
-    this.compareWith = compareWith;
+  private show() {
     const other =
-      compareWith === 'none'
+      this.compareWith === 'none' || !this.resource
         ? null
-        : this.resource?.[compareWith]?.mapFields || {};
+        : this.resource[this.compareWith]?.mapFields || {};
     this.rows = compareAssignment(this.saved, other, this.otherName);
     this.differing = this.rows.filter((r) => r.difference).length;
     this.onlyDiffering = this.onlyDiffering && this.differing > 0;

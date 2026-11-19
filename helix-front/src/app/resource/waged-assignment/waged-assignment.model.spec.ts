@@ -22,7 +22,7 @@ describe('compareAssignment', () => {
 
     expect(rows.map((r) => [r.partition, r.difference])).toEqual([
       ['p_1', '2 states differ'],
-      ['p_2', '1 replica not placed yet'],
+      ['p_2', '1 replica not placed yet, 1 extra replica still placed'],
       ['p_3', '1 extra replica still placed'],
       ['p_4', 'Not in the saved assignment'],
       ['p_10', null],
@@ -32,6 +32,19 @@ describe('compareAssignment', () => {
       { instance: 'a', state: 'MASTER' },
       { instance: 'b', state: 'SLAVE' },
     ]);
+  });
+
+  it('counts a replaced replica on both sides, with any state change', () => {
+    const [moved, both] = compareAssignment(
+      { p_0: { a: 'MASTER', b: 'SLAVE' }, p_1: { a: 'MASTER', b: 'SLAVE' } },
+      { p_0: { a: 'MASTER', c: 'SLAVE' }, p_1: { a: 'SLAVE', c: 'MASTER' } },
+    );
+    expect(moved.difference).toBe(
+      '1 replica not placed yet, 1 extra replica still placed',
+    );
+    expect(both.difference).toBe(
+      '1 replica not placed yet, 1 extra replica still placed, 1 state differs',
+    );
   });
 
   it('names the map it compares with', () => {
