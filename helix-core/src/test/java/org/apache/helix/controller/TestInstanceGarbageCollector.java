@@ -19,6 +19,7 @@ package org.apache.helix.controller;
  * under the License.
  */
 
+import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixManager;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
@@ -27,6 +28,7 @@ import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
+import org.apache.helix.model.ClusterConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -60,6 +62,34 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
     assertSubtreeExists(clusterName, "host_leftover_live", true);
     assertSubtreeExists(clusterName, "host_kept", true);
     _gZkClient.delete(PropertyPathBuilder.liveInstance(clusterName, "host_leftover_live"));
+    deleteCluster(clusterName);
+  }
+
+  // 0 or negative in the ClusterConfig turns the collection off: nothing is deleted, and the next
+  // run comes a default interval later to read the setting again. Once it is turned back on, a
+  // leftover still waits a full grace period, and runs follow the configured interval.
+  @Test
+  public void testIntervalFromClusterConfig() {
+    String clusterName = CLUSTER_PREFIX + "_" + TestHelper.getTestMethodName();
+    long defaultInterval = ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS;
+    _gSetupTool.addCluster(clusterName, true);
+    createLeftoverSubtree(clusterName, "host_leftover");
+    ClockedCollector collector = new ClockedCollector();
+    HelixManager manager = mockManager(clusterName, true);
+
+    Assert.assertEquals(collector.runAt(0, manager), defaultInterval);
+    setCollectionInterval(clusterName, 0);
+    Assert.assertEquals(collector.runAt(GRACE, manager), defaultInterval);
+    setCollectionInterval(clusterName, -1);
+    Assert.assertEquals(collector.runAt(2 * GRACE, manager), defaultInterval);
+    assertSubtreeExists(clusterName, "host_leftover", true);
+
+    setCollectionInterval(clusterName, 5000L);
+    Assert.assertEquals(collector.runAt(3 * GRACE, manager), 5000L);
+    Assert.assertEquals(collector.runAt(4 * GRACE - 1, manager), 5000L);
+    assertSubtreeExists(clusterName, "host_leftover", true);
+    collector.runAt(4 * GRACE, manager);
+    assertSubtreeExists(clusterName, "host_leftover", false);
     deleteCluster(clusterName);
   }
 
@@ -130,9 +160,9 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
       return _now;
     }
 
-    void runAt(long now, HelixManager manager) {
+    long runAt(long now, HelixManager manager) {
       _now = now;
-      collect(manager);
+      return collect(manager);
     }
   }
 
@@ -145,6 +175,13 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
         new ZKHelixDataAccessor(clusterName, new ZkBaseDataAccessor<>(_gZkClient)));
     when(manager.getClusterManagmentTool()).thenReturn(new ZKHelixAdmin(_gZkClient));
     return manager;
+  }
+
+  private void setCollectionInterval(String clusterName, long intervalMs) {
+    ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+    ClusterConfig clusterConfig = configAccessor.getClusterConfig(clusterName);
+    clusterConfig.setInstanceGarbageCollectionIntervalMs(intervalMs);
+    configAccessor.setClusterConfig(clusterName, clusterConfig);
   }
 
   // Simulates a dropInstance that deleted the InstanceConfig but failed before the subtree.

@@ -27,13 +27,16 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.model.ClusterConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Deletes /INSTANCES/{instance} subtrees left without an InstanceConfig by a dropInstance that
- * failed between deleting the config and deleting the subtree. The leader controller runs it every
- * {@link #COLLECTION_INTERVAL_MS} on its own thread, independent of cluster events and pipelines.
+ * failed between deleting the config and deleting the subtree. The leader controller runs it on
+ * its own thread, independent of cluster events and pipelines, every
+ * {@link ClusterConfig#getInstanceGarbageCollectionIntervalMs()} (1 minute by default). 0 or
+ * negative turns it off for the cluster; it then only rereads that setting once a minute.
  * Leftovers are found from ZK, so those left by any caller (REST, ClusterSetup, purge, participant
  * deregistration) are cleaned up, including after a controller failover.
  *
@@ -44,7 +47,6 @@ import org.slf4j.LoggerFactory;
  */
 class InstanceGarbageCollector {
   private static final Logger LOG = LoggerFactory.getLogger(InstanceGarbageCollector.class);
-  static final long COLLECTION_INTERVAL_MS = 60 * 1000L;
   static final long GARBAGE_GRACE_PERIOD_MS = 60 * 1000L;
 
   // When each current leftover was first seen. Kept in memory only: after a failover the new leader
@@ -54,16 +56,26 @@ class InstanceGarbageCollector {
   /**
    * Finds the leftover instance subtrees in the manager's cluster and deletes those seen for at
    * least {@link #GARBAGE_GRACE_PERIOD_MS}. Does nothing unless the manager is the connected
-   * leader.
+   * leader and the collection is on in the ClusterConfig, which is read on every run.
+   * @return the delay in ms before the next run: the configured interval, or the default one while
+   *     the collection is off or this manager is not the leader
    */
-  void collect(HelixManager manager) {
+  long collect(HelixManager manager) {
     if (!manager.isConnected() || !manager.isLeader()) {
       reset();
-      return;
+      return ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS;
     }
     String clusterName = manager.getClusterName();
     HelixDataAccessor accessor = manager.getHelixDataAccessor();
     PropertyKey.Builder keyBuilder = accessor.keyBuilder();
+    ClusterConfig clusterConfig = accessor.getProperty(keyBuilder.clusterConfig());
+    long intervalMs = clusterConfig == null
+        ? ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS
+        : clusterConfig.getInstanceGarbageCollectionIntervalMs();
+    if (intervalMs <= 0) {
+      reset();
+      return ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS;
+    }
     Set<String> garbageInstances = new HashSet<>(accessor.getChildNames(keyBuilder.instances()));
     garbageInstances.removeAll(accessor.getChildNames(keyBuilder.instanceConfigs()));
     garbageInstances.removeAll(accessor.getChildNames(keyBuilder.liveInstances()));
@@ -87,6 +99,7 @@ class InstanceGarbageCollector {
             instanceName, clusterName, e);
       }
     }
+    return intervalMs;
   }
 
   /**

@@ -209,6 +209,8 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
           "HelixController-instance_gc-" + GenericHelixController.this._clusterName));
   private final InstanceGarbageCollector _instanceGarbageCollector = new InstanceGarbageCollector();
   private ScheduledFuture<?> _instanceGarbageCollectionFutureTask = null;
+  // Bumped on every start and stop, so a run from an earlier start does not schedule another.
+  private long _instanceGarbageCollectionGeneration = 0;
 
   /**
    * The timer that triggers the on-demand rebalance pipeline.
@@ -456,7 +458,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   }
 
   /**
-   * Starts the periodic instance garbage collection, if it is not running yet.
+   * Starts the periodic instance garbage collection, if it is not running yet. Each run schedules
+   * the next one after the interval it read from the ClusterConfig, so a changed interval applies
+   * from the next run without waiting for the controller's cache.
    */
   private void startInstanceGarbageCollection(HelixManager manager) {
     synchronized (_instanceGarbageCollectionExecutor) {
@@ -466,16 +470,28 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       }
       _instanceGarbageCollector.reset();
       logger.info("Controller starting instance garbage collection for cluster {}", _clusterName);
-      _instanceGarbageCollectionFutureTask =
-          _instanceGarbageCollectionExecutor.scheduleWithFixedDelay(() -> {
-            // An exception thrown out of a scheduled task cancels all its later runs.
-            try {
-              _instanceGarbageCollector.collect(manager);
-            } catch (Exception e) {
-              logger.warn("Instance garbage collection failed for cluster {}", _clusterName, e);
-            }
-          }, InstanceGarbageCollector.COLLECTION_INTERVAL_MS,
-              InstanceGarbageCollector.COLLECTION_INTERVAL_MS, TimeUnit.MILLISECONDS);
+      scheduleInstanceGarbageCollection(manager, ++_instanceGarbageCollectionGeneration,
+          ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS);
+    }
+  }
+
+  // Schedules one run, unless the collection was stopped or restarted since this chain began.
+  private void scheduleInstanceGarbageCollection(HelixManager manager, long generation,
+      long delayMs) {
+    synchronized (_instanceGarbageCollectionExecutor) {
+      if (generation != _instanceGarbageCollectionGeneration
+          || _instanceGarbageCollectionExecutor.isShutdown()) {
+        return;
+      }
+      _instanceGarbageCollectionFutureTask = _instanceGarbageCollectionExecutor.schedule(() -> {
+        long nextDelayMs = ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS;
+        try {
+          nextDelayMs = _instanceGarbageCollector.collect(manager);
+        } catch (Exception e) {
+          logger.warn("Instance garbage collection failed for cluster {}", _clusterName, e);
+        }
+        scheduleInstanceGarbageCollection(manager, generation, nextDelayMs);
+      }, delayMs, TimeUnit.MILLISECONDS);
     }
   }
 
@@ -486,6 +502,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     synchronized (_instanceGarbageCollectionExecutor) {
       if (_instanceGarbageCollectionFutureTask != null) {
         logger.info("Controller stopping instance garbage collection for cluster {}", _clusterName);
+        _instanceGarbageCollectionGeneration++;
         _instanceGarbageCollectionFutureTask.cancel(false /* mayInterruptIfRunning */);
         _instanceGarbageCollectionFutureTask = null;
         _instanceGarbageCollector.reset();
