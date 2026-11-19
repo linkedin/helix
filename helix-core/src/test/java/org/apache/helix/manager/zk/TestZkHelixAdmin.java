@@ -2407,7 +2407,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 
-  // A drop of a large instance that fails between its two phases leaves a leftover subtree.
+  // A drop of a large instance that fails between its two steps leaves a leftover subtree.
   // addInstance deletes it first, so the new instance does not inherit stale state.
   @Test
   public void testAddInstanceCleansLeftoverSubtree() {
@@ -2720,9 +2720,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   // An instance whose config and subtree fit in one batch is deleted with a single atomic multi(),
-  // so a failed drop leaves nothing behind. A larger one is deleted in two phases: the config
-  // together with a fence on the subtree root, then the subtree in batches of at most
-  // DELETE_RECURSIVE_BATCH_SIZE ops that each check the fence.
+  // so a failed drop leaves nothing behind. A larger one is deleted in two steps: the config, then
+  // the subtree, which is fenced and deleted in batches of at most DELETE_RECURSIVE_BATCH_SIZE ops
+  // that each check the fence.
   @Test
   public void testDropInstanceIsAtomicUnlessSubtreeExceedsOneBatch() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
@@ -2754,8 +2754,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       multiCalls.clear();
       largeConfigExisted.clear();
       admin.dropInstance(clusterName, new InstanceConfig("host_large"));
-      Assert.assertEquals(multiCalls.get(0), Arrays.asList(largeConfigPath, largeInstancePath),
-          "The config is deleted together with the fence on the subtree root");
+      Assert.assertEquals(multiCalls.get(0), Collections.singletonList(largeInstancePath),
+          "The subtree root is fenced after the config is deleted");
+      Assert.assertFalse(largeConfigExisted.get(0));
       List<List<String>> batches = multiCalls.subList(1, multiCalls.size());
       Assert.assertTrue(batches.size() > 1, "Expected batched deletes: " + batches.size());
       for (int i = 0; i < batches.size(); i++) {
@@ -2788,7 +2789,7 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
     setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
     addMessages(clusterName, instanceName, 2 * batchSize);
 
-    // Call 0 deletes the config and fences the root; re-add the instance before batch 1.
+    // The config is deleted and call 0 fences the root; re-add the instance before batch 1.
     org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
         createZkClientBeforeEachMulti((callIndex, paths) -> {
           if (callIndex == 1) {
@@ -2809,6 +2810,63 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         InstanceType.PARTICIPANT));
     Assert.assertTrue(_gZkClient.getChildren(
         PropertyPathBuilder.instanceMessage(clusterName, instanceName)).isEmpty());
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // A drop that deleted the config and then lost its fence retries. If the instance is re-added
+  // before the retry looks for a config, the retry must keep it instead of dropping it again.
+  @Test
+  public void testDropInstanceRetryKeepsInstanceReAddedAfterConfigDelete() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceRetryKeepsReAdded";
+    final String instanceName = "host_readded_before_retry";
+    final String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    addMessages(clusterName, instanceName,
+        2 * org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE);
+
+    org.apache.helix.zookeeper.impl.client.ZkClient zkClient =
+        new org.apache.helix.zookeeper.impl.client.ZkClient(ZK_ADDR) {
+          private int _multiCalls = 0;
+          private int _subtreeListings = 0;
+
+          // The config is deleted and call 0 fences the root. Before batch 1, another deleter
+          // fences the root, so the batch fails and the drop retries.
+          @Override
+          public List<OpResult> multi(Iterable<Op> ops) {
+            if (_multiCalls++ == 1) {
+              _gZkClient.multi(Collections.singletonList(Op.setData(instancePath, null, -1)));
+            }
+            return super.multi(ops);
+          }
+
+          // The retry lists the subtree, then the instance is re-added before the retry looks
+          // for a config.
+          @Override
+          public List<String> getSubtreeChildrenFirst(String path) {
+            List<String> subtree = super.getSubtreeChildrenFirst(path);
+            if (++_subtreeListings == 2) {
+              setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+            }
+            return subtree;
+          }
+        };
+    try {
+      new ZKHelixAdmin(zkClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("dropInstance should report that the instance was re-added");
+    } catch (HelixConflictException expected) {
+      Assert.assertTrue(expected.getMessage().contains("re-added"), expected.getMessage());
+    } finally {
+      zkClient.close();
+    }
+    Assert.assertTrue(
+        _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
+    Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
+        InstanceType.PARTICIPANT));
 
     _gSetupTool.deleteCluster(clusterName);
     System.out.println("End test :" + TestHelper.getTestMethodName());
