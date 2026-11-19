@@ -235,7 +235,9 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
         this.segments.map((s) => `${s.label} ${s.count}`).join(', ');
       // every partition carries one reason; the controller picks the most
       // urgent one of the worst status as primary, which need not be the largest
+      // NONE is the converged partitions, which the bar already counts
       this.reasons = Object.entries(summary.reasonCounts || {})
+        .filter(([reason]) => reason !== 'NONE')
         .map(([reason, count]) => ({
           primary: reason === r.primaryReason,
           label: reasonLabel(reason),

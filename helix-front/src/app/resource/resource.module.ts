@@ -13,6 +13,7 @@ import { ResourceDetailForInstanceComponent } from './resource-detail-for-instan
 import { PartitionListComponent } from './partition-list/partition-list.component';
 import { PartitionDetailComponent } from './partition-detail/partition-detail.component';
 import { ResourceNodeViewerComponent } from './resource-node-viewer/resource-node-viewer.component';
+import { WagedAssignmentComponent } from './waged-assignment/waged-assignment.component';
 
 @NgModule({
   imports: [
@@ -29,6 +30,7 @@ import { ResourceNodeViewerComponent } from './resource-node-viewer/resource-nod
     PartitionListComponent,
     PartitionDetailComponent,
     ResourceNodeViewerComponent,
+    WagedAssignmentComponent,
   ],
 })
 export class ResourceModule {}

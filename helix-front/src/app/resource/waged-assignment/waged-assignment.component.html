@@ -1,0 +1,147 @@
+<section class="waged-assignment">
+  <hi-list-status
+    [loading]="isLoading"
+    [error]="error"
+    [count]="isLoading || error || notSaved ? null : rows.length"
+    [updated]="readAt"
+    label="partitions"
+    [hint]="about.text"
+    [emptyText]="
+      'This resource is not in the saved ' + about.title.toLowerCase() + '.'
+    "
+    (refresh)="load()"
+  ></hi-list-status>
+
+  <p class="notice" *ngIf="notSaved">
+    WAGED has not saved a {{ about.title.toLowerCase() }} for this cluster yet.
+    It is written after the controller's first successful rebalance.
+  </p>
+
+  <ng-container *ngIf="!isLoading && !error && !notSaved">
+    <div class="toolbar">
+      <span class="summary">
+        <strong>{{ about.title }}</strong>
+        <span *ngIf="version">version {{ version }}</span>
+        <span *ngIf="written">written {{ utc(written) }}</span>
+      </span>
+      <label class="compare">
+        Compare with
+        <select
+          [value]="compareWith"
+          (change)="compare($any($event.target).value)"
+          aria-label="Compare with"
+        >
+          <option value="none">Nothing</option>
+          <option value="idealState">Ideal state</option>
+          <option value="externalView">External view</option>
+        </select>
+      </label>
+    </div>
+
+    <p class="note" *ngIf="isComparing" data-testid="compare-loading">
+      Reading the {{ otherName }}...
+    </p>
+    <p
+      class="note warning"
+      *ngIf="compareError && compareWith !== 'none'"
+      data-testid="compare-error"
+    >
+      {{ compareError }}
+    </p>
+
+    <ng-container *ngIf="compared && compareWith === 'idealState'">
+      <p
+        class="note warning"
+        *ngIf="persist && !persist.bestPossible && !persist.intermediate"
+        data-testid="persist-off"
+      >
+        This cluster does not persist assignments into the ideal state
+        (PERSIST_BEST_POSSIBLE_ASSIGNMENT and PERSIST_INTERMEDIATE_ASSIGNMENT
+        are off), so its partition map is not the controller's output and may be
+        empty or out of date. Compare with the external view instead.
+      </p>
+      <p
+        class="note info"
+        *ngIf="persist?.intermediate"
+        data-testid="persist-intermediate"
+      >
+        PERSIST_INTERMEDIATE_ASSIGNMENT is on, so the ideal state holds the
+        intermediate assignment, the next throttled step toward the target. This
+        compares with that step, not with the final placement.
+      </p>
+      <p class="note warning" *ngIf="!persist" data-testid="persist-unknown">
+        Could not read the cluster config, so it is not known whether the ideal
+        state holds the controller's assignment.
+      </p>
+    </ng-container>
+
+    <div class="filters" *ngIf="compared">
+      <span class="badge" [class.ok]="!differing" [class.warning]="differing">{{
+        differing
+          ? differing + ' of ' + rows.length + ' differ from the ' + otherName
+          : 'matches the ' + otherName
+      }}</span>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="!onlyDiffering"
+        [attr.aria-pressed]="!onlyDiffering"
+        (click)="onlyDiffering = false"
+      >
+        All {{ rows.length }}
+      </button>
+      <button
+        type="button"
+        class="chip"
+        [class.active]="onlyDiffering"
+        [attr.aria-pressed]="onlyDiffering"
+        [disabled]="!differing"
+        (click)="onlyDiffering = true"
+      >
+        Differs {{ differing }}
+      </button>
+    </div>
+
+    <table
+      class="assignment"
+      *ngIf="rows.length"
+      hiResizableColumns="waged-assignment"
+    >
+      <thead>
+        <tr>
+          <th>Partition</th>
+          <th>{{ about.title }}</th>
+          <ng-container *ngIf="compared">
+            <th>{{ otherName | titlecase }}</th>
+            <th>Difference</th>
+          </ng-container>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let row of shown" [class.differs]="row.difference">
+          <td class="partition">{{ row.partition }}</td>
+          <td>
+            <span class="replica" *ngFor="let r of row.saved"
+              ><hi-state-label [state]="r.state"></hi-state-label
+              >{{ r.instance }}</span
+            >
+          </td>
+          <ng-container *ngIf="compared">
+            <td>
+              <span class="replica" *ngFor="let r of row.other"
+                ><hi-state-label [state]="r.state"></hi-state-label
+                >{{ r.instance }}</span
+              >
+            </td>
+            <td>
+              <span class="difference" *ngIf="row.difference">{{
+                row.difference
+              }}</span>
+              <span class="muted" *ngIf="!row.difference">Same</span>
+            </td>
+          </ng-container>
+        </tr>
+      </tbody>
+    </table>
+  </ng-container>
+</section>

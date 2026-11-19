@@ -9,6 +9,7 @@ import { InstanceListComponent } from './instance/instance-list/instance-list.co
 import { ResourceListComponent } from './resource/resource-list/resource-list.component';
 import { ResourceDetailComponent } from './resource/resource-detail/resource-detail.component';
 import { ResourceNodeViewerComponent } from './resource/resource-node-viewer/resource-node-viewer.component';
+import { WagedAssignmentComponent } from './resource/waged-assignment/waged-assignment.component';
 import { PartitionListComponent } from './resource/partition-list/partition-list.component';
 import { ControllerDetailComponent } from './controller/controller-detail/controller-detail.component';
 import { HistoryListComponent } from './history/history-list/history-list.component';
@@ -119,6 +120,16 @@ const HELIX_ROUTES: Routes = [
             data: {
               path: 'idealState',
             },
+          },
+          {
+            path: 'baseline',
+            component: WagedAssignmentComponent,
+            data: { kind: 'baseline' },
+          },
+          {
+            path: 'bestPossible',
+            component: WagedAssignmentComponent,
+            data: { kind: 'bestPossible' },
           },
           {
             path: 'configs',
