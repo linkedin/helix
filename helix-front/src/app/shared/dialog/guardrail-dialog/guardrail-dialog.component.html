@@ -37,7 +37,10 @@
   </div>
   <div class="banner info" *ngIf="!forceable && !confirming">
     <mat-icon>lock</mat-icon>
-    <span>This check cannot be overridden. Fix the input and try again.</span>
+    <span
+      >This UI does not offer Force for this check, since forcing it would write
+      an invalid config. Fix the input and try again.</span
+    >
   </div>
 </div>
 

@@ -6,8 +6,23 @@ export interface GuardrailViolation {
   indeterminate?: boolean;
 }
 
-// Rules guarding capacity, placement and liveness, where an operator can
-// knowingly override. Rules that reject invalid config are never forceable.
+// A write the guardrail blocked and the user chose not to force. Callers get it
+// as the error, so they can tell a blocked write apart from a failed one.
+export class GuardrailBlocked extends Error {
+  constructor(public violations: GuardrailViolation[]) {
+    super('Not applied: the change was blocked by a guardrail.');
+    Object.setPrototypeOf(this, GuardrailBlocked.prototype);
+  }
+
+  toString() {
+    return this.message;
+  }
+}
+
+// Rules whose backend documents force=true as an intended override. helix-rest
+// accepts force for every rule; the UI does not offer it for the rest, which
+// reject invalid input (a missing state model, min active above replicas, a
+// retired config key), since forcing those only writes a broken config.
 const FORCEABLE_RULES = new Set([
   'LIVE_INSTANCE_ON_INSTANCE_DROP',
   'RESOURCE_IN_USE_ON_RESOURCE_DROP',
@@ -17,6 +32,8 @@ const FORCEABLE_RULES = new Set([
   'IDEAL_STATE_REBALANCE_FEASIBILITY',
   'INSTANCE_CAPACITY_BELOW_CLUSTER_DEMAND',
   'PARTITION_WEIGHT_EXCEEDS_INSTANCE_CAPACITY',
+  'WAGED_INSTANCE_CAPACITY_KEY_MISSING',
+  'USER_DEFINED_REBALANCER_CLASS_INVALID',
 ]);
 
 export function isForceable(violations: GuardrailViolation[]): boolean {

@@ -6,15 +6,20 @@ import {
   HttpEvent,
   HttpErrorResponse,
 } from '@angular/common/http';
-import { Observable, EMPTY, throwError } from 'rxjs';
+import { Observable, throwError } from 'rxjs';
 import { catchError, switchMap } from 'rxjs/operators';
 import { MatDialog } from '@angular/material/dialog';
 
-import { isForceable, parseGuardrailVerdict } from './guardrail';
+import {
+  GuardrailBlocked,
+  isForceable,
+  parseGuardrailVerdict,
+} from './guardrail';
 import { GuardrailDialogComponent } from '../shared/dialog/guardrail-dialog/guardrail-dialog.component';
 
 // Shows the verdict when helix-rest blocks a mutation, and for overridable
 // rules re-sends the same request with force=true if the user confirms.
+// Otherwise the caller gets a GuardrailBlocked error.
 @Injectable()
 export class GuardrailInterceptor implements HttpInterceptor {
   constructor(private dialog: MatDialog) {}
@@ -41,7 +46,7 @@ export class GuardrailInterceptor implements HttpInterceptor {
                 ? next.handle(
                     req.clone({ params: req.params.set('force', 'true') }),
                   )
-                : EMPTY,
+                : throwError(new GuardrailBlocked(violations)),
             ),
           );
       }),

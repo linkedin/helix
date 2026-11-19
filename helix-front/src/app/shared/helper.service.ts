@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 
+import { GuardrailBlocked } from '../core/guardrail';
 import { AlertDialogComponent } from './dialog/alert-dialog/alert-dialog.component';
 import { ConfirmDialogComponent } from './dialog/confirm-dialog/confirm-dialog.component';
 import { InputDialogComponent } from './dialog/input-dialog/input-dialog.component';
@@ -17,6 +18,11 @@ export class HelperService {
   }
 
   showError(message: string | object) {
+    // the guardrail dialog already explained why; just confirm nothing was written
+    if (message instanceof GuardrailBlocked) {
+      this.showSnackBar(message.message);
+      return;
+    }
     this.dialog.open(AlertDialogComponent, {
       data: {
         title: 'Error',
