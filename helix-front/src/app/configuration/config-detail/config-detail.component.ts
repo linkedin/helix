@@ -101,6 +101,8 @@ export class ConfigDetailComponent implements OnInit {
         (error) => {
           this.helper.showError(error);
           this.isLoading = false;
+          // show what is stored, since the editor has already closed
+          this.loadConfig();
         },
         () => (this.isLoading = false)
       );

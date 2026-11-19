@@ -3,6 +3,7 @@ import { NgModule } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { HttpClientModule, HTTP_INTERCEPTORS } from '@angular/common/http';
 import { AuthInterceptor } from './core/auth.interceptor';
+import { GuardrailInterceptor } from './core/guardrail.interceptor';
 
 // import { Angulartics2Module } from 'angulartics2';
 // import { Angulartics2Piwik } from 'angulartics2/piwik';
@@ -50,6 +51,7 @@ import { OverviewModule } from './overview/overview.module';
   ],
   providers: [
     { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptor, multi: true },
+    { provide: HTTP_INTERCEPTORS, useClass: GuardrailInterceptor, multi: true },
   ],
   bootstrap: [AppComponent],
 })

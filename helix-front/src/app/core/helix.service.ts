@@ -6,6 +6,7 @@ import { HttpHeaders, HttpClient, HttpParams, HttpErrorResponse } from '@angular
 import { Router } from '@angular/router';
 
 import { Settings } from './settings';
+import { GuardrailBlocked } from './guardrail';
 
 @Injectable()
 export class HelixService {
@@ -67,6 +68,10 @@ export class HelixService {
   }
 
   protected errorHandler(error: any) {
+    // already shown to the user by the guardrail dialog; callers check for it
+    if (error instanceof GuardrailBlocked) {
+      return observableThrowError(error);
+    }
     console.error(error);
 
     let message = error.message || 'Cannot reach Helix restful service.';
