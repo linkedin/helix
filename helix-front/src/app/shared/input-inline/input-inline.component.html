@@ -30,18 +30,39 @@
       [minlength]="minlength"
       [maxlength]="maxlength"
       (focus)="focus($event)"
-      (blur)="onBlur($event)"
-      (keyup.enter)="onBlur($event)"
+      (keyup.enter)="save()"
       (keyup.escape)="cancel()"
       [required]="required"
+      [readonly]="pending"
       [name]="value"
       [(ngModel)]="value"
       [type]="type"
       [placeholder]="label"
     />
     <mat-hint *ngIf="hasError()" align="start">{{ errorLabel }}</mat-hint>
-    <mat-hint align="end">press ESC to cancel</mat-hint>
+    <mat-hint align="end">Enter to save, ESC to discard</mat-hint>
   </mat-form-field>
+  <section *ngIf="editing" class="edit-actions">
+    <button
+      mat-stroked-button
+      color="primary"
+      type="button"
+      class="save-edit"
+      [disabled]="pending || !isChanged() || hasError()"
+      (click)="save()"
+    >
+      Save
+    </button>
+    <button
+      mat-button
+      type="button"
+      class="discard-edit"
+      [disabled]="pending"
+      (click)="cancel()"
+    >
+      Discard
+    </button>
+  </section>
   <section *ngIf="!editing">
     <div
       class="inline-edit {{ hasError() ? 'error' : '' }}"

@@ -4,11 +4,19 @@ import { MatDialog } from '@angular/material/dialog';
 import { Settings } from '../../core/settings';
 import { InputDialogComponent } from '../dialog/input-dialog/input-dialog.component';
 import { ConfirmDialogComponent } from '../dialog/confirm-dialog/confirm-dialog.component';
+import { InlineEditGroup } from '../input-inline/inline-edit-group';
+
+// what the inline editor needs to hear back after the confirmation
+interface Editor {
+  confirmed(): void;
+  declined(): void;
+}
 
 @Component({
   selector: 'hi-data-table',
   templateUrl: './data-table.component.html',
   styleUrls: ['./data-table.component.scss'],
+  providers: [InlineEditGroup],
 })
 export class DataTableComponent implements OnInit {
   @Input() rows = [];
@@ -16,6 +24,8 @@ export class DataTableComponent implements OnInit {
   @Input() sorts = [];
   @Input() deletable = false;
   @Input() insertable = false;
+  // the config key a nested list or map table belongs to, so the confirmation names it
+  @Input() keyName?: string;
 
   @Output() update: EventEmitter<any> = new EventEmitter<any>();
   @Output() create: EventEmitter<any> = new EventEmitter<any>();
@@ -27,17 +37,44 @@ export class DataTableComponent implements OnInit {
 
   ngOnInit() {}
 
-  onEdited(row, column, value) {
+  onEdited(row, column, value, editor?: Editor) {
     const prop = this.getPropName(column);
 
-    // only emit when value changes
-    if (row[prop] !== value) {
-      this.update.emit({
-        row,
-        column,
-        value,
-      });
+    // only emit when value changes, and only after the user confirms it
+    if (row[prop] === value) {
+      editor?.declined();
+      return;
     }
+
+    const inner = row.name !== undefined ? row.name : null;
+    const name = this.keyName
+      ? inner !== null
+        ? `${this.keyName}.${inner}`
+        : this.keyName
+      : (inner ?? column.name);
+    this.dialog
+      .open(ConfirmDialogComponent, {
+        data: {
+          title: 'Save change?',
+          message: `Change "${name}" from "${row[prop]}" to "${value}"?`,
+          confirmButtonText: 'Save',
+        },
+        // the editor takes focus back itself; Save is disabled while it waits
+        restoreFocus: false,
+      })
+      .afterClosed()
+      .subscribe((result) => {
+        if (result) {
+          editor?.confirmed();
+          this.update.emit({
+            row,
+            column,
+            value,
+          });
+        } else {
+          editor?.declined();
+        }
+      });
   }
 
   onCreate() {

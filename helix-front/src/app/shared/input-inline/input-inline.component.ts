@@ -1,7 +1,9 @@
 import {
   Component,
+  OnDestroy,
   OnInit,
   Input,
+  Optional,
   Output,
   ViewChild,
   ElementRef,
@@ -9,13 +11,18 @@ import {
 } from '@angular/core';
 import { ControlValueAccessor } from '@angular/forms';
 
+import { InlineEditGroup } from './inline-edit-group';
+
 @Component({
   selector: 'hi-input-inline',
   templateUrl: './input-inline.component.html',
   styleUrls: ['./input-inline.component.scss'],
 })
-export class InputInlineComponent implements ControlValueAccessor, OnInit {
-  @ViewChild('inputControl', { static: true }) inputControl: ElementRef;
+export class InputInlineComponent
+  implements ControlValueAccessor, OnInit, OnDestroy
+{
+  // the input only exists while editing, so the query cannot be static
+  @ViewChild('inputControl') inputControl: ElementRef;
 
   @Output('update') change: EventEmitter<string> = new EventEmitter<string>();
 
@@ -32,10 +39,16 @@ export class InputInlineComponent implements ControlValueAccessor, OnInit {
   @Input() disabled = false;
 
   editing = false;
+  // a save is waiting for the parent's confirmation
+  pending = false;
 
   private _value = '';
 
   private lastValue = '';
+
+  // what was typed in the last confirmed save, kept until the field shows a
+  // new value, so a rejected write can be retried without retyping
+  private draft: { from: string; value: string } | null = null;
 
   // Required forControlValueAccessor interface
   public onChange: any = Function.prototype;
@@ -62,9 +75,18 @@ export class InputInlineComponent implements ControlValueAccessor, OnInit {
     this._value = value;
   }
 
-  constructor() {}
+  private readonly group: InlineEditGroup;
+
+  constructor(@Optional() group?: InlineEditGroup) {
+    // outside a table each field is its own group
+    this.group = group || new InlineEditGroup();
+  }
 
   ngOnInit() {}
+
+  ngOnDestroy() {
+    this.group.release(this);
+  }
 
   hasError() {
     const exp = new RegExp(this.pattern);
@@ -80,30 +102,65 @@ export class InputInlineComponent implements ControlValueAccessor, OnInit {
     return false;
   }
 
+  isChanged() {
+    return this.value !== this.lastValue;
+  }
+
   edit(value) {
-    if (this.disabled) {
+    if (this.disabled || this.editing) {
       return;
     }
 
+    // only one field in a table is edited at a time, so a save is one key
+    this.group.claim(this);
     this.lastValue = value;
+    if (this.draft && this.draft.from === value) {
+      this.value = this.draft.value;
+    }
+    this.draft = null;
     this.editing = true;
-    setTimeout((_) => {
-      this.inputControl?.nativeElement.focus();
-    });
+    this.focusInput();
   }
 
-  onBlur($event: Event) {
-    if (this.hasError()) {
-      return false;
+  // Asks the parent to save; the editor stays open with the typed value until
+  // the parent reports the user's answer through confirmed() or declined().
+  save() {
+    if (this.pending || this.hasError() || !this.isChanged()) {
+      return;
     }
-
-    // this.blur();
-    this.editing = false;
+    this.pending = true;
     this.change.emit(this.value);
   }
 
+  // The write was sent. Show the stored value until the parent reloads, and
+  // keep the typed one in case the write is rejected.
+  confirmed() {
+    this.draft = { from: this.lastValue, value: this.value };
+    this.value = this.lastValue;
+    this.close();
+  }
+
+  // The user backed out of the confirmation, so let them keep editing.
+  declined() {
+    this.pending = false;
+    this.focusInput();
+  }
+
   cancel() {
-    this._value = this.lastValue;
+    this.value = this.lastValue;
+    this.draft = null;
+    this.close();
+  }
+
+  private close() {
+    this.pending = false;
     this.editing = false;
+    this.group.release(this);
+  }
+
+  private focusInput() {
+    setTimeout((_) => {
+      this.inputControl?.nativeElement.focus();
+    });
   }
 }

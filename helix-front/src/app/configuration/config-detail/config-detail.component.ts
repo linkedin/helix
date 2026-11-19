@@ -98,7 +98,10 @@ export class ConfigDetailComponent implements OnInit {
           this.helper.showSnackBar('Configuration updated!');
           this.loadConfig();
         },
-        (error) => this.helper.showError(error),
+        (error) => {
+          this.helper.showError(error);
+          this.isLoading = false;
+        },
         () => (this.isLoading = false)
       );
     }
@@ -130,7 +133,10 @@ export class ConfigDetailComponent implements OnInit {
           this.helper.showSnackBar('Configuration deleted!');
           this.loadConfig();
         },
-        (error) => this.helper.showError(error),
+        (error) => {
+          this.helper.showError(error);
+          this.isLoading = false;
+        },
         () => (this.isLoading = false)
       );
     }
