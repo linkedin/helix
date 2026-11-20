@@ -490,7 +490,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       return algorithm;
     }
     ClusterConfig clusterConfig = clusterData.getClusterConfig();
-    boolean enabled = clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
+    boolean enabled = clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled()
+        && !clusterConfig.isWagedBestEffortPlacementEnabled();
     long generation = monitor.configureWagedInstanceTagIsolation(enabled, resources);
     if (!enabled) {
       return algorithm;
@@ -827,9 +828,14 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       // overwrite result, which leaves its current assignment untouched by the merge below.
       Map<String, ResourceAssignment> assignment =
           WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, Collections.emptyMap());
-      // keep only the resource entries requiring changes for minActiveReplica
-      assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
-      DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
+      if (clusterData.getClusterConfig().isWagedBestEffortPlacementEnabled()) {
+        DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment,
+            clusterModel.getAssignableNodes().keySet());
+      } else {
+        // keep only the resource entries requiring changes for minActiveReplica
+        assignment.keySet().retainAll(clusterModel.getAssignableReplicaMap().keySet());
+        DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment);
+      }
       overwriteClean = true;
       return currentResourceAssignment;
     } catch (HelixRebalanceException e) {

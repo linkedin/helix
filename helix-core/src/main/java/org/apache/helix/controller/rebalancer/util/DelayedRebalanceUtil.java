@@ -365,6 +365,27 @@ public class DelayedRebalanceUtil {
     });
   }
 
+  public static void mergeAssignments(Map<String, ResourceAssignment> newAssignment,
+      Map<String, ResourceAssignment> currentResourceAssignment, Set<String> modeledInstances) {
+    newAssignment.forEach((resName, assignment) -> {
+      ResourceAssignment current = currentResourceAssignment.get(resName);
+      if (current == null) {
+        currentResourceAssignment.put(resName, assignment);
+        return;
+      }
+      Set<Partition> partitions = new HashSet<>(current.getMappedPartitions());
+      partitions.addAll(assignment.getMappedPartitions());
+      for (Partition partition : partitions) {
+        Map<String, String> merged = new HashMap<>();
+        current.getReplicaMap(partition).forEach((inst, state) -> {
+          if (!modeledInstances.contains(inst)) merged.put(inst, state);
+        });
+        merged.putAll(assignment.getReplicaMap(partition));
+        current.addReplicaMap(partition, merged);
+      }
+    });
+  }
+
   /**
    * From the current assignment, find the partitions that are missing minActiveReplica for ALL resources, return as a
    * map keyed by resource name.

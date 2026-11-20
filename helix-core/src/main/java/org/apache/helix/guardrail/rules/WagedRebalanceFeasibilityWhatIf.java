@@ -437,6 +437,7 @@ final class WagedRebalanceFeasibilityWhatIf {
     // would read that as placed. While another clique already fails, the baseline fails too and the
     // edit is certified, as when WAGED cannot compute the cluster without isolation.
     simulationClusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    simulationClusterConfig.setWagedBestEffortPlacementEnabled(false);
 
     String subject = "the proposed ideal-state edit to resource " + targetResource;
 

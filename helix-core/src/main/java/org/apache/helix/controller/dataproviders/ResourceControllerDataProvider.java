@@ -562,6 +562,10 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     Map<String, Integer> partitionWeightMap =
           _wagedPartitionWeightProvider.getPartitionWeights(resourceName, partition);
     if (partitionWeightMap == null || partitionWeightMap.isEmpty()) {
+      if (getClusterConfig() != null && getClusterConfig().isWagedBestEffortPlacementEnabled()) {
+        return _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance, resourceName,
+            partition, Collections.emptyMap());
+      }
       return true;
     }
 

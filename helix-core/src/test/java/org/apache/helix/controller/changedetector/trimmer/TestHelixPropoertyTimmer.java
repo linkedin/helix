@@ -547,6 +547,12 @@ public class TestHelixPropoertyTimmer {
       return Boolean.toString(
           !((ClusterConfig) helixProperty).isWagedInstanceTagIsolationEnabled());
     }
+    if (helixProperty instanceof ClusterConfig
+        && ClusterConfig.ClusterConfigProperty.WAGED_BEST_EFFORT_PLACEMENT_ENABLED.name()
+        .equals(fieldKey)) {
+      return Boolean.toString(
+          !((ClusterConfig) helixProperty).isWagedBestEffortPlacementEnabled());
+    }
     return "foobar";
   }
 
