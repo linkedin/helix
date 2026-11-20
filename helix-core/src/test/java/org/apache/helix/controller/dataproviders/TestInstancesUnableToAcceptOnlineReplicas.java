@@ -225,6 +225,65 @@ public class TestInstancesUnableToAcceptOnlineReplicas {
         "Only unmarked, non-routable instances that aren't enabled-live should count");
   }
 
+  // ----- Routable count (percentage denominator) ------------------------------------------
+
+  @Test
+  public void testRoutableCountIgnoresLivenessAndMarkers() {
+    // The denominator is cluster capacity, not health: an instance stays routable whether it is
+    // live, offline, disabled, evacuating, or exempted by a maintenance marker.
+    Map<String, InstanceConfig> instanceConfigMap = configs(
+        config("enable-live", InstanceConstants.InstanceOperation.ENABLE),
+        config("enable-offline", InstanceConstants.InstanceOperation.ENABLE),
+        config("disable", InstanceConstants.InstanceOperation.DISABLE),
+        config("evacuate", InstanceConstants.InstanceOperation.EVACUATE),
+        configWithMarker("marked", InstanceConstants.InstanceOperation.ENABLE, FUTURE_MS));
+    BaseControllerDataProvider provider =
+        providerWith(instanceConfigMap, liveInstances("enable-live"));
+    Assert.assertEquals(provider.getRoutableInstanceCount(), 5,
+        "All five instances are routable regardless of liveness or maintenance markers");
+  }
+
+  @Test
+  public void testRoutableCountExcludesUnroutableOperations() {
+    Map<String, InstanceConfig> instanceConfigMap = configs(
+        config("enable", InstanceConstants.InstanceOperation.ENABLE),
+        config("swap-in", InstanceConstants.InstanceOperation.SWAP_IN),
+        config("unknown", InstanceConstants.InstanceOperation.UNKNOWN));
+    BaseControllerDataProvider provider = providerWith(instanceConfigMap, liveInstances("enable"));
+    Assert.assertEquals(provider.getRoutableInstanceCount(), 1,
+        "SWAP_IN and UNKNOWN are not assignable capacity and must not inflate the denominator");
+  }
+
+  @Test
+  public void testRoutableCountIsEmptyClusterSafe() {
+    BaseControllerDataProvider provider = providerWith(configs(), liveInstances());
+    Assert.assertEquals(provider.getRoutableInstanceCount(), 0,
+        "An empty cluster must report zero routable instances, not throw");
+  }
+
+  @Test
+  public void testOfflineBudgetIsSubsetOfRoutablePopulation() {
+    // The percentage thresholds divide the offline count by the routable count, so the former
+    // must never exceed the latter. Build a cluster mixing every operation and assert the
+    // invariant holds for the exact population both MM entry and MM exit measure.
+    Map<String, InstanceConfig> instanceConfigMap = configs(
+        config("enable-live", InstanceConstants.InstanceOperation.ENABLE),
+        config("enable-offline", InstanceConstants.InstanceOperation.ENABLE),
+        config("disable", InstanceConstants.InstanceOperation.DISABLE),
+        config("evacuate", InstanceConstants.InstanceOperation.EVACUATE),
+        configWithMarker("marked", InstanceConstants.InstanceOperation.ENABLE, FUTURE_MS),
+        config("swap-in", InstanceConstants.InstanceOperation.SWAP_IN),
+        config("unknown", InstanceConstants.InstanceOperation.UNKNOWN));
+    BaseControllerDataProvider provider =
+        providerWith(instanceConfigMap, liveInstances("enable-live"));
+
+    Set<String> unableToAccept = provider.getInstancesUnableToAcceptOnlineReplicas(NOW_MS);
+    Assert.assertEquals(unableToAccept, setOf("enable-offline", "disable", "evacuate"));
+    Assert.assertEquals(provider.getRoutableInstanceCount(), 5);
+    Assert.assertTrue(unableToAccept.size() <= provider.getRoutableInstanceCount(),
+        "Offline budget population must be a subset of the routable population");
+  }
+
   // ----- Returned-set contract ------------------------------------------------------------
 
   @Test

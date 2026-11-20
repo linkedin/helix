@@ -30,6 +30,7 @@ import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.pipeline.AbstractAsyncBaseStage;
 import org.apache.helix.controller.pipeline.AsyncWorkerType;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
+import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.MaintenanceSignal;
 import org.apache.helix.model.Partition;
@@ -87,24 +88,70 @@ public class MaintenanceRecoveryStage extends AbstractAsyncBaseStage {
     // two arms must stay collapsed for backward compatibility.
     case MAX_OFFLINE_INSTANCES_EXCEEDED:
     case MAX_INSTANCES_UNABLE_TO_ACCEPT_ONLINE_REPLICAS:
-      int numOfflineInstancesForAutoExit =
-          cache.getClusterConfig().getNumOfflineInstancesForAutoExit();
-      if (numOfflineInstancesForAutoExit < 0) {
-        return; // Config is not set, no auto-exit
+      // Check on the number of offline/disabled instances
+      ClusterConfig clusterConfig = cache.getClusterConfig();
+      int absoluteExitThreshold = clusterConfig.getNumOfflineInstancesForAutoExit();
+      int percentageExitThreshold = clusterConfig.getNumOfflineInstancesForAutoExitPercentage();
+
+      if (absoluteExitThreshold < 0 && percentageExitThreshold < 0) {
+        return; // Neither config is set, no auto-exit
       }
+
       // Use the shared offline-budget accessor so MM exit measures against the same
       // population MM entry uses in BestPossibleStateCalcStage. See
       // BaseControllerDataProvider#getInstancesUnableToAcceptOnlineReplicas for the
       // membership rules (routable, not enabled-live, no valid maintenance marker).
       int instancesUnableToAcceptOnlineReplicas =
           cache.getInstancesUnableToAcceptOnlineReplicas(System.currentTimeMillis()).size();
-      shouldExitMaintenance =
-          instancesUnableToAcceptOnlineReplicas <= numOfflineInstancesForAutoExit;
+      // Percentages resolve against the routable population, the same denominator MM entry uses.
+      int routableInstanceCount = cache.getRoutableInstanceCount();
+
+      int effectiveExitThreshold = ClusterConfig.resolveEffectiveThreshold(
+          absoluteExitThreshold, percentageExitThreshold, routableInstanceCount);
+
+      // An exit threshold looser than the entry threshold makes the cluster flap: for any count
+      // in (entry, exit] this stage exits maintenance mode and the entry check in
+      // BestPossibleStateCalcStage immediately re-enters it. ClusterConfig can only
+      // cross-validate absolute-against-absolute and percentage-against-percentage, so a mixed
+      // configuration such as a percentage entry with an absolute exit reaches here unvalidated;
+      // comparing those two statically is impossible because a percentage only becomes a count
+      // once the routable instance count is known. Clamp here, where that count is known.
+      // An entry threshold of -1 means auto-enter is off, so nothing can re-enter and a
+      // previously persisted maintenance signal must still be allowed to auto-exit.
+      int effectiveEntryThreshold = ClusterConfig.resolveEffectiveThreshold(
+          clusterConfig.getMaxOfflineInstancesAllowed(),
+          clusterConfig.getMaxOfflineInstancesAllowedPercentage(), routableInstanceCount);
+      boolean exitLooserThanEntry =
+          effectiveEntryThreshold >= 0 && effectiveExitThreshold > effectiveEntryThreshold;
+      int configuredExitThreshold = effectiveExitThreshold;
+      if (exitLooserThanEntry) {
+        effectiveExitThreshold = effectiveEntryThreshold;
+      }
+
+      shouldExitMaintenance = effectiveExitThreshold >= 0
+          && instancesUnableToAcceptOnlineReplicas <= effectiveExitThreshold;
+
+      // Only warn when the clamp actually suppressed an exit, so a cluster that is staying in
+      // maintenance mode on its own merits does not log this on every pipeline run.
+      if (exitLooserThanEntry && !shouldExitMaintenance
+          && instancesUnableToAcceptOnlineReplicas <= configuredExitThreshold) {
+        LogUtil.logWarn(LOG, event.getEventId(), String.format(
+            "Cluster %s has an auto-exit threshold (%d) looser than its auto-enter threshold "
+                + "(%d) for %d routable instances, so exiting maintenance mode would immediately "
+                + "re-enter it. Clamping the exit threshold to the enter threshold and staying in "
+                + "maintenance mode. Configured exit absolute=%d, percentage=%d%%; enter "
+                + "absolute=%d, percentage=%d%%.",
+            event.getClusterName(), configuredExitThreshold, effectiveEntryThreshold,
+            routableInstanceCount, absoluteExitThreshold, percentageExitThreshold,
+            clusterConfig.getMaxOfflineInstancesAllowed(),
+            clusterConfig.getMaxOfflineInstancesAllowedPercentage()));
+      }
       reason = String.format(
           "Auto-exiting maintenance mode for cluster %s; instances unable to take ONLINE "
-              + "replicas count %d is less than or equal to the exit threshold %d",
-          event.getClusterName(), instancesUnableToAcceptOnlineReplicas,
-          numOfflineInstancesForAutoExit);
+              + "replicas count %d is less than or equal to effective exit threshold %d "
+              + "(absolute=%d, percentage=%d%% of %d routable)",
+          event.getClusterName(), instancesUnableToAcceptOnlineReplicas, effectiveExitThreshold,
+          absoluteExitThreshold, percentageExitThreshold, routableInstanceCount);
       break;
     case MAX_PARTITION_PER_INSTANCE_EXCEEDED:
       IntermediateStateOutput intermediateStateOutput =
