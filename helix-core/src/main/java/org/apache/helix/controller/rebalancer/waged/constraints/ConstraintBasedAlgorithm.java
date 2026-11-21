@@ -65,8 +65,15 @@ import org.slf4j.LoggerFactory;
  */
 public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   private static final float DIV_GUARD = 0.01f;
+  // Bound single-hop relocation probes per unplaceable replica and across all unsuccessful
+  // replicas in one calculate() run so a saturated tag clique (e.g. 200 unplaceable replicas
+  // scanning 1,000 occupied hosts) stays fast instead of degrading into O(replicas * nodes).
   private static final int MAX_RELOCATION_EVALUATIONS = 256;
   private static final int MAX_TOTAL_UNSUCCESSFUL_RELOCATION_EVALUATIONS = 1024;
+  // Host-level hard constraints whose outcome for an incoming replica does not change when a
+  // single victim replica is released from that host (fault zone, instance tag, disabled
+  // partition, or same partition already on the host). Used to skip whole hosts before iterating
+  // over their assigned victims during single-hop relocation.
   private static final Set<HardConstraint.Type> STATIC_HOST_CONSTRAINTS = EnumSet.of(
       HardConstraint.Type.FAULT_ZONE, HardConstraint.Type.VALID_GROUP_TAG,
       HardConstraint.Type.REPLICA_ACTIVATE, HardConstraint.Type.SAME_PARTITION_ON_INSTANCE);
@@ -198,12 +205,19 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       // Stop if the replica has no candidate node, unless isolation can skip its share block.
       if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
         if (bestEffort) {
+          // Direct placement found no eligible node. Try a bounded single-hop swap (vacate one
+          // movable replica on a blocking host onto a free compatible host) before leaving this
+          // replica unplaced. Cache failed keys so identical siblings do not repeat the scan
+          // unless a later placement changes cluster occupancy (which clears failedRelocationKeys).
           if (relocationBudget.get() > 0 && !failedRelocationKeys.contains(replica.toString())
               && tryRelocateBlockingReplica(replica, nodes, clusterModel, busyInstances,
                   placedOnHostThisRun, relocationBudget)) {
             failedRelocationKeys.clear();
             continue;
           }
+          // Partial commit: record blocking constraint telemetry for observability, leave this
+          // replica unplaced, and keep placing all remaining feasible replicas (e.g. 20 of 21
+          // replicas continue serving cleanly when 1 single-slot host is lost at zero spares).
           failedRelocationKeys.add(replica.toString());
           blockingTypes.addAll(replicaBlocking);
           if (_hardConstraintFailureReporter != null) {
@@ -280,6 +294,9 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       if (clusterRemainingCap.getValue() < 0) {
         long totalCapacity = clusterModel.getContext().getClusterCapacityMap().get(capacityKey);
         if (bestEffort) {
+          // When total replica demand exceeds cluster capacity (e.g. 21 replicas on 20 single-slot
+          // nodes), clamp the denominator to a positive 1% guard instead of throwing
+          // CAPACITY_DEFICIT so replica urgency scores stay positive and finite.
           positiveEstimateClusterRemainCap.put(capacityKey,
               Math.max(DIV_GUARD, totalCapacity * DIV_GUARD));
           continue;
@@ -308,6 +325,18 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     return positiveEstimateClusterRemainCap;
   }
 
+  /**
+   * Orders unassigned replicas for greedy placement. In best-effort mode, two invariants prevent
+   * starvation and unnecessary live movement under tight or skewed fault zones:
+   * 1. Partition ordinal round-robin (0, 1, ..., RF - 1), starting from the count of replicas
+   *    already pre-allocated on nodes in PARTIAL/EMERGENCY/OVERWRITE scopes. Example: with 7
+   *    partitions x RF 3 across skewed zones [10, 2, 2, 1, 1, 1, 1, 1, 1, 1] (max feasible = 18),
+   *    placing ordinal 0 of P0..P6, then ordinal 1, then ordinal 2 yields [3, 3, 3, 3, 2, 2, 2]
+   *    instead of greedily giving 3rd copies to P0..P5 and starving P6 at 1 replica.
+   * 2. Feasible active home priority: within the same ordinal, replicas whose prior BestPossible
+   *    (or Baseline) host is still assignable and has remaining capacity/slot headroom run before
+   *    homeless peers so evicted replicas cannot steal an existing resident's slot first.
+   */
   private List<AssignableReplicaWithScore> buildOrderedReplicas(ClusterModel clusterModel,
       List<AssignableNode> nodes, Map<String, Float> positiveEstimateClusterRemainCap,
       boolean bestEffort) {
@@ -350,6 +379,12 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     return result;
   }
 
+  /**
+   * Reserves one feasible prior-home slot for {@code r} if its previous BestPossible/Baseline
+   * logicalId is still valid in the current model and within remaining host capacity and partition
+   * slots. Example: if n1 (cap 2) holds {P2, P3} and n2's capacity shrinks from 2 to 1 on {P0, P1},
+   * P2 and P3 reserve both slots on n1 here so they are placed before the evicted n2 replica.
+   */
   private boolean claimFeasibleActiveHome(AssignableReplica r, List<AssignableNode> sortedNodes,
       ClusterContext ctx, Map<String, String> stateMap, Map<String, Map<String, Integer>> homeCap,
       Map<String, Integer> homeSlots, Set<String> claimed) {
@@ -447,6 +482,11 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       double s2, Set<String> busy, Map<String, Integer> zoneCounts, boolean bestEffort) {
     int cmp = Double.compare(s1, s2);
     if (cmp == 0 && bestEffort && !zoneCounts.isEmpty()) {
+      // Break equal soft-constraint scores toward the fault zone with more remaining candidate
+      // nodes (Ryser's largest-residual-zone rule). Example: on 7 partitions x RF 3 across
+      // zero-spare zones [4, 2, 2, 2, 2, 2, 2, 2, 2, 1], node-ID tie-breaking drains the 1-node
+      // zone early and strands 2 copies of the last partition with only zone01 left; preferring
+      // larger candidate zones drains zone01 (4 -> 3 -> 2 -> 1) first and places all 21/21.
       cmp = Integer.compare(zoneCounts.getOrDefault(n1.getFaultZone(), 0),
           zoneCounts.getOrDefault(n2.getFaultZone(), 0));
     }
@@ -463,10 +503,26 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     return sorted;
   }
 
+  /**
+   * Attempts a bounded single-hop swap when {@code replica} has no direct candidate node.
+   * Example: P1 (already in zone01) loses its zone04 copy while the only free slot in the cluster
+   * is zone01-spare; P0 holds zone03-n1 (SLAVE) and zone02-n1 (MASTER). Releasing P0's SLAVE from
+   * zone03-n1 onto zone01-spare frees zone03-n1 so P1 can be placed without violating fault zones.
+   *
+   * <p>Move cost prefers zero live disruption:
+   * - cost 0: victim was placed on {@code host} earlier in this same calculate() run (0 live moves)
+   * - cost 1: victim is a live non-top-state replica (e.g. SLAVE / STANDBY)
+   * - cost 2: victim is a live top-state replica (e.g. MASTER / LEADER)
+   * In non-baseline scopes, a victim currently on an enabled-live node may only move to another
+   * enabled-live node ({@code reqLive}), never onto a disabled or delayed-offline instance.
+   */
   private boolean tryRelocateBlockingReplica(AssignableReplica replica, List<AssignableNode> nodes,
       ClusterModel clusterModel, Set<String> busyInstances, Set<String> placedOnHostThisRun,
       AtomicInteger relocationBudget) {
     ClusterContext ctx = clusterModel.getContext();
+    // Pre-compute max remaining capacity per key across nodes with at least one open partition
+    // slot (keyed by null for untagged resources and by tag for tagged resources) so victims that
+    // cannot fit on any destination node are rejected in O(1) before mutating the ClusterModel.
     Map<String, Map<String, Integer>> maxRemByTag = new HashMap<>();
     for (AssignableNode node : nodes) {
       if (node.getMaxPartition() < 0 || node.getAssignedReplicaCount() < node.getMaxPartition()) {

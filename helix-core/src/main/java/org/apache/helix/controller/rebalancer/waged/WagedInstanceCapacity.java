@@ -226,6 +226,10 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
     if (checkClusterMaxPartitions && _allocatedPartitionsMap.getOrDefault(
         instance, Collections.emptyMap()).values().stream().mapToInt(Set::size).sum()
         >= _maxPartitionsPerInstance) {
+      // Defer new bootstrap transitions while a vacated replica is still dropping from this host
+      // (e.g. during a 1-hop swap on a single-slot cluster where ClusterConfig sets
+      // MAX_PARTITIONS_PER_INSTANCE = 1 but instance weight capacity is generous), preventing
+      // transient slot over-subscription and auto-maintenance entry.
       LOG.info("Instance: {} reached cluster maxPartitionsPerInstance ({}), deferring {}/{}",
           instance, _maxPartitionsPerInstance, resName, partitionName);
       return false;
@@ -240,6 +244,8 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
             instanceCapacity.put(processedKey, instanceCapacity.get(processedKey) + processedCapacity.get(processedKey));
           }
           if (!checkClusterMaxPartitions && _enforceClusterMaxPartitions) {
+            // Current-state accounting still records the existing replica in _allocatedPartitionsMap
+            // even on an over-weight host so checkClusterMaxPartitions sees the true slot count.
             _allocatedPartitionsMap.computeIfAbsent(instance, k -> new HashMap<>())
                 .computeIfAbsent(resName, k -> new HashSet<>()).add(partitionName);
           }

@@ -120,8 +120,8 @@ public class WagedRebalanceUtil {
             yielded, clusterModel.getRebalanceScopeType(),
             clusterModel.getContext().getClusterName());
       }
-    } else if (clusterModel.getContext().isBestEffortPlacementEnabled()
-        && !previousAssignment.isEmpty()) {
+    } else if (!previousAssignment.isEmpty() && clusterModel.getContext() != null
+        && clusterModel.getContext().isBestEffortPlacementEnabled()) {
       preserveZeroPlacedPartitionsOutsideModel(clusterModel, newAssignment, previousAssignment);
     }
     algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
@@ -132,6 +132,14 @@ public class WagedRebalanceUtil {
     return newAssignment;
   }
 
+  /**
+   * Retains prior replicas on unmodeled instances (e.g. EVACUATE, DISABLE, or offline nodes) only
+   * when a partition ended up with 0 placed replicas across all modeled active nodes. Without this,
+   * best-effort partial commit would emit an empty replica map and send DROPPED to the sole
+   * surviving copy on an evacuating node when the cluster has nowhere else to move it. Deleted
+   * partitions, RF = 0 resources, UNKNOWN/SWAP_IN instances, and tag mismatches are filtered out
+   * via {@link ClusterContext#canRetainUnmodeledReplica}.
+   */
   private static void preserveZeroPlacedPartitionsOutsideModel(ClusterModel clusterModel,
       Map<String, ResourceAssignment> newAssignment, Map<String, ResourceAssignment> prev) {
     Set<String> modeled = clusterModel.getAssignableNodes().keySet();

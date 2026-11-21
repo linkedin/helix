@@ -829,6 +829,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       Map<String, ResourceAssignment> assignment =
           WagedRebalanceUtil.calculateAssignment(clusterModel, algorithm, Collections.emptyMap());
       if (clusterData.getClusterConfig().isWagedBestEffortPlacementEnabled()) {
+        // Best-effort overwrite may relocate an existing live replica across modeled live nodes to
+        // unblock a degraded partition; replace modeled-node entries so the vacated host is cleared.
         DelayedRebalanceUtil.mergeAssignments(assignment, currentResourceAssignment,
             clusterModel.getAssignableNodes().keySet());
       } else {

@@ -193,6 +193,9 @@ public class ClusterModel {
   public void release(AssignableNode node, AssignableReplica replica) {
     locateAssignableNode(node.getInstanceName());
     node.release(replica);
+    // Speculative release during 1-hop relocation must keep the zone marked as holding the
+    // partition if another node in the same zone still hosts a replica (e.g. when fault-zone
+    // awareness is off or pre-existing state had two copies in one zone).
     if (node.hasFaultZone() && !zoneStillHoldsPartition(node.getFaultZone(),
         replica.getResourceName(), replica.getPartitionName())) {
       _clusterContext.removePartitionFromFaultZone(node.getFaultZone(), replica.getResourceName(),

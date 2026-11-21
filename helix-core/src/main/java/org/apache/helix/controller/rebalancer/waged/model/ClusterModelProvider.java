@@ -270,6 +270,10 @@ public class ClusterModelProvider {
     // Initial the cluster context with the allocated assignments.
     context.setAssignmentForFaultZoneMap(mapAssignmentToFaultZone(assignableNodes));
     if (context.isBestEffortPlacementEnabled()) {
+      // Capture non-UNKNOWN/non-SWAP_IN configured tags and active IdealState partitions (replicaMap
+      // already excludes RF = 0 and deleted partitions) for unmodeled sole-replica retention checks,
+      // plus enabled-live logicalIds so 1-hop relocation never moves a live replica onto an offline
+      // or disabled node.
       Map<String, Set<String>> configuredTags = new HashMap<>();
       dataProvider.getInstanceConfigMap().forEach((name, ic) -> {
         InstanceConstants.InstanceOperation op = ic.getInstanceOperation().getOperation();

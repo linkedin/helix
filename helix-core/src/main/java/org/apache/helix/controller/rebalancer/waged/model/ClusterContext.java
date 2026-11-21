@@ -121,6 +121,8 @@ public class ClusterContext {
     _bestEffortPlacementEnabled = Optional.ofNullable(clusterConfig)
         .map(ClusterConfig::isWagedBestEffortPlacementEnabled)
         .orElse(ClusterConfig.DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED);
+    // Best-effort placement handles deficits and missing candidates at replica granularity, so it
+    // takes precedence over whole-clique skipping in WAGED_INSTANCE_TAG_ISOLATION_ENABLED.
     _instanceTagIsolationEnabled = !_bestEffortPlacementEnabled && Optional.ofNullable(clusterConfig)
         .map(ClusterConfig::isWagedInstanceTagIsolationEnabled)
         .orElse(ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
