@@ -20,6 +20,7 @@ package org.apache.helix.rest.server;
  */
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.client.WebTarget;
+import javax.ws.rs.core.Application;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -44,6 +46,7 @@ import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
+import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.rebalancer.waged.WagedRebalancer;
 import org.apache.helix.guardrail.rules.InstanceCapacityHeadroomGuardrailRule;
@@ -54,6 +57,7 @@ import org.apache.helix.integration.manager.ClusterControllerManager;
 import org.apache.helix.integration.manager.MockParticipantManager;
 import org.apache.helix.integration.task.MockTask;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.CurrentState;
 import org.apache.helix.model.ExternalView;
@@ -63,6 +67,8 @@ import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.ResourceConfig;
 import org.apache.helix.participant.StateMachineEngine;
+import org.apache.helix.rest.common.ContextPropertyKeys;
+import org.apache.helix.rest.common.HelixRestNamespace;
 import org.apache.helix.rest.server.resources.AbstractResource;
 import org.apache.helix.rest.server.resources.helix.InstancesAccessor;
 import org.apache.helix.rest.server.resources.helix.PerInstanceAccessor;
@@ -77,6 +83,7 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
@@ -597,6 +604,90 @@ public class TestPerInstanceAccessor extends AbstractTestClass {
     delete("clusters/" + CLUSTER_NAME + "/instances/" + INSTANCE_NAME + "TEST",
         Response.Status.OK.getStatusCode());
     _configAccessor.getInstanceConfig(CLUSTER_NAME, INSTANCE_NAME + "TEST");
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // A dropInstance that fails after deleting the InstanceConfig leaves the instance subtree behind.
+  // A retried DELETE must finish that drop instead of rejecting the missing config, after which
+  // DELETE returns 404. PUT deletes such a leftover before adding the instance, unless the instance
+  // is live, which returns 409.
+  @Test(dependsOnMethods = "testDeleteInstance")
+  public void testDeleteInstanceResumesPartialDrop() throws IOException {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = INSTANCE_NAME + "PARTIAL_DROP";
+    InstanceConfig instanceConfig = new InstanceConfig(instanceName);
+    Entity entity = Entity.entity(OBJECT_MAPPER.writeValueAsString(instanceConfig.getRecord()),
+        MediaType.APPLICATION_JSON_TYPE);
+    String instanceUri = "clusters/" + CLUSTER_NAME + "/instances/" + instanceName;
+    String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName);
+    String staleCurrentStatePath =
+        PropertyPathBuilder.instanceCurrentState(CLUSTER_NAME, instanceName) + "/stale-session";
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
+
+    // DELETE finishes a partial drop.
+    _gZkClient.delete(instanceConfigPath);
+    Assert.assertTrue(_gZkClient.exists(instancePath));
+    delete(instanceUri, Response.Status.OK.getStatusCode());
+    Assert.assertFalse(_gZkClient.exists(instancePath));
+    delete(instanceUri, Response.Status.NOT_FOUND.getStatusCode());
+
+    // PUT deletes the leftover subtree, including its stale state, then adds the instance.
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
+    _gZkClient.createPersistent(staleCurrentStatePath);
+    _gZkClient.delete(instanceConfigPath);
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.OK.getStatusCode());
+    Assert.assertTrue(_gZkClient.exists(instanceConfigPath));
+    Assert.assertFalse(_gZkClient.exists(staleCurrentStatePath));
+
+    // PUT on the leftover of a live instance is a conflict.
+    _gZkClient.delete(instanceConfigPath);
+    String liveInstancePath = PropertyPathBuilder.liveInstance(CLUSTER_NAME, instanceName);
+    _gZkClient.createPersistent(liveInstancePath);
+    Assert.assertEquals(target(instanceUri).request().put(entity).getStatus(),
+        Response.Status.CONFLICT.getStatusCode());
+    _gZkClient.delete(liveInstancePath);
+    delete(instanceUri, Response.Status.OK.getStatusCode());
+    Assert.assertFalse(_gZkClient.exists(instancePath));
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // A drop that finds the instance re-added mid-drop keeps it and throws HelixConflictException.
+  // DELETE returns 409 for it, not the 400 that tells callers to retry the drop.
+  @Test(dependsOnMethods = "testDeleteInstance")
+  public void testDeleteInstanceReturnsConflictWhenReAddedDuringDrop() throws Exception {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    String instanceName = INSTANCE_NAME + "READDED_DURING_DROP";
+    _gSetupTool.addInstanceToCluster(CLUSTER_NAME, instanceName);
+    HelixAdmin admin = Mockito.mock(HelixAdmin.class);
+    Mockito.doThrow(new HelixConflictException("Node " + instanceName + " was re-added"))
+        .when(admin).dropInstance(Mockito.eq(CLUSTER_NAME), Mockito.any(InstanceConfig.class));
+    PerInstanceAccessor accessor = Mockito.spy(new PerInstanceAccessor());
+    Mockito.doReturn(admin).when(accessor).getHelixAdmin();
+    Mockito.doReturn(new ZKHelixDataAccessor(CLUSTER_NAME, new ZkBaseDataAccessor<>(_gZkClient)))
+        .when(accessor).getDataAccssor(CLUSTER_NAME);
+    HelixRestNamespace namespace = new HelixRestNamespace(ZK_ADDR);
+    Field application = AbstractResource.class.getDeclaredField("_application");
+    application.setAccessible(true);
+    application.set(accessor, new Application() {
+      @Override
+      public Map<String, Object> getProperties() {
+        return Collections.singletonMap(ContextPropertyKeys.METADATA.name(), namespace);
+      }
+    });
+
+    try {
+      Response response = accessor.deleteInstance(CLUSTER_NAME, instanceName, false, false);
+      Assert.assertEquals(response.getStatus(), Response.Status.CONFLICT.getStatusCode());
+      Assert.assertTrue(_gZkClient.exists(
+          PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName)));
+    } finally {
+      _gSetupTool.getClusterManagementTool()
+          .dropInstance(CLUSTER_NAME, new InstanceConfig(instanceName));
+    }
     System.out.println("End test :" + TestHelper.getTestMethodName());
   }
 

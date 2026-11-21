@@ -70,6 +70,9 @@ public class ClusterConfig extends HelixProperty {
     // Time in ms after which a non-empty controller event queue that has not completed a pipeline
     // run is treated as a wedged ("zombie leader") controller by ControllerPipelineStalledGauge.
     CONTROLLER_PIPELINE_STALL_THRESHOLD_MS,
+    // How often in ms the leader controller deletes instance subtrees left without an
+    // InstanceConfig by a failed dropInstance. 0 or negative turns it off.
+    INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS,
     MAX_CONCURRENT_TASK_PER_INSTANCE,
 
     // The following concerns maintenance mode
@@ -303,6 +306,7 @@ public class ClusterConfig extends HelixProperty {
   // Default for CONTROLLER_PIPELINE_STALL_THRESHOLD_MS when unset.
   private final static long DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS = 300000L; // 5 minutes
   private final static long DEFAULT_PARTITION_RECOVERY_DURATION_THRESHOLD = 300000L; // 5 minutes
+  public final static long DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS = 60 * 1000L;
 
   /**
    * Instantiate for a specific cluster
@@ -893,6 +897,27 @@ public class ClusterConfig extends HelixProperty {
     return _record.getLongField(
         ClusterConfigProperty.CONTROLLER_PIPELINE_STALL_THRESHOLD_MS.name(),
         DEFAULT_CONTROLLER_PIPELINE_STALL_THRESHOLD_MS);
+  }
+
+  /**
+   * Set how often the leader controller deletes /INSTANCES/{instance} subtrees left without an
+   * InstanceConfig by a dropInstance that failed partway.
+   * @param intervalMs interval in milliseconds; 0 or negative turns the collection off
+   */
+  public void setInstanceGarbageCollectionIntervalMs(long intervalMs) {
+    _record.setLongField(ClusterConfigProperty.INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS.name(),
+        intervalMs);
+  }
+
+  /**
+   * @return the instance garbage collection interval in ms, defaulting to
+   *         {@value #DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS} when unset. 0 or negative
+   *         means the collection is off.
+   */
+  public long getInstanceGarbageCollectionIntervalMs() {
+    return _record.getLongField(
+        ClusterConfigProperty.INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS.name(),
+        DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS);
   }
 
   /**

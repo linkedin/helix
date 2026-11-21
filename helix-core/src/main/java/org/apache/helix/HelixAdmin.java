@@ -295,6 +295,19 @@ public interface HelixAdmin {
   void dropInstance(String clusterName, InstanceConfig instanceConfig);
 
   /**
+   * Delete the /INSTANCES/{instance} subtree left without an InstanceConfig by a dropInstance that
+   * failed partway. If the instance is re-added meanwhile, its new znodes are kept.
+   * @param clusterName
+   * @param instanceName
+   * @throws org.apache.helix.api.exceptions.HelixConflictException if the instance has an
+   *     InstanceConfig, is live, or was re-added during the delete
+   */
+  default void deleteDroppedInstanceGarbage(String clusterName, String instanceName) {
+    throw new UnsupportedOperationException("deleteDroppedInstanceGarbage is not supported by "
+        + getClass().getName());
+  }
+
+  /**
    * Purge offline instances that have been offline for longer than the offline duration time
    * from a cluster
    * @param clusterName

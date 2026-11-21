@@ -42,6 +42,7 @@ import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixException;
 import org.apache.helix.PropertyKey;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.cloud.azure.AzureConstants;
 import org.apache.helix.cloud.constants.CloudProvider;
@@ -324,6 +325,14 @@ public class ClusterSetup {
 
     InstanceConfig config = accessor.getProperty(keyBuilder.instanceConfig(instanceId));
     if (config == null) {
+      // A drop that failed after deleting the InstanceConfig leaves the instance subtree behind.
+      // Finish that drop instead of refusing; the instance is already disabled by its removal.
+      if (_zkClient.exists(PropertyPathBuilder.instance(clusterName, instanceId))) {
+        _logger.warn("Node {} has no config but its instance subtree remains, finishing the drop",
+            instanceId);
+        _admin.dropInstance(clusterName, new InstanceConfig(instanceId));
+        return;
+      }
       String error = "Node " + instanceId + " does not exist, cannot drop";
       _logger.warn(error);
       throw new HelixException(error);

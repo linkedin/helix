@@ -220,6 +220,27 @@ public class TestClusterSetup extends ZkUnitTestBase {
     AssertJUnit.assertTrue(caughtException);
   }
 
+  // A drop that failed after deleting the InstanceConfig leaves the instance subtree behind;
+  // dropInstanceFromCluster must finish that drop instead of reporting the instance as missing.
+  @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")
+  public void testDropInstanceFromClusterResumesPartialDrop() {
+    String instanceName = INSTANCE_PREFIX + 7;
+    String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
+    _clusterSetup.addInstanceToCluster(CLUSTER_NAME, instanceName);
+    _gZkClient.delete(PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName));
+    Assert.assertTrue(_gZkClient.exists(instancePath));
+
+    _clusterSetup.dropInstanceFromCluster(CLUSTER_NAME, instanceName);
+    Assert.assertFalse(_gZkClient.exists(instancePath));
+
+    try {
+      _clusterSetup.dropInstanceFromCluster(CLUSTER_NAME, instanceName);
+      Assert.fail("Dropping a fully removed instance should fail");
+    } catch (HelixException expected) {
+      Assert.assertTrue(expected.getMessage().contains("does not exist"), expected.getMessage());
+    }
+  }
+
   @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")
   public void testAddResource() throws Exception {
     try {
