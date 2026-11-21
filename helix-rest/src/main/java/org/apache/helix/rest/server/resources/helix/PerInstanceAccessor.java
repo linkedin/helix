@@ -780,6 +780,11 @@ public class PerInstanceAccessor extends AbstractHelixResource {
     }
     try {
       admin.dropInstance(clusterId, new InstanceConfig(instanceName));
+    } catch (HelixConflictException e) {
+      // The instance was re-added during the drop and is kept. A 400 would tell the caller to
+      // retry, and the retry would drop the re-added instance.
+      LOG.warn("Conflict dropping instance {}: {}", instanceName, e.getMessage());
+      return Response.status(Response.Status.CONFLICT).entity(e.getMessage()).build();
     } catch (HelixException e) {
       return badRequest(e.getMessage());
     }
