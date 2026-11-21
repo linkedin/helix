@@ -311,10 +311,11 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     // <instanceName> : <resourceName> : <partitionName>
     Map<String, Map<String, Set<String>>> swapInInstanceAssignment = new HashMap<>();
     ClusterConfig clusterConfig = cache.getClusterConfig();
-    boolean instanceTagIsolation =
-        clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
+    boolean allowMissingWagedResource = clusterConfig != null
+        && (clusterConfig.isWagedInstanceTagIsolationEnabled()
+            || clusterConfig.isWagedBestEffortPlacementEnabled());
     resourceMap.forEach((resourceName, resource) -> {
-      if (instanceTagIsolation
+      if (allowMissingWagedResource
           && !bestPossibleStateOutput.getResourceStatesMap().containsKey(resourceName)
           && WagedValidationUtil.isWagedEnabled(cache.getIdealState(resourceName))) {
         // Instance tag isolation leaves a skipped resource that was never assigned out of the

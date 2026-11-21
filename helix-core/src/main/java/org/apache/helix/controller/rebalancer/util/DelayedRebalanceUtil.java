@@ -366,6 +366,37 @@ public class DelayedRebalanceUtil {
   }
 
   /**
+   * Merges a delayed-rebalance overwrite assignment into {@code currentResourceAssignment} when
+   * single-hop relocation may have moved an existing live replica between modeled live instances.
+   * Unlike {@link #mergeAssignments(Map, Map)}, which unions maps via {@code putAll} (assuming the
+   * overwrite only adds replicas), this replaces entries for {@code modeledInstances} while
+   * retaining unmodeled delayed-offline instances still within their delay window.
+   * Example: if overwrite moves live P0 from z2-n1 to z1-spare so degraded P1 (with delayed copy
+   * on offline z4-dead) can take z2-n1, unioning would leave P0 on both z2-n1 and z1-spare and
+   * double-book z2-n1; replacing modeled live entries moves P0 cleanly while keeping z4-dead on P1.
+   */
+  public static void mergeAssignments(Map<String, ResourceAssignment> newAssignment,
+      Map<String, ResourceAssignment> currentResourceAssignment, Set<String> modeledInstances) {
+    newAssignment.forEach((resName, assignment) -> {
+      ResourceAssignment current = currentResourceAssignment.get(resName);
+      if (current == null) {
+        currentResourceAssignment.put(resName, assignment);
+        return;
+      }
+      Set<Partition> partitions = new HashSet<>(current.getMappedPartitions());
+      partitions.addAll(assignment.getMappedPartitions());
+      for (Partition partition : partitions) {
+        Map<String, String> merged = new HashMap<>();
+        current.getReplicaMap(partition).forEach((inst, state) -> {
+          if (!modeledInstances.contains(inst)) merged.put(inst, state);
+        });
+        merged.putAll(assignment.getReplicaMap(partition));
+        current.addReplicaMap(partition, merged);
+      }
+    });
+  }
+
+  /**
    * From the current assignment, find the partitions that are missing minActiveReplica for ALL resources, return as a
    * map keyed by resource name.
    * @param clusterData Cluster data cache

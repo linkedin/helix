@@ -60,6 +60,7 @@ public class ClusterModel {
   private final Map<String, AssignableNode> _assignableNodeMap;
   private final Set<String> _assignableNodeLogicalIds;
   private final Map<String, Set<String>> _assignableLogicalIdsByInstanceTag;
+  private final Map<String, Set<AssignableNode>> _nodesByFaultZone;
   // The rebalance scope that produced this model. Used to route per-run reversible metrics to a
   // single owning phase. Never null.
   private final RebalanceScopeType _rebalanceScopeType;
@@ -92,13 +93,17 @@ public class ClusterModel {
         assignableNodes.parallelStream().map(AssignableNode::getLogicalId)
             .collect(Collectors.toSet());
 
-    // Index all the instances by their instance tags
+    // Index all the instances by their instance tags and fault zones
     _assignableLogicalIdsByInstanceTag = new HashMap<>();
+    _nodesByFaultZone = new HashMap<>();
     assignableNodes.forEach(node -> {
       node.getInstanceTags().forEach(tag -> {
         _assignableLogicalIdsByInstanceTag.computeIfAbsent(tag, key -> new HashSet<>())
             .add(node.getLogicalId());
       });
+      if (node.hasFaultZone()) {
+        _nodesByFaultZone.computeIfAbsent(node.getFaultZone(), key -> new HashSet<>()).add(node);
+      }
     });
   }
 
@@ -172,6 +177,36 @@ public class ClusterModel {
 
     node.release(replica);
     _clusterContext.removePartitionFromFaultZone(node.getFaultZone(), resourceName, partitionName);
+  }
+
+  public void assign(AssignableNode node, AssignableReplica replica) {
+    locateAssignableNode(node.getInstanceName());
+    node.assign(replica);
+    if (node.hasFaultZone() && !_clusterContext
+        .getPartitionsForResourceAndFaultZone(replica.getResourceName(), node.getFaultZone())
+        .contains(replica.getPartitionName())) {
+      _clusterContext.addPartitionToFaultZone(node.getFaultZone(), replica.getResourceName(),
+          replica.getPartitionName());
+    }
+  }
+
+  public void release(AssignableNode node, AssignableReplica replica) {
+    locateAssignableNode(node.getInstanceName());
+    node.release(replica);
+    // Speculative release during 1-hop relocation must keep the zone marked as holding the
+    // partition if another node in the same zone still hosts a replica (e.g. when fault-zone
+    // awareness is off or pre-existing state had two copies in one zone).
+    if (node.hasFaultZone() && !zoneStillHoldsPartition(node.getFaultZone(),
+        replica.getResourceName(), replica.getPartitionName())) {
+      _clusterContext.removePartitionFromFaultZone(node.getFaultZone(), replica.getResourceName(),
+          replica.getPartitionName());
+    }
+  }
+
+  private boolean zoneStillHoldsPartition(String zone, String res, String part) {
+    Set<AssignableNode> zoneNodes = _nodesByFaultZone.get(zone);
+    return zoneNodes != null && zoneNodes.size() > 1 && zoneNodes.stream()
+        .anyMatch(other -> other.getAssignedPartitionsByResource(res).contains(part));
   }
 
   private AssignableNode locateAssignableNode(String instanceName) {

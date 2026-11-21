@@ -20,6 +20,7 @@ package org.apache.helix.controller.rebalancer.waged;
  */
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -45,6 +46,8 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
   // Available Capacity per Instance
   private final Map<String, Map<String, Integer>> _instanceCapacityMap;
   private final Map<String, Map<String, Set<String>>> _allocatedPartitionsMap;
+  private final boolean _enforceClusterMaxPartitions;
+  private final int _maxPartitionsPerInstance;
 
   public WagedInstanceCapacity(ResourceControllerDataProvider clusterData) {
     _instanceCapacityMap = new HashMap<>();
@@ -52,8 +55,13 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
     ClusterConfig clusterConfig = clusterData.getClusterConfig();
     if (clusterConfig == null) {
       LOG.error("Cluster config is null, cannot initialize instance capacity map.");
+      _enforceClusterMaxPartitions = false;
+      _maxPartitionsPerInstance = -1;
       return;
     }
+    _maxPartitionsPerInstance = clusterConfig.getMaxPartitionsPerInstance();
+    _enforceClusterMaxPartitions =
+        clusterConfig.isWagedBestEffortPlacementEnabled() && _maxPartitionsPerInstance > 0;
     for (InstanceConfig instanceConfig : clusterData.getInstanceConfigMap().values()) {
       Map<String, Integer> instanceCapacity = null;
       try {
@@ -113,7 +121,7 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
           String partitionName = msg.getPartitionName();
           // Get Partition Weight
           Map<String, Integer> partCapacity = weightProvider.getPartitionWeights(resName, partitionName);
-          if (partCapacity == null || partCapacity.isEmpty()) {
+          if ((partCapacity == null || partCapacity.isEmpty()) && !_enforceClusterMaxPartitions) {
             LOG.debug("Partition: " + partitionName + " in resource: " + resName
                 + " has no weight specified. Skipping it.");
             continue;
@@ -123,7 +131,8 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
               && msg.getFromState().equals(stateModelDef.getInitialState())) {
             LOG.info("For bootstrapping - deducting capacity for instance: " + instance
                 + " for resource: " + resName + " for partition: " + partitionName);
-            checkAndReduceInstanceCapacity(instance, resName, partitionName, partCapacity);
+            reduceInstanceCapacity(instance, resName, partitionName,
+                partCapacity == null ? Collections.emptyMap() : partCapacity, false);
           }
         }
       }
@@ -156,7 +165,8 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
         Map<String, String> currentStateMap = currentStateOutput.getCurrentStateMap(resName, partition);
         if (currentStateMap != null && !currentStateMap.isEmpty()) {
           for (String instance : currentStateMap.keySet()) {
-            checkAndReduceInstanceCapacity(instance, resName, partitionName, partCapacity);
+            reduceInstanceCapacity(instance, resName, partitionName,
+                partCapacity == null ? Collections.emptyMap() : partCapacity, false);
           }
         }
       }
@@ -194,7 +204,12 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
 
   public synchronized boolean checkAndReduceInstanceCapacity(String instance, String resName,
       String partitionName, Map<String, Integer> partitionCapacity) {
+    return reduceInstanceCapacity(instance, resName, partitionName, partitionCapacity,
+        _enforceClusterMaxPartitions);
+  }
 
+  private boolean reduceInstanceCapacity(String instance, String resName, String partitionName,
+      Map<String, Integer> partitionCapacity, boolean checkClusterMaxPartitions) {
     if (hasPartitionChargedForCapacity(instance, resName, partitionName)) {
       LOG.debug("Instance: " + instance + " for resource: " + resName
           + " for partition: " + partitionName + " already charged for capacity.");
@@ -208,6 +223,17 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
       LOG.debug("Instance: " + instance + " has no config (may have been deleted), skipping capacity check.");
       return false;
     }
+    if (checkClusterMaxPartitions && _allocatedPartitionsMap.getOrDefault(
+        instance, Collections.emptyMap()).values().stream().mapToInt(Set::size).sum()
+        >= _maxPartitionsPerInstance) {
+      // Defer new bootstrap transitions while a vacated replica is still dropping from this host
+      // (e.g. during a 1-hop swap on a single-slot cluster where ClusterConfig sets
+      // MAX_PARTITIONS_PER_INSTANCE = 1 but instance weight capacity is generous), preventing
+      // transient slot over-subscription and auto-maintenance entry.
+      LOG.info("Instance: {} reached cluster maxPartitionsPerInstance ({}), deferring {}/{}",
+          instance, _maxPartitionsPerInstance, resName, partitionName);
+      return false;
+    }
     Map<String, Integer> processedCapacity = new HashMap<>();
     for (String key : instanceCapacity.keySet()) {
       if (partitionCapacity.containsKey(key)) {
@@ -216,6 +242,12 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
           // rollback the previously processed capacity.
           for (String processedKey : processedCapacity.keySet()) {
             instanceCapacity.put(processedKey, instanceCapacity.get(processedKey) + processedCapacity.get(processedKey));
+          }
+          if (!checkClusterMaxPartitions && _enforceClusterMaxPartitions) {
+            // Current-state accounting still records the existing replica in _allocatedPartitionsMap
+            // even on an over-weight host so checkClusterMaxPartitions sees the true slot count.
+            _allocatedPartitionsMap.computeIfAbsent(instance, k -> new HashMap<>())
+                .computeIfAbsent(resName, k -> new HashSet<>()).add(partitionName);
           }
           return false;
         }

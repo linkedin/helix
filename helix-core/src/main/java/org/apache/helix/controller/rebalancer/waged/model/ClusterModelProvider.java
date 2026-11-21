@@ -32,6 +32,7 @@ import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixException;
+import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
 import org.apache.helix.model.ClusterConfig;
@@ -268,6 +269,27 @@ public class ClusterModelProvider {
 
     // Initial the cluster context with the allocated assignments.
     context.setAssignmentForFaultZoneMap(mapAssignmentToFaultZone(assignableNodes));
+    if (context.isBestEffortPlacementEnabled()) {
+      // Capture non-UNKNOWN/non-SWAP_IN configured tags and active IdealState partitions (replicaMap
+      // already excludes RF = 0 and deleted partitions) for unmodeled sole-replica retention checks,
+      // plus enabled-live logicalIds so 1-hop relocation never moves a live replica onto an offline
+      // or disabled node.
+      Map<String, Set<String>> configuredTags = new HashMap<>();
+      dataProvider.getInstanceConfigMap().forEach((name, ic) -> {
+        InstanceConstants.InstanceOperation op = ic.getInstanceOperation().getOperation();
+        if (op != InstanceConstants.InstanceOperation.UNKNOWN
+            && op != InstanceConstants.InstanceOperation.SWAP_IN) {
+          configuredTags.put(name, new HashSet<>(ic.getTags()));
+        }
+      });
+      Map<String, Set<String>> resourcePartitions = new HashMap<>();
+      replicaMap.forEach((resName, reps) -> resourcePartitions.put(resName,
+          reps.stream().map(AssignableReplica::getPartitionName).collect(Collectors.toSet())));
+      context.setBestEffortContext(dataProvider.getEnabledLiveInstances().stream()
+          .map(n -> assignableInstanceConfigMap.getOrDefault(n, new InstanceConfig(n))
+              .getLogicalId(clusterTopologyConfig.getEndNodeType())).collect(Collectors.toSet()),
+          configuredTags, resourcePartitions);
+    }
 
     return new ClusterModel(context, toBeAssignedReplicas, assignableNodes, scopeType);
   }

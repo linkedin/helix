@@ -120,6 +120,9 @@ public class WagedRebalanceUtil {
             yielded, clusterModel.getRebalanceScopeType(),
             clusterModel.getContext().getClusterName());
       }
+    } else if (!previousAssignment.isEmpty() && clusterModel.getContext() != null
+        && clusterModel.getContext().isBestEffortPlacementEnabled()) {
+      preserveZeroPlacedPartitionsOutsideModel(clusterModel, newAssignment, previousAssignment);
     }
     algorithm.onAssignmentComputed(clusterModel.getRebalanceScopeType(),
         Collections.unmodifiableSet(new HashSet<>(clusterModel.getAssignableReplicaMap().keySet())),
@@ -127,6 +130,36 @@ public class WagedRebalanceUtil {
     LOG.info("Finish calculating an assignment with algorithm {}. Took: {} ms.",
         algorithm.getName(), System.currentTimeMillis() - startTime);
     return newAssignment;
+  }
+
+  /**
+   * Retains prior replicas on unmodeled instances (e.g. EVACUATE, DISABLE, or offline nodes) only
+   * when a partition ended up with 0 placed replicas across all modeled active nodes. Without this,
+   * best-effort partial commit would emit an empty replica map and send DROPPED to the sole
+   * surviving copy on an evacuating node when the cluster has nowhere else to move it. Deleted
+   * partitions, RF = 0 resources, UNKNOWN/SWAP_IN instances, and tag mismatches are filtered out
+   * via {@link ClusterContext#canRetainUnmodeledReplica}.
+   */
+  private static void preserveZeroPlacedPartitionsOutsideModel(ClusterModel clusterModel,
+      Map<String, ResourceAssignment> newAssignment, Map<String, ResourceAssignment> prev) {
+    Set<String> modeled = clusterModel.getAssignableNodes().keySet();
+    prev.forEach((res, prevRa) -> {
+      ResourceAssignment cur = newAssignment.get(res);
+      for (Partition p : prevRa.getMappedPartitions()) {
+        if (cur != null && !cur.getReplicaMap(p).isEmpty()) continue;
+        Map<String, String> kept = new HashMap<>();
+        prevRa.getReplicaMap(p).forEach((inst, state) -> {
+          if (!modeled.contains(inst)
+              && clusterModel.getContext().canRetainUnmodeledReplica(res, p.getPartitionName(), inst)) {
+            kept.put(inst, state);
+          }
+        });
+        if (!kept.isEmpty()) {
+          cur = newAssignment.computeIfAbsent(res, ResourceAssignment::new);
+          cur.addReplicaMap(p, kept);
+        }
+      }
+    });
   }
 
   /**

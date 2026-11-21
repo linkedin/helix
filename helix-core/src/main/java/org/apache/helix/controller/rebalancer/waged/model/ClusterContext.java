@@ -84,6 +84,10 @@ public class ClusterContext {
   // instance-group-tag group and every group connected to it through shared nodes, instead of
   // failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
+  private final boolean _bestEffortPlacementEnabled;
+  private Set<String> _enabledLiveLogicalIds;
+  private Map<String, Set<String>> _configuredInstanceTags = Collections.emptyMap();
+  private Map<String, Set<String>> _resourcePartitions = Collections.emptyMap();
   private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
   // The replicas the totals below are summed over. Kept only when instance tag isolation is on and
   // a capacity key is short, so the deficit can be split across the groups that own them.
@@ -114,7 +118,12 @@ public class ClusterContext {
     _topStateScoringAlpha = Optional.ofNullable(clusterConfig)
         .map(ClusterConfig::getTopStateScoringAlpha).orElse(-1d);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
-    _instanceTagIsolationEnabled = Optional.ofNullable(clusterConfig)
+    _bestEffortPlacementEnabled = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::isWagedBestEffortPlacementEnabled)
+        .orElse(ClusterConfig.DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED);
+    // Best-effort placement handles deficits and missing candidates at replica granularity, so it
+    // takes precedence over whole-clique skipping in WAGED_INSTANCE_TAG_ISOLATION_ENABLED.
+    _instanceTagIsolationEnabled = !_bestEffortPlacementEnabled && Optional.ofNullable(clusterConfig)
         .map(ClusterConfig::isWagedInstanceTagIsolationEnabled)
         .orElse(ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
 
@@ -123,7 +132,7 @@ public class ClusterContext {
         .entrySet()) {
       int replicas = entry.getValue().size();
       totalReplicas += replicas;
-      if (_instanceTagIsolationEnabled) {
+      if (_instanceTagIsolationEnabled || _bestEffortPlacementEnabled) {
         _resourceInstanceGroupTags.put(entry.getKey(),
             entry.getValue().get(0).getResourceInstanceGroupTag());
       }
@@ -242,6 +251,36 @@ public class ClusterContext {
    */
   public boolean isInstanceTagIsolationEnabled() {
     return _instanceTagIsolationEnabled;
+  }
+
+  public boolean isBestEffortPlacementEnabled() {
+    return _bestEffortPlacementEnabled;
+  }
+
+  void setBestEffortContext(Set<String> enabledLiveLogicalIds,
+      Map<String, Set<String>> configuredInstanceTags,
+      Map<String, Set<String>> resourcePartitions) {
+    _enabledLiveLogicalIds = enabledLiveLogicalIds == null ? null
+        : Collections.unmodifiableSet(new HashSet<>(enabledLiveLogicalIds));
+    _configuredInstanceTags =
+        configuredInstanceTags == null ? Collections.emptyMap() : configuredInstanceTags;
+    _resourcePartitions = resourcePartitions == null ? Collections.emptyMap() : resourcePartitions;
+  }
+
+  public boolean hasEnabledLiveLogicalIds() {
+    return _enabledLiveLogicalIds != null;
+  }
+
+  public boolean isEnabledLiveLogicalId(String id) {
+    return _enabledLiveLogicalIds == null || _enabledLiveLogicalIds.contains(id);
+  }
+
+  public boolean canRetainUnmodeledReplica(String resource, String partition, String instance) {
+    Set<String> parts = _resourcePartitions.get(resource);
+    Set<String> instTags = _configuredInstanceTags.get(instance);
+    String reqTag = _resourceInstanceGroupTags.get(resource);
+    return parts != null && parts.contains(partition) && instTags != null
+        && (reqTag == null || reqTag.isEmpty() || instTags.contains(reqTag));
   }
 
   /**

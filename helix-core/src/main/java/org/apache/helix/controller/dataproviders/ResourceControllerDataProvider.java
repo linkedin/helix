@@ -562,6 +562,13 @@ public class ResourceControllerDataProvider extends BaseControllerDataProvider {
     Map<String, Integer> partitionWeightMap =
           _wagedPartitionWeightProvider.getPartitionWeights(resourceName, partition);
     if (partitionWeightMap == null || partitionWeightMap.isEmpty()) {
+      // Even when partition weight maps are empty, best-effort clusters with a positive
+      // ClusterConfig.MAX_PARTITIONS_PER_INSTANCE must still enforce the per-instance partition
+      // slot gate before dispatching an OFFLINE -> ONLINE bootstrap message.
+      if (getClusterConfig() != null && getClusterConfig().isWagedBestEffortPlacementEnabled()) {
+        return _wagedInstanceCapacity.checkAndReduceInstanceCapacity(instance, resourceName,
+            partition, Collections.emptyMap());
+      }
       return true;
     }
 
