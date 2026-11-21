@@ -312,22 +312,23 @@ public class ZKHelixAdmin implements HelixAdmin {
           + clusterName + ", so its subtree is in use. Stop the participant, then retry.");
     }
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
-    retryInstanceZnodeDelete(clusterName, instanceName, attempt -> {
-      deleteDroppedInstanceGarbageOnce(clusterName, instanceName,
-          _zkClient.getSubtreeChildrenFirst(instancePath));
-      return null;
-    });
+    retryInstanceZnodeDelete(clusterName, instanceName, "delete leftover subtree of instance",
+        attempt -> {
+          deleteDroppedInstanceGarbageOnce(clusterName, instanceName,
+              _zkClient.getSubtreeChildrenFirst(instancePath));
+          return null;
+        });
   }
 
   // Deletes the instance's InstanceConfig and /INSTANCES/{instance} subtree in two steps, each
-  // retried on its own. Step 1 deletes the config (see deleteInstanceConfigOnce). Step 2 deletes
-  // whatever subtree is left, and only that: once the config is gone, any config seen later belongs
-  // to a re-added instance, which step 2 keeps.
+  // retried on its own. Step 1 deletes the config (see deleteConfigAndSmallSubtreeOnce). Step 2
+  // deletes whatever subtree is left, and only that: once the config is gone, any config seen
+  // later belongs to a re-added instance, which step 2 keeps.
   private void dropInstanceZnodes(String clusterName, String instanceName) {
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
-    List<String> subtree = retryInstanceZnodeDelete(clusterName, instanceName,
-        attempt -> deleteInstanceConfigOnce(clusterName, instanceName));
-    retryInstanceZnodeDelete(clusterName, instanceName, attempt -> {
+    List<String> subtree = retryInstanceZnodeDelete(clusterName, instanceName, "drop instance",
+        attempt -> deleteConfigAndSmallSubtreeOnce(clusterName, instanceName));
+    retryInstanceZnodeDelete(clusterName, instanceName, "drop instance", attempt -> {
       // The first attempt reuses step 1's listing; a retry lists the subtree again.
       deleteDroppedInstanceGarbageOnce(clusterName, instanceName,
           attempt == 0 ? subtree : _zkClient.getSubtreeChildrenFirst(instancePath));
@@ -336,15 +337,15 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   // Runs deleteAttempt with the attempt number (from 0), retrying up to 3 times when it failed
-  // because the subtree changed concurrently. Each retry lists the subtree again, so no backoff is
-  // needed:
+  // because the subtree changed concurrently. operation names it in logs and errors. Each retry
+  // lists the subtree again, so no backoff is needed:
   // - NotEmpty: a child was created meanwhile, e.g. the controller persisting node history.
   // - NoNode: a znode was deleted meanwhile, concurrently or by an atomic multi() that committed
   //   before a connection loss and was then resent.
   // - Fence lost: another agent fenced the subtree for its own delete. Retried only while the
   //   instance has no config; otherwise it was re-added, and its new subtree must be kept.
   private <T> T retryInstanceZnodeDelete(String clusterName, String instanceName,
-      IntFunction<T> deleteAttempt) {
+      String operation, IntFunction<T> deleteAttempt) {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     int retryCnt = 0;
     while (true) {
@@ -357,12 +358,12 @@ public class ZKHelixAdmin implements HelixAdmin {
               + clusterName + " while its znodes were being deleted; its new znodes are kept.");
         }
         if (retryCnt < 3 && (fenceLost || isConcurrentChange(e))) {
-          logger.warn("Retrying dropping instance {} with exception {}", instanceName,
+          logger.warn("Retrying to {} {} with exception {}", operation, instanceName,
               e.getMessage());
           retryCnt++;
         } else {
           String errorMessage =
-              "Failed to drop instance: " + instanceName + ". Retry times: " + retryCnt;
+              "Failed to " + operation + ": " + instanceName + ". Retry times: " + retryCnt;
           logger.error(errorMessage, e);
           throw new HelixException(errorMessage, e);
         }
@@ -384,7 +385,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   // counting the instance; step 2 deletes the subtree. A failure between the steps leaves the
   // subtree without a config; dropInstance, addInstance and the controller's periodic
   // InstanceGarbageCollector each delete such a subtree.
-  private List<String> deleteInstanceConfigOnce(String clusterName, String instanceName) {
+  private List<String> deleteConfigAndSmallSubtreeOnce(String clusterName, String instanceName) {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     List<String> subtree = _zkClient.getSubtreeChildrenFirst(instancePath);
@@ -415,8 +416,8 @@ public class ZKHelixAdmin implements HelixAdmin {
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     int fenceVersion;
     try {
-      fenceVersion = fenceVersion(
-          _zkClient.multi(Collections.singletonList(fenceOp(instancePath))).get(0));
+      fenceVersion = getFenceVersion(
+          _zkClient.multi(Collections.singletonList(newFenceOp(instancePath))).get(0));
     } catch (ZkNoNodeException e) {
       return;
     }
@@ -430,11 +431,11 @@ public class ZKHelixAdmin implements HelixAdmin {
 
   // Bumps the data version of the subtree root without changing its data (nothing stores data
   // there), so deletes that check the new version abort if the root is deleted and recreated.
-  private static Op fenceOp(String instancePath) {
+  private static Op newFenceOp(String instancePath) {
     return Op.setData(instancePath, null, -1);
   }
 
-  private static int fenceVersion(OpResult fenceResult) {
+  private static int getFenceVersion(OpResult fenceResult) {
     return ((OpResult.SetDataResult) fenceResult).getStat().getVersion();
   }
 

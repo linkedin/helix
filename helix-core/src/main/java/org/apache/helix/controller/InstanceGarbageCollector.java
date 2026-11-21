@@ -24,7 +24,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.helix.HelixDataAccessor;
-import org.apache.helix.HelixException;
 import org.apache.helix.HelixManager;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.model.ClusterConfig;
@@ -92,9 +91,10 @@ class InstanceGarbageCollector {
         _garbageFirstSeenTimes.remove(instanceName);
         LOG.info("Deleted leftover subtree of instance {} in cluster {}, left by a partial "
             + "dropInstance", instanceName, clusterName);
-      } catch (HelixException e) {
-        // Also thrown if the instance was re-added or came live since it was listed; the next run
-        // then no longer finds it as a leftover.
+      } catch (RuntimeException e) {
+        // A HelixException is also thrown if the instance was re-added or came live since it was
+        // listed; the next run then no longer finds it as a leftover. Any failure is contained to
+        // this instance, so the others are still collected.
         LOG.warn("Did not delete leftover subtree of instance {} in cluster {}, will retry",
             instanceName, clusterName, e);
       }

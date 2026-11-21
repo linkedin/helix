@@ -20,6 +20,7 @@ package org.apache.helix.controller;
  */
 
 import org.apache.helix.ConfigAccessor;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixManager;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.TestHelper;
@@ -32,7 +33,9 @@ import org.apache.helix.model.ClusterConfig;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 public class TestInstanceGarbageCollector extends ZkTestBase {
@@ -62,6 +65,27 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
     assertSubtreeExists(clusterName, "host_leftover_live", true);
     assertSubtreeExists(clusterName, "host_kept", true);
     _gZkClient.delete(PropertyPathBuilder.liveInstance(clusterName, "host_leftover_live"));
+    deleteCluster(clusterName);
+  }
+
+  // An unexpected failure deleting one leftover does not stop the others from being collected.
+  @Test
+  public void testFailureOnOneLeftoverDoesNotStopOthers() {
+    String clusterName = CLUSTER_PREFIX + "_" + TestHelper.getTestMethodName();
+    _gSetupTool.addCluster(clusterName, true);
+    createLeftoverSubtree(clusterName, "host_failing");
+    createLeftoverSubtree(clusterName, "host_leftover");
+    HelixManager manager = mockManager(clusterName, true);
+    HelixAdmin admin = spy(new ZKHelixAdmin(_gZkClient));
+    doThrow(new UnsupportedOperationException("unexpected")).when(admin)
+        .deleteDroppedInstanceGarbage(clusterName, "host_failing");
+    when(manager.getClusterManagmentTool()).thenReturn(admin);
+    ClockedCollector collector = new ClockedCollector();
+
+    collector.runAt(0, manager);
+    collector.runAt(GRACE, manager);
+    assertSubtreeExists(clusterName, "host_failing", true);
+    assertSubtreeExists(clusterName, "host_leftover", false);
     deleteCluster(clusterName);
   }
 
@@ -144,7 +168,7 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
     try {
       Assert.assertTrue(TestHelper.verify(() -> {
         GenericHelixController leader = GenericHelixController.getLeaderController(clusterName);
-        return leader != null && leader.isInstanceGarbageCollectionRunning();
+        return leader != null && leader.isInstanceGarbageCollectionScheduled();
       }, TestHelper.WAIT_DURATION));
     } finally {
       controller.syncStop();

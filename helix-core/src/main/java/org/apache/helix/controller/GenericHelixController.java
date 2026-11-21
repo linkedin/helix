@@ -489,8 +489,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
           nextDelayMs = _instanceGarbageCollector.collect(manager);
         } catch (Exception e) {
           logger.warn("Instance garbage collection failed for cluster {}", _clusterName, e);
+        } finally {
+          // Also after an Error, which would otherwise end the collection until leadership changes.
+          scheduleInstanceGarbageCollection(manager, generation, nextDelayMs);
         }
-        scheduleInstanceGarbageCollection(manager, generation, nextDelayMs);
       }, delayMs, TimeUnit.MILLISECONDS);
     }
   }
@@ -511,7 +513,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   }
 
   // Visible for testing.
-  boolean isInstanceGarbageCollectionRunning() {
+  boolean isInstanceGarbageCollectionScheduled() {
     synchronized (_instanceGarbageCollectionExecutor) {
       return _instanceGarbageCollectionFutureTask != null;
     }

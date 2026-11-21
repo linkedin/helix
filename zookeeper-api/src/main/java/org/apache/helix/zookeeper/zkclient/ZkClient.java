@@ -108,8 +108,9 @@ public class ZkClient implements Watcher {
   private static final int NUM_CHILDREN_LIMIT = 100 * 1000;
 
   /**
-   * Maximum number of delete ops {@link #deleteRecursively(String)} sends in one multi(). At about
-   * 240 bytes per op a batch is about 240 KB, well below jute.maxbuffer (just under 1 MB by
+   * Maximum number of ops in one multi() sent by {@link #deleteRecursively(String)} and
+   * {@link #deleteInBatches(List, String, int)}, including the fence check when there is one. At
+   * about 240 bytes per op a batch is about 240 KB, well below jute.maxbuffer (just under 1 MB by
    * default in ZooKeeper).
    */
   public static final int DELETE_RECURSIVE_BATCH_SIZE = 1000;
@@ -2127,7 +2128,7 @@ public class ZkClient implements Watcher {
       try {
         multi(ops);
       } catch (ZkNoNodeException e) {
-        if (fencePath != null && !isFenceIntact(fencePath, fenceVersion)) {
+        if (fencePath != null && !checkFenceUnchanged(fencePath, fenceVersion)) {
           return;
         }
         LOG.info("zkclient {}, A znode in a batched delete under {} is already gone, deleting the "
@@ -2155,7 +2156,7 @@ public class ZkClient implements Watcher {
           multi(Arrays.asList(Op.check(fencePath, fenceVersion), Op.delete(node, -1)));
         }
       } catch (ZkNoNodeException e) {
-        if (!isFenceIntact(fencePath, fenceVersion)) {
+        if (!checkFenceUnchanged(fencePath, fenceVersion)) {
           return false;
         }
       } catch (Exception e) {
@@ -2166,9 +2167,10 @@ public class ZkClient implements Watcher {
     return true;
   }
 
-  // Called after a NoNode. Returns false if fencePath is gone, and true if there is no fence or it
-  // still has fenceVersion, meaning the missing znode was another one. Throws if it was recreated.
-  private boolean isFenceIntact(String fencePath, int fenceVersion) {
+  // Called after a NoNode. Throws if fencePath no longer has fenceVersion, e.g. it was recreated.
+  // Otherwise returns whether fencePath still exists (true if there is no fence), meaning the
+  // missing znode was another one and the delete should go on.
+  private boolean checkFenceUnchanged(String fencePath, int fenceVersion) {
     if (fencePath == null) {
       return true;
     }
