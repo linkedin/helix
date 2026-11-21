@@ -19,7 +19,10 @@ package org.apache.helix.integration.controller;
  * under the License.
  */
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.helix.ZkUnitTestBase;
@@ -50,6 +53,22 @@ public class TestGenericHelixControllerThreading extends ZkUnitTestBase {
           remainingExpectedEventProcessThreadsCount);
     }
     System.out.println("testGenericHelixControllerThreadCount ENDs");
+  }
+
+  // Each pipeline thread is an inner class of its controller, so one that outlives shutdown keeps the whole
+  // controller reachable, and a distributed controller makes a new one every time it regains a cluster.
+  @Test
+  public void testShutdownStopsEveryPipelineThread() throws Exception {
+    GenericHelixController controller = new GenericHelixController("TestShutdownStopsEveryPipelineThread");
+    Map<String, Thread> threads = new LinkedHashMap<>();
+    for (String name : new String[] {"_eventThread", "_taskEventThread", "_managementModeEventThread"}) {
+      Field field = GenericHelixController.class.getDeclaredField(name);
+      field.setAccessible(true);
+      threads.put(name, (Thread) field.get(controller));
+    }
+    threads.forEach((name, thread) -> Assert.assertTrue(thread.isAlive(), name + " did not start"));
+    controller.shutdown();
+    threads.forEach((name, thread) -> Assert.assertFalse(thread.isAlive(), name + " outlived its controller's shutdown"));
   }
 
   private ArrayList<GenericHelixController> createHelixControllers(int count) {
