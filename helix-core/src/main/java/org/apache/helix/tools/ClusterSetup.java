@@ -327,10 +327,12 @@ public class ClusterSetup {
     if (config == null) {
       // A drop that failed after deleting the InstanceConfig leaves the instance subtree behind.
       // Finish that drop instead of refusing; the instance is already disabled by its removal.
+      // deleteDroppedInstanceGarbage, unlike dropInstance, refuses an instance re-added since the
+      // config was read, which would otherwise be dropped while enabled.
       if (_zkClient.exists(PropertyPathBuilder.instance(clusterName, instanceId))) {
         _logger.warn("Node {} has no config but its instance subtree remains, finishing the drop",
             instanceId);
-        _admin.dropInstance(clusterName, new InstanceConfig(instanceId));
+        _admin.deleteDroppedInstanceGarbage(clusterName, instanceId);
         return;
       }
       String error = "Node " + instanceId + " does not exist, cannot drop";
