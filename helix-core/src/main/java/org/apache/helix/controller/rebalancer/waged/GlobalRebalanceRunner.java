@@ -207,7 +207,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
               HelixRebalanceException.FailureCategory.ASYNC_EXECUTION, e);
         }
       }
-    } else if (clusterData.getClusterConfig().isWagedInstanceTagIsolationEnabled()) {
+    } else if (clusterData.getClusterConfig().isWagedInstanceTagIsolationEnabled()
+        && !clusterData.getClusterConfig().isWagedBestEffortPlacementEnabled()) {
       Future<Boolean> lastBaseline = _lastBaseline;
       Set<String> reported = _reportedIsolationRetries;
       // Only once that baseline is done, so this never overwrites a newer report, and only while
@@ -234,7 +235,8 @@ class GlobalRebalanceRunner implements AutoCloseable {
     _baselineCalcCounter.increment(1L);
     _baselineCalcLatency.startMeasuringLatency();
 
-    boolean isolationEnabled = clusterData.getClusterConfig().isWagedInstanceTagIsolationEnabled();
+    boolean isolationEnabled = clusterData.getClusterConfig().isWagedInstanceTagIsolationEnabled()
+        && !clusterData.getClusterConfig().isWagedBestEffortPlacementEnabled();
     Set<String> previousRetries = _isolationResourcesToRetry.get();
     Set<String> inFlightRetries =
         isolationEnabled ? new HashSet<>(resourceMap.keySet()) : Collections.emptySet();

@@ -69,6 +69,16 @@ public class OptimalAssignment {
         resourceAssignment.addReplicaMap(partition, partitionStateMap);
       }
     }
+    if (clusterModel.getContext() != null
+        && clusterModel.getContext().isBestEffortPlacementEnabled()) {
+      // Ensure resources where 0 replicas could fit still emit an explicit empty ResourceAssignment
+      // rather than disappearing from the output map (which callers treat as "skipped").
+      for (String resourceName : clusterModel.getAssignableReplicaMap().keySet()) {
+        if (!_skippedResources.contains(resourceName)) {
+          assignmentMap.computeIfAbsent(resourceName, ResourceAssignment::new);
+        }
+      }
+    }
     _optimalAssignment = assignmentMap;
   }
 

@@ -84,6 +84,9 @@ public class ClusterContext {
   // instance-group-tag group and every group connected to it through shared nodes, instead of
   // failing the whole rebalance. Read from the cluster config, default false.
   private final boolean _instanceTagIsolationEnabled;
+  // True when WAGED_BEST_EFFORT_PLACEMENT_ENABLED is set on ClusterConfig; places all feasible
+  // replicas instead of failing on capacity deficits or missing candidates. Default false.
+  private final boolean _bestEffortPlacementEnabled;
   private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
   // The replicas the totals below are summed over. Kept only when instance tag isolation is on and
   // a capacity key is short, so the deficit can be split across the groups that own them.
@@ -114,9 +117,15 @@ public class ClusterContext {
     _topStateScoringAlpha = Optional.ofNullable(clusterConfig)
         .map(ClusterConfig::getTopStateScoringAlpha).orElse(-1d);
     _clusterName = Optional.ofNullable(clusterConfig).map(ClusterConfig::getClusterName).orElse(null);
-    _instanceTagIsolationEnabled = Optional.ofNullable(clusterConfig)
-        .map(ClusterConfig::isWagedInstanceTagIsolationEnabled)
-        .orElse(ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
+    _bestEffortPlacementEnabled = Optional.ofNullable(clusterConfig)
+        .map(ClusterConfig::isWagedBestEffortPlacementEnabled)
+        .orElse(ClusterConfig.DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED);
+    // Best-effort placement handles deficits and missing candidates at replica granularity, so it
+    // takes precedence over whole-clique skipping in WAGED_INSTANCE_TAG_ISOLATION_ENABLED.
+    _instanceTagIsolationEnabled = !_bestEffortPlacementEnabled
+        && Optional.ofNullable(clusterConfig)
+            .map(ClusterConfig::isWagedInstanceTagIsolationEnabled)
+            .orElse(ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
 
     for (Map.Entry<String, List<AssignableReplica>> entry : replicaSet.stream()
         .collect(Collectors.groupingBy(AssignableReplica::getResourceName))
@@ -244,6 +253,10 @@ public class ClusterContext {
     return _instanceTagIsolationEnabled;
   }
 
+  public boolean isBestEffortPlacementEnabled() {
+    return _bestEffortPlacementEnabled;
+  }
+
   /**
    * Resource tags for the full model, including resources whose replicas are already allocated.
    * Kept only while instance tag isolation is enabled, and empty otherwise.
@@ -343,7 +356,13 @@ public class ClusterContext {
   }
 
   public int getEstimatedMaxPartitionByResource(String resourceName) {
-    return _estimatedMaxPartitionByResource.get(resourceName);
+    // In PARTIAL scope under best-effort mode, a resource that had 0 placed replicas in Baseline
+    // has its replica set trimmed empty by retainExistingReplicas and is absent from
+    // _estimatedMaxPartitionByResource; fall back to 1 instead of throwing NullPointerException
+    // if a replica of another resource speculatively probes a host holding a current-state copy.
+    return _bestEffortPlacementEnabled
+        ? _estimatedMaxPartitionByResource.getOrDefault(resourceName, 1)
+        : _estimatedMaxPartitionByResource.get(resourceName);
   }
 
   public int getEstimatedMaxTopStateCount() {

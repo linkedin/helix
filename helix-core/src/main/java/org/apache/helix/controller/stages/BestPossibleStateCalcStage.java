@@ -311,10 +311,11 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
     // <instanceName> : <resourceName> : <partitionName>
     Map<String, Map<String, Set<String>>> swapInInstanceAssignment = new HashMap<>();
     ClusterConfig clusterConfig = cache.getClusterConfig();
-    boolean instanceTagIsolation =
-        clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
+    boolean allowMissingWagedResource = clusterConfig != null
+        && (clusterConfig.isWagedInstanceTagIsolationEnabled()
+            || clusterConfig.isWagedBestEffortPlacementEnabled());
     resourceMap.forEach((resourceName, resource) -> {
-      if (instanceTagIsolation
+      if (allowMissingWagedResource
           && !bestPossibleStateOutput.getResourceStatesMap().containsKey(resourceName)
           && WagedValidationUtil.isWagedEnabled(cache.getIdealState(resourceName))) {
         // Instance tag isolation leaves a skipped resource that was never assigned out of the
@@ -726,9 +727,17 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
         .getReplicas().equals("0")) {
       // getPreferenceLists() always returns an initialized map (never null) since ZNRecord
       // initializes listFields as a TreeMap. A null result would indicate a programming error.
+      boolean bestEffortWaged = cache.getClusterConfig() != null
+          && cache.getClusterConfig().isWagedBestEffortPlacementEnabled()
+          && WagedValidationUtil.isWagedEnabled(idealState);
       Map<String, List<String>> preferenceLists = idealState.getPreferenceLists();
       if (preferenceLists == null || preferenceLists.isEmpty()) {
-        return checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
+        // When best-effort WAGED cannot place any replica of a brand-new resource (0 current-state
+        // copies), accept the empty preference lists instead of failing pipeline validation; if
+        // current-state copies do exist, defer to checkEmptyPreferenceListAllowed so existing
+        // sole-copy safety checks still apply.
+        return (bestEffortWaged && !hasCurrentStateForResource(resource, currentStateOutput))
+            || checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
       }
       int emptyListCount = 0;
       for (List<String> preferenceList : preferenceLists.values()) {
@@ -738,13 +747,14 @@ public class BestPossibleStateCalcStage extends AbstractBaseStage {
       }
       if (emptyListCount == preferenceLists.values().size()) {
         // All per-partition lists are empty — treat the same as map-level empty.
-        return checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
+        return (bestEffortWaged && !hasCurrentStateForResource(resource, currentStateOutput))
+            || checkEmptyPreferenceListAllowed(idealState, resource, currentStateOutput, cache);
       }
       // Some but not all per-partition lists are empty. This is expected when
-      // maxPartitionsPerInstance is explicitly configured and capacity is exhausted for some nodes.
-      // The default value of maxPartitionsPerInstance is Integer.MAX_VALUE (unconstrained), so we
-      // only treat partial empty lists as valid when it has been explicitly set to a finite value.
-      if (emptyListCount > 0 && idealState.getMaxPartitionsPerInstance() != Integer.MAX_VALUE) {
+      // maxPartitionsPerInstance or WAGED best-effort placement is enabled and capacity/zones/tags
+      // are exhausted for some partitions.
+      if (emptyListCount > 0
+          && (idealState.getMaxPartitionsPerInstance() != Integer.MAX_VALUE || bestEffortWaged)) {
         return true;
       }
       // maxPartitionsPerInstance is not configured: partial empty lists indicate an inconsistent

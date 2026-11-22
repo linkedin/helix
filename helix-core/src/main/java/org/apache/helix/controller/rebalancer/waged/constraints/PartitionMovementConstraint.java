@@ -48,6 +48,15 @@ public class PartitionMovementConstraint extends AbstractPartitionMovementConstr
       // baseline assignment should be used instead.
       return calculateAssignmentScore(logicalId, state, baselineAssignment);
     }
-    return calculateAssignmentScore(logicalId, state, bestPossibleAssignment);
+    double score = calculateAssignmentScore(logicalId, state, bestPossibleAssignment);
+    // When best-effort placement shrunk BestPossible below Baseline (e.g. a multi-host outage past
+    // the rebalance delay), score a returning Baseline-only home at 0.5x weight: positive enough to
+    // reclaim its own prior host even when EVENNESS is 0, yet strictly below 1.0 so it never ties
+    // or evicts a live replacement copy that already joined BestPossible on a spare host.
+    if (score == MIN_SCORE && clusterContext.isBestEffortPlacementEnabled()
+        && bestPossibleAssignment.size() < baselineAssignment.size()) {
+      return 0.5 * calculateAssignmentScore(logicalId, state, baselineAssignment);
+    }
+    return score;
   }
 }
