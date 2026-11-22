@@ -22,9 +22,11 @@ package org.apache.helix.controller.rebalancer.waged;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableMap;
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixRebalanceException;
 import org.apache.helix.constants.InstanceConstants;
@@ -55,6 +58,7 @@ import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
@@ -130,6 +134,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
   private volatile LastRun _lastRun = LastRun.CLEAN;
   // Set once a partial run has finished, so a new leader does not report its default flags as health.
   private volatile boolean _servingOutcomeKnown;
+  // Deduplicates sole-copy retention WARN logs across consecutive pipeline runs while unchanged.
+  private volatile Set<String> _lastLoggedRetainedPartitions = Collections.emptySet();
 
   private static AssignmentMetadataStore constructAssignmentStore(String metadataStoreAddrs,
       String clusterName) {
@@ -490,7 +496,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       return algorithm;
     }
     ClusterConfig clusterConfig = clusterData.getClusterConfig();
-    boolean enabled = clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled();
+    boolean enabled = clusterConfig != null && clusterConfig.isWagedInstanceTagIsolationEnabled()
+        && !clusterConfig.isWagedBestEffortPlacementEnabled();
     long generation = monitor.configureWagedInstanceTagIsolation(enabled, resources);
     if (!enabled) {
       return algorithm;
@@ -561,6 +568,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
       _servingFailureCategory.set(null);
       _servingOutcomeKnown = false;
       _lastRun = LastRun.CLEAN;
+      _lastLoggedRetainedPartitions = Collections.emptySet();
     }
   }
 
@@ -570,6 +578,7 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     _partialRebalanceRunner.close();
     _globalRebalanceRunner.close();
     resetIsolationReporting();
+    _lastLoggedRetainedPartitions = Collections.emptySet();
     if (_assignmentMetadataStore != null) {
       _assignmentMetadataStore.close();
     }
@@ -650,6 +659,14 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     }
     _lastRun = usedFallback ? new LastRun(failure) : LastRun.CLEAN;
 
+    if (clusterData.getClusterConfig() != null
+        && clusterData.getClusterConfig().isWagedBestEffortPlacementEnabled()) {
+      // Runs even on fallback assignments so a partition with 0 placed replicas in newIdealStates
+      // keeps any healthy current-state sole copy instead of receiving DROPPED.
+      retainSoleCopiesForUnplacedPartitions(clusterData, resourceMap, currentStateOutput,
+          newIdealStates, usedFallback);
+    }
+
     // Construct the new best possible states according to the current state and target assignment.
     // Note that the new ideal state might be an intermediate state between the current state and
     // the target assignment.
@@ -673,6 +690,116 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
     LOG.info("Finish computing new ideal states for resources: {}",
         resourceMap.keySet().toString());
     return newIdealStates;
+  }
+
+  /**
+   * Ensures every active partition has an explicit preference list in {@code newIdealStates}, and
+   * when best-effort placement could place 0 replicas of a partition anywhere (e.g. its active host
+   * had capacity cut to 0 or lost its group tag with no alternative host), unconditionally retains
+   * existing non-ERROR/non-DROPPED current-state holders so the sole surviving copy is never sent
+   * DROPPED. {@code WagedInstanceCapacity} already charges every existing current-state copy before
+   * {@code DelayedAutoRebalancer} evaluates upward transitions, preventing any newly assigned
+   * replica on that host from bootstrapping while capacity is full (though WAGED's placement model
+   * does not reserve the unplaced sole copy's slot). Persisted BEST_POSSIBLE stays empty for
+   * unplaced partitions, so all controllers must support this flag and it must stay enabled while
+   * any partition has 0 valid placements.
+   */
+  private void retainSoleCopiesForUnplacedPartitions(ResourceControllerDataProvider clusterData,
+      Map<String, Resource> resourceMap, CurrentStateOutput currentStateOutput,
+      Map<String, IdealState> newIdealStates, boolean usedFallback) {
+    ClusterConfig clusterConfig = clusterData.getClusterConfig();
+    Map<String, InstanceConfig> instanceConfigMap = clusterData.getInstanceConfigMap();
+    Set<String> retainedPartitions = new LinkedHashSet<>();
+
+    int liveCount = clusterData.getEnabledLiveInstances().size();
+    List<String> resourceNames =
+        new ArrayList<>(usedFallback ? newIdealStates.keySet() : resourceMap.keySet());
+    Collections.sort(resourceNames);
+    for (String resourceName : resourceNames) {
+      Resource resource = resourceMap.get(resourceName);
+      if (resource == null) {
+        continue;
+      }
+      IdealState idealState = newIdealStates.get(resourceName);
+      if (idealState == null) {
+        // When every replica of a resource is unplaceable, PARTIAL omits that resource from
+        // newBestPossibleAssignment; synthesize its IdealState shell here so sole-copy retention
+        // still protects any healthy current-state holders.
+        IdealState currentIdealState = clusterData.getIdealState(resourceName);
+        if (currentIdealState == null) {
+          continue;
+        }
+        idealState = new IdealState(resourceName);
+        idealState.getRecord().setSimpleFields(currentIdealState.getRecord().getSimpleFields());
+        applyUserDefinedPreferenceList(clusterData.getResourceConfig(resourceName), idealState);
+        newIdealStates.put(resourceName, idealState);
+      }
+      boolean wantsActiveReplicas =
+          !"0".equals(idealState.getReplicas()) && idealState.getReplicaCount(liveCount) > 0;
+      Map<String, Integer> statePriorityMap =
+          clusterData.getStateModelDef(idealState.getStateModelDefRef()).getStatePriorityMap();
+      List<Partition> partitions = new ArrayList<>(resource.getPartitions());
+      partitions.sort(Comparator.comparing(Partition::getPartitionName));
+      for (Partition partition : partitions) {
+        List<String> preferenceList = idealState.getPreferenceList(partition.getPartitionName());
+        if (preferenceList != null && !preferenceList.isEmpty()) {
+          continue;
+        }
+        List<String> retainedHolders = !wantsActiveReplicas ? Collections.emptyList()
+            : findRetainableSoleCopyHolders(resourceName, partition, currentStateOutput,
+                instanceConfigMap, statePriorityMap);
+        if (!retainedHolders.isEmpty()) {
+          retainedPartitions.add(resourceName + "/" + partition.getPartitionName());
+        }
+        idealState.setPreferenceList(partition.getPartitionName(), retainedHolders);
+      }
+    }
+    logRetainedSoleCopies(clusterConfig == null ? "" : clusterConfig.getClusterName(),
+        retainedPartitions);
+  }
+
+  private void logRetainedSoleCopies(String clusterName, Set<String> retainedPartitions) {
+    if (this instanceof ReadOnlyWagedRebalancer) {
+      return;
+    }
+    if (retainedPartitions.isEmpty()) {
+      _lastLoggedRetainedPartitions = Collections.emptySet();
+      return;
+    }
+    if (!retainedPartitions.equals(_lastLoggedRetainedPartitions)) {
+      _lastLoggedRetainedPartitions =
+          Collections.unmodifiableSet(new LinkedHashSet<>(retainedPartitions));
+      List<String> sample = retainedPartitions.stream().limit(10).collect(Collectors.toList());
+      LOG.warn("Best-effort WAGED placed 0 replicas for {} partition(s) in cluster {} (retaining "
+              + "current-state sole copies; do not disable WAGED_BEST_EFFORT_PLACEMENT_ENABLED "
+              + "while unplaced; sample={}).",
+          retainedPartitions.size(), clusterName, sample);
+    } else {
+      LOG.debug("Best-effort WAGED continues retaining sole copies for {} partition(s) in "
+          + "cluster {}.", retainedPartitions.size(), clusterName);
+    }
+  }
+
+  private static List<String> findRetainableSoleCopyHolders(String resourceName,
+      Partition partition, CurrentStateOutput currentStateOutput,
+      Map<String, InstanceConfig> instanceConfigMap, Map<String, Integer> statePriorityMap) {
+    return currentStateOutput.getCurrentStateMap(resourceName, partition).entrySet().stream()
+        .filter(entry -> !HelixDefinedState.DROPPED.name().equals(entry.getValue())
+            && !HelixDefinedState.ERROR.name().equals(entry.getValue())
+            && isRetainableInstance(instanceConfigMap.get(entry.getKey())))
+        .sorted(Comparator.<Map.Entry<String, String>>comparingInt(
+            entry -> statePriorityMap.getOrDefault(entry.getValue(), Integer.MAX_VALUE))
+            .thenComparing(Map.Entry::getKey))
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toList());
+  }
+
+  private static boolean isRetainableInstance(InstanceConfig instanceConfig) {
+    InstanceConstants.InstanceOperation operation =
+        instanceConfig == null ? null : instanceConfig.getInstanceOperation().getOperation();
+    return operation != null
+        && operation != InstanceConstants.InstanceOperation.UNKNOWN
+        && operation != InstanceConstants.InstanceOperation.SWAP_IN;
   }
 
   public WagedRebalanceStatus getConvergenceStatus() {
