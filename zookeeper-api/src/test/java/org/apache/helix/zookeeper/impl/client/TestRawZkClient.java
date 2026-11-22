@@ -55,6 +55,7 @@ import org.apache.helix.zookeeper.zkclient.callback.ZkAsyncCallbacks;
 import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
+import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkSessionMismatchedException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkTimeoutException;
 import org.apache.helix.zookeeper.zkclient.metric.ZkClientMonitor;
@@ -1427,7 +1428,7 @@ public class TestRawZkClient extends ZkTestBase {
     _zkClient.deleteRecursively(root);
     _zkClient.createPersistent(root + "/child-0", true);
     try {
-      _zkClient.deleteInBatches(paths, root, fenceVersion);
+      _zkClient.deleteInBatches(paths, root, fenceVersion, null);
       Assert.fail("deleteInBatches should fail once the fence znode changed");
     } catch (ZkClientException expected) {
       Assert.assertTrue(expected.getCause() instanceof ZkBadVersionException,
@@ -1448,9 +1449,35 @@ public class TestRawZkClient extends ZkTestBase {
     int fenceVersion = _zkClient.writeDataGetStat(root, null, -1).getVersion();
     _zkClient.deleteRecursively(root);
 
-    _zkClient.deleteInBatches(paths, root, fenceVersion);
+    _zkClient.deleteInBatches(paths, root, fenceVersion, null);
 
     Assert.assertFalse(_zkClient.exists(root));
+  }
+
+  // A delete guarded by absentPath deletes nothing while that path exists.
+  @Test
+  void testDeleteInBatchesStopsWhenAbsentPathExists() {
+    System.out.println("Start test: " + TestHelper.getTestMethodName());
+    String root = "/testDeleteInBatchesAbsentPathExists";
+    String absentPath = "/testDeleteInBatchesAbsentPathExistsGuard";
+    _zkClient.createPersistent(root + "/child-0", true);
+    _zkClient.createPersistent(absentPath);
+    List<String> paths = _zkClient.getSubtreeChildrenFirst(root);
+    try {
+      _zkClient.deleteInBatches(paths, null, -1, absentPath);
+      Assert.fail("deleteInBatches should fail while absentPath exists");
+    } catch (ZkClientException expected) {
+      Assert.assertTrue(expected.getCause() instanceof ZkNodeExistsException,
+          "Unexpected cause: " + expected.getCause());
+    } finally {
+      Assert.assertTrue(_zkClient.exists(root + "/child-0"));
+      Assert.assertTrue(_zkClient.exists(absentPath));
+      _zkClient.delete(absentPath);
+    }
+
+    _zkClient.deleteInBatches(paths, null, -1, absentPath);
+    Assert.assertFalse(_zkClient.exists(root));
+    Assert.assertFalse(_zkClient.exists(absentPath));
   }
 
   // Creates root with numGroups children, each with leavesPerGroup children.

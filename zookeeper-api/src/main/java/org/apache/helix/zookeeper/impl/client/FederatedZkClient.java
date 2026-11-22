@@ -380,18 +380,20 @@ public class FederatedZkClient implements RealmAwareZkClient {
 
   @Override
   public void deleteInBatches(List<String> pathsChildrenFirst, String fencePath,
-      int fenceVersion) {
+      int fenceVersion, String absentPath) {
     if (pathsChildrenFirst.isEmpty()) {
       return;
     }
     // Each batch is one multi() call, which cannot span realms.
     if (pathsChildrenFirst.stream().map(this::getZkRealm).distinct().count() > 1
         || (fencePath != null && !getZkRealm(fencePath).equals(
+        getZkRealm(pathsChildrenFirst.get(0))))
+        || (absentPath != null && !getZkRealm(absentPath).equals(
         getZkRealm(pathsChildrenFirst.get(0))))) {
       throw new IllegalArgumentException("Cannot delete paths across different realms");
     }
     getZkClient(pathsChildrenFirst.get(0)).deleteInBatches(pathsChildrenFirst, fencePath,
-        fenceVersion);
+        fenceVersion, absentPath);
   }
 
   @Override

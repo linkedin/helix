@@ -109,9 +109,9 @@ public class ZkClient implements Watcher {
 
   /**
    * Maximum number of ops in one multi() sent by {@link #deleteRecursively(String)} and
-   * {@link #deleteInBatches(List, String, int)}, including the fence check when there is one. At
-   * about 240 bytes per op a batch is about 240 KB, well below jute.maxbuffer (just under 1 MB by
-   * default in ZooKeeper).
+   * {@link #deleteInBatches(List, String, int, String)}, including the guard ops when there are
+   * any. At about 240 bytes per op a batch is about 240 KB, well below jute.maxbuffer (just under
+   * 1 MB by default in ZooKeeper).
    */
   public static final int DELETE_RECURSIVE_BATCH_SIZE = 1000;
 
@@ -2038,7 +2038,7 @@ public class ZkClient implements Watcher {
    * resumes the deletion, since it only walks the znodes that still exist.
    *
    * <p>The subtree is listed with {@link #getSubtreeChildrenFirst(String)} and deleted with
-   * {@link #deleteInBatches(List, String, int)}, see those for details.
+   * {@link #deleteInBatches(List, String, int, String)}, see those for details.
    *
    * @param path ZK path to delete; a no-op if it does not exist
    * @throws ZkClientException if a znode cannot be deleted or the subtree cannot be listed
@@ -2053,7 +2053,7 @@ public class ZkClient implements Watcher {
           _uid, path, e);
       throw new ZkClientException("Failed to delete " + path, e);
     }
-    deleteInBatches(pathsChildrenFirst, null, -1);
+    deleteInBatches(pathsChildrenFirst, null, -1, null);
   }
 
   /**
@@ -2105,22 +2105,42 @@ public class ZkClient implements Watcher {
    * nothing more. If {@code fencePath} no longer exists, nothing under it is left either, so the
    * call returns.
    *
+   * <p>If {@code absentPath} is set, every request also creates and deletes it, so it runs only
+   * while {@code absentPath} does not exist. Once it exists the call fails as
+   * {@code ZkClientException -> ZkNodeExistsException} and deletes nothing more.
+   *
    * @param pathsChildrenFirst znodes to delete, each listed before its parent
    * @param fencePath znode whose data version guards the delete, or null for none
    * @param fenceVersion expected data version of {@code fencePath}; ignored if it is null
-   * @throws ZkClientException if a znode cannot be deleted or the fence no longer holds
+   * @param absentPath znode that must not exist for the delete to go on, or null for none; its
+   *     parent must exist
+   * @throws ZkClientException if a znode cannot be deleted, the fence no longer holds, or
+   *     {@code absentPath} exists
    */
   public void deleteInBatches(List<String> pathsChildrenFirst, String fencePath,
-      int fenceVersion) throws ZkClientException {
-    int maxDeletesPerBatch =
-        fencePath == null ? DELETE_RECURSIVE_BATCH_SIZE : DELETE_RECURSIVE_BATCH_SIZE - 1;
+      int fenceVersion, String absentPath) throws ZkClientException {
+    List<Op> guardOps = new ArrayList<>(3);
+    if (fencePath != null) {
+      guardOps.add(Op.check(fencePath, fenceVersion));
+    }
+    if (absentPath != null) {
+      // A missing parent would fail the create with NoNode, which reads as a deleted znode.
+      int lastSlash = absentPath.lastIndexOf('/');
+      String parent = lastSlash == 0 ? "/" : absentPath.substring(0, lastSlash);
+      if (!exists(parent)) {
+        throw new ZkClientException("Failed to delete: parent of " + absentPath
+            + " does not exist", new ZkNoNodeException(parent));
+      }
+      guardOps.add(Op.create(absentPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+          CreateMode.PERSISTENT));
+      guardOps.add(Op.delete(absentPath, -1));
+    }
+    int maxDeletesPerBatch = DELETE_RECURSIVE_BATCH_SIZE - guardOps.size();
     for (int i = 0; i < pathsChildrenFirst.size(); i += maxDeletesPerBatch) {
       List<String> batch = pathsChildrenFirst.subList(i,
           Math.min(i + maxDeletesPerBatch, pathsChildrenFirst.size()));
-      List<Op> ops = new ArrayList<>(batch.size() + 1);
-      if (fencePath != null) {
-        ops.add(Op.check(fencePath, fenceVersion));
-      }
+      List<Op> ops = new ArrayList<>(guardOps.size() + batch.size());
+      ops.addAll(guardOps);
       for (String node : batch) {
         ops.add(Op.delete(node, -1));
       }
@@ -2133,7 +2153,7 @@ public class ZkClient implements Watcher {
         }
         LOG.info("zkclient {}, A znode in a batched delete under {} is already gone, deleting the "
             + "batch one znode at a time", _uid, batch.get(batch.size() - 1));
-        if (!deleteOneByOneSkippingMissing(batch, fencePath, fenceVersion)) {
+        if (!deleteOneByOneSkippingMissing(batch, fencePath, fenceVersion, guardOps)) {
           return;
         }
       } catch (Exception e) {
@@ -2144,16 +2164,18 @@ public class ZkClient implements Watcher {
     }
   }
 
-  // Deletes the given znodes in order, one request each, skipping missing ones. Returns false if
-  // fencePath turned out to be gone, which means everything under it is gone too.
+  // Deletes the given znodes in order, one request each with guardOps first, skipping missing ones.
+  // Returns false if fencePath turned out to be gone, which means everything under it is gone too.
   private boolean deleteOneByOneSkippingMissing(List<String> nodes, String fencePath,
-      int fenceVersion) {
+      int fenceVersion, List<Op> guardOps) {
     for (String node : nodes) {
       try {
-        if (fencePath == null) {
+        if (guardOps.isEmpty()) {
           delete(node);
         } else {
-          multi(Arrays.asList(Op.check(fencePath, fenceVersion), Op.delete(node, -1)));
+          List<Op> ops = new ArrayList<>(guardOps);
+          ops.add(Op.delete(node, -1));
+          multi(ops);
         }
       } catch (ZkNoNodeException e) {
         if (!checkFenceUnchanged(fencePath, fenceVersion)) {

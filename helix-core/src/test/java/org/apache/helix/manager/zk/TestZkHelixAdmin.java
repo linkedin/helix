@@ -2754,8 +2754,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
       multiCalls.clear();
       largeConfigExisted.clear();
       admin.dropInstance(clusterName, new InstanceConfig("host_large"));
-      Assert.assertEquals(multiCalls.get(0), Collections.singletonList(largeInstancePath),
-          "The subtree root is fenced after the config is deleted");
+      Assert.assertEquals(multiCalls.get(0),
+          Arrays.asList(largeConfigPath, largeConfigPath, largeInstancePath),
+          "The subtree root is fenced, only while there is no config, after the config is deleted");
       Assert.assertFalse(largeConfigExisted.get(0));
       List<List<String>> batches = multiCalls.subList(1, multiCalls.size());
       Assert.assertTrue(batches.size() > 1, "Expected batched deletes: " + batches.size());
@@ -2763,7 +2764,9 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         List<String> paths = batches.get(i);
         Assert.assertTrue(paths.size() <= batchSize, "Batch too large: " + paths.size());
         Assert.assertEquals(paths.get(0), largeInstancePath, "Each batch checks the fence first");
-        Assert.assertFalse(paths.contains(largeConfigPath));
+        Assert.assertEquals(paths.subList(1, 3), Arrays.asList(largeConfigPath, largeConfigPath),
+            "Each batch requires the config to be absent");
+        Assert.assertFalse(paths.subList(3, paths.size()).contains(largeConfigPath));
         Assert.assertFalse(largeConfigExisted.get(i + 1));
       }
       Assert.assertFalse(_gZkClient.exists(largeInstancePath));
@@ -2867,6 +2870,130 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
         _gZkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName)));
     Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
         InstanceType.PARTICIPANT));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // A recreated subtree root starts again at version 0. A cleaner that loses to a re-add must not
+  // bump the new root to the version a stalled drop still holds as its fence from the old root, or
+  // the drop's next batch would pass its fence check and delete the re-added instance's subtree.
+  @Test
+  public void testLeftoverCleanerDoesNotFenceReAddedRoot() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestCleanerDoesNotFenceReAddedRoot";
+    final String instanceName = "host_readded_after_stale_check";
+    final String instanceConfigPath =
+        PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    addMessages(clusterName, instanceName,
+        2 * org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE);
+
+    // A cleaner whose config check ran before the re-add: it sees no config once.
+    org.apache.helix.zookeeper.impl.client.ZkClient staleCleanerClient =
+        new org.apache.helix.zookeeper.impl.client.ZkClient(ZK_ADDR) {
+          private boolean _missedConfig = false;
+
+          @Override
+          public boolean exists(String path) {
+            if (path.equals(instanceConfigPath) && !_missedConfig) {
+              _missedConfig = true;
+              return false;
+            }
+            return super.exists(path);
+          }
+        };
+    // The drop fences the old root in call 0 and deletes batch 1 in call 1. Before batch 2, the
+    // instance is re-added, which deletes the old root and creates a new one, and then the stale
+    // cleaner tries to clean it up.
+    org.apache.helix.zookeeper.impl.client.ZkClient dropClient =
+        createZkClientBeforeEachMulti((callIndex, paths) -> {
+          if (callIndex == 2) {
+            setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+            try {
+              new ZKHelixAdmin(staleCleanerClient)
+                  .deleteDroppedInstanceGarbage(clusterName, instanceName);
+              Assert.fail("The cleaner should find the instance re-added");
+            } catch (HelixConflictException expected) {
+            }
+          }
+        });
+    try {
+      new ZKHelixAdmin(dropClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("dropInstance should report that the instance was re-added");
+    } catch (HelixConflictException expected) {
+    } finally {
+      dropClient.close();
+      staleCleanerClient.close();
+    }
+    Assert.assertTrue(_gZkClient.exists(instanceConfigPath));
+    Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
+        InstanceType.PARTICIPANT));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // addInstance of Helix versions before this change writes the config and reuses an existing root,
+  // so the root keeps the version a drop holds as its fence. The drop must still stop.
+  @Test
+  public void testDropInstanceKeepsInstanceReAddedOnSameRoot() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDropInstanceReAddedOnSameRoot";
+    final String instanceName = "host_readded_on_same_root";
+    final String instanceConfigPath =
+        PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    HelixAdmin setupAdmin = new ZKHelixAdmin(_gZkClient);
+    setupAdmin.addCluster(clusterName, true);
+    setupAdmin.addInstance(clusterName, new InstanceConfig(instanceName));
+    addMessages(clusterName, instanceName,
+        2 * org.apache.helix.zookeeper.zkclient.ZkClient.DELETE_RECURSIVE_BATCH_SIZE);
+
+    // Call 0 fences the root and call 1 deletes batch 1. Before batch 2, an older client re-adds
+    // the instance: it writes the config and keeps the root and its remaining znodes.
+    org.apache.helix.zookeeper.impl.client.ZkClient dropClient =
+        createZkClientBeforeEachMulti((callIndex, paths) -> {
+          if (callIndex == 2) {
+            _gZkClient.createPersistent(instanceConfigPath,
+                new InstanceConfig(instanceName).getRecord());
+          }
+        });
+    try {
+      new ZKHelixAdmin(dropClient).dropInstance(clusterName, new InstanceConfig(instanceName));
+      Assert.fail("dropInstance should report that the instance was re-added");
+    } catch (HelixConflictException expected) {
+    } finally {
+      dropClient.close();
+    }
+    Assert.assertTrue(_gZkClient.exists(instanceConfigPath));
+    Assert.assertTrue(ZKUtil.isInstanceSetup(_gZkClient, clusterName, instanceName,
+        InstanceType.PARTICIPANT));
+
+    _gSetupTool.deleteCluster(clusterName);
+    System.out.println("End test :" + TestHelper.getTestMethodName());
+  }
+
+  // Without the InstanceConfig parent the cleanup cannot take its fence. It fails instead of
+  // returning as if the subtree were already gone.
+  @Test
+  public void testDeleteDroppedInstanceGarbageFailsWithoutConfigParent() {
+    System.out.println("Start test :" + TestHelper.getTestMethodName());
+    final String clusterName = "TestDeleteGarbageWithoutConfigParent";
+    final String instanceName = "host_leftover_no_config_parent";
+    HelixAdmin admin = new ZKHelixAdmin(_gZkClient);
+    admin.addCluster(clusterName, true);
+    admin.addInstance(clusterName, new InstanceConfig(instanceName));
+    _gZkClient.deleteRecursively(PropertyPathBuilder.instanceConfig(clusterName));
+    try {
+      admin.deleteDroppedInstanceGarbage(clusterName, instanceName);
+      Assert.fail("deleteDroppedInstanceGarbage should fail without the InstanceConfig parent");
+    } catch (HelixException expected) {
+      Assert.assertFalse(expected instanceof HelixConflictException, expected.getMessage());
+    }
+    Assert.assertTrue(
+        _gZkClient.exists(PropertyPathBuilder.instance(clusterName, instanceName)));
 
     _gSetupTool.deleteCluster(clusterName);
     System.out.println("End test :" + TestHelper.getTestMethodName());

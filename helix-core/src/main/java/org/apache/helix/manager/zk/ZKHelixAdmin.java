@@ -120,9 +120,11 @@ import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNoNodeException;
 import org.apache.helix.zookeeper.zkclient.exception.ZkNodeExistsException;
+import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -344,6 +346,7 @@ public class ZKHelixAdmin implements HelixAdmin {
   //   before a connection loss and was then resent.
   // - Fence lost: another agent fenced the subtree for its own delete. Retried only while the
   //   instance has no config; otherwise it was re-added, and its new subtree must be kept.
+  // A batch that found the InstanceConfig created is never retried: the instance was re-added.
   private <T> T retryInstanceZnodeDelete(String clusterName, String instanceName,
       String operation, IntFunction<T> deleteAttempt) {
     String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
@@ -353,7 +356,7 @@ public class ZKHelixAdmin implements HelixAdmin {
         return deleteAttempt.apply(retryCnt);
       } catch (ZkClientException | ZkException e) {
         boolean fenceLost = isFenceLost(e);
-        if (fenceLost && _zkClient.exists(instanceConfigPath)) {
+        if ((fenceLost && _zkClient.exists(instanceConfigPath)) || isConfigCreated(e)) {
           throw new HelixConflictException("Node " + instanceName + " was re-added to cluster "
               + clusterName + " while its znodes were being deleted; its new znodes are kept.");
         }
@@ -405,9 +408,10 @@ public class ZKHelixAdmin implements HelixAdmin {
   }
 
   // Deletes a /INSTANCES/{instance} subtree whose InstanceConfig is gone. The subtree root is
-  // fenced first and the config checked after that: an instance re-added before the fence has a
-  // config, and one re-added after it has a new root, which fails the fence check of every delete
-  // batch. Either way the re-added instance is left alone.
+  // fenced only if the instance has no config, atomically (see newFenceOps): an instance re-added
+  // before the fence has a config, so nothing is fenced, and one re-added after it has a new root,
+  // which fails the fence check of every delete batch. Either way the re-added instance is left
+  // alone.
   private void deleteDroppedInstanceGarbageOnce(String clusterName, String instanceName,
       List<String> subtree) {
     if (subtree.isEmpty()) {
@@ -416,23 +420,41 @@ public class ZKHelixAdmin implements HelixAdmin {
     String instancePath = PropertyPathBuilder.instance(clusterName, instanceName);
     int fenceVersion;
     try {
-      fenceVersion = getFenceVersion(
-          _zkClient.multi(Collections.singletonList(newFenceOp(instancePath))).get(0));
-    } catch (ZkNoNodeException e) {
-      return;
-    }
-    if (_zkClient.exists(PropertyPathBuilder.instanceConfig(clusterName, instanceName))) {
+      List<OpResult> results = _zkClient.multi(newFenceOps(clusterName, instanceName));
+      fenceVersion = getFenceVersion(results.get(results.size() - 1));
+    } catch (ZkNodeExistsException e) {
       throw new HelixConflictException("Node " + instanceName + " was re-added to cluster "
           + clusterName + " while its leftover subtree was being deleted; its new znodes are "
           + "kept.");
+    } catch (ZkNoNodeException e) {
+      if (_zkClient.exists(instancePath)) {
+        // The root is there, so the create of the InstanceConfig failed: its parent is missing.
+        throw new HelixException("Cannot delete leftover subtree of instance " + instanceName
+            + " in cluster " + clusterName + ": " + PropertyPathBuilder.instanceConfig(clusterName)
+            + " does not exist");
+      }
+      return;
     }
-    _zkClient.deleteInBatches(subtree, instancePath, fenceVersion);
+    // Each batch also requires the instance to have no config. The fence alone does not catch a
+    // re-add that keeps the root, as addInstance of Helix versions before this change does.
+    _zkClient.deleteInBatches(subtree, instancePath, fenceVersion,
+        PropertyPathBuilder.instanceConfig(clusterName, instanceName));
   }
 
   // Bumps the data version of the subtree root without changing its data (nothing stores data
   // there), so deletes that check the new version abort if the root is deleted and recreated.
-  private static Op newFenceOp(String instancePath) {
-    return Op.setData(instancePath, null, -1);
+  // The create and delete of the InstanceConfig make the multi fail with NodeExists, bumping
+  // nothing, if the instance has a config. A new root always has one, since addInstance writes the
+  // config before the root, so a fence never lands on a re-added root. Fencing first and checking
+  // the config after would leave a window in which a recreated root, which starts again at
+  // version 0, is bumped to a version a stalled delete of the old root still holds.
+  private static List<Op> newFenceOps(String clusterName, String instanceName) {
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(clusterName, instanceName);
+    return Arrays.asList(
+        Op.create(instanceConfigPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+            CreateMode.PERSISTENT),
+        Op.delete(instanceConfigPath, -1),
+        Op.setData(PropertyPathBuilder.instance(clusterName, instanceName), null, -1));
   }
 
   private static int getFenceVersion(OpResult fenceResult) {
@@ -442,6 +464,12 @@ public class ZKHelixAdmin implements HelixAdmin {
   private static boolean isFenceLost(RuntimeException e) {
     Throwable cause = e instanceof ZkClientException ? e.getCause() : e;
     return cause instanceof ZkBadVersionException;
+  }
+
+  // Whether a delete batch failed because its InstanceConfig, which must not exist, was created.
+  private static boolean isConfigCreated(RuntimeException e) {
+    Throwable cause = e instanceof ZkClientException ? e.getCause() : e;
+    return cause instanceof ZkNodeExistsException;
   }
 
   private static boolean isConcurrentChange(RuntimeException e) {

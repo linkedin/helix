@@ -176,6 +176,21 @@ public class TestInstanceGarbageCollector extends ZkTestBase {
     deleteCluster(clusterName);
   }
 
+  // Losing leadership stops the collection, even when no FINALIZE event reaches the pipeline.
+  @Test
+  public void testLeadershipLossStopsCollection() throws InterruptedException {
+    String clusterName = CLUSTER_PREFIX + "_" + TestHelper.getTestMethodName();
+    GenericHelixController controller = new GenericHelixController(clusterName);
+    try {
+      controller.startInstanceGarbageCollection(mockManager(clusterName, true));
+      Assert.assertTrue(controller.isInstanceGarbageCollectionScheduled());
+      controller.onControllerChange(null);
+      Assert.assertFalse(controller.isInstanceGarbageCollectionScheduled());
+    } finally {
+      controller.shutdown();
+    }
+  }
+
   private static class ClockedCollector extends InstanceGarbageCollector {
     private long _now;
 

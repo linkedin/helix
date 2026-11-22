@@ -461,8 +461,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
    * Starts the periodic instance garbage collection, if it is not running yet. Each run schedules
    * the next one after the interval it read from the ClusterConfig, so a changed interval applies
    * from the next run without waiting for the controller's cache.
+   * Package-private for tests.
    */
-  private void startInstanceGarbageCollection(HelixManager manager) {
+  void startInstanceGarbageCollection(HelixManager manager) {
     synchronized (_instanceGarbageCollectionExecutor) {
       if (_instanceGarbageCollectionFutureTask != null
           || _instanceGarbageCollectionExecutor.isShutdown()) {
@@ -1492,6 +1493,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       pushToEventQueues(ClusterEventType.ControllerChange, changeContext, Collections.emptyMap());
     } else {
       enableClusterStatusMonitor(false);
+      // The FINALIZE event that would also stop it is dropped on a session expiry, since it carries
+      // the new session.
+      stopInstanceGarbageCollection();
       // Note that onControllerChange is executed in parallel with the event processing thread. It
       // is possible that the current WAGED rebalancer object is in use for handling callback. So
       // mark the rebalancer invalid only, instead of closing it here.
