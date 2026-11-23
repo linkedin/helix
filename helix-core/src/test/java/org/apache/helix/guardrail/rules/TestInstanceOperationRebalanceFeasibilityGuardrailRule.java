@@ -481,6 +481,24 @@ public class TestInstanceOperationRebalanceFeasibilityGuardrailRule {
   }
 
   @Test
+  public void testBestEffortRetainedAssignmentNamingTargetIsInfeasible() {
+    // With best-effort placement on, sole-copy retention can keep an unplaceable partition on a
+    // drained EVACUATE instance; checkUsable must stop counting that target once drained.
+    Map<String, ResourceAssignment> retained = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    ClusterConfig bestEffortConfig = enabledClusterConfig();
+    bestEffortConfig.setWagedBestEffortPlacementEnabled(true);
+    doReturn(bestEffortConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    ValidationResult result = rule.validate(context(dataAccessor,
+        InstanceConstants.InstanceOperation.EVACUATE, fixedProvider(retained, retained)));
+
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+    Assert.assertTrue(result.getViolations().get(0).getMessage().contains("from 1 to 0"));
+  }
+
+  @Test
   public void testWithoutIsolationEveryNonDroppedReplicaCounts() {
     // With isolation off every non DROPPED entry counts, on any instance. The default mode never
     // returns this pair, since an unplaceable clique fails the what-if outright.
