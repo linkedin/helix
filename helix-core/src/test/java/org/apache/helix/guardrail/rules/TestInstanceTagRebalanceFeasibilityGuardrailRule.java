@@ -461,6 +461,20 @@ public class TestInstanceTagRebalanceFeasibilityGuardrailRule {
   }
 
   @Test
+  public void testBestEffortRetainedAssignmentNamingTargetWithoutTagIsInfeasible() {
+    Map<String, ResourceAssignment> retained = ImmutableMap.of(RESOURCE, resourceAssignment(
+        ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER"))));
+    HelixDataAccessor dataAccessor = simulationAccessor();
+    ClusterConfig bestEffortConfig = enabledClusterConfig();
+    bestEffortConfig.setWagedBestEffortPlacementEnabled(true);
+    doReturn(bestEffortConfig).when(dataAccessor).getProperty(BUILDER.clusterConfig());
+    ValidationResult result = rule.validate(
+        context(dataAccessor, ImmutableList.of(TAG), fixedProvider(retained, retained)));
+    Assert.assertFalse(result.isFeasible());
+    Assert.assertEquals(result.getViolations().size(), 1);
+  }
+
+  @Test
   public void testWithoutIsolationEveryNonDroppedReplicaCounts() {
     // With isolation off every non DROPPED entry counts, on any instance. The default mode never
     // returns this pair, since an unplaceable clique fails the what-if outright.
