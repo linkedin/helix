@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -34,6 +35,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -47,6 +49,7 @@ import org.apache.helix.controller.rebalancer.waged.model.AssignableReplica;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterContext;
 import org.apache.helix.controller.rebalancer.waged.model.ClusterModel;
 import org.apache.helix.controller.rebalancer.waged.model.OptimalAssignment;
+import org.apache.helix.model.Partition;
 import org.apache.helix.model.ResourceAssignment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,6 +66,18 @@ import org.slf4j.LoggerFactory;
  */
 public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
   private static final float DIV_GUARD = 0.01f;
+  // Bound single-hop relocation probes per unplaceable replica and across all unsuccessful
+  // replicas in one calculate() run so a saturated tag clique (e.g. 200 unplaceable replicas
+  // scanning 1,000 occupied hosts) stays fast instead of degrading into O(replicas * nodes).
+  private static final int MAX_RELOCATION_EVALUATIONS = 256;
+  private static final int MAX_TOTAL_UNSUCCESSFUL_RELOCATION_EVALUATIONS = 1024;
+  // Host-level hard constraints whose outcome for an incoming replica does not change when a
+  // single victim replica is released from that host (fault zone, instance tag, disabled
+  // partition, or same partition already on the host). Used to skip whole hosts before iterating
+  // over their assigned victims during single-hop relocation.
+  private static final Set<HardConstraint.Type> STATIC_HOST_CONSTRAINTS = EnumSet.of(
+      HardConstraint.Type.FAULT_ZONE, HardConstraint.Type.VALID_GROUP_TAG,
+      HardConstraint.Type.REPLICA_ACTIVATE, HardConstraint.Type.SAME_PARTITION_ON_INSTANCE);
   private static final Logger LOG = LoggerFactory.getLogger(ConstraintBasedAlgorithm.class);
   private final List<HardConstraint> _hardConstraints;
   private final Map<SoftConstraint, Float> _softConstraints;
@@ -171,9 +186,14 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     List<AssignableReplicaWithScore> toBeAssignedReplicas =
         buildOrderedReplicas(clusterModel, nodes, positiveEstimateClusterRemainCap, bestEffort);
 
+    Set<String> placedOnHostThisRun = bestEffort ? new HashSet<>() : Collections.emptySet();
+    List<DeferredReplica> deferredForRelocation =
+        bestEffort ? new ArrayList<>() : Collections.emptyList();
     int unplacedReplicas = 0;
     AssignableReplica firstUnplaced = null;
 
+    // Pass 1: Place every replica that has a direct candidate node first so replicas with a valid
+    // free spot claim it without displacing an existing resident via unnecessary 1-hop relocation.
     for (AssignableReplicaWithScore replicaWithScore : toBeAssignedReplicas) {
       AssignableReplica replica = replicaWithScore.getAssignableReplica();
       if (isolation.shouldSkip(replica)) {
@@ -187,17 +207,7 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
       // Stop if the replica has no candidate node, unless isolation can skip its share block.
       if (!maybeBestNode.isPresent() || failureSink.hasAnyFailure()) {
         if (bestEffort) {
-          // Partial commit: record blocking constraint telemetry for observability, leave this
-          // replica unplaced, and keep placing all remaining feasible replicas (e.g. 20 of 21
-          // replicas continue serving cleanly when 1 single-slot host is lost at zero spares).
-          blockingTypes.addAll(replicaBlocking);
-          if (_hardConstraintFailureReporter != null) {
-            replicaBlocking.forEach(_hardConstraintFailureReporter);
-          }
-          if (firstUnplaced == null) {
-            firstUnplaced = replica;
-          }
-          unplacedReplicas++;
+          deferredForRelocation.add(new DeferredReplica(replica, replicaBlocking));
           continue;
         }
         // Only the first placement failure of a run can be thrown. Later ones are tolerated and
@@ -226,6 +236,57 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
           .assign(replica.getResourceName(), replica.getPartitionName(), replica.getReplicaState(),
               bestNode.getInstanceName());
       isolation.recordPlacement(replica, bestNode);
+      if (bestEffort) {
+        placedOnHostThisRun.add(bestNode.getInstanceName() + ":" + replica.toString());
+      }
+    }
+
+    // Pass 2: For replicas that had no direct spot in Pass 1, try a bounded single-hop swap before
+    // leaving any remaining unplaceable replicas unplaced via partial commit.
+    if (bestEffort && !deferredForRelocation.isEmpty()) {
+      Set<String> failedRelocationKeys = new HashSet<>();
+      AtomicInteger relocationBudget =
+          new AtomicInteger(MAX_TOTAL_UNSUCCESSFUL_RELOCATION_EVALUATIONS);
+      boolean anyRelocated = false;
+      for (DeferredReplica deferred : deferredForRelocation) {
+        AssignableReplica replica = deferred.replica;
+        if (anyRelocated) {
+          // An earlier 1-hop swap may have opened a fault zone or host slot for a later replica;
+          // retry direct placement before probing another swap.
+          OptimalAssignment retrySink = new OptimalAssignment();
+          Set<HardConstraint.Type> retryBlocking = new HashSet<>();
+          Optional<AssignableNode> directRetry = getNodeWithHighestPoints(replica, nodes,
+              clusterModel.getContext(), busyInstances, retrySink, retryBlocking);
+          if (directRetry.isPresent() && !retrySink.hasAnyFailure()) {
+            AssignableNode bestNode = directRetry.get();
+            clusterModel.assign(replica.getResourceName(), replica.getPartitionName(),
+                replica.getReplicaState(), bestNode.getInstanceName());
+            isolation.recordPlacement(replica, bestNode);
+            placedOnHostThisRun.add(bestNode.getInstanceName() + ":" + replica.toString());
+            failedRelocationKeys.clear();
+            continue;
+          }
+          deferred.blockingTypes = retryBlocking;
+        }
+        if (relocationBudget.get() > 0 && !failedRelocationKeys.contains(replica.toString())
+            && tryRelocateBlockingReplica(replica, nodes, clusterModel, busyInstances,
+                placedOnHostThisRun, relocationBudget)) {
+          anyRelocated = true;
+          failedRelocationKeys.clear();
+          continue;
+        }
+        // Memoize unsuccessful replica keys until the next placement mutates cluster occupancy so
+        // identical unplaceable replicas (e.g. a missing tag) do not re-scan every host.
+        failedRelocationKeys.add(replica.toString());
+        blockingTypes.addAll(deferred.blockingTypes);
+        if (_hardConstraintFailureReporter != null) {
+          deferred.blockingTypes.forEach(_hardConstraintFailureReporter);
+        }
+        if (firstUnplaced == null) {
+          firstUnplaced = replica;
+        }
+        unplacedReplicas++;
+      }
     }
 
     if (unplacedReplicas > 0) {
@@ -533,6 +594,373 @@ public class ConstraintBasedAlgorithm implements RebalanceAlgorithm {
     sorted.sort(Comparator.comparing(AssignableNode::getLogicalId)
         .thenComparing(AssignableNode::getInstanceName));
     return sorted;
+  }
+
+  private static final class DeferredReplica {
+    final AssignableReplica replica;
+    Set<HardConstraint.Type> blockingTypes;
+
+    DeferredReplica(AssignableReplica replica, Set<HardConstraint.Type> blockingTypes) {
+      this.replica = replica;
+      this.blockingTypes = blockingTypes;
+    }
+  }
+
+  /**
+   * Attempts a bounded single-hop swap when {@code replica} has no direct candidate node.
+   * Example: P1 (already in zone01) loses its zone04 copy while the only free slot in the cluster
+   * is zone01-spare; P0 holds zone03-n1 (SLAVE) and zone02-n1 (MASTER). Releasing P0's SLAVE from
+   * zone03-n1 onto zone01-spare frees zone03-n1 so P1 can be placed without violating fault zones.
+   *
+   * <p>Move cost prefers zero live disruption:
+   * - cost 0: victim was placed on {@code sourceHost} earlier in this same run (0 live moves)
+   * - cost 1: victim is a live non-top-state replica (e.g. SLAVE / STANDBY)
+   * - cost 2: victim is a live top-state replica (e.g. MASTER / LEADER)
+   *
+   * <p>Safety invariants on live moves ({@code moveCost > 0}):
+   * 1. Disallowed in {@code DELAYED_REBALANCE_OVERWRITES} (temporary min-active top-up only adds).
+   * 2. In {@code EMERGENCY} / {@code PARTIAL}, both {@code sourceHost} and {@code targetNode} must
+   *    be enabled-live so a delayed-offline or disabled host is never evicted or targeted.
+   * 3. Requires at least {@code max(1, minActiveReplicas)} other enabled-live copies of the victim.
+   * 4. Skips target nodes that still hold any replica in BEST_POSSIBLE, non-DROPPED CURRENTSTATE,
+   *    or pending transitions that is absent from the node's current model assignment, preventing
+   *    2-node add-before-drop bootstrap deadlocks across multi-step state-model drops.
+   */
+  private boolean tryRelocateBlockingReplica(AssignableReplica replica, List<AssignableNode> nodes,
+      ClusterModel clusterModel, Set<String> busyInstances, Set<String> placedOnHostThisRun,
+      AtomicInteger relocationBudget) {
+    ClusterContext clusterContext = clusterModel.getContext();
+    Map<String, Map<String, Integer>> maxRemainingByTag = computeMaxRemainingCapacityByTag(nodes);
+    if (!maxRemainingByTag.containsKey(null)) {
+      return false;
+    }
+
+    ClusterModel.RebalanceScopeType scope = clusterModel.getRebalanceScopeType();
+    boolean preserveLive = scope != ClusterModel.RebalanceScopeType.GLOBAL_BASELINE
+        && clusterContext.hasEnabledLiveLogicalIds();
+    List<AssignableNode> sortedNodes = sortNodesDeterministically(nodes);
+    int evaluationLimit = Math.min(MAX_RELOCATION_EVALUATIONS, relocationBudget.get());
+    int evaluations = 0;
+    int resourceMaxPerInstance = replica.getResourceMaxPartitionsPerInstance();
+    Map<String, Map<String, Integer>> enabledLiveCopiesByPartition = null;
+    Map<String, Map<String, Set<String>>> heldPartitionsByLogicalId = null;
+
+    AssignableNode bestSourceHost = null;
+    AssignableNode bestTargetNode = null;
+    AssignableReplica bestVictim = null;
+    int bestCost = Integer.MAX_VALUE;
+    double bestCombinedScore = Double.NEGATIVE_INFINITY;
+
+    for (AssignableNode sourceHost : sortedNodes) {
+      int hostResourceCount =
+          sourceHost.getAssignedPartitionsByResource(replica.getResourceName()).size();
+      if ((resourceMaxPerInstance >= 0 && hostResourceCount > resourceMaxPerInstance)
+          || !isStaticallyValidOnHost(sourceHost, replica, clusterContext)) {
+        continue;
+      }
+      boolean isHostEnabledAndLive =
+          clusterContext.isEnabledLiveLogicalId(sourceHost.getLogicalId());
+      boolean requireLiveTarget = preserveLive && isHostEnabledAndLive;
+      List<AssignableReplica> victims = new ArrayList<>(sourceHost.getAssignedReplicas());
+      victims.sort(AssignableReplica::compareTo);
+
+      for (AssignableReplica victim : victims) {
+        int moveCost =
+            computeVictimMoveCost(sourceHost, victim, clusterContext, placedOnHostThisRun);
+        if (moveCost > 0
+            && (scope == ClusterModel.RebalanceScopeType.DELAYED_REBALANCE_OVERWRITES
+                || (preserveLive && !isHostEnabledAndLive))) {
+          // Never perform a live move in the temporary overwrite scope, and never evict a replica
+          // from a delayed-offline or disabled sourceHost (which would copy its data onto a spare
+          // while parking the incoming replica on a non-serving host).
+          continue;
+        }
+        String victimTag =
+            victim.hasResourceInstanceGroupTag() ? victim.getResourceInstanceGroupTag() : null;
+        Map<String, Integer> maxDestCapacity = maxRemainingByTag.get(victimTag);
+        if (maxDestCapacity == null || !canFitWithin(victim, maxDestCapacity)
+            || !canSwapOnHost(sourceHost, victim, replica, resourceMaxPerInstance,
+                hostResourceCount)) {
+          continue;
+        }
+        if (moveCost > 0) {
+          if (preserveLive) {
+            if (enabledLiveCopiesByPartition == null) {
+              enabledLiveCopiesByPartition =
+                  buildEnabledLiveCopyCounts(sortedNodes, clusterContext);
+            }
+            int totalLiveCopies = enabledLiveCopiesByPartition
+                .getOrDefault(victim.getResourceName(), Collections.emptyMap())
+                .getOrDefault(victim.getPartitionName(), 0);
+            int otherLiveCopies = totalLiveCopies - (isHostEnabledAndLive ? 1 : 0);
+            if (otherLiveCopies < Math.max(1, victim.getResourceMinActiveReplicas())) {
+              continue;
+            }
+          }
+          if (heldPartitionsByLogicalId == null) {
+            heldPartitionsByLogicalId = buildHeldPartitionsByLogicalId(clusterContext);
+          }
+        }
+        if (evaluations >= evaluationLimit) {
+          break;
+        }
+        evaluations++;
+
+        SwapProbe probe = probeSingleHopSwap(clusterModel, sourceHost, victim, replica, sortedNodes,
+            busyInstances, moveCost, requireLiveTarget,
+            moveCost > 0 ? heldPartitionsByLogicalId : Collections.emptyMap());
+        if (probe == null) {
+          continue;
+        }
+        if (probe.moveCost < bestCost
+            || (probe.moveCost == bestCost && probe.combinedScore > bestCombinedScore)) {
+          bestCost = probe.moveCost;
+          bestCombinedScore = probe.combinedScore;
+          bestSourceHost = sourceHost;
+          bestVictim = victim;
+          bestTargetNode = probe.targetNode;
+          if (bestCost == 0) {
+            break;
+          }
+        }
+      }
+      if (bestCost == 0 || evaluations >= evaluationLimit) {
+        break;
+      }
+    }
+
+    if (bestSourceHost == null) {
+      relocationBudget.addAndGet(-evaluations);
+      return false;
+    }
+
+    clusterModel.release(bestSourceHost, bestVictim);
+    clusterModel.assign(bestTargetNode, bestVictim);
+    clusterModel.assign(bestSourceHost, replica);
+    if (placedOnHostThisRun.remove(bestSourceHost.getInstanceName() + ":" + bestVictim)) {
+      placedOnHostThisRun.add(bestTargetNode.getInstanceName() + ":" + bestVictim);
+    }
+    placedOnHostThisRun.add(bestSourceHost.getInstanceName() + ":" + replica);
+    return true;
+  }
+
+  private static int computeVictimMoveCost(AssignableNode sourceHost, AssignableReplica victim,
+      ClusterContext clusterContext, Set<String> placedOnHostThisRun) {
+    String hostVictimKey = sourceHost.getInstanceName() + ":" + victim;
+    boolean wasPreviouslyAssignedOnHost = clusterContext
+        .getBestPossibleAssignmentStateMap(victim.getResourceName(), victim.getPartitionName())
+        .containsKey(sourceHost.getLogicalId());
+    return (placedOnHostThisRun.contains(hostVictimKey) && !wasPreviouslyAssignedOnHost)
+        ? 0
+        : (victim.isReplicaTopState() ? 2 : 1);
+  }
+
+  /**
+   * Pre-indexes enabled-live replica counts per (resourceName, partitionName) once per relocation
+   * call so the per-victim MIN_ACTIVE check runs in O(1) instead of scanning all nodes repeatedly.
+   */
+  private static Map<String, Map<String, Integer>> buildEnabledLiveCopyCounts(
+      List<AssignableNode> nodes, ClusterContext clusterContext) {
+    Map<String, Map<String, Integer>> countsByResource = new HashMap<>();
+    for (AssignableNode node : nodes) {
+      if (!clusterContext.isEnabledLiveLogicalId(node.getLogicalId())) {
+        continue;
+      }
+      for (AssignableReplica assigned : node.getAssignedReplicas()) {
+        countsByResource.computeIfAbsent(assigned.getResourceName(), key -> new HashMap<>())
+            .merge(assigned.getPartitionName(), 1, Integer::sum);
+      }
+    }
+    return countsByResource;
+  }
+
+  /**
+   * Unions physically held participant replicas (non-DROPPED current state + pending transitions)
+   * with the prior assignment per logicalId so multi-hop drops (ONLINE -> OFFLINE -> DROPPED) stay
+   * visible across back-to-back rebalance passes until DROPPED completes.
+   */
+  private static Map<String, Map<String, Set<String>>> buildHeldPartitionsByLogicalId(
+      ClusterContext clusterContext) {
+    Map<String, Map<String, Set<String>>> heldByLogicalId = new HashMap<>();
+    clusterContext.getCurrentStatePartitionsByLogicalId().forEach((logicalId, byResource) -> {
+      Map<String, Set<String>> destByResource =
+          heldByLogicalId.computeIfAbsent(logicalId, key -> new HashMap<>());
+      byResource.forEach((resourceName, partitions) -> destByResource
+          .computeIfAbsent(resourceName, key -> new HashSet<>()).addAll(partitions));
+    });
+    for (Map.Entry<String, ResourceAssignment> resEntry : clusterContext.getBestPossibleAssignment()
+        .entrySet()) {
+      String resourceName = resEntry.getKey();
+      ResourceAssignment assignment = resEntry.getValue();
+      for (Partition partition : assignment.getMappedPartitions()) {
+        String partitionName = partition.getPartitionName();
+        for (String logicalId : assignment.getReplicaMap(partition).keySet()) {
+          heldByLogicalId.computeIfAbsent(logicalId, key -> new HashMap<>())
+              .computeIfAbsent(resourceName, key -> new HashSet<>()).add(partitionName);
+        }
+      }
+    }
+    return heldByLogicalId;
+  }
+
+  /**
+   * Returns true if {@code candidateNode} still holds any replica in
+   * {@code heldPartitionsByLogicalId} that is absent from its current {@link ClusterModel}
+   * assignment (regardless of remaining host headroom), avoiding 2-node add-before-drop swap
+   * cycles while a replica is still departing.
+   */
+  private static boolean hasDepartingReplica(AssignableNode candidateNode,
+      Map<String, Map<String, Set<String>>> heldPartitionsByLogicalId) {
+    Map<String, Set<String>> heldByResource =
+        heldPartitionsByLogicalId.get(candidateNode.getLogicalId());
+    if (heldByResource == null) {
+      return false;
+    }
+    for (Map.Entry<String, Set<String>> entry : heldByResource.entrySet()) {
+      Set<String> currentlyAssigned = candidateNode.getAssignedPartitionsByResource(entry.getKey());
+      for (String partitionName : entry.getValue()) {
+        if (!currentlyAssigned.contains(partitionName)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Computes, for untagged resources (key {@code null}) and each configured instance tag, the
+   * maximum remaining capacity per weight key across nodes that still have at least one open
+   * partition slot. Initializes the per-tag map even when {@code INSTANCE_CAPACITY_KEYS} is empty
+   * so slot-only clusters still admit single-hop relocation.
+   */
+  private static Map<String, Map<String, Integer>> computeMaxRemainingCapacityByTag(
+      List<AssignableNode> nodes) {
+    Map<String, Map<String, Integer>> maxRemainingByTag = new HashMap<>();
+    for (AssignableNode node : nodes) {
+      if (node.getMaxPartition() >= 0 && node.getAssignedReplicaCount() >= node.getMaxPartition()) {
+        continue;
+      }
+      Map<String, Integer> untaggedMax =
+          maxRemainingByTag.computeIfAbsent(null, tag -> new HashMap<>());
+      node.getRemainingCapacity().forEach((capacityKey, freeCapacity) ->
+          untaggedMax.merge(capacityKey, freeCapacity, Math::max));
+      for (String tag : node.getInstanceTags()) {
+        Map<String, Integer> tagMax =
+            maxRemainingByTag.computeIfAbsent(tag, key -> new HashMap<>());
+        node.getRemainingCapacity().forEach((capacityKey, freeCapacity) ->
+            tagMax.merge(capacityKey, freeCapacity, Math::max));
+      }
+    }
+    return maxRemainingByTag;
+  }
+
+  /**
+   * Speculatively releases {@code victim} from {@code sourceHost}, checks whether {@code incoming}
+   * passes all hard constraints on {@code sourceHost} and whether {@code victim} has a valid
+   * destination node, then always restores {@code victim} onto {@code sourceHost} before returning.
+   */
+  private SwapProbe probeSingleHopSwap(ClusterModel clusterModel, AssignableNode sourceHost,
+      AssignableReplica victim, AssignableReplica incoming, List<AssignableNode> sortedNodes,
+      Set<String> busyInstances, int moveCost, boolean requireLiveTarget,
+      Map<String, Map<String, Set<String>>> heldPartitionsByLogicalId) {
+    ClusterContext clusterContext = clusterModel.getContext();
+    AssignableNode targetNode = null;
+    double combinedScore = Double.NEGATIVE_INFINITY;
+    clusterModel.release(sourceHost, victim);
+    try {
+      if (isValidOnNode(sourceHost, incoming, clusterContext)) {
+        targetNode = selectBestCandidateSequential(victim, sortedNodes, clusterContext,
+            busyInstances, sourceHost, requireLiveTarget, heldPartitionsByLogicalId);
+        if (targetNode != null) {
+          combinedScore = getAssignmentNormalizedScore(targetNode, victim, clusterContext)
+              + getAssignmentNormalizedScore(sourceHost, incoming, clusterContext);
+        }
+      }
+    } finally {
+      clusterModel.assign(sourceHost, victim);
+    }
+    return targetNode == null ? null : new SwapProbe(targetNode, moveCost, combinedScore);
+  }
+
+  private static final class SwapProbe {
+    final AssignableNode targetNode;
+    final int moveCost;
+    final double combinedScore;
+
+    SwapProbe(AssignableNode targetNode, int moveCost, double combinedScore) {
+      this.targetNode = targetNode;
+      this.moveCost = moveCost;
+      this.combinedScore = combinedScore;
+    }
+  }
+
+  private static boolean canSwapOnHost(AssignableNode sourceHost, AssignableReplica victim,
+      AssignableReplica incoming, int resourceMaxPerInstance, int hostResourceCount) {
+    if (sourceHost.getMaxPartition() >= 0
+        && sourceHost.getAssignedReplicaCount() - 1 >= sourceHost.getMaxPartition()) {
+      return false;
+    }
+    if (resourceMaxPerInstance >= 0 && hostResourceCount == resourceMaxPerInstance
+        && !victim.getResourceName().equals(incoming.getResourceName())) {
+      return false;
+    }
+    Map<String, Integer> remainingCapacity = sourceHost.getRemainingCapacity();
+    Map<String, Integer> victimWeight = victim.getCapacity();
+    for (Map.Entry<String, Integer> weightEntry : incoming.getCapacity().entrySet()) {
+      Integer freeOnHost = remainingCapacity.get(weightEntry.getKey());
+      if (freeOnHost != null
+          && freeOnHost + victimWeight.getOrDefault(weightEntry.getKey(), 0)
+              < weightEntry.getValue()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean isStaticallyValidOnHost(AssignableNode sourceHost, AssignableReplica replica,
+      ClusterContext clusterContext) {
+    for (HardConstraint hardConstraint : _hardConstraints) {
+      if (STATIC_HOST_CONSTRAINTS.contains(hardConstraint.getType())
+          && !hardConstraint.isAssignmentValid(sourceHost, replica, clusterContext)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Selects the highest-scoring valid destination node for a vacated {@code replica} sequentially
+   * on the caller thread (avoiding nested ForkJoinPool submissions during speculative probes) while
+   * applying the same fault-zone headroom tie-breaker as {@link #getNodeWithHighestPoints}.
+   */
+  private AssignableNode selectBestCandidateSequential(AssignableReplica replica,
+      List<AssignableNode> nodes, ClusterContext clusterContext, Set<String> busyInstances,
+      AssignableNode excludedHost, boolean requireLiveTarget,
+      Map<String, Map<String, Set<String>>> heldPartitionsByLogicalId) {
+    List<AssignableNode> candidates = new ArrayList<>();
+    for (AssignableNode node : nodes) {
+      if (node != excludedHost
+          && (!requireLiveTarget || clusterContext.isEnabledLiveLogicalId(node.getLogicalId()))
+          && !hasDepartingReplica(node, heldPartitionsByLogicalId)
+          && isValidOnNode(node, replica, clusterContext)) {
+        candidates.add(node);
+      }
+    }
+    if (candidates.isEmpty()) {
+      return null;
+    }
+    Map<String, Integer> candidateCountByZone = countZones(candidates);
+    AssignableNode bestNode = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+    for (AssignableNode candidate : candidates) {
+      double score = getAssignmentNormalizedScore(candidate, replica, clusterContext);
+      if (bestNode == null || compareCandidateNodes(candidate, score, bestNode, bestScore,
+          busyInstances, candidateCountByZone, true) > 0) {
+        bestNode = candidate;
+        bestScore = score;
+      }
+    }
+    return bestNode;
   }
 
   private static boolean canFitWithin(AssignableReplica replica,

@@ -46,6 +46,7 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
   private final String _resourceName;
   private final String _resourceInstanceGroupTag;
   private final int _resourceMaxPartitionsPerInstance;
+  private final int _resourceMinActiveReplicas;
   private final Map<String, Integer> _capacityUsage;
   // The priority of the replica's state
   private final int _statePriority;
@@ -69,6 +70,7 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
     _capacityUsage = WagedRebalanceUtil.fetchCapacityUsage(partitionName, resourceConfig, clusterConfig);
     _resourceInstanceGroupTag = idealState.getInstanceGroupTag();
     _resourceMaxPartitionsPerInstance = idealState.getMaxPartitionsPerInstance();
+    _resourceMinActiveReplicas = idealState.getMinActiveReplicas();
     _replicaKey = generateReplicaKey(_resourceName, _partitionName,_replicaState);
   }
 
@@ -106,6 +108,10 @@ public class AssignableReplica implements Comparable<AssignableReplica> {
 
   public int getResourceMaxPartitionsPerInstance() {
     return _resourceMaxPartitionsPerInstance;
+  }
+
+  public int getResourceMinActiveReplicas() {
+    return _resourceMinActiveReplicas;
   }
 
   @Override

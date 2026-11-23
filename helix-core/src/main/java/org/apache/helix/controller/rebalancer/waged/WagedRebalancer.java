@@ -1031,6 +1031,8 @@ public class WagedRebalancer implements StatefulRebalancer<ResourceControllerDat
             HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
             HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
       }
+      ClusterModelProvider.attachCurrentStateHoldings(clusterModel, clusterData, resourceMap,
+          currentStateOutput);
       newAssignment = WagedRebalanceUtil
           .calculateAssignment(clusterModel, algorithm, currentBestPossibleAssignment);
     } else {

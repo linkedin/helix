@@ -208,6 +208,8 @@ class PartialRebalanceRunner implements AutoCloseable {
           HelixRebalanceException.Type.INVALID_CLUSTER_STATUS,
           HelixRebalanceException.FailureCategory.INVALID_CLUSTER_CONFIG, ex);
     }
+    ClusterModelProvider.attachCurrentStateHoldings(clusterModel, clusterData, resourceMap,
+        currentStateOutput);
     Map<String, ResourceAssignment> newAssignment = WagedRebalanceUtil
         .calculateAssignment(clusterModel, algorithm, currentBestPossibleAssignment);
 
