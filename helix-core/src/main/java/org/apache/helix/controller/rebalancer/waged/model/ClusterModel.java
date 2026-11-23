@@ -60,6 +60,7 @@ public class ClusterModel {
   private final Map<String, AssignableNode> _assignableNodeMap;
   private final Set<String> _assignableNodeLogicalIds;
   private final Map<String, Set<String>> _assignableLogicalIdsByInstanceTag;
+  private final Map<String, Set<AssignableNode>> _nodesByFaultZone;
   // The rebalance scope that produced this model. Used to route per-run reversible metrics to a
   // single owning phase. Never null.
   private final RebalanceScopeType _rebalanceScopeType;
@@ -92,13 +93,17 @@ public class ClusterModel {
         assignableNodes.parallelStream().map(AssignableNode::getLogicalId)
             .collect(Collectors.toSet());
 
-    // Index all the instances by their instance tags
+    // Index all the instances by their instance tags and fault zones
     _assignableLogicalIdsByInstanceTag = new HashMap<>();
+    _nodesByFaultZone = new HashMap<>();
     assignableNodes.forEach(node -> {
       node.getInstanceTags().forEach(tag -> {
         _assignableLogicalIdsByInstanceTag.computeIfAbsent(tag, key -> new HashSet<>())
             .add(node.getLogicalId());
       });
+      if (node.hasFaultZone()) {
+        _nodesByFaultZone.computeIfAbsent(node.getFaultZone(), key -> new HashSet<>()).add(node);
+      }
     });
   }
 
@@ -172,6 +177,45 @@ public class ClusterModel {
 
     node.release(replica);
     _clusterContext.removePartitionFromFaultZone(node.getFaultZone(), resourceName, partitionName);
+  }
+
+  /**
+   * Assigns an existing {@link AssignableReplica} reference (e.g. a pre-allocated or previously
+   * placed victim replica during speculative single-hop relocation) to {@code node} and updates
+   * fault-zone occupancy without looking up the replica in {@code _assignableReplicaMap}.
+   */
+  public void assign(AssignableNode node, AssignableReplica replica) {
+    locateAssignableNode(node.getInstanceName());
+    node.assign(replica);
+    if (node.hasFaultZone() && !_clusterContext
+        .getPartitionsForResourceAndFaultZone(replica.getResourceName(), node.getFaultZone())
+        .contains(replica.getPartitionName())) {
+      _clusterContext.addPartitionToFaultZone(node.getFaultZone(), replica.getResourceName(),
+          replica.getPartitionName());
+    }
+  }
+
+  /**
+   * Releases an existing {@link AssignableReplica} reference from {@code node} (used during
+   * speculative single-hop relocation) while preserving the fault zone's partition marker if
+   * another node in the same zone still hosts a copy of that partition.
+   */
+  public void release(AssignableNode node, AssignableReplica replica) {
+    locateAssignableNode(node.getInstanceName());
+    node.release(replica);
+    if (node.hasFaultZone() && !zoneStillHoldsPartition(node.getFaultZone(),
+        replica.getResourceName(), replica.getPartitionName())) {
+      _clusterContext.removePartitionFromFaultZone(node.getFaultZone(), replica.getResourceName(),
+          replica.getPartitionName());
+    }
+  }
+
+  private boolean zoneStillHoldsPartition(String zoneName, String resourceName,
+      String partitionName) {
+    Set<AssignableNode> zoneNodes = _nodesByFaultZone.get(zoneName);
+    return zoneNodes != null && zoneNodes.size() > 1 && zoneNodes.stream()
+        .anyMatch(peerNode -> peerNode.getAssignedPartitionsByResource(resourceName)
+            .contains(partitionName));
   }
 
   private AssignableNode locateAssignableNode(String instanceName) {
