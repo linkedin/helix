@@ -31,9 +31,11 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.helix.HelixConstants;
+import org.apache.helix.HelixDefinedState;
 import org.apache.helix.HelixException;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.DelayedRebalanceUtil;
+import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.ClusterTopologyConfig;
 import org.apache.helix.model.IdealState;
@@ -164,6 +166,56 @@ public class ClusterModelProvider {
   }
 
   /**
+   * Attaches partitions still physically held on participants (any non-DROPPED current state plus
+   * pending transitions, keyed by logicalId -> resourceName -> partitionNames) onto the model's
+   * {@link ClusterContext}. Real Helix drops replicas in two pipeline passes (ONLINE -> OFFLINE,
+   * then OFFLINE -> DROPPED), while {@code PartialRebalanceRunner} re-runs immediately once
+   * BEST_POSSIBLE drops the replica; tracking physical current-state holdings prevents a live 1-hop
+   * relocation on that second pass from targeting a host that is still draining its old copy.
+   */
+  public static void attachCurrentStateHoldings(ClusterModel clusterModel,
+      ResourceControllerDataProvider dataProvider, Map<String, Resource> resourceMap,
+      CurrentStateOutput currentStateOutput) {
+    if (currentStateOutput == null || !clusterModel.getContext().isBestEffortPlacementEnabled()) {
+      return;
+    }
+    ClusterTopologyConfig topologyConfig =
+        ClusterTopologyConfig.createFromClusterConfig(dataProvider.getClusterConfig());
+    Map<String, InstanceConfig> instanceConfigMap = dataProvider.getInstanceConfigMap();
+    Map<String, Map<String, Set<String>>> holdingsByLogicalId = new HashMap<>();
+    for (Resource resource : resourceMap.values()) {
+      String resourceName = resource.getResourceName();
+      for (Partition partition : resource.getPartitions()) {
+        String partitionName = partition.getPartitionName();
+        currentStateOutput.getCurrentStateMap(resourceName, partition)
+            .forEach((instanceName, state) -> {
+              if (!HelixDefinedState.DROPPED.name().equals(state)) {
+                recordParticipantHolding(holdingsByLogicalId, instanceConfigMap, topologyConfig,
+                    instanceName, resourceName, partitionName);
+              }
+            });
+        for (String instanceName : currentStateOutput.getPendingStateMap(resourceName, partition)
+            .keySet()) {
+          recordParticipantHolding(holdingsByLogicalId, instanceConfigMap, topologyConfig,
+              instanceName, resourceName, partitionName);
+        }
+      }
+    }
+    clusterModel.getContext().setCurrentStatePartitionsByLogicalId(holdingsByLogicalId);
+  }
+
+  private static void recordParticipantHolding(
+      Map<String, Map<String, Set<String>>> holdingsByLogicalId,
+      Map<String, InstanceConfig> instanceConfigMap, ClusterTopologyConfig topologyConfig,
+      String instanceName, String resourceName, String partitionName) {
+    InstanceConfig instanceConfig = instanceConfigMap.get(instanceName);
+    String logicalId = instanceConfig == null ? instanceName
+        : instanceConfig.getLogicalId(topologyConfig.getEndNodeType());
+    holdingsByLogicalId.computeIfAbsent(logicalId, key -> new HashMap<>())
+        .computeIfAbsent(resourceName, key -> new HashSet<>()).add(partitionName);
+  }
+
+  /**
    * Generate a new Cluster Model object according to the current cluster status.
    * @param dataProvider           The controller's data cache.
    * @param resourceMap            The full list of the resources to be rebalanced. Note that any
@@ -268,6 +320,15 @@ public class ClusterModelProvider {
 
     // Initial the cluster context with the allocated assignments.
     context.setAssignmentForFaultZoneMap(mapAssignmentToFaultZone(assignableNodes));
+    if (context.isBestEffortPlacementEnabled()) {
+      // Record enabled-live logical IDs so single-hop relocation in non-baseline scopes never
+      // evicts a live replica from or onto a disabled or delayed-offline node.
+      context.setEnabledLiveLogicalIds(dataProvider.getEnabledLiveInstances().stream()
+          .map(instanceName -> assignableInstanceConfigMap
+              .getOrDefault(instanceName, new InstanceConfig(instanceName))
+              .getLogicalId(clusterTopologyConfig.getEndNodeType()))
+          .collect(Collectors.toSet()));
+    }
 
     return new ClusterModel(context, toBeAssignedReplicas, assignableNodes, scopeType);
   }

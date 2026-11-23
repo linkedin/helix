@@ -20,6 +20,7 @@ package org.apache.helix.controller.rebalancer.waged;
  */
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -29,6 +30,7 @@ import org.apache.helix.HelixException;
 import org.apache.helix.controller.rebalancer.util.WagedValidationUtil;
 import org.apache.helix.controller.stages.CurrentStateOutput;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.Message;
 import org.apache.helix.model.Partition;
@@ -45,14 +47,29 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
   // Available Capacity per Instance
   private final Map<String, Map<String, Integer>> _instanceCapacityMap;
   private final Map<String, Map<String, Set<String>>> _allocatedPartitionsMap;
+  // When best-effort placement is enabled alongside a positive cluster-level or resource-level
+  // MAX_PARTITIONS_PER_INSTANCE, enforce that partition-slot cap before admitting new bootstrap
+  // transitions so a host vacating a replica during a 1-hop swap does not transiently exceed its
+  // slot cap and trip auto-maintenance mode.
+  private final boolean _bestEffortEnabled;
+  private final int _maxPartitionsPerInstance;
+  private final Map<String, Integer> _resourceMaxPartitionsMap;
 
   public WagedInstanceCapacity(ResourceControllerDataProvider clusterData) {
     _instanceCapacityMap = new HashMap<>();
     _allocatedPartitionsMap = new HashMap<>();
+    _resourceMaxPartitionsMap = new HashMap<>();
     ClusterConfig clusterConfig = clusterData.getClusterConfig();
     if (clusterConfig == null) {
       LOG.error("Cluster config is null, cannot initialize instance capacity map.");
+      _bestEffortEnabled = false;
+      _maxPartitionsPerInstance = -1;
       return;
+    }
+    _maxPartitionsPerInstance = clusterConfig.getMaxPartitionsPerInstance();
+    _bestEffortEnabled = clusterConfig.isWagedBestEffortPlacementEnabled();
+    if (_bestEffortEnabled) {
+      refreshResourceMaxPartitions(clusterData);
     }
     for (InstanceConfig instanceConfig : clusterData.getInstanceConfigMap().values()) {
       Map<String, Integer> instanceCapacity = null;
@@ -82,8 +99,24 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
 
   public void process(ResourceControllerDataProvider cache, CurrentStateOutput currentStateOutput,
       Map<String, Resource> resourceMap, WagedResourceWeightsProvider weightProvider) {
+    if (_bestEffortEnabled) {
+      refreshResourceMaxPartitions(cache);
+    }
     processCurrentState(cache, currentStateOutput, resourceMap, weightProvider);
     processPendingMessages(cache, resourceMap, weightProvider);
+  }
+
+  private void refreshResourceMaxPartitions(ResourceControllerDataProvider cache) {
+    if (cache == null || cache.getIdealStates() == null) {
+      return;
+    }
+    for (Map.Entry<String, IdealState> entry : cache.getIdealStates().entrySet()) {
+      IdealState idealState = entry.getValue();
+      if (idealState != null && idealState.getMaxPartitionsPerInstance() > 0
+          && idealState.getMaxPartitionsPerInstance() < Integer.MAX_VALUE) {
+        _resourceMaxPartitionsMap.put(entry.getKey(), idealState.getMaxPartitionsPerInstance());
+      }
+    }
   }
 
   public void processPendingMessages(ResourceControllerDataProvider cache,
@@ -113,17 +146,21 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
           String partitionName = msg.getPartitionName();
           // Get Partition Weight
           Map<String, Integer> partCapacity = weightProvider.getPartitionWeights(resName, partitionName);
-          if (partCapacity == null || partCapacity.isEmpty()) {
+          if ((partCapacity == null || partCapacity.isEmpty()) && !_bestEffortEnabled) {
             LOG.debug("Partition: " + partitionName + " in resource: " + resName
                 + " has no weight specified. Skipping it.");
             continue;
           }
           // If bootstrapping message is pending, we should deduct the capacity.
+          // Pass checkMaxPartitions = false because the bootstrap message is already in flight on
+          // the participant and must be recorded in _allocatedPartitionsMap regardless of current
+          // slot occupancy.
           if (statePriorityMap.get(msg.getFromState()) > statePriorityMap.get(msg.getToState())
               && msg.getFromState().equals(stateModelDef.getInitialState())) {
             LOG.info("For bootstrapping - deducting capacity for instance: " + instance
                 + " for resource: " + resName + " for partition: " + partitionName);
-            checkAndReduceInstanceCapacity(instance, resName, partitionName, partCapacity);
+            reduceInstanceCapacity(instance, resName, partitionName,
+                partCapacity == null ? Collections.emptyMap() : partCapacity, false);
           }
         }
       }
@@ -152,11 +189,13 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
         String partitionName = partition.getPartitionName();
         // Get Partition Weight
         Map<String, Integer> partCapacity = weightProvider.getPartitionWeights(resName, partitionName);
-        // Get the current state for the partition
+        // Pass checkMaxPartitions = false so pre-existing replicas are always counted in
+        // _allocatedPartitionsMap before new bootstrap admissions check remaining slot headroom.
         Map<String, String> currentStateMap = currentStateOutput.getCurrentStateMap(resName, partition);
         if (currentStateMap != null && !currentStateMap.isEmpty()) {
           for (String instance : currentStateMap.keySet()) {
-            checkAndReduceInstanceCapacity(instance, resName, partitionName, partCapacity);
+            reduceInstanceCapacity(instance, resName, partitionName,
+                partCapacity == null ? Collections.emptyMap() : partCapacity, false);
           }
         }
       }
@@ -194,7 +233,12 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
 
   public synchronized boolean checkAndReduceInstanceCapacity(String instance, String resName,
       String partitionName, Map<String, Integer> partitionCapacity) {
+    return reduceInstanceCapacity(instance, resName, partitionName, partitionCapacity,
+        _bestEffortEnabled);
+  }
 
+  private boolean reduceInstanceCapacity(String instance, String resName, String partitionName,
+      Map<String, Integer> partitionCapacity, boolean checkMaxPartitions) {
     if (hasPartitionChargedForCapacity(instance, resName, partitionName)) {
       LOG.debug("Instance: " + instance + " for resource: " + resName
           + " for partition: " + partitionName + " already charged for capacity.");
@@ -208,6 +252,25 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
       LOG.debug("Instance: " + instance + " has no config (may have been deleted), skipping capacity check.");
       return false;
     }
+    if (checkMaxPartitions) {
+      Map<String, Set<String>> allocatedByResource =
+          _allocatedPartitionsMap.getOrDefault(instance, Collections.emptyMap());
+      int resourceMaxPartitions = _resourceMaxPartitionsMap.getOrDefault(resName, -1);
+      if ((_maxPartitionsPerInstance > 0
+              && allocatedByResource.values().stream().mapToInt(Set::size).sum()
+                  >= _maxPartitionsPerInstance)
+          || (resourceMaxPartitions > 0
+              && allocatedByResource.getOrDefault(resName, Collections.emptySet()).size()
+                  >= resourceMaxPartitions)) {
+        // Defer new bootstrap transitions while a vacated replica is still dropping from this host
+        // (whether capped via ClusterConfig or IdealState MAX_PARTITIONS_PER_INSTANCE), preventing
+        // transient slot over-subscription during a 1-hop swap.
+        LOG.info("Instance: {} reached maxPartitionsPerInstance (cluster={}, resource={}), "
+            + "deferring {}/{}", instance, _maxPartitionsPerInstance, resourceMaxPartitions,
+            resName, partitionName);
+        return false;
+      }
+    }
     Map<String, Integer> processedCapacity = new HashMap<>();
     for (String key : instanceCapacity.keySet()) {
       if (partitionCapacity.containsKey(key)) {
@@ -216,6 +279,12 @@ public class WagedInstanceCapacity implements InstanceCapacityDataProvider {
           // rollback the previously processed capacity.
           for (String processedKey : processedCapacity.keySet()) {
             instanceCapacity.put(processedKey, instanceCapacity.get(processedKey) + processedCapacity.get(processedKey));
+          }
+          if (!checkMaxPartitions && _bestEffortEnabled) {
+            // Current-state accounting still records existing replicas in _allocatedPartitionsMap
+            // even on an over-weight host so checkMaxPartitions sees the true slot count.
+            _allocatedPartitionsMap.computeIfAbsent(instance, k -> new HashMap<>())
+                .computeIfAbsent(resName, k -> new HashSet<>()).add(partitionName);
           }
           return false;
         }

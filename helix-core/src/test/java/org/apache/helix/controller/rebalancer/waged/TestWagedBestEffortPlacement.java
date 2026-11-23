@@ -33,12 +33,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.helix.HelixConstants;
 import org.apache.helix.HelixRebalanceException;
+import org.apache.helix.NotificationContext;
+import org.apache.helix.common.ZkTestBase;
 import org.apache.helix.constants.InstanceConstants;
 import org.apache.helix.controller.dataproviders.ResourceControllerDataProvider;
 import org.apache.helix.controller.rebalancer.util.WagedRebalanceUtil;
@@ -51,8 +55,13 @@ import org.apache.helix.controller.stages.BestPossibleStateOutput;
 import org.apache.helix.controller.stages.ClusterEvent;
 import org.apache.helix.controller.stages.ClusterEventType;
 import org.apache.helix.controller.stages.CurrentStateOutput;
+import org.apache.helix.integration.manager.ClusterControllerManager;
+import org.apache.helix.integration.manager.MockParticipantManager;
+import org.apache.helix.manager.zk.ZKHelixDataAccessor;
+import org.apache.helix.manager.zk.ZkBaseDataAccessor;
 import org.apache.helix.model.BuiltInStateModelDefinitions;
 import org.apache.helix.model.ClusterConfig;
+import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
@@ -61,12 +70,44 @@ import org.apache.helix.model.Partition;
 import org.apache.helix.model.Resource;
 import org.apache.helix.model.ResourceAssignment;
 import org.apache.helix.model.ResourceConfig;
+import org.apache.helix.participant.statemachine.StateModel;
+import org.apache.helix.participant.statemachine.StateModelFactory;
+import org.apache.helix.participant.statemachine.StateModelInfo;
+import org.apache.helix.participant.statemachine.Transition;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-public class TestWagedBestEffortPlacement {
+public class TestWagedBestEffortPlacement extends ZkTestBase {
   private static final String RES = "TestResource";
   private static final String KEY = "PARTITION_COUNT";
+
+  @StateModelInfo(initialState = "OFFLINE", states = {"OFFLINE", "ONLINE", "DROPPED", "ERROR"})
+  public static class SingleSlotModel extends StateModel {
+    private final String _part;
+    private final Set<String> _held;
+    private final AtomicInteger _violations;
+
+    public SingleSlotModel(String p, Set<String> h, AtomicInteger v) { _part = p; _held = h; _violations = v; }
+
+    @Transition(to = "ONLINE", from = "OFFLINE")
+    public void onBecomeOnlineFromOffline(Message m, NotificationContext c) {
+      synchronized (_held) {
+        if (!_held.add(_part) || _held.size() == 1) { return; }
+        _held.remove(_part);
+        _violations.incrementAndGet();
+        throw new IllegalStateException("Slot violation on " + _part);
+      }
+    }
+
+    @Transition(to = "OFFLINE", from = "ONLINE")
+    public void onBecomeOfflineFromOnline(Message m, NotificationContext c) throws Exception { Thread.sleep(40L); }
+
+    @Transition(to = "DROPPED", from = "OFFLINE")
+    public void onBecomeDroppedFromOffline(Message m, NotificationContext c) throws Exception {
+      Thread.sleep(40L);
+      synchronized (_held) { _held.remove(_part); }
+    }
+  }
 
   @Test
   public void testColdStartTrapZeroSpareRemovalAndSkewScaleUp() throws Exception {
@@ -189,6 +230,261 @@ public class TestWagedBestEffortPlacement {
       Assert.assertFalse(event.<BestPossibleStateOutput>getAttribute(AttributeName.BEST_POSSIBLE_STATE.name())
           .getPreferenceLists(RES).isEmpty());
     } finally { stageRebalancer.close(); }
+  }
+
+  @Test
+  public void testRelocationGuardsTwoPassAndScaleBound() throws Exception {
+    Partition p0 = new Partition(RES + "_0");
+    Partition p1 = new Partition(RES + "_1");
+    List<InstanceConfig> emptyNodes = hostList("z1-n1", "z1-sp", "z2-n1", "z3-n1", "z4-dead");
+    ResourceAssignment prior = assign("z2-n1:MASTER,z3-n1:SLAVE", "z1-n1:MASTER,z4-dead:SLAVE");
+    Set<String> fourLive = setOf("z1-n1", "z1-sp", "z2-n1", "z3-n1");
+    ResourceControllerDataProvider emptyCapData = buildClusterData(emptyNodes, 2, 2, 1, true, fourLive, 1);
+    emptyCapData.getIdealState(RES).setStateModelDefRef("MasterSlave");
+    emptyCapData.getClusterConfig().setInstanceCapacityKeys(Collections.emptyList());
+    emptyCapData.getClusterConfig().setDefaultInstanceCapacityMap(Collections.emptyMap());
+    emptyCapData.getClusterConfig().setDefaultPartitionWeightMap(Collections.emptyMap());
+    emptyNodes.forEach(ic -> ic.setInstanceCapacityMap(Collections.emptyMap()));
+    ResourceAssignment vacated = calculateEmergency(emptyCapData, fourLive, prior, null);
+    Assert.assertEquals(vacated.getReplicaMap(p0).get("z2-n1"), "MASTER");
+    Assert.assertEquals(vacated.getReplicaMap(p0).get("z1-sp"), "SLAVE");
+    Assert.assertEquals(vacated.getReplicaMap(p1).get("z3-n1"), "SLAVE");
+
+    List<InstanceConfig> weighted = hostList("z1-n1", "z1-sp", "z2-n1", "z3-n1", "z4-dead");
+    CurrentStateOutput pendingCs = new CurrentStateOutput();
+    Message dropMsg = new Message(Message.MessageType.STATE_TRANSITION, "msg-drop");
+    dropMsg.setFromState("OFFLINE");
+    dropMsg.setToState("DROPPED");
+    pendingCs.setPendingMessage(RES, p1, "z1-sp", dropMsg);
+    Assert.assertEquals(
+        msEmerg(weighted, 1, fourLive, fourLive, prior, pendingCs).getReplicaMap(p0).get("z3-n1"), "SLAVE");
+    Assert.assertEquals(
+        msEmerg(weighted, 1, setOf("z1-n1", "z2-n1", "z3-n1"), fourLive, prior, null).getReplicaMap(p0).get("z3-n1"),
+        "SLAVE");
+    Assert.assertEquals(msEmerg(weighted, 2, fourLive, fourLive, prior, null).getReplicaMap(p0).get("z3-n1"), "SLAVE");
+
+    Set<String> fiveLive = setOf("z1-n1", "z1-sp", "z2-n1", "z2-n2", "z3-n1");
+    ResourceAssignment twoPassOut = calculateEmergency(buildClusterData(
+        hostList("z1-n1", "z1-sp", "z2-n1", "z2-n2", "z3-n1", "z4-dead", "z5-dead"), 2, 3, 2, true, fiveLive, 1),
+        fiveLive, assign("z1-n1:ONLINE,z2-n1:ONLINE,z4-dead:ONLINE", "z2-n2:ONLINE,z3-n1:ONLINE,z5-dead:ONLINE"), null);
+    Assert.assertEquals(twoPassOut.getReplicaMap(p1).get("z1-sp"), "ONLINE");
+    Assert.assertEquals(twoPassOut.getReplicaMap(p1).get("z3-n1"), "ONLINE");
+
+    ResourceAssignment afterEmergency = calculateEmergency(buildClusterData(
+        hostList("z1-n1", "z1-sp", "z2-n1", "z2-n2", "z3-off", "z4-n1", "z5-dead"), 2, 3, 2, true,
+        setOf("z1-n1", "z1-sp", "z2-n1", "z2-n2", "z4-n1"), 1),
+        setOf("z1-n1", "z1-sp", "z2-n1", "z2-n2", "z3-off", "z4-n1"),
+        assign("z2-n1:ONLINE,z3-off:ONLINE,z4-n1:ONLINE", "z1-n1:ONLINE,z2-n2:ONLINE,z5-dead:ONLINE"), null);
+    Assert.assertEquals(afterEmergency.getReplicaMap(p0).get("z3-off"), "ONLINE");
+    Assert.assertFalse(afterEmergency.getReplicaMap(p1).containsKey("z3-off"));
+
+    Set<String> overwriteLive = setOf("z1-n1", "z1-sp", "z2-n1", "z3-n1", "z4-n1");
+    ResourceControllerDataProvider overwriteData = buildClusterData(
+        hostList("z1-n1", "z1-sp", "z2-n1", "z3-n1", "z4-n1", "z5-off"), 2, 3, 2, true, overwriteLive, 1);
+    overwriteData.getClusterConfig().setDelayRebalaceEnabled(true);
+    overwriteData.getClusterConfig().setRebalanceDelayTime(3_600_000L);
+    ClusterModel overwriteModel = ClusterModelProvider.generateClusterModelForDelayedRebalanceOverwrites(overwriteData,
+        attachCapacity(overwriteData, new CurrentStateOutput()), overwriteLive, Collections.singletonMap(RES,
+            assign("z2-n1:ONLINE,z3-n1:ONLINE,z4-n1:ONLINE", "z1-n1:ONLINE,z5-off:ONLINE")));
+    ResourceAssignment overwriteOut = WagedRebalanceUtil.calculateAssignment(overwriteModel,
+        ConstraintBasedAlgorithmFactory.getInstance(overwriteData.getClusterConfig().getGlobalRebalancePreference()),
+        Collections.emptyMap()).get(RES);
+    Assert.assertTrue(overwriteOut == null || !overwriteOut.getReplicaMap(p0).containsKey("z1-sp"));
+
+    assertDeterministicTwoHopMoveZone();
+    List<InstanceConfig> cliqueNodes = IntStream.range(0, 600).mapToObj(i -> buildNodeConfig(
+        String.format("zone%02d-n%03d", (i % 20) + 1, i), String.format("zone%02d", (i % 20) + 1), 1,
+        i < 100 ? "tagFull" : "tagSpare")).collect(Collectors.toList());
+    ResourceControllerDataProvider cliqueData = clusterData(cliqueNodes, 100, 3, 2);
+    cliqueData.getIdealState(RES).setInstanceGroupTag("tagFull");
+    long startMs = System.currentTimeMillis();
+    ResourceAssignment cliqueOut = calc(cliqueData, null, null, null);
+    Assert.assertTrue(System.currentTimeMillis() - startMs < 30000L);
+    Assert.assertEquals(cliqueOut.getMappedPartitions().stream().mapToInt(p -> cliqueOut.getReplicaMap(p).size()).sum(),
+        100);
+  }
+
+  private static void assertDeterministicTwoHopMoveZone() throws Exception {
+    Map<ClusterConfig.GlobalRebalancePreferenceKey, Integer> pref = ImmutableMap.of(
+        ClusterConfig.GlobalRebalancePreferenceKey.EVENNESS, 1,
+        ClusterConfig.GlobalRebalancePreferenceKey.LESS_MOVEMENT, 1,
+        ClusterConfig.GlobalRebalancePreferenceKey.FORCE_BASELINE_CONVERGE, 0);
+    Map<String, String> before = new LinkedHashMap<>(assign(
+        "n0:zone01,n1:zone04,n2:zone02,n3:zone02,n4:zone03,n5:zone04").getReplicaMap(new Partition(RES + "_0")));
+    Map<String, String> after = new LinkedHashMap<>(before);
+    after.put("n1", "zone01");
+    ResourceAssignment seed = assign("n0:ONLINE,n1:ONLINE,n2:ONLINE", "n3:ONLINE,n4:ONLINE,n5:ONLINE");
+    CurrentStateOutput cs0 = new CurrentStateOutput();
+    seed.getMappedPartitions().forEach(p -> seed.getReplicaMap(p).forEach((h, s) -> cs0.setCurrentState(RES, p, h, s)));
+    MockAssignmentMetadataStore store = new MockAssignmentMetadataStore();
+    store.persistBaseline(Collections.singletonMap(RES, seed));
+    store.persistBestPossibleAssignment(Collections.singletonMap(RES, seed));
+    WagedRebalancer reb =
+        new WagedRebalancer(store, ConstraintBasedAlgorithmFactory.getInstance(pref), Optional.empty());
+    reb.setGlobalRebalanceAsyncMode(false);
+    reb.setPartialRebalanceAsyncMode(false);
+    CurrentStateOutput cur = cs0;
+    try {
+      for (int step = 0; step < 14; step++) {
+        Map<String, String> activeZones = step == 0 ? before : after;
+        ResourceControllerDataProvider dp = clusterData(activeZones.entrySet().stream()
+            .map(e -> buildNodeConfig(e.getKey(), e.getValue(), 1)).collect(Collectors.toList()), 2, 3, 2);
+        dp.getClusterConfig().setGlobalRebalancePreference(pref);
+        IdealState out = reb.computeNewIdealStates(dp, attachCapacity(dp, cur), cur).get(RES);
+        CurrentStateOutput next = new CurrentStateOutput();
+        Set<String> usedHosts = new HashSet<>();
+        for (int i = 0; i < 2; i++) {
+          Partition p = new Partition(RES + "_" + i);
+          Map<String, String> desired = Optional.ofNullable(out.getInstanceStateMap(p.getPartitionName()))
+              .orElse(Collections.emptyMap());
+          Map<String, String> current = cur.getCurrentStateMap(RES, p);
+          Set<String> hosts = new TreeSet<>(current.keySet());
+          hosts.addAll(desired.keySet());
+          Set<String> onlineZones = new HashSet<>();
+          for (String h : hosts) {
+            String cst = current.get(h);
+            String des = desired.getOrDefault(h, "DROPPED");
+            String nst = "ONLINE".equals(des) ? "ONLINE" : "OFFLINE".equals(des) ? (cst == null ? null : "OFFLINE")
+                : ("ONLINE".equals(cst) ? "OFFLINE" : null);
+            if (nst != null) {
+              next.setCurrentState(RES, p, h, nst);
+              Assert.assertTrue(usedHosts.add(h) && (!"ONLINE".equals(nst) || step == 0
+                  || onlineZones.add(activeZones.get(h))));
+            }
+          }
+        }
+        cur = next;
+      }
+      for (int i = 0; i < 2; i++) {
+        Assert.assertEquals(cur.getCurrentStateMap(RES, new Partition(RES + "_" + i)).entrySet().stream()
+            .filter(e -> "ONLINE".equals(e.getValue())).map(e -> after.get(e.getKey())).distinct().count(), 3L);
+      }
+    } finally {
+      reb.close();
+    }
+  }
+
+  @Test
+  public void testLiveZkSlotGate() throws Exception {
+    for (boolean useClusterMax : new boolean[]{true, false}) {
+      String cluster = useClusterMax ? "BestEffortClusterMax" : "BestEffortResourceMax";
+      _gSetupTool.addCluster(cluster, true);
+      ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, new ZkBaseDataAccessor<>(_gZkClient));
+      ClusterControllerManager controller = new ClusterControllerManager(ZK_ADDR, cluster, "ctrl_0");
+      Map<String, MockParticipantManager> participants = new LinkedHashMap<>();
+      AtomicInteger violations = new AtomicInteger();
+      try {
+        ClusterConfig cfg = new ClusterConfig(cluster);
+        cfg.setTopology("/zone/instance");
+        cfg.setFaultZoneType("zone");
+        cfg.setTopologyAwareEnabled(true);
+        cfg.setWagedBestEffortPlacementEnabled(true);
+        cfg.setMaxPartitionsPerInstance(useClusterMax ? 1 : -1);
+        cfg.setInstanceCapacityKeys(useClusterMax ? Collections.singletonList(KEY) : Collections.emptyList());
+        cfg.setDefaultInstanceCapacityMap(useClusterMax ? Collections.singletonMap(KEY, 1000) : Collections.emptyMap());
+        cfg.setDefaultPartitionWeightMap(useClusterMax ? Collections.singletonMap(KEY, 1) : Collections.emptyMap());
+        accessor.setProperty(accessor.keyBuilder().clusterConfig(), cfg);
+        IntStream.rangeClosed(1, 4)
+            .forEach(z -> addLiveNode(cluster, "z" + z + "-n1", "z" + z, useClusterMax, participants, violations));
+        accessor.setProperty(accessor.keyBuilder().idealStates(RES),
+            buildIdealState(RES, 2, 2, 1, useClusterMax ? 0 : 1, null));
+        controller.syncStart();
+        ExternalView pinned = waitForConvergedOnline(accessor, participants.keySet());
+        Assert.assertNotNull(pinned);
+        addLiveNode(cluster, "z1-sp", "z1", useClusterMax, participants, violations);
+        String z1Part = pinned.getStateMap(RES + "_0").containsKey("z1-n1") ? RES + "_0" : RES + "_1";
+        String peer = pinned.getStateMap(z1Part).keySet().stream().filter(h -> !h.startsWith("z1-")).findFirst().get();
+        participants.remove(peer).syncStop();
+        InstanceConfig droppedCfg = accessor.getProperty(accessor.keyBuilder().instanceConfig(peer));
+        _gSetupTool.getClusterManagementTool().dropInstance(cluster, droppedCfg);
+        Assert.assertNotNull(waitForConvergedOnline(accessor, participants.keySet()));
+        Assert.assertNull(accessor.getProperty(accessor.keyBuilder().maintenance()));
+        Assert.assertEquals(violations.get(), 0);
+      } finally {
+        if (controller.isConnected()) { controller.syncStop(); }
+        participants.values().stream()
+            .filter(MockParticipantManager::isConnected).forEach(MockParticipantManager::syncStop);
+        accessor.getBaseDataAccessor().close();
+        deleteCluster(cluster);
+      }
+    }
+  }
+
+  private void addLiveNode(String cluster, String name, String zone, boolean useClusterMax,
+      Map<String, MockParticipantManager> participants, AtomicInteger violations) {
+    InstanceConfig cfg = buildNodeConfig(name, zone, useClusterMax ? 1000 : 1);
+    if (!useClusterMax) { cfg.setInstanceCapacityMap(Collections.emptyMap()); }
+    _gSetupTool.getClusterManagementTool().addInstance(cluster, cfg);
+    Set<String> held = ConcurrentHashMap.newKeySet();
+    MockParticipantManager p = new MockParticipantManager(ZK_ADDR, cluster, name);
+    p.getStateMachineEngine().registerStateModelFactory("OnlineOffline", new StateModelFactory<StateModel>() {
+      @Override
+      public StateModel createNewStateModel(String r, String k) { return new SingleSlotModel(k, held, violations); }
+    });
+    p.syncStart();
+    participants.put(name, p);
+  }
+
+  private static ExternalView waitForConvergedOnline(ZKHelixDataAccessor accessor, Set<String> liveHosts)
+      throws InterruptedException {
+    for (long end = System.currentTimeMillis() + 15_000L; System.currentTimeMillis() < end; Thread.sleep(100L)) {
+      ExternalView view = accessor.getProperty(accessor.keyBuilder().externalView(RES));
+      if (view == null) { continue; }
+      boolean ok = true;
+      Set<String> hosts = new HashSet<>();
+      for (int i = 0; i < 2; i++) {
+        Map<String, String> raw = Optional.ofNullable(view.getStateMap(RES + "_" + i)).orElse(Collections.emptyMap());
+        Set<String> zones = new HashSet<>();
+        for (Map.Entry<String, String> e : raw.entrySet()) {
+          InstanceConfig ic = accessor.getProperty(accessor.keyBuilder().instanceConfig(e.getKey()));
+          ok &= "ONLINE".equals(e.getValue())
+              ? (liveHosts.contains(e.getKey()) && ic != null && hosts.add(e.getKey())
+                  && zones.add(ic.getDomainAsMap().get("zone")))
+              : "DROPPED".equals(e.getValue());
+        }
+        ok &= zones.size() == 2;
+      }
+      if (ok && hosts.size() == 4) { return view; }
+    }
+    return null;
+  }
+
+  private static Set<String> setOf(String... xs) { return new HashSet<>(Arrays.asList(xs)); }
+
+  private static List<InstanceConfig> hostList(String... names) {
+    return Arrays.stream(names).map(n -> buildNodeConfig(n, n.substring(0, n.indexOf('-')), 1))
+        .collect(Collectors.toList());
+  }
+
+  private static ResourceAssignment assign(String... partSpecs) {
+    ResourceAssignment ra = new ResourceAssignment(RES);
+    IntStream.range(0, partSpecs.length).forEach(i -> ra.addReplicaMap(new Partition(RES + "_" + i),
+        Arrays.stream(partSpecs[i].split(",")).collect(Collectors.toMap(
+            s -> s.substring(0, s.indexOf(':')), s -> s.substring(s.indexOf(':') + 1)))));
+    return ra;
+  }
+
+  private static ResourceAssignment msEmerg(List<InstanceConfig> nodes, int minActive, Set<String> liveSubset,
+      Set<String> active, ResourceAssignment prior, CurrentStateOutput cs) throws HelixRebalanceException {
+    ResourceControllerDataProvider dp = buildClusterData(nodes, 2, 2, minActive, true, liveSubset, 1);
+    dp.getIdealState(RES).setStateModelDefRef("MasterSlave");
+    return calculateEmergency(dp, active, prior, cs);
+  }
+
+  private static ResourceAssignment calculateEmergency(ResourceControllerDataProvider dp, Set<String> active,
+      ResourceAssignment priorBestPossible, CurrentStateOutput cs) throws HelixRebalanceException {
+    CurrentStateOutput cur = cs == null ? new CurrentStateOutput() : cs;
+    MockAssignmentMetadataStore store = new MockAssignmentMetadataStore();
+    store.persistBestPossibleAssignment(Collections.singletonMap(RES, priorBestPossible));
+    RebalanceAlgorithm alg =
+        ConstraintBasedAlgorithmFactory.getInstance(dp.getClusterConfig().getGlobalRebalancePreference());
+    WagedRebalancer reb = new WagedRebalancer(store, alg, Optional.empty());
+    reb.setPartialRebalanceAsyncMode(true);
+    try {
+      return reb.emergencyRebalance(dp, attachCapacity(dp, cur), active, cur, alg).get(RES);
+    } finally {
+      reb.close();
+    }
   }
 
   private static void assertZoneEditTieBreakOutcome() throws Exception {
@@ -390,7 +686,9 @@ public class TestWagedBestEffortPlacement {
     dp.setIdealStates(Collections.singletonList(buildIdealState(RES, parts, rf, minActive, 1, null)));
     dp.setResourceConfigMap(Collections.singletonMap(RES, new ResourceConfig(RES)));
     BuiltInStateModelDefinitions onlineOffline = BuiltInStateModelDefinitions.OnlineOffline;
-    dp.setStateModelDefMap(Collections.singletonMap("OnlineOffline", onlineOffline.getStateModelDefinition()));
+    BuiltInStateModelDefinitions masterSlave = BuiltInStateModelDefinitions.MasterSlave;
+    dp.setStateModelDefMap(ImmutableMap.of("OnlineOffline", onlineOffline.getStateModelDefinition(),
+        "MasterSlave", masterSlave.getStateModelDefinition()));
     return dp;
   }
 }

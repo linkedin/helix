@@ -87,6 +87,13 @@ public class ClusterContext {
   // True when WAGED_BEST_EFFORT_PLACEMENT_ENABLED is set on ClusterConfig; places all feasible
   // replicas instead of failing on capacity deficits or missing candidates. Default false.
   private final boolean _bestEffortPlacementEnabled;
+  // Logical IDs of currently enabled and live instances. Populated in best-effort mode so 1-hop
+  // relocation in non-baseline scopes never evicts from or onto a disabled or delayed-offline node.
+  private Set<String> _enabledLiveLogicalIds;
+  // Replicas still physically held on participants (non-DROPPED current state or pending
+  // transition), indexed as logicalId -> resourceName -> partitionNames for two-hop drop safety.
+  private Map<String, Map<String, Set<String>>> _currentStatePartitionsByLogicalId =
+      Collections.emptyMap();
   private final Map<String, String> _resourceInstanceGroupTags = new HashMap<>();
   // The replicas the totals below are summed over. Kept only when instance tag isolation is on and
   // a capacity key is short, so the deficit can be split across the groups that own them.
@@ -255,6 +262,39 @@ public class ClusterContext {
 
   public boolean isBestEffortPlacementEnabled() {
     return _bestEffortPlacementEnabled;
+  }
+
+  /**
+   * Records the logical IDs of currently enabled and live instances so single-hop relocation in
+   * non-baseline scopes never moves a live replica onto a disabled or delayed-offline node.
+   */
+  void setEnabledLiveLogicalIds(Set<String> enabledLiveLogicalIds) {
+    _enabledLiveLogicalIds = enabledLiveLogicalIds == null ? null
+        : Collections.unmodifiableSet(new HashSet<>(enabledLiveLogicalIds));
+  }
+
+  /**
+   * Records partitions still physically held per logical ID (any non-DROPPED current state or
+   * pending state transition) so live 1-hop relocation skips hosts whose departing replica has left
+   * BEST_POSSIBLE but has not yet completed OFFLINE -> DROPPED.
+   */
+  public void setCurrentStatePartitionsByLogicalId(
+      Map<String, Map<String, Set<String>>> currentStatePartitionsByLogicalId) {
+    _currentStatePartitionsByLogicalId = currentStatePartitionsByLogicalId == null
+        ? Collections.emptyMap()
+        : currentStatePartitionsByLogicalId;
+  }
+
+  public Map<String, Map<String, Set<String>>> getCurrentStatePartitionsByLogicalId() {
+    return _currentStatePartitionsByLogicalId;
+  }
+
+  public boolean hasEnabledLiveLogicalIds() {
+    return _enabledLiveLogicalIds != null;
+  }
+
+  public boolean isEnabledLiveLogicalId(String id) {
+    return _enabledLiveLogicalIds == null || _enabledLiveLogicalIds.contains(id);
   }
 
   /**
