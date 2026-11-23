@@ -249,14 +249,15 @@ final class WagedRebalanceFeasibilityWhatIf {
     }
 
     // Flag only partitions that lose placeable replicas as a result of the mutation.
-    // With tag isolation on, a clique that cannot be placed keeps its old assignment, which can
-    // still name the instance this change takes away. So count only replicas on instances the
-    // resource can use. A new assignment only uses such instances anyway.
-    boolean instanceTagIsolation = simulationClusterConfig.isWagedInstanceTagIsolationEnabled();
+    // With tag isolation or best-effort placement on, an unplaceable partition can keep its old
+    // assignment or retain a sole current-state copy on an instance whose tag this change removes.
+    // So count only replicas on instances the resource can actually use.
+    boolean checkUsable = simulationClusterConfig.isWagedInstanceTagIsolationEnabled()
+        || simulationClusterConfig.isWagedBestEffortPlacementEnabled();
     Map<String, InstanceConfig> baselineConfigByName = null;
     Map<String, InstanceConfig> candidateConfigByName = null;
     Map<String, IdealState> idealStateByName = null;
-    if (instanceTagIsolation) {
+    if (checkUsable) {
       baselineConfigByName = indexByInstanceName(baselineInstanceConfigs);
       candidateConfigByName = indexByInstanceName(candidateInstanceConfigs);
       idealStateByName = new HashMap<>();
@@ -275,7 +276,7 @@ final class WagedRebalanceFeasibilityWhatIf {
       }
       ResourceAssignment candidateAssignment = candidate.get(resourceName);
       String groupTag = null;
-      if (instanceTagIsolation) {
+      if (checkUsable) {
         // The ideal state owns the placement tag, as for WAGED itself. WAGED treats an empty tag
         // as no tag, so the resource can use every instance.
         IdealState idealState = idealStateByName.get(resourceName);
@@ -286,7 +287,7 @@ final class WagedRebalanceFeasibilityWhatIf {
       for (Partition partition : partitions) {
         int baselineReplicas;
         int candidateReplicas;
-        if (instanceTagIsolation) {
+        if (checkUsable) {
           baselineReplicas = countUsableReplicas(baselineAssignment.getReplicaMap(partition),
               baselineConfigByName, groupTag);
           candidateReplicas = candidateAssignment == null ? 0
@@ -437,6 +438,7 @@ final class WagedRebalanceFeasibilityWhatIf {
     // would read that as placed. While another clique already fails, the baseline fails too and the
     // edit is certified, as when WAGED cannot compute the cluster without isolation.
     simulationClusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    simulationClusterConfig.setWagedBestEffortPlacementEnabled(false);
 
     String subject = "the proposed ideal-state edit to resource " + targetResource;
 

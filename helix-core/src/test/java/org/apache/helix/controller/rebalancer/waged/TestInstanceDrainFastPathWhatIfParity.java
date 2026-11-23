@@ -317,6 +317,37 @@ public class TestInstanceDrainFastPathWhatIfParity extends ZkTestBase {
     tearDownCluster(cluster);
   }
 
+  /**
+   * With best-effort placement enabled, WAGED omits unplaceable drained replicas instead of
+   * throwing NO_CANDIDATE_NODE / CAPACITY_DEFICIT. The accept-only drain fast path must disable
+   * best-effort on its simulation config so a zero-spare drain declines the fast path and is
+   * blocked by the full what-if.
+   */
+  @Test
+  public void testBestEffortZeroSpareDrainFastPathDeclinesAndAgreesWithFullWhatIf() {
+    String cluster = "TestDrainParityBestEffortZeroSpare";
+    setupCluster(cluster, 3, 60);
+    ZKHelixDataAccessor accessor = new ZKHelixDataAccessor(cluster, _baseAccessor);
+    PropertyKey.Builder keys = accessor.keyBuilder();
+    ClusterConfig clusterConfig = accessor.getProperty(keys.clusterConfig());
+    clusterConfig.setWagedBestEffortPlacementEnabled(true);
+    accessor.setProperty(keys.clusterConfig(), clusterConfig);
+    createResourceWithWagedRebalance(cluster, "R", "MasterSlave", 3, 1, 1);
+    seedBestPossible(cluster, readIdealStates(cluster));
+
+    String target = instanceName(0);
+    Outcome fastPath = evaluateRule(cluster, target, true);
+    Outcome fullOnly = evaluateRule(cluster, target, false);
+
+    Assert.assertFalse(fullOnly.feasible, "the full what-if must block zero-spare drain");
+    Assert.assertTrue(fastPath.probeCalls > 0, "the fast path must have been attempted");
+    Assert.assertEquals(fastPath.probeHits, 0,
+        "the fast path must NOT certify a zero-spare drain when best-effort placement is on");
+    Assert.assertFalse(fastPath.feasible, "the rule must fall back to the full what-if and block");
+
+    tearDownCluster(cluster);
+  }
+
   // Real WAGED on a topology-aware cluster with a persisted assignment, then TOPOLOGY removed:
   // WAGED drops every node and places nothing. The EVACUATE what-if must be indeterminate, not
   // approved, while the public lenient util keeps returning empty replica maps.

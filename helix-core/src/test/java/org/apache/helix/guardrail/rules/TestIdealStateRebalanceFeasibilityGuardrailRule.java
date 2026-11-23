@@ -343,6 +343,33 @@ public class TestIdealStateRebalanceFeasibilityGuardrailRule {
         "the cluster's own config must be left as is");
   }
 
+  @Test
+  public void testSimulatesWithoutBestEffortPlacement() {
+    // With best-effort placement on, an unplaceable new resource can return 0 mapped partitions
+    // instead of throwing CAPACITY_DEFICIT; both what-if simulations must disable best-effort so
+    // an infeasible IdealState edit is rejected all-or-nothing without mutating the caller's config.
+    IdealState proposed = proposedWagedIdealState(OTHER_RESOURCE, 2);
+    Map<String, ResourceAssignment> baselinePlaced = ImmutableMap.of(RESOURCE, resourceAssignment(
+        RESOURCE, ImmutableMap.of(RESOURCE + "_0", ImmutableMap.of("instance0", "MASTER"))));
+    ClusterConfig clusterConfig = clusterConfig();
+    clusterConfig.setWagedBestEffortPlacementEnabled(true);
+    HelixDataAccessor dataAccessor =
+        accessor(ImmutableList.of(wagedIdealState(RESOURCE)), clusterConfig);
+    List<Boolean> bestEffortSimulated = new ArrayList<>();
+    WagedAssignmentProvider provider =
+        (cfg, instanceConfigs, liveInstances, idealStates, resourceConfigs) -> {
+          bestEffortSimulated.add(cfg.isWagedBestEffortPlacementEnabled());
+          if (idealStates.contains(proposed) && !cfg.isWagedBestEffortPlacementEnabled()) {
+            throw new RuntimeException("CAPACITY_DEFICIT");
+          }
+          return baselinePlaced;
+        };
+
+    Assert.assertFalse(rule.validate(context(dataAccessor, proposed, provider)).isFeasible());
+    Assert.assertEquals(bestEffortSimulated, ImmutableList.of(false, false));
+    Assert.assertTrue(clusterConfig.isWagedBestEffortPlacementEnabled());
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------------------------

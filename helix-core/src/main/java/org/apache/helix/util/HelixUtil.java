@@ -428,10 +428,11 @@ public final class HelixUtil {
     ClusterConfig simulationClusterConfig = new ClusterConfig(clusterConfig.getRecord());
     simulationClusterConfig.setGlobalRebalanceAsyncMode(false);
     simulationClusterConfig.setDelayRebalaceEnabled(false);
-    // Keep the probe all or nothing. With instance tag isolation on, a clique that cannot take the
-    // drained replicas is skipped instead of failing, which would read as a clean placement. The
-    // full what-if this falls back to applies isolation itself.
+    // Keep the probe all or nothing. With instance tag isolation or best-effort placement on,
+    // unplaceable drained replicas do not throw, which would read as a clean placement here. The
+    // full what-if this falls back to compares per-partition replica counts directly.
     simulationClusterConfig.setWagedInstanceTagIsolationEnabled(false);
+    simulationClusterConfig.setWagedBestEffortPlacementEnabled(false);
 
     HelixDataAccessor helixDataAccessor =
         new ZKHelixDataAccessor(simulationClusterConfig.getClusterName(), baseDataAccessor);
