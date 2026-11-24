@@ -218,6 +218,20 @@ public class ClusterConfig extends HelixProperty {
      */
     WAGED_INSTANCE_TAG_ISOLATION_ENABLED,
 
+    /**
+     * When enabled, WAGED places as many replicas as constraints allow instead of failing on a
+     * deficit or missing candidate node, orders equal-weight replicas by partition ordinal, breaks
+     * equal scores by fault-zone candidate count, and retains healthy sole copies for unplaced
+     * partitions. Unplaced sole copies are not reserved in WAGED's placement model, so WAGED may
+     * still target their host while {@code WagedInstanceCapacity} defers new bootstraps there
+     * (needs configured capacity keys until the {@code MAX_PARTITIONS_PER_INSTANCE} bootstrap slot
+     * gate is deployed). Persisted BEST_POSSIBLE metadata stays empty for unplaced partitions, so
+     * never disable this flag or run mixed controller versions while any partition has 0 valid
+     * placements. Takes precedence over {@link #WAGED_INSTANCE_TAG_ISOLATION_ENABLED}. Default is
+     * false.
+     */
+    WAGED_BEST_EFFORT_PLACEMENT_ENABLED,
+
     // The target size of task thread pools for each participant. If participants specify their
     // individual pool sizes in their InstanceConfig's, this value will NOT be used; if participants
     // don't specify their individual pool sizes, this value will be used for all participants; if
@@ -295,6 +309,7 @@ public class ClusterConfig extends HelixProperty {
   private final static int MIN_REBALANCE_PREFERENCE = 0;
   public final static boolean DEFAULT_GLOBAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   public final static boolean DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED = false;
+  public final static boolean DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED = false;
   public final static boolean DEFAULT_PARTIAL_REBALANCE_ASYNC_MODE_ENABLED = true;
   private static final int GLOBAL_TARGET_TASK_THREAD_POOL_SIZE_NOT_SET = -1;
   private final static int DEFAULT_VIEW_CLUSTER_REFRESH_PERIOD = 30;
@@ -1427,6 +1442,23 @@ public class ClusterConfig extends HelixProperty {
     return _record
         .getBooleanField(ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
             DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
+  }
+
+  /**
+   * Enable or disable WAGED best-effort placement mode. Never disable this flag or run mixed
+   * controller versions while any partition has 0 valid placements and is held via sole-copy
+   * retention, as persisted BEST_POSSIBLE metadata remains empty for unplaced partitions.
+   * Unplaced sole copies are not reserved in WAGED's placement model, so WAGED may keep targeting
+   * their host while {@code WagedInstanceCapacity} blocks new bootstraps when capacity is full.
+   */
+  public void setWagedBestEffortPlacementEnabled(boolean enabled) {
+    _record.setBooleanField(
+        ClusterConfigProperty.WAGED_BEST_EFFORT_PLACEMENT_ENABLED.name(), enabled);
+  }
+
+  public boolean isWagedBestEffortPlacementEnabled() {
+    return _record.getBooleanField(ClusterConfigProperty.WAGED_BEST_EFFORT_PLACEMENT_ENABLED.name(),
+        DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED);
   }
 
   /**

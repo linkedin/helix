@@ -72,7 +72,8 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
                   // emergency calculations read the flag on every pipeline, but without this entry
                   // the baseline would not be recalculated until some unrelated config change
                   // happened to trigger the next global rebalance.
-                  ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name()),
+                  ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name(),
+                  ClusterConfigProperty.WAGED_BEST_EFFORT_PLACEMENT_ENABLED.name()),
           FieldType.LIST_FIELD, ImmutableSet
               .of(ClusterConfigProperty.INSTANCE_CAPACITY_KEYS.name(),
                   ClusterConfigProperty.TOP_STATE_SCORING_KEYS.name()),
@@ -92,22 +93,29 @@ public class ClusterConfigTrimmer extends HelixPropertyTrimmer<ClusterConfig> {
   @Override
   public ClusterConfig trimProperty(ClusterConfig property) {
     ZNRecord trimmed = doTrim(property);
-    // Compare the isolation flag by the value it reads as. A flag that reads as its default, such
+    // Compare boolean WAGED flags by the value they read as. A flag that reads as its default, such
     // as an explicit false or any value that is not a boolean, is dropped so it compares equal to
     // an absent one, and a flag that reads as enabled is written down canonically. Otherwise
     // rewriting the flag without changing what it reads as would look like a cluster config change
     // and trigger a full baseline recalculation for nothing.
-    String isolation = ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED.name();
-    if (trimmed.getSimpleFields().containsKey(isolation)) {
-      boolean enabled = trimmed.getBooleanField(isolation,
-          ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
-      if (enabled == ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED) {
-        trimmed.getSimpleFields().remove(isolation);
+    canonicalizeBooleanField(trimmed, ClusterConfigProperty.WAGED_INSTANCE_TAG_ISOLATION_ENABLED,
+        ClusterConfig.DEFAULT_WAGED_INSTANCE_TAG_ISOLATION_ENABLED);
+    canonicalizeBooleanField(trimmed, ClusterConfigProperty.WAGED_BEST_EFFORT_PLACEMENT_ENABLED,
+        ClusterConfig.DEFAULT_WAGED_BEST_EFFORT_PLACEMENT_ENABLED);
+    return new ClusterConfig(trimmed);
+  }
+
+  private static void canonicalizeBooleanField(ZNRecord trimmed, ClusterConfigProperty property,
+      boolean defaultValue) {
+    String key = property.name();
+    if (trimmed.getSimpleFields().containsKey(key)) {
+      boolean value = trimmed.getBooleanField(key, defaultValue);
+      if (value == defaultValue) {
+        trimmed.getSimpleFields().remove(key);
       } else {
-        trimmed.setBooleanField(isolation, enabled);
+        trimmed.setBooleanField(key, value);
       }
     }
-    return new ClusterConfig(trimmed);
   }
 
   public static ClusterConfigTrimmer getInstance() {

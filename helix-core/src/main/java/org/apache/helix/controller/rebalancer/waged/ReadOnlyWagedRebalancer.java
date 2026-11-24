@@ -56,6 +56,11 @@ public class ReadOnlyWagedRebalancer extends WagedRebalancer {
     return failureTypes;
   }
 
+  @Override
+  protected boolean shouldLogRetainedSoleCopies() {
+    return false;
+  }
+
   public void updateChangeDetectorSnapshots(ResourceControllerDataProvider dataProvider) {
     getChangeDetector().updateSnapshots(dataProvider);
   }
