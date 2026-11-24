@@ -24,6 +24,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,9 +41,46 @@ import org.slf4j.LoggerFactory;
 public class ZNRecordSerializer implements ZkSerializer {
   private static final Logger LOG = LoggerFactory.getLogger(ZNRecordSerializer.class);
 
-  protected static ObjectMapper mapper = new ObjectMapper()
+  /*
+   * ZNRecord JSON field names are dominated by high-cardinality, dynamic map
+   * keys (partition, instance and session names in simpleFields, listFields and
+   * mapFields) that rarely repeat across records. Jackson's field-name
+   * canonicalizer (ByteQuadsCanonicalizer) is built for recurring field names:
+   * with these dynamic keys it continually grows and copies its backing int[]
+   * and String[] arrays on every parse (ByteQuadsCanonicalizer._verifySharing
+   * -> Arrays.copyOf), which was the single largest source of allocation and GC
+   * pressure on Helix controllers. Canonicalization provides no benefit here, so
+   * disable it on the shared factory to skip the symbol table entirely.
+   *
+   * Two trade-offs come with disabling it:
+   *   - Parser swap: ByteSourceJsonBootstrapper.constructParser only selects the
+   *     byte-based UTF8StreamJsonParser when canonicalization is on; with it off,
+   *     parsing goes through an InputStreamReader and ReaderBasedJsonParser. This
+   *     is marginally slower for small records when the symbol table is not
+   *     churning, but a large win once high-cardinality keys would otherwise
+   *     thrash it (the Helix controller's steady state).
+   *   - Heap vs. allocation: canonicalization de-duplicates repeated field names
+   *     to one shared String; without it each parsed record keeps its own key
+   *     strings. This trades a modest rise in retained heap for long-lived caches
+   *     of parsed records (e.g. a spectator RoutingTable holding ExternalViews,
+   *     which has no string dedup) for a large drop in transient allocation. On
+   *     the controller the allocation win dominates.
+   */
+  private static final JsonFactory JSON_FACTORY =
+      new JsonFactory().disable(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES);
+
+  protected static ObjectMapper mapper = new ObjectMapper(JSON_FACTORY)
       // TODO: remove it after upgrading ZNRecord's annotations to Jackson 2
-      .setAnnotationIntrospector(new CodehausJacksonIntrospector());
+      .setAnnotationIntrospector(new CodehausJacksonIntrospector())
+      // The mapper is shared across all (concurrent) serialize/deserialize
+      // calls, so configure it once, here, before first use. Mutating these
+      // features per call (as this class used to) is a data race on the shared
+      // mapper's configuration.
+      .enable(MapperFeature.AUTO_DETECT_FIELDS)
+      .enable(MapperFeature.AUTO_DETECT_SETTERS)
+      .enable(MapperFeature.CAN_OVERRIDE_ACCESS_MODIFIERS)
+      .enable(SerializationFeature.INDENT_OUTPUT)
+      .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
   private static int getListFieldBound(ZNRecord record) {
     int max = Integer.MAX_VALUE;
@@ -81,10 +119,6 @@ public class ZNRecordSerializer implements ZkSerializer {
     }
 
     // do serialization
-    mapper.enable(SerializationFeature.INDENT_OUTPUT);
-    mapper.enable(MapperFeature.AUTO_DETECT_FIELDS);
-    mapper.enable(MapperFeature.CAN_OVERRIDE_ACCESS_MODIFIERS);
-
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     byte[] serializedBytes;
     boolean isCompressed = false;
@@ -126,9 +160,6 @@ public class ZNRecordSerializer implements ZkSerializer {
 
     ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
 
-    mapper.enable(MapperFeature.AUTO_DETECT_FIELDS);
-    mapper.enable(MapperFeature.AUTO_DETECT_SETTERS);
-    mapper.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     try {
       //decompress the data if its already compressed
       if (GZipCompressionUtil.isCompressed(bytes)) {

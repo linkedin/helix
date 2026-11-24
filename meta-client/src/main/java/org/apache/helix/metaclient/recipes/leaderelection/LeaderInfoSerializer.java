@@ -1,7 +1,5 @@
 package org.apache.helix.metaclient.recipes.leaderelection;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.MapperFeature;
 import java.io.ByteArrayInputStream;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
@@ -23,9 +21,6 @@ public class LeaderInfoSerializer extends ZNRecordSerializer {
 
     ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
 
-    mapper.enable(MapperFeature.AUTO_DETECT_FIELDS);
-    mapper.enable(MapperFeature.AUTO_DETECT_SETTERS);
-    mapper.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     try {
       //decompress the data if its already compressed
       if (GZipCompressionUtil.isCompressed(bytes)) {
