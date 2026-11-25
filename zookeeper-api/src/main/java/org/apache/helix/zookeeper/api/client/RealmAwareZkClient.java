@@ -219,6 +219,29 @@ public interface RealmAwareZkClient {
   void deleteRecursivelyAtomic(String path);
   void deleteRecursivelyAtomic(List<String> paths);
 
+  /**
+   * Lists the subtree rooted at path, children before their parents. Returns an empty list if path
+   * does not exist.
+   * See {@link org.apache.helix.zookeeper.zkclient.ZkClient#getSubtreeChildrenFirst}.
+   * The default throws, so implementations outside Helix keep compiling.
+   */
+  default List<String> getSubtreeChildrenFirst(String path) {
+    throw new UnsupportedOperationException(
+        "getSubtreeChildrenFirst is not supported by " + getClass().getName());
+  }
+
+  /**
+   * Deletes the given znodes in order, in batches, optionally guarded by the data version of
+   * fencePath and by absentPath not existing. See
+   * {@link org.apache.helix.zookeeper.zkclient.ZkClient#deleteInBatches}.
+   * The default throws, so implementations outside Helix keep compiling.
+   */
+  default void deleteInBatches(List<String> pathsChildrenFirst, String fencePath,
+      int fenceVersion, String absentPath) {
+    throw new UnsupportedOperationException(
+        "deleteInBatches is not supported by " + getClass().getName());
+  }
+
   boolean delete(final String path);
 
   boolean delete(final String path, final int expectedVersion);

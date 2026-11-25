@@ -37,6 +37,7 @@ import org.apache.helix.TestHelper;
 import org.apache.helix.zookeeper.api.client.RealmAwareZkClient;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.ZkUnitTestBase;
+import org.apache.helix.api.exceptions.HelixConflictException;
 import org.apache.helix.cloud.azure.AzureConstants;
 import org.apache.helix.cloud.constants.CloudProvider;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -47,7 +48,9 @@ import org.apache.helix.model.CloudConfig;
 import org.apache.helix.model.ClusterConfig;
 import org.apache.helix.model.HelixConfigScope.ConfigScopeProperty;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
+import org.mockito.stubbing.Answer;
 import org.testng.Assert;
 import org.testng.AssertJUnit;
 import org.testng.annotations.AfterClass;
@@ -59,7 +62,10 @@ import org.testng.annotations.Test;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -218,6 +224,54 @@ public class TestClusterSetup extends ZkUnitTestBase {
       caughtException = true;
     }
     AssertJUnit.assertTrue(caughtException);
+  }
+
+  // A drop that failed after deleting the InstanceConfig leaves the instance subtree behind;
+  // dropInstanceFromCluster must finish that drop instead of reporting the instance as missing.
+  @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")
+  public void testDropInstanceFromClusterResumesPartialDrop() {
+    String instanceName = INSTANCE_PREFIX + 7;
+    String instancePath = PropertyPathBuilder.instance(CLUSTER_NAME, instanceName);
+    _clusterSetup.addInstanceToCluster(CLUSTER_NAME, instanceName);
+    _gZkClient.delete(PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName));
+    Assert.assertTrue(_gZkClient.exists(instancePath));
+
+    _clusterSetup.dropInstanceFromCluster(CLUSTER_NAME, instanceName);
+    Assert.assertFalse(_gZkClient.exists(instancePath));
+
+    try {
+      _clusterSetup.dropInstanceFromCluster(CLUSTER_NAME, instanceName);
+      Assert.fail("Dropping a fully removed instance should fail");
+    } catch (HelixException expected) {
+      Assert.assertTrue(expected.getMessage().contains("does not exist"), expected.getMessage());
+    }
+  }
+
+  // The instance is re-added, enabled, after dropInstanceFromCluster found its config missing and
+  // before it finishes the partial drop. The re-added instance must be kept.
+  @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")
+  public void testDropInstanceFromClusterKeepsInstanceReAddedDuringPartialDrop() {
+    String instanceName = INSTANCE_PREFIX + 8;
+    String instanceConfigPath = PropertyPathBuilder.instanceConfig(CLUSTER_NAME, instanceName);
+    _clusterSetup.addInstanceToCluster(CLUSTER_NAME, instanceName);
+    _gZkClient.delete(instanceConfigPath);
+
+    ZKHelixAdmin admin = spy(new ZKHelixAdmin(_gZkClient));
+    Answer<Object> reAddFirst = invocation -> {
+      new ZKHelixAdmin(_gZkClient).addInstance(CLUSTER_NAME, new InstanceConfig(instanceName));
+      return invocation.callRealMethod();
+    };
+    doAnswer(reAddFirst).when(admin).dropInstance(eq(CLUSTER_NAME), any(InstanceConfig.class));
+    doAnswer(reAddFirst).when(admin).deleteDroppedInstanceGarbage(CLUSTER_NAME, instanceName);
+
+    try {
+      new ClusterSetup(_gZkClient, admin).dropInstanceFromCluster(CLUSTER_NAME, instanceName);
+      Assert.fail("Dropping an instance re-added during the drop should fail");
+    } catch (HelixConflictException expected) {
+      Assert.assertTrue(expected.getMessage().contains(instanceName), expected.getMessage());
+    }
+    Assert.assertTrue(_gZkClient.exists(instanceConfigPath));
+    Assert.assertTrue(_gZkClient.exists(PropertyPathBuilder.instance(CLUSTER_NAME, instanceName)));
   }
 
   @Test(dependsOnMethods = "testAddClusterWithValidCloudConfig")

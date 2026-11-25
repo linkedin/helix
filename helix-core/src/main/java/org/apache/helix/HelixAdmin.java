@@ -60,7 +60,8 @@ public interface HelixAdmin {
   /**
    * Get a list of instances under a cluster
    * @param clusterName
-   * @return a list of instance names
+   * @return the names of the instances that have an InstanceConfig. An instance whose drop failed
+   *     after deleting its InstanceConfig is not included, though its /INSTANCES subtree remains.
    */
   List<String> getInstancesInCluster(String clusterName);
 
@@ -288,11 +289,27 @@ public interface HelixAdmin {
   void addInstance(String clusterName, InstanceConfig instanceConfig);
 
   /**
-   * Drop an instance from a cluster
+   * Drop an instance from a cluster: its InstanceConfig, then its /INSTANCES subtree. If an earlier
+   * drop failed after deleting the InstanceConfig, this finishes deleting the subtree.
    * @param clusterName
    * @param instanceConfig
+   * @throws org.apache.helix.api.exceptions.HelixConflictException if the instance is re-added
+   *     while it is being dropped; the re-added instance is kept
    */
   void dropInstance(String clusterName, InstanceConfig instanceConfig);
+
+  /**
+   * Delete the /INSTANCES/{instance} subtree left without an InstanceConfig by a dropInstance that
+   * failed partway. If the instance is re-added meanwhile, its new znodes are kept.
+   * @param clusterName
+   * @param instanceName
+   * @throws org.apache.helix.api.exceptions.HelixConflictException if the instance has an
+   *     InstanceConfig, is live, or was re-added during the delete
+   */
+  default void deleteDroppedInstanceGarbage(String clusterName, String instanceName) {
+    throw new UnsupportedOperationException("deleteDroppedInstanceGarbage is not supported by "
+        + getClass().getName());
+  }
 
   /**
    * Purge offline instances that have been offline for longer than the offline duration time

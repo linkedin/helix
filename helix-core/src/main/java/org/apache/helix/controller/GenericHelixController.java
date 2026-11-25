@@ -203,6 +203,18 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
   long _timerPeriod = Long.MAX_VALUE;
 
   /**
+   * The executor that periodically deletes leftover instance subtrees, see
+   * {@link InstanceGarbageCollector}. It runs on its own schedule, independent of cluster events.
+   */
+  private final ScheduledExecutorService _instanceGarbageCollectionExecutor =
+      Executors.newSingleThreadScheduledExecutor(r -> new Thread(r,
+          "HelixController-instance_gc-" + GenericHelixController.this._clusterName));
+  private final InstanceGarbageCollector _instanceGarbageCollector = new InstanceGarbageCollector();
+  private ScheduledFuture<?> _instanceGarbageCollectionFutureTask = null;
+  // Bumped on every start and stop, so a run from an earlier start does not schedule another.
+  private long _instanceGarbageCollectionGeneration = 0;
+
+  /**
    * The timer that triggers the on-demand rebalance pipeline.
    */
   Timer _onDemandRebalanceTimer = null;
@@ -258,7 +270,10 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     if (clusterName != null) {
       ImmutableSet<GenericHelixController> controllers = _helixControllerFactory.get(clusterName);
       if (controllers != null) {
-        return controllers.stream().filter(controller -> controller._helixManager.isLeader())
+        // _helixManager is null until the controller handles its first event.
+        return controllers.stream()
+            .filter(controller -> controller._helixManager != null
+                && controller._helixManager.isLeader())
             .findAny().orElse(null);
       }
     }
@@ -469,6 +484,69 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         _periodicRebalanceFutureTask.cancel(false /* mayInterruptIfRunning */);
         _timerPeriod = Long.MAX_VALUE;
       }
+    }
+  }
+
+  /**
+   * Starts the periodic instance garbage collection, if it is not running yet. Each run schedules
+   * the next one after the interval it read from the ClusterConfig, so a changed interval applies
+   * from the next run without waiting for the controller's cache.
+   * Package-private for tests.
+   */
+  void startInstanceGarbageCollection(HelixManager manager) {
+    synchronized (_instanceGarbageCollectionExecutor) {
+      if (_instanceGarbageCollectionFutureTask != null
+          || _instanceGarbageCollectionExecutor.isShutdown()) {
+        return;
+      }
+      _instanceGarbageCollector.reset();
+      logger.info("Controller starting instance garbage collection for cluster {}", _clusterName);
+      scheduleInstanceGarbageCollection(manager, ++_instanceGarbageCollectionGeneration,
+          ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS);
+    }
+  }
+
+  // Schedules one run, unless the collection was stopped or restarted since this chain began.
+  private void scheduleInstanceGarbageCollection(HelixManager manager, long generation,
+      long delayMs) {
+    synchronized (_instanceGarbageCollectionExecutor) {
+      if (generation != _instanceGarbageCollectionGeneration
+          || _instanceGarbageCollectionExecutor.isShutdown()) {
+        return;
+      }
+      _instanceGarbageCollectionFutureTask = _instanceGarbageCollectionExecutor.schedule(() -> {
+        long nextDelayMs = ClusterConfig.DEFAULT_INSTANCE_GARBAGE_COLLECTION_INTERVAL_MS;
+        try {
+          nextDelayMs = _instanceGarbageCollector.collect(manager);
+        } catch (Exception e) {
+          logger.warn("Instance garbage collection failed for cluster {}", _clusterName, e);
+        } finally {
+          // Also after an Error, which would otherwise end the collection until leadership changes.
+          scheduleInstanceGarbageCollection(manager, generation, nextDelayMs);
+        }
+      }, delayMs, TimeUnit.MILLISECONDS);
+    }
+  }
+
+  /**
+   * Stops the periodic instance garbage collection.
+   */
+  private void stopInstanceGarbageCollection() {
+    synchronized (_instanceGarbageCollectionExecutor) {
+      if (_instanceGarbageCollectionFutureTask != null) {
+        logger.info("Controller stopping instance garbage collection for cluster {}", _clusterName);
+        _instanceGarbageCollectionGeneration++;
+        _instanceGarbageCollectionFutureTask.cancel(false /* mayInterruptIfRunning */);
+        _instanceGarbageCollectionFutureTask = null;
+        _instanceGarbageCollector.reset();
+      }
+    }
+  }
+
+  // Visible for testing.
+  boolean isInstanceGarbageCollectionScheduled() {
+    synchronized (_instanceGarbageCollectionExecutor) {
+      return _instanceGarbageCollectionFutureTask != null;
     }
   }
 
@@ -944,6 +1022,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     if (context != null) {
       if (context.getType() == NotificationContext.Type.FINALIZE) {
         stopPeriodRebalance();
+        stopInstanceGarbageCollection();
         logger.info("Get FINALIZE notification, skip the pipeline. Event :" + event.getEventType());
         return;
       } else {
@@ -951,6 +1030,7 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
         if (_resourceControlDataProvider != null) {
           checkRebalancingTimer(manager, dataProvider.getClusterConfig());
         }
+        startInstanceGarbageCollection(manager);
         if (_isMonitoring) {
           _clusterStatusMonitor.setEnabled(!_inManagementMode);
           _clusterStatusMonitor.setPaused(_inManagementMode);
@@ -1458,6 +1538,9 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
       pushToEventQueues(ClusterEventType.ControllerChange, changeContext, Collections.emptyMap());
     } else {
       enableClusterStatusMonitor(false);
+      // The FINALIZE event that would also stop it is dropped on a session expiry, since it carries
+      // the new session.
+      stopInstanceGarbageCollection();
       // Note that onControllerChange is executed in parallel with the event processing thread. It
       // is possible that the current WAGED rebalancer object is in use for handling callback. So
       // mark the rebalancer invalid only, instead of closing it here.
@@ -1603,6 +1686,15 @@ public class GenericHelixController implements IdealStateChangeListener, LiveIns
     if (!_periodicalRebalanceExecutor
         .awaitTermination(EVENT_THREAD_JOIN_TIMEOUT, TimeUnit.MILLISECONDS)) {
       _periodicalRebalanceExecutor.shutdownNow();
+    }
+
+    synchronized (_instanceGarbageCollectionExecutor) {
+      stopInstanceGarbageCollection();
+      _instanceGarbageCollectionExecutor.shutdown();
+    }
+    if (!_instanceGarbageCollectionExecutor
+        .awaitTermination(EVENT_THREAD_JOIN_TIMEOUT, TimeUnit.MILLISECONDS)) {
+      _instanceGarbageCollectionExecutor.shutdownNow();
     }
 
     shutdownOnDemandTimer();

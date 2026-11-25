@@ -398,6 +398,27 @@ public class DedicatedZkClient implements RealmAwareZkClient {
   }
 
   @Override
+  public List<String> getSubtreeChildrenFirst(String path) {
+    checkIfPathContainsShardingKey(path);
+    return _rawZkClient.getSubtreeChildrenFirst(path);
+  }
+
+  @Override
+  public void deleteInBatches(List<String> pathsChildrenFirst, String fencePath,
+      int fenceVersion, String absentPath) {
+    for (String path : pathsChildrenFirst) {
+      checkIfPathContainsShardingKey(path);
+    }
+    if (fencePath != null) {
+      checkIfPathContainsShardingKey(fencePath);
+    }
+    if (absentPath != null) {
+      checkIfPathContainsShardingKey(absentPath);
+    }
+    _rawZkClient.deleteInBatches(pathsChildrenFirst, fencePath, fenceVersion, absentPath);
+  }
+
+  @Override
   public boolean delete(String path) {
     return delete(path, -1);
   }
