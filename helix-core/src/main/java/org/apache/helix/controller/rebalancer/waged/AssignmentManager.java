@@ -53,15 +53,27 @@ class AssignmentManager {
       CurrentStateOutput currentStateOutput, Set<String> resources) throws HelixRebalanceException {
     Map<String, ResourceAssignment> currentBaseline = new HashMap<>();
     if (assignmentMetadataStore != null) {
+      Map<String, ResourceAssignment> baselineFromStore;
       try {
         _stateReadLatency.startMeasuringLatency();
-        currentBaseline = new HashMap<>(assignmentMetadataStore.getBaseline());
+        try {
+          baselineFromStore = assignmentMetadataStore.getBaseline();
+        } catch (Exception ex) {
+          throw new HelixRebalanceException(
+              "Failed to get the current baseline assignment because of unexpected error.",
+              HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+              HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
+        }
+        try {
+          currentBaseline = new HashMap<>(baselineFromStore);
+        } catch (Exception ex) {
+          throw new HelixRebalanceException(
+              "Failed to process the current baseline assignment because of unexpected error.",
+              HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+              HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL, ex);
+        }
+      } finally {
         _stateReadLatency.endMeasuringLatency();
-      } catch (Exception ex) {
-        throw new HelixRebalanceException(
-            "Failed to get the current baseline assignment because of unexpected error.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
-            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     }
     currentBaseline.keySet().retainAll(resources);
@@ -87,19 +99,30 @@ class AssignmentManager {
       Set<String> resources) throws HelixRebalanceException {
     Map<String, ResourceAssignment> currentBestAssignment = new HashMap<>();
     if (assignmentMetadataStore != null) {
+      Map<String, ResourceAssignment> bestPossibleFromStore;
       try {
         _stateReadLatency.startMeasuringLatency();
-        currentBestAssignment =
-            assignmentMetadataStore.getBestPossibleAssignment().entrySet().stream().collect(
-                Collectors.toMap(Map.Entry::getKey,
-                    entry -> new ResourceAssignment(entry.getValue().getRecord())));
-        ;
+        try {
+          bestPossibleFromStore = assignmentMetadataStore.getBestPossibleAssignment();
+        } catch (Exception ex) {
+          throw new HelixRebalanceException(
+              "Failed to get the current best possible assignment because of unexpected error.",
+              HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+              HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
+        }
+        try {
+          currentBestAssignment =
+              bestPossibleFromStore.entrySet().stream().collect(
+                  Collectors.toMap(Map.Entry::getKey,
+                      entry -> new ResourceAssignment(entry.getValue().getRecord())));
+        } catch (Exception ex) {
+          throw new HelixRebalanceException(
+              "Failed to process the current best possible assignment because of unexpected error.",
+              HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
+              HelixRebalanceException.FailureCategory.ALGORITHM_INTERNAL, ex);
+        }
+      } finally {
         _stateReadLatency.endMeasuringLatency();
-      } catch (Exception ex) {
-        throw new HelixRebalanceException(
-            "Failed to get the current best possible assignment because of unexpected error.",
-            HelixRebalanceException.Type.INVALID_REBALANCER_STATUS,
-            HelixRebalanceException.FailureCategory.METADATA_STORE_IO, ex);
       }
     }
     currentBestAssignment.keySet().retainAll(resources);
