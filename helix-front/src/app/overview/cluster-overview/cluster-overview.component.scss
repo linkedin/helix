@@ -1,8 +1,9 @@
 @use '../../shared/diagnostics';
 
 .diagnostics {
+  // clear of the status line above it, so the two borders do not touch
   .convergence {
-    margin-bottom: 14px;
+    margin: 12px 0 14px;
   }
   .verdict {
     font-size: 15px;
@@ -19,12 +20,6 @@
     }
     strong {
       overflow-wrap: anywhere;
-      // only counts get the large size; words such as Normal or a controller name stay smaller
-      &.word {
-        font-size: 16px;
-        font-weight: 500;
-        line-height: 1.5;
-      }
     }
     &:hover {
       text-decoration: none;

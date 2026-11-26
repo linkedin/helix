@@ -19,6 +19,9 @@
 }
 
 .filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.18));
   background: var(--hi-surface, #fff);
   border-radius: 14px;
@@ -31,6 +34,20 @@
     background: var(--hi-chip-active-bg, rgba(0, 119, 181, 0.1));
     border-color: var(--hi-chip-active-border, rgba(0, 119, 181, 0.5));
     color: var(--hi-chip-active-text, #005a9d);
+  }
+
+  // a dot in the operation's colour, so the filters read like the chips
+  &[data-operation]::before {
+    content: '';
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--op-text);
+    box-shadow: 0 0 0 1px var(--op-ring);
+  }
+  &[data-operation='UNKNOWN']::before {
+    background: var(--op-bg);
   }
 }
 
@@ -63,21 +80,11 @@
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 11px;
-  background: var(--hi-track, rgba(0, 0, 0, 0.08));
-  color: var(--hi-text, rgba(0, 0, 0, 0.75));
+  // the colours come from the chip's data-operation, see styles.scss
+  background: var(--op-bg, var(--hi-track, rgba(0, 0, 0, 0.08)));
+  color: var(--op-text, var(--hi-text, rgba(0, 0, 0, 0.75)));
+  box-shadow: inset 0 0 0 1px var(--op-ring, transparent);
 
-  &[data-operation='DISABLE'] {
-    background: var(--hi-op-disable-bg, #eceff1);
-  }
-  &[data-operation='EVACUATE'] {
-    background: var(--hi-op-evacuate-bg, #ffe0b2);
-  }
-  &[data-operation='UNKNOWN'] {
-    background: var(--hi-op-unknown-bg, #ffecb3);
-  }
-  &[data-operation='SWAP_IN'] {
-    background: var(--hi-op-swap-bg, #e1bee7);
-  }
   &.marker {
     background: var(--hi-info-bg, #e3f2fd);
     color: var(--hi-info, #1565c0);
@@ -174,11 +181,4 @@ button.op-current {
   max-width: 100%;
   margin-right: 4px;
   overflow-wrap: anywhere;
-}
-
-// an instance that is simply enabled is the normal case, so its chip recedes
-button.op-current[data-operation='ENABLE'] {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--hi-divider, rgba(0, 0, 0, 0.12));
-  color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
 }

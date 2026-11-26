@@ -228,3 +228,15 @@ kbd {
     animation: none;
   }
 }
+
+@media (max-width: 600px) {
+  .palette-trigger {
+    margin-right: 4px;
+    padding: 0 8px;
+
+    .label,
+    kbd {
+      display: none;
+    }
+  }
+}

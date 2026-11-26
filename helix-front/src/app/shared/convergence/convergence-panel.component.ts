@@ -34,6 +34,9 @@ const TONES: Record<ConvergenceStatusName, string> = {
 };
 
 // a report in these states will not change by reading again
+// counts read as 12,802 everywhere in the panel, headline and legend alike
+const num = (n: number) => n.toLocaleString('en-US');
+
 const SETTLED_STATES = ['MONITORING_DISABLED', 'SCHEMA_UNSUPPORTED'];
 
 interface Segment {
@@ -202,9 +205,9 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
     const summary = r.partitionSummary;
     const total = summary?.total ?? 0;
     const scope =
-      `${total} partition${total === 1 ? '' : 's'}` +
+      `${num(total)} partition${total === 1 ? '' : 's'}` +
       (r.resourceCount != null
-        ? ` across ${r.resourceCount} resource${r.resourceCount === 1 ? '' : 's'}`
+        ? ` across ${num(r.resourceCount)} resource${r.resourceCount === 1 ? '' : 's'}`
         : '');
     const why = REASON_TEXT[r.primaryReason] || reasonLabel(r.primaryReason);
     if (r.status === 'CONVERGED') {
@@ -215,8 +218,8 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
       const unknown = summary?.statusCounts?.UNKNOWN ?? 0;
       const stuck = (summary?.notConverged ?? 0) - unknown;
       const counts = stuck
-        ? `${stuck} of ${scope} are not converged${unknown ? `, ${unknown} unknown` : ''}`
-        : `${unknown} of ${scope} have an unknown status`;
+        ? `${num(stuck)} of ${scope} are not converged${unknown ? `, ${num(unknown)} unknown` : ''}`
+        : `${num(unknown)} of ${scope} have an unknown status`;
       this.headline = `${counts}.`;
     }
     if (r.unconvergedSince > 0) {
@@ -232,7 +235,7 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
       }));
       this.barLabel =
         'Partitions by status: ' +
-        this.segments.map((s) => `${s.label} ${s.count}`).join(', ');
+        this.segments.map((s) => `${s.label} ${num(s.count)}`).join(', ');
       // every partition carries one reason; the controller picks the most
       // urgent one of the worst status as primary, which need not be the largest
       // NONE is the converged partitions, which the bar already counts
@@ -252,7 +255,7 @@ export class ConvergencePanelComponent implements OnChanges, OnDestroy {
       text: [
         STATUS_LABELS[row.status] || row.status,
         reasonLabel(row.primaryReason),
-        `${row.notConvergedPartitions} partition${row.notConvergedPartitions === 1 ? '' : 's'}`,
+        `${num(row.notConvergedPartitions)} partition${row.notConvergedPartitions === 1 ? '' : 's'}`,
       ].join(' · '),
     }));
     this.moreResources =

@@ -32,6 +32,7 @@ import { ConvergencePanelComponent } from './convergence/convergence-panel.compo
 import { ConvergenceService } from './convergence/convergence.service';
 
 import { ResizableColumnsDirective } from './resizable/resizable-columns.directive';
+import { BalancedGridDirective } from './balanced-grid/balanced-grid.directive';
 
 @NgModule({
   imports: [
@@ -63,6 +64,7 @@ import { ResizableColumnsDirective } from './resizable/resizable-columns.directi
     CommandPaletteComponent,
     ConvergencePanelComponent,
     ResizableColumnsDirective,
+    BalancedGridDirective,
   ],
   exports: [
     RouterModule,
@@ -82,6 +84,7 @@ import { ResizableColumnsDirective } from './resizable/resizable-columns.directi
     CommandPaletteComponent,
     ConvergencePanelComponent,
     ResizableColumnsDirective,
+    BalancedGridDirective,
   ],
   providers: [HelperService, ConvergenceService],
 })

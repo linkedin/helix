@@ -53,7 +53,6 @@
   [class.dense]="dense"
   [class.flat]="!byZone"
   [class.finding]="!!query"
-  [style.--hi-columns]="heatmap.columns"
   (mouseover)="showCard($event)"
   (focusin)="showCard($event)"
   (mouseleave)="hideCard()"
@@ -62,6 +61,8 @@
   <section
     class="zone"
     *ngFor="let zone of heatmap.zones; trackBy: zoneId"
+    [class.full]="zone.tiles.length >= heatmap.columns"
+    [style.--hi-zone-columns]="zoneColumns(zone)"
     [attr.data-zone]="zone.label"
     [attr.aria-label]="zone.label + ', ' + zone.tiles.length + ' instances'"
   >
@@ -80,10 +81,10 @@
       <i class="swatch shade-{{ zone.shade }}"></i>
       <b>{{ zone.label }}</b>
       <span>({{ zone.tiles.length }})</span>
-      <ng-container *ngIf="zone.mean !== null; else noStats">
+      <span class="stats" *ngIf="zone.mean !== null; else noStats">
         <span class="stat">avg {{ percent(zone.mean) }}</span>
         <span class="stat">max {{ percent(zone.max) }}</span>
-      </ng-container>
+      </span>
       <ng-template #noStats><span class="stat">unknown</span></ng-template>
     </div>
     <div class="cells">

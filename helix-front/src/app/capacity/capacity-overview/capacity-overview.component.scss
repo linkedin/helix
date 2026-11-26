@@ -17,25 +17,40 @@
 }
 
 .cards {
-  display: flex;
-  flex-wrap: wrap;
+  // even rows, never one card on its own: see hiBalancedGrid. Cards match the
+  // Overview tab: label above the value, one type scale.
+  display: grid;
+  align-items: stretch;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 12px;
   margin: 12px 0;
 }
 
 .card {
-  min-width: 130px;
-  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 13px;
   border: 1px solid var(--hi-divider, rgba(0, 0, 0, 0.12));
-  border-radius: 6px;
+  border-radius: 7px;
+  background: var(--hi-surface, transparent);
 
-  .value {
-    font-size: 22px;
-    font-weight: 500;
-  }
   .label {
+    order: 0;
     font-size: 12px;
+    font-weight: 500;
+    line-height: 16px;
+    letter-spacing: 0.01em;
     color: var(--hi-text-secondary, rgba(0, 0, 0, 0.6));
+  }
+  .value {
+    order: 1;
+    margin-top: 2px;
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 34px;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--hi-text, rgba(0, 0, 0, 0.87));
   }
   &.bad {
     border-color: var(--hi-error-border, #e57373);
@@ -151,6 +166,13 @@
 
   &.off {
     background: var(--hi-tag-off, #cfd8dc);
+  }
+
+  // an operation tag takes the operation's colours, see styles.scss
+  &[data-operation] {
+    background: var(--op-bg);
+    color: var(--op-text);
+    box-shadow: inset 0 0 0 1px var(--op-ring);
   }
 }
 
