@@ -2320,6 +2320,47 @@ public class TestZkHelixAdmin extends ZkUnitTestBase {
   }
 
   @Test
+  public void testAddClusterToGrandClusterReplicas() {
+    String prefix = TestHelper.getTestClassName() + "_" + TestHelper.getTestMethodName();
+    String grandCluster = prefix + "_grand";
+    String defaultManaged = prefix + "_default";
+    String configuredManaged = prefix + "_configured";
+    _gSetupTool.addCluster(grandCluster, true);
+    _gSetupTool.addInstanceToCluster(grandCluster, "controller_0");
+    _gSetupTool.addCluster(defaultManaged, true);
+    _gSetupTool.addCluster(configuredManaged, true);
+    HelixAdmin admin = _gSetupTool.getClusterManagementTool();
+    ConfigAccessor configAccessor = new ConfigAccessor(_gZkClient);
+    try {
+      // Unset SUPERCLUSTER_REPLICAS keeps the historical default of 3.
+      _gSetupTool.activateCluster(defaultManaged, grandCluster, true);
+      Assert.assertEquals(admin.getResourceIdealState(grandCluster, defaultManaged).getReplicas(),
+          "3");
+
+      ClusterConfig grandConfig = configAccessor.getClusterConfig(grandCluster);
+      grandConfig.setSuperClusterReplicas(2);
+      configAccessor.setClusterConfig(grandCluster, grandConfig);
+      _gSetupTool.activateCluster(configuredManaged, grandCluster, true);
+      Assert.assertEquals(
+          admin.getResourceIdealState(grandCluster, configuredManaged).getReplicas(), "2");
+      // Clusters activated before the change keep their REPLICAS.
+      Assert.assertEquals(admin.getResourceIdealState(grandCluster, defaultManaged).getReplicas(),
+          "3");
+
+      try {
+        configAccessor.getClusterConfig(grandCluster).setSuperClusterReplicas(0);
+        Assert.fail("SUPERCLUSTER_REPLICAS below 1 must be rejected");
+      } catch (IllegalArgumentException expected) {
+        // expected
+      }
+    } finally {
+      _gSetupTool.deleteCluster(configuredManaged);
+      _gSetupTool.deleteCluster(defaultManaged);
+      _gSetupTool.deleteCluster(grandCluster);
+    }
+  }
+
+  @Test
   public void testDropInstance() {
     System.out.println("Start test :" + TestHelper.getTestMethodName());
     int numInstances = 5;

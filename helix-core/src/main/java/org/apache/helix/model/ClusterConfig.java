@@ -236,6 +236,10 @@ public class ClusterConfig extends HelixProperty {
     // How long offline nodes will stay in the cluster before they are automatically purged, in milliseconds
     PARTICIPANT_DEREGISTRATION_TIMEOUT,
 
+    // For a super (grand) cluster: the REPLICAS written for each managed cluster when it is
+    // activated into this cluster (1 leader + standbys). Unset uses the default of 3.
+    SUPERCLUSTER_REPLICAS,
+
     // If enabled, all downward transitions from TopState (e.g., MASTER→SLAVE or LEADER→STANDBY)
     // are classified as RECOVERY_REBALANCE instead of LOAD_BALANCE.
     ENABLE_RECOVERY_REBALANCE_FOR_TOPSTATE_DOWNWARD_TRANSITION,
@@ -1637,6 +1641,31 @@ public class ClusterConfig extends HelixProperty {
    */
   public boolean isParticipantDeregistrationEnabled() {
     return getParticipantDeregistrationTimeout() > -1;
+  }
+
+  /**
+   * Get the REPLICAS this super (grand) cluster writes for each managed cluster when it is
+   * activated into it (1 leader + standbys).
+   *
+   * @return the configured replica count, or -1 if unset (activation then uses the default of 3)
+   */
+  public int getSuperClusterReplicas() {
+    return _record.getIntField(ClusterConfigProperty.SUPERCLUSTER_REPLICAS.name(), -1);
+  }
+
+  /**
+   * Set the REPLICAS this super (grand) cluster writes for each managed cluster when it is
+   * activated into it. Only affects clusters activated after the change; existing managed clusters
+   * keep their current REPLICAS.
+   *
+   * @param replicas replica count, at least 1
+   */
+  public void setSuperClusterReplicas(int replicas) {
+    if (replicas < 1) {
+      throw new IllegalArgumentException(
+          "SUPERCLUSTER_REPLICAS must be at least 1, got " + replicas);
+    }
+    _record.setIntField(ClusterConfigProperty.SUPERCLUSTER_REPLICAS.name(), replicas);
   }
 
   /**
