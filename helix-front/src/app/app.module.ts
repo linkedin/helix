@@ -19,7 +19,6 @@ import { HistoryModule } from './history/history.module';
 import { AppComponent } from './app.component';
 import { WorkflowModule } from './workflow/workflow.module';
 import { ChooserModule } from './chooser/chooser.module';
-import { DashboardModule } from './dashboard/dashboard.module';
 import { TopologyModule } from './topology/topology.module';
 import { CapacityModule } from './capacity/capacity.module';
 import { DiagnosticsModule } from './diagnostics/diagnostics.module';
@@ -43,7 +42,6 @@ import { OverviewModule } from './overview/overview.module';
     HistoryModule,
     WorkflowModule,
     ChooserModule,
-    DashboardModule,
     TopologyModule,
     CapacityModule,
     DiagnosticsModule,

@@ -19,7 +19,6 @@ import { InputDialogComponent } from '../../shared/dialog/input-dialog/input-dia
 export class ClusterDetailComponent implements OnInit {
   readonly tabLinks = [
     { label: 'Overview', link: 'overview' },
-    { label: 'Dashboard', link: 'dashboard', beta: true },
     { label: 'Resources', link: 'resources' },
     { label: 'Workflows', link: 'workflows' },
     { label: 'Instances', link: 'instances' },
@@ -46,7 +45,7 @@ export class ClusterDetailComponent implements OnInit {
     protected dialog: MatDialog,
     protected helperService: HelperService,
     protected clusterService: ClusterService,
-    protected instanceService: InstanceService
+    protected instanceService: InstanceService,
   ) {}
 
   ngOnInit() {
@@ -68,7 +67,7 @@ export class ClusterDetailComponent implements OnInit {
         this.loadError = String(error);
         this.isLoading = false;
       },
-      () => (this.isLoading = false)
+      () => (this.isLoading = false),
     );
   }
 
@@ -100,7 +99,7 @@ export class ClusterDetailComponent implements OnInit {
               this.cluster.name,
               result.host.value,
               result.port.value,
-              result.enabled.value
+              result.enabled.value,
             )
             .subscribe(
               (data) => {
@@ -115,7 +114,7 @@ export class ClusterDetailComponent implements OnInit {
                 }, 100);
               },
               (error) => this.helperService.showError(error),
-              () => {}
+              () => {},
             );
         }
       });
@@ -124,14 +123,14 @@ export class ClusterDetailComponent implements OnInit {
   enableCluster() {
     this.clusterService.enable(this.clusterName).subscribe(
       () => this.loadCluster(),
-      (error) => this.helperService.showError(error)
+      (error) => this.helperService.showError(error),
     );
   }
 
   disableCluster() {
     this.clusterService.disable(this.clusterName).subscribe(
       () => this.loadCluster(),
-      (error) => this.helperService.showError(error)
+      (error) => this.helperService.showError(error),
     );
   }
 
@@ -170,7 +169,7 @@ export class ClusterDetailComponent implements OnInit {
                     this.loadCluster();
                   });
               },
-              (error) => this.helperService.showError(error)
+              (error) => this.helperService.showError(error),
             );
         }
       });
@@ -197,7 +196,7 @@ export class ClusterDetailComponent implements OnInit {
             .enableMaintenanceMode(this.clusterName, result.reason.value)
             .subscribe(
               () => this.loadCluster(),
-              (error) => this.helperService.showError(error)
+              (error) => this.helperService.showError(error),
             );
         }
       });
@@ -206,7 +205,7 @@ export class ClusterDetailComponent implements OnInit {
   disableMaintenanceMode() {
     this.clusterService.disableMaintenanceMode(this.clusterName).subscribe(
       () => this.loadCluster(),
-      (error) => this.helperService.showError(error)
+      (error) => this.helperService.showError(error),
     );
   }
 
@@ -215,13 +214,13 @@ export class ClusterDetailComponent implements OnInit {
       .showConfirmation(
         'Are you sure you want to delete this cluster? This cannot be undone.',
         'Confirm Cluster Deletion',
-        `Delete Cluster ${this.clusterName}`
+        `Delete Cluster ${this.clusterName}`,
       )
       .then((result) => {
         if (result) {
           this.clusterService.remove(this.cluster.name).subscribe((data) => {
             this.helperService.showSnackBar(
-              `Cluster ${this.clusterName} deleted`
+              `Cluster ${this.clusterName} deleted`,
             );
             // FIXME: should reload cluster list as well
             this.router.navigate(['..'], { relativeTo: this.route });

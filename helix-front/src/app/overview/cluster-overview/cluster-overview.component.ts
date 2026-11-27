@@ -70,6 +70,23 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
       .join(' ');
   }
 
+  // the controller is one fact about the cluster, so it sits above the cards
+  get controller(): { name: string; detail: string; bad: boolean } {
+    if (!this.snapshot) {
+      return {
+        name: 'Unknown',
+        detail: 'Could not read the capacity snapshot',
+        bad: false,
+      };
+    }
+    const name = this.snapshot.controllerName;
+    return {
+      name: name || 'No leader',
+      detail: name ? 'Holds leadership' : 'Nothing is rebalanced or recovered',
+      bad: !name,
+    };
+  }
+
   // lets a host name wrap after its dots instead of mid-word
   breakable(value: unknown): string[] {
     return String(value).split(/(?<=[._])/);
@@ -301,13 +318,6 @@ export class ClusterOverviewComponent implements OnInit, OnDestroy {
             }
           : { value: 'n/a', detail: 'No WAGED capacity keys defined' },
       ),
-      card(snapshot, 'snapshot', 'controller leader', '../controller', (s) => ({
-        value: s.controllerName || 'No leader',
-        detail: s.controllerName
-          ? 'Holds leadership'
-          : 'Nothing is rebalanced or recovered',
-        tone: s.controllerName ? undefined : 'bad',
-      })),
       card(snapshot, 'snapshot', 'cluster mode', '../controller', (s) => ({
         value:
           [s.paused && 'Paused', s.maintenance && 'Maintenance']

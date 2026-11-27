@@ -19,6 +19,18 @@
       {{ verdict }}
     </p>
 
+    <a
+      class="controller-line"
+      [class.bad]="controller.bad"
+      routerLink="../controller"
+      data-testid="controller"
+    >
+      <span class="label">Controller leader</span>{{ ' ' }}
+      <strong>{{ controller.name }}</strong
+      >{{ ' ' }}
+      <span class="muted">{{ controller.detail }}</span>
+    </a>
+
     <div class="summary-grid" [hiBalancedGrid]="170">
       <a
         *ngFor="let card of cards"

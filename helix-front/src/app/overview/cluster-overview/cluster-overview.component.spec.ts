@@ -214,7 +214,6 @@ describe('ClusterOverviewComponent', () => {
       '4 resources 3 WAGED, 1 non-WAGED, 1 disabled, 2 missing an external view',
       '2 ERROR replicas On 1 instance',
       '1 over WAGED capacity Hottest: n3 at 120% of CU, 1 with unknown capacity',
-      'ctl controller leader Holds leadership',
       'Maintenance cluster mode Reason: upgrade',
     ]);
     expect(component.cards.map((c) => c.link)).toEqual([
@@ -224,7 +223,9 @@ describe('ClusterOverviewComponent', () => {
       '../diagnostics',
       '../capacity',
       '../controller',
-      '../controller',
+    ]);
+    expect(texts(fixture, 'controller')).toEqual([
+      'Controller leader ctl Holds leadership',
     ]);
     const readTimes = component.readTimes;
     expect(readTimes).toContain('sample taken at 2026-11-01 10:00:00 UTC');
@@ -248,12 +249,29 @@ describe('ClusterOverviewComponent', () => {
       '1 resource 1 WAGED, 0 non-WAGED',
       'Unknown ERROR replicas Could not read the capacity snapshot',
       'Unknown over WAGED capacity Could not read the capacity snapshot',
-      'Unknown controller leader Could not read the capacity snapshot',
       'Unknown cluster mode Could not read the capacity snapshot',
+    ]);
+    expect(texts(fixture, 'controller')).toEqual([
+      'Controller leader Unknown Could not read the capacity snapshot',
     ]);
     const readTimes = fixture.componentInstance.readTimes;
     expect(readTimes).not.toContain('sample taken at');
     expect(readTimes).toContain('Instances and resources were read at');
+  });
+
+  it('shows a missing controller leader as a problem above the cards', () => {
+    getSnapshot.mockReturnValue(
+      of({ ...snapshotFixture(), controllerName: null }),
+    );
+    const fixture = create();
+
+    expect(texts(fixture, 'controller')).toEqual([
+      'Controller leader No leader Nothing is rebalanced or recovered',
+    ]);
+    expect(
+      fixture.nativeElement.querySelector('.controller-line.bad'),
+    ).not.toBeNull();
+    expect(texts(fixture, 'card').join('|')).not.toContain('controller leader');
   });
 
   it('keeps the large size for counts only', () => {
