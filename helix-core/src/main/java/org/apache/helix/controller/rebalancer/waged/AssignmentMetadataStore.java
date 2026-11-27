@@ -49,7 +49,9 @@ public class AssignmentMetadataStore {
   private final BucketDataAccessor _dataAccessor;
   private final String _baselinePath;
   private final String _bestPossiblePath;
-  // volatile for double-checked locking
+  // volatile for double-checked locking.
+  // The in-memory maps are copy-on-write: readers iterate them without holding the store lock, so a
+  // published map must never be mutated. Updates build a new map and swap the reference.
   protected volatile Map<String, ResourceAssignment> _globalBaseline;
   protected volatile Map<String, ResourceAssignment> _bestPossibleAssignment;
   protected volatile int _bestPossibleVersion = 0;
@@ -157,14 +159,11 @@ public class AssignmentMetadataStore {
    */
   public synchronized void persistBaseline(Map<String, ResourceAssignment> globalBaseline) {
     // Create defensive copy so that the in-memory assignment is not modified after it is persisted
-    Map<String, ResourceAssignment> baselineCopy = globalBaseline.entrySet().stream().collect(
-        Collectors.toMap(Map.Entry::getKey,
-            entry -> new ResourceAssignment(entry.getValue().getRecord())));
+    Map<String, ResourceAssignment> baselineCopy = copyAssignments(globalBaseline);
     // write to metadata store
     persistAssignmentToMetadataStore(baselineCopy, _baselinePath, BASELINE_KEY);
     // write to memory
-    getBaseline().clear();
-    getBaseline().putAll(baselineCopy);
+    _globalBaseline = baselineCopy;
   }
 
   /**
@@ -174,14 +173,11 @@ public class AssignmentMetadataStore {
    */
   public synchronized void persistBestPossibleAssignment(Map<String, ResourceAssignment> bestPossibleAssignment) {
     // Create defensive copy so that the in-memory assignment is not modified after it is persisted
-    Map<String, ResourceAssignment> bestPossibleAssignmentCopy = bestPossibleAssignment.entrySet().stream().collect(
-        Collectors.toMap(Map.Entry::getKey,
-            entry -> new ResourceAssignment(entry.getValue().getRecord())));
+    Map<String, ResourceAssignment> bestPossibleAssignmentCopy = copyAssignments(bestPossibleAssignment);
     // write to metadata store
     persistAssignmentToMetadataStore(bestPossibleAssignmentCopy, _bestPossiblePath, BEST_POSSIBLE_KEY);
     // write to memory
-    getBestPossibleAssignment().clear();
-    getBestPossibleAssignment().putAll(bestPossibleAssignmentCopy);
+    _bestPossibleAssignment = bestPossibleAssignmentCopy;
     _bestPossibleVersion++;
     _lastPersistedBestPossibleVersion = _bestPossibleVersion;
   }
@@ -197,8 +193,7 @@ public class AssignmentMetadataStore {
       Map<String, ResourceAssignment> bestPossibleAssignment, int newVersion) {
     // Check if the version is stale by this point
     if (newVersion > _bestPossibleVersion) {
-      getBestPossibleAssignment().clear();
-      getBestPossibleAssignment().putAll(bestPossibleAssignment);
+      _bestPossibleAssignment = copyAssignments(bestPossibleAssignment);
       _bestPossibleVersion = newVersion;
       return true;
     }
@@ -213,19 +208,19 @@ public class AssignmentMetadataStore {
   public synchronized void clearAssignmentMetadata() {
     persistAssignmentToMetadataStore(Collections.emptyMap(), _baselinePath, BASELINE_KEY);
     persistAssignmentToMetadataStore(Collections.emptyMap(), _bestPossiblePath, BEST_POSSIBLE_KEY);
-    getBaseline().clear();
-    getBestPossibleAssignment().clear();
+    _globalBaseline = new HashMap<>();
+    _bestPossibleAssignment = new HashMap<>();
   }
 
   protected synchronized void reset() {
-    if (_bestPossibleAssignment != null) {
-      _bestPossibleAssignment.clear();
-      _bestPossibleAssignment = null;
-    }
-    if (_globalBaseline != null) {
-      _globalBaseline.clear();
-      _globalBaseline = null;
-    }
+    _bestPossibleAssignment = null;
+    _globalBaseline = null;
+  }
+
+  private static Map<String, ResourceAssignment> copyAssignments(
+      Map<String, ResourceAssignment> assignments) {
+    return assignments.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey,
+        entry -> new ResourceAssignment(entry.getValue().getRecord())));
   }
 
   protected void finalize() {
