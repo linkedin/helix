@@ -113,8 +113,6 @@
   --hi-tonal-bg: rgba(121, 184, 227, 0.14);
   --hi-tonal-hover: rgba(121, 184, 227, 0.24);
   --hi-tonal-text: #b4d9f2;
-  --hi-label-evacuate: #f0a35e;
-  --hi-label-swap: #c5a3f5;
 
   --hi-chip-bg: transparent;
   --hi-chip-active-bg: rgba(121, 184, 227, 0.18);
@@ -141,10 +139,22 @@
   --hi-err-mark-bg: #f28b82;
   --hi-err-mark-text: #2b0f0e;
 
-  --hi-op-disable-bg: rgba(201, 214, 227, 0.12);
-  --hi-op-evacuate-bg: rgba(240, 150, 70, 0.2);
-  --hi-op-unknown-bg: rgba(232, 184, 92, 0.2);
-  --hi-op-swap-bg: rgba(190, 140, 240, 0.22);
+  // Instance operations: tinted chips, except UNKNOWN which stays solid black
+  --hi-op-enable-text: #7fdc9c;
+  --hi-op-enable-bg: rgba(111, 207, 143, 0.16);
+  --hi-op-enable-ring: rgba(111, 207, 143, 0.45);
+  --hi-op-disable-text: #f2cf63;
+  --hi-op-disable-bg: rgba(242, 201, 76, 0.16);
+  --hi-op-disable-ring: rgba(242, 201, 76, 0.45);
+  --hi-op-evacuate-text: #ff9a6e;
+  --hi-op-evacuate-bg: rgba(255, 138, 91, 0.17);
+  --hi-op-evacuate-ring: rgba(255, 138, 91, 0.5);
+  --hi-op-swap-in-text: #8fbaff;
+  --hi-op-swap-in-bg: rgba(125, 177, 255, 0.17);
+  --hi-op-swap-in-ring: rgba(125, 177, 255, 0.5);
+  --hi-op-unknown-text: #e6edf3;
+  --hi-op-unknown-bg: #000;
+  --hi-op-unknown-ring: #6b7682;
 
   color-scheme: dark;
   background: var(--hi-background);

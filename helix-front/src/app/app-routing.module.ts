@@ -17,7 +17,6 @@ import { InstanceDetailComponent } from './instance/instance-detail/instance-det
 import { WorkflowListComponent } from './workflow/workflow-list/workflow-list.component';
 import { WorkflowDetailComponent } from './workflow/workflow-detail/workflow-detail.component';
 import { HelixListComponent } from './chooser/helix-list/helix-list.component';
-import { DashboardComponent } from './dashboard/dashboard.component';
 import { TopologyComponent } from './topology/topology.component';
 import { CapacityOverviewComponent } from './capacity/capacity-overview/capacity-overview.component';
 import { InstanceDiagnosticsComponent } from './instance/instance-diagnostics/instance-diagnostics.component';
@@ -64,10 +63,8 @@ const HELIX_ROUTES: Routes = [
             path: 'workflows',
             component: WorkflowListComponent,
           },
-          {
-            path: 'dashboard',
-            component: DashboardComponent,
-          },
+          // the old graph view showed nothing; keep bookmarks working
+          { path: 'dashboard', redirectTo: 'overview', pathMatch: 'full' },
           { path: 'topology', component: TopologyComponent },
           {
             path: 'capacity',

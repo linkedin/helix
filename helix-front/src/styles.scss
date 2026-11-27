@@ -85,6 +85,52 @@ body {
   --hi-motion-fast: 120ms;
   --hi-motion: 200ms;
   --hi-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  // One colour per instance operation, shared by the operation chips, the
+  // status labels and the filter dots. The word is always shown as well, so
+  // the colour is never the only signal. Dark values live in app-theme.scss.
+  --hi-op-enable-text: #14692f;
+  --hi-op-enable-bg: #dff3e4;
+  --hi-op-enable-ring: #86c79a;
+  --hi-op-disable-text: #6b4a00;
+  --hi-op-disable-bg: #ffefb0;
+  --hi-op-disable-ring: #e3c24f;
+  --hi-op-evacuate-text: #9a3a09;
+  --hi-op-evacuate-bg: #ffdcc7;
+  --hi-op-evacuate-ring: #f0a074;
+  --hi-op-swap-in-text: #174ea6;
+  --hi-op-swap-in-bg: #dce8fb;
+  --hi-op-swap-in-ring: #8fb0ec;
+  --hi-op-unknown-text: #fff;
+  --hi-op-unknown-bg: #1b1f24;
+  --hi-op-unknown-ring: #1b1f24;
+}
+
+// Anything tagged with an operation picks up that operation's colours
+[data-operation='ENABLE'] {
+  --op-text: var(--hi-op-enable-text);
+  --op-bg: var(--hi-op-enable-bg);
+  --op-ring: var(--hi-op-enable-ring);
+}
+[data-operation='DISABLE'] {
+  --op-text: var(--hi-op-disable-text);
+  --op-bg: var(--hi-op-disable-bg);
+  --op-ring: var(--hi-op-disable-ring);
+}
+[data-operation='EVACUATE'] {
+  --op-text: var(--hi-op-evacuate-text);
+  --op-bg: var(--hi-op-evacuate-bg);
+  --op-ring: var(--hi-op-evacuate-ring);
+}
+[data-operation='SWAP_IN'] {
+  --op-text: var(--hi-op-swap-in-text);
+  --op-bg: var(--hi-op-swap-in-bg);
+  --op-ring: var(--hi-op-swap-in-ring);
+}
+[data-operation='UNKNOWN'] {
+  --op-text: var(--hi-op-unknown-text);
+  --op-bg: var(--hi-op-unknown-bg);
+  --op-ring: var(--hi-op-unknown-ring);
 }
 
 .ngx-datatable.material .datatable-body-row {

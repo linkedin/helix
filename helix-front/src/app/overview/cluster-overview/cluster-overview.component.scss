@@ -1,8 +1,9 @@
 @use '../../shared/diagnostics';
 
 .diagnostics {
+  // clear of the status line above it, so the two borders do not touch
   .convergence {
-    margin-bottom: 14px;
+    margin: 12px 0 14px;
   }
   .verdict {
     font-size: 15px;
@@ -13,18 +14,45 @@
     border-color: var(--hi-success-border, #b7d8c2);
     color: var(--hi-success, #25613a);
   }
+  // one line above the cards: label, name, detail
+  .controller-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 12px;
+    margin: 14px 0 0;
+    padding: 2px 2px;
+    color: var(--hi-text, #1f2933);
+    overflow-wrap: anywhere;
+    .label {
+      color: var(--hi-text-secondary, #596979);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    strong {
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .muted {
+      font-size: 12px;
+    }
+    &:hover {
+      text-decoration: none;
+      strong {
+        color: var(--hi-primary-text, #0064a5);
+      }
+    }
+    &.bad strong {
+      color: var(--hi-error, #a32323);
+    }
+  }
   .summary-card {
     .muted {
       overflow-wrap: anywhere;
     }
     strong {
       overflow-wrap: anywhere;
-      // only counts get the large size; words such as Normal or a controller name stay smaller
-      &.word {
-        font-size: 16px;
-        font-weight: 500;
-        line-height: 1.5;
-      }
     }
     &:hover {
       text-decoration: none;

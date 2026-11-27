@@ -3,14 +3,33 @@
 :host {
   --tone: var(--hi-error, #c62828);
 }
+:host(.label-disable),
+:host(.label-unknown),
+:host(.label-evacuate),
+:host(.label-swap-in) {
+  --label-text: var(--op-text);
+  --label-bg: var(--op-bg);
+  --label-ring: var(--op-ring);
+}
+:host(.label-disable) {
+  --op-text: var(--hi-op-disable-text, #6b4a00);
+  --op-bg: var(--hi-op-disable-bg, #ffefb0);
+  --op-ring: var(--hi-op-disable-ring, #e3c24f);
+}
 :host(.label-unknown) {
-  --tone: var(--hi-warning, #8a5a00);
+  --op-text: var(--hi-op-unknown-text, #fff);
+  --op-bg: var(--hi-op-unknown-bg, #1b1f24);
+  --op-ring: var(--hi-op-unknown-ring, #1b1f24);
 }
 :host(.label-evacuate) {
-  --tone: var(--hi-label-evacuate, #b54708);
+  --op-text: var(--hi-op-evacuate-text, #9a3a09);
+  --op-bg: var(--hi-op-evacuate-bg, #ffdcc7);
+  --op-ring: var(--hi-op-evacuate-ring, #f0a074);
 }
 :host(.label-swap-in) {
-  --tone: var(--hi-label-swap, #6b3fb8);
+  --op-text: var(--hi-op-swap-in-text, #174ea6);
+  --op-bg: var(--hi-op-swap-in-bg, #dce8fb);
+  --op-ring: var(--hi-op-swap-in-ring, #8fb0ec);
 }
 
 .status-disabled {
@@ -24,17 +43,21 @@
   vertical-align: middle;
   white-space: nowrap;
   border-radius: 6px;
-  color: var(--tone);
+  color: var(--label-text, var(--tone));
   // browsers without color-mix() (Chrome before 111) get a neutral tint and a
   // full-strength ring; a fallback declared in the same rule would not help,
   // since a value with var() only fails after the cascade has picked it
-  background-color: rgba(128, 128, 128, 0.12);
-  box-shadow: inset 0 0 0 1px var(--tone);
+  background-color: var(--label-bg, rgba(128, 128, 128, 0.12));
+  box-shadow: inset 0 0 0 1px var(--label-ring, var(--tone));
 }
 
 @supports (background-color: color-mix(in srgb, red 12%, transparent)) {
   .status-disabled {
-    background-color: color-mix(in srgb, var(--tone) 12%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 35%, transparent);
+    background-color: var(
+      --label-bg,
+      color-mix(in srgb, var(--tone) 12%, transparent)
+    );
+    box-shadow: inset 0 0 0 1px
+      var(--label-ring, color-mix(in srgb, var(--tone) 35%, transparent));
   }
 }

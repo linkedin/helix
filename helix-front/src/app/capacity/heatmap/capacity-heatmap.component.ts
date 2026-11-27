@@ -143,6 +143,11 @@ export class CapacityHeatmapComponent implements OnChanges {
     return name.split(/(?<=[._])/);
   }
 
+  // a zone is only as wide as its own instances, up to the shared column count
+  zoneColumns(zone: HeatZone): number {
+    return Math.max(1, Math.min(this.heatmap.columns, zone.tiles.length));
+  }
+
   zoneId(_: number, zone: HeatZone) {
     return zone.name;
   }

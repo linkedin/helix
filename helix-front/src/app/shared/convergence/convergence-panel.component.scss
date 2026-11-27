@@ -65,6 +65,14 @@ $neutral: var(--hi-text-secondary, #7b8a98);
   box-shadow: inset 0 0 0 1px var(--tone);
 }
 
+// The tone is a mid colour; small text in it falls short of 4.5:1, so the word
+// is drawn toward the text colour while the ring keeps the pure tone
+@supports (color: color-mix(in srgb, red 50%, blue)) {
+  .status {
+    color: color-mix(in srgb, var(--tone) 70%, var(--hi-text, #1f2933));
+  }
+}
+
 .live {
   display: inline-flex;
   align-items: center;
@@ -83,6 +91,11 @@ $neutral: var(--hi-text-secondary, #7b8a98);
   margin: 8px 0 12px;
   line-height: 1.5;
   font-size: 14px;
+
+  // nothing below it (monitoring off, or still reading): no extra space
+  &:last-child {
+    margin-bottom: 0;
+  }
 }
 
 .bar {

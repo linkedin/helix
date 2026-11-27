@@ -24,7 +24,7 @@
       {{ warning }}
     </div>
 
-    <div class="cards">
+    <div class="cards" [hiBalancedGrid]="190">
       <div class="card">
         <div class="value">
           {{ snapshot.summary.liveInstances }} /
@@ -207,9 +207,12 @@
             <span class="tag" [class.off]="!row.instance.live">{{
               row.instance.live ? 'live' : 'offline'
             }}</span>
-            <span class="tag" *ngIf="row.instance.operation !== 'ENABLE'">{{
-              row.instance.operation || 'no config'
-            }}</span>
+            <span
+              class="tag"
+              *ngIf="row.instance.operation !== 'ENABLE'"
+              [attr.data-operation]="row.instance.operation"
+              >{{ row.instance.operation || 'no config' }}</span
+            >
           </td>
           <td class="util-col" *ngIf="snapshot.capacityKeys.length">
             <div class="bar" *ngIf="row.ratio !== null">

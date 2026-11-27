@@ -93,7 +93,9 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
   grid-template-columns: minmax(0, 1fr) 280px;
   gap: 0 16px;
   align-items: start;
+  // One type scale: 12px for every line of text, 11px inside cells and on the scale
   font-size: 12px;
+  line-height: 16px;
   --hi-cell-w: 40px;
   --hi-cell-h: 28px;
 }
@@ -148,7 +150,7 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
   position: absolute;
   top: 12px;
   transform: translateX(-50%);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   white-space: nowrap;
 
@@ -171,17 +173,11 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 
 .map {
   position: relative;
-  display: grid;
-  // a zone is as wide as its columns of cells, but never wider than the map,
-  // so one large zone on a narrow screen shrinks its cells instead of spilling
-  grid-template-columns: repeat(
-    auto-fill,
-    minmax(
-      min(100%, calc(var(--hi-columns) * (var(--hi-cell-w) + 2px) + 6px)),
-      1fr
-    )
-  );
-  align-items: start;
+  // zones size to their own cells and wrap; a zone with a full row of cells
+  // also grows to share the line, so a row never ends in a wide empty box
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
 
@@ -192,7 +188,9 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 
   // one block of every instance, as many cells to a row as fit
   &.flat {
-    grid-template-columns: minmax(0, 1fr);
+    .zone {
+      flex: 1 1 100%;
+    }
 
     .cells {
       grid-template-columns: repeat(auto-fill, minmax(var(--hi-cell-w), 1fr));
@@ -201,9 +199,23 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 }
 
 .zone {
+  box-sizing: border-box;
+  // as wide as its columns of cells, never wider than the map; the name and
+  // stats wrap inside it, so a one-instance zone is a small box
+  flex: 0 1 auto;
+  // wide enough for its cells and for a header line such as "14 (1) avg 5% max 5%"
+  width: max(
+    calc(var(--hi-zone-columns, 1) * (var(--hi-cell-w) + 2px) + 6px),
+    var(--hi-zone-min, 150px)
+  );
+  max-width: 100%;
   padding: 4px;
   border-radius: 6px;
   background: var(--hi-zone, #eceff1);
+
+  &.full {
+    flex-grow: 1;
+  }
 }
 
 // wraps the stats under the name when the zone is narrow
@@ -214,7 +226,7 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
   gap: 0 6px;
   margin-bottom: 4px;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--hi-text-secondary, rgba(0, 0, 0, 0.7));
 
@@ -225,6 +237,11 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
     margin: 0;
     border-radius: 2px;
   }
+  // avg and max stay together, so a narrow zone breaks after its name
+  .stats {
+    display: inline-flex;
+    gap: 0 6px;
+  }
   .stat {
     font-variant-numeric: tabular-nums;
   }
@@ -232,7 +249,7 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 
 .cells {
   display: grid;
-  grid-template-columns: repeat(var(--hi-columns), minmax(0, 1fr));
+  grid-template-columns: repeat(var(--hi-zone-columns, 1), minmax(0, 1fr));
   grid-auto-rows: var(--hi-cell-h);
   gap: 2px;
 }
@@ -292,7 +309,8 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
     border-radius: 6px;
     background: var(--hi-err-mark-bg, #b71c1c);
     color: var(--hi-err-mark-text, #fff);
-    font-size: 9px;
+    font-size: 10px;
+    font-weight: 700;
     line-height: 12px;
     text-align: center;
   }
@@ -312,8 +330,8 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
   border-radius: 6px;
   background: var(--hi-tooltip-bg, rgba(33, 33, 33, 0.94));
   color: #fff;
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 12px;
+  line-height: 16px;
   transform: translateX(-50%);
   pointer-events: none;
 
@@ -324,6 +342,10 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
   span {
     display: block;
     overflow-wrap: anywhere;
+  }
+  b {
+    margin-bottom: 2px;
+    font-weight: 600;
   }
 }
 
@@ -339,9 +361,10 @@ $median-dark: (-5: #5b9ae6, -2: #2f527d, 0: #2a323c, 2: #7a3434, 5: #ef6b5d);
 
   h3,
   h4 {
-    margin: 10px 0 4px;
+    margin: 12px 0 4px;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 600;
+    line-height: 18px;
   }
   .close {
     float: right;

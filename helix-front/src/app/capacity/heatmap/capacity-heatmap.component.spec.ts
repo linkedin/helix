@@ -52,6 +52,17 @@ describe('CapacityHeatmapComponent', () => {
     ]);
   }
 
+  it('sizes each zone to its own instances, and only a full zone grows', () => {
+    const html: HTMLElement = create().nativeElement;
+    const zone = (name: string) =>
+      html.querySelector(`[data-zone="${name}"]`) as HTMLElement;
+
+    // z1 and z2 hold one instance, z3 two, and the shared column count is 4
+    expect(zone('z1').style.getPropertyValue('--hi-zone-columns')).toBe('1');
+    expect(zone('z3').style.getPropertyValue('--hi-zone-columns')).toBe('2');
+    expect(html.querySelectorAll('.zone.full').length).toBe(0);
+  });
+
   it('renders zones in name order, shaded cells and legend counts', () => {
     const html: HTMLElement = create().nativeElement;
 

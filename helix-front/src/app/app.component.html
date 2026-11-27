@@ -32,7 +32,7 @@
     <hi-theme-toggle></hi-theme-toggle>
     <a mat-button (click)="login()" *ngIf="!isLoggedIn">
       <mat-icon>person</mat-icon>
-      {{ currentUser | async }}
+      <span class="user-name">{{ currentUser | async }}</span>
     </a>
     <button
       mat-button
@@ -40,7 +40,7 @@
       *ngIf="isLoggedIn"
     >
       <mat-icon>person</mat-icon>
-      {{ currentUser | async }}
+      <span class="user-name">{{ currentUser | async }}</span>
     </button>
     <mat-menu #userMenu="matMenu">
       <button mat-menu-item (click)="logout()">

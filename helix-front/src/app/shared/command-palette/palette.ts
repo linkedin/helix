@@ -31,7 +31,6 @@ export const CLUSTER_PAGES = [
   'Topology',
   'Capacity',
   'Diagnostics',
-  'Dashboard',
   'Configs',
 ];
 
